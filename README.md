@@ -94,13 +94,12 @@ For armv7, build Aether for `armeabi-v7a`, copy the resulting `libaether.so` to 
 
 ## CI releases
 
-The [Android release workflow](.github/workflows/android-release.yml) builds debug APKs for `arm64-v8a` and `armeabi-v7a` when a `v*` tag is pushed or when it is run manually. It uploads only direct `.apk` files to a **draft** GitHub Release.
+The [Android release workflow](.github/workflows/android-release.yml) runs manually and builds debug APKs for `arm64-v8a` and `armeabi-v7a`. It uploads only direct `.apk` files to a **draft** GitHub Release. See the [release guide](docs/release.md).
 
 To prepare v0.1.0:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+Open **Actions**, select **Build Android APKs**, choose **Run workflow**, and enter `v0.1.0` as the release tag.
 ```
 
 Review the draft assets and release note in GitHub, then publish the release when ready.

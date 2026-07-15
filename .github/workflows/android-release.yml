@@ -1,13 +1,6 @@
 name: Build Android APKs
 
 on:
-  push:
-    branches:
-      - master
-    tags:
-      - "v*"
-    paths:
-      - ".github/workflows/android-release.yml"
   workflow_dispatch:
     inputs:
       tag:
