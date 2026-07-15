@@ -2,8 +2,12 @@ name: Build Android APKs
 
 on:
   push:
+    branches:
+      - master
     tags:
       - "v*"
+    paths:
+      - ".github/workflows/android-release.yml"
   workflow_dispatch:
     inputs:
       tag:
@@ -81,6 +85,7 @@ jobs:
 
   draft-release:
     name: Create draft release
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
     steps:
