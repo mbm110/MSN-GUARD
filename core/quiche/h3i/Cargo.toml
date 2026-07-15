@@ -1,0 +1,40 @@
+[package]
+name = "h3i"
+version = "0.6.0"
+description = "Low-level HTTP/3 debugging and testing"
+repository = { workspace = true }
+authors = [
+  "Lucas Pardue <lucas@lucaspardue.com>",
+  "Evan Rittenhouse <evanrittenhouse@gmail.com>",
+]
+edition = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+categories = { workspace = true }
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[features]
+async = ["dep:tokio", "dep:tokio-quiche"]
+
+[dependencies]
+clap = "3"
+env_logger = { workspace = true }
+inquire = "0.9.1"
+log = { workspace = true, features = ["std"] }
+mio = { workspace = true, features = ["net", "os-poll"] }
+multimap = "0.10"
+octets = { workspace = true }
+qlog = { workspace = true }
+quiche = { features = ["internal", "qlog"], workspace = true }
+ring = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_with = { workspace = true, features = ["macros", "std"] }
+url = { workspace = true }
+
+# Dependencies for async client
+tokio = { version = "1.44", features = ["net", "sync", "time"], optional = true }
+tokio-quiche = { features = ["capture_keylogs", "quiche_internal"], optional = true, workspace = true }

@@ -1,0 +1,137 @@
+on: [push, pull_request]
+
+name: Nightly
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  FEATURES: "async,ffi,qlog"
+  RUSTFLAGS: "-D warnings"
+  RUSTDOCFLAGS: "--cfg docsrs"
+  RUSTTOOLCHAIN: "nightly"
+
+concurrency:
+  group: ${{ github.ref }}-nightly
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+jobs:
+  quiche_nightly:
+    runs-on: ubuntu-latest
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTTOOLCHAIN }}
+
+      - name: Install qlog-dancer dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install libexpat1-dev libfreetype6-dev libfontconfig1-dev
+
+      - name: Run cargo test
+        run: cargo test --verbose --all-targets --features=${{ env.FEATURES }}
+
+      - name: Run cargo test with custom-client-dcid feature enabled
+        run: cargo test --verbose --all-targets --features=custom-client-dcid,${{ env.FEATURES }}
+
+      # Need to run doc tests separately.
+      # (https://github.com/rust-lang/cargo/issues/6669)
+      - name: Run cargo doc test
+        run: cargo test --verbose --doc --features=${{ env.FEATURES }}
+
+      # NOTE: this is disabled as it fails when building changes that bump
+      # version of local crates (e.g. when doing a `qlog` release) that have not
+      # been published yet, and we couldn't find a workaround.
+      #
+      # - name: Run cargo package
+      #   run: cargo package --verbose --workspace --exclude=quiche_apps --allow-dirty
+
+      - name: Run cargo doc
+        run: cargo doc --no-deps --all-features --document-private-items
+
+      - name: Build C examples
+        run: |
+          sudo apt-get install libev-dev uthash-dev
+          make -C quiche/examples
+
+  fuzz:
+    runs-on: ubuntu-latest
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    # `quiche-fuzz` calls `RAND_reset_for_fuzzing`, which BoringSSL only
+    # exports when `BORINGSSL_UNSAFE_DETERMINISTIC_MODE` is defined.
+    # `boring-sys` doesn't expose a feature for that, but cmake-rs honors
+    # `CFLAGS`/`CXXFLAGS`, so inject the defines there.
+    env:
+      CFLAGS: "-DBORINGSSL_UNSAFE_DETERMINISTIC_MODE -DBORINGSSL_UNSAFE_FUZZER_MODE"
+      CXXFLAGS: "-DBORINGSSL_UNSAFE_DETERMINISTIC_MODE -DBORINGSSL_UNSAFE_FUZZER_MODE"
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTTOOLCHAIN }}
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Run cargo fuzz for packet_recv_client
+        run: cargo fuzz run packet_recv_client -- -runs=1
+
+      - name: Run cargo fuzz for packet_recv_server
+        run: cargo fuzz run packet_recv_server -- -runs=1
+
+      - name: Run cargo fuzz for qpack_decode
+        run: cargo fuzz run qpack_decode -- -runs=1
+
+  http3_test_nightly:
+    runs-on: ubuntu-latest
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTTOOLCHAIN }}
+
+      - name: Run cargo test
+        run: cargo test --no-run --verbose --manifest-path=tools/http3_test/Cargo.toml
+
+  fmt:
+    runs-on: ubuntu-latest
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          components: rustfmt
+
+      - name: Run cargo fmt - quiche
+        run: cargo fmt -- --check
+
+      - name: Run cargo fmt - http3_test
+        run: cargo fmt --manifest-path=tools/http3_test/Cargo.toml -- --check
+
+      - name: Run cargo fmt - fuzz
+        run: cargo fmt --manifest-path=fuzz/Cargo.toml -- --check

@@ -1,0 +1,40 @@
+[package]
+name = "quiche_apps"
+version = "0.1.0"
+authors = ["Lucas Pardue <lucaspardue.24.7@gmail.com>"]
+edition = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+categories = { workspace = true }
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# Enable quiche's fuzzing mode.
+fuzzing = ["quiche/fuzzing"]
+
+# Enable qlog support.
+qlog = ["quiche/qlog"]
+
+# Enable sfv support.
+sfv = ["quiche/sfv"]
+
+default = ["qlog", "sfv"]
+
+[dependencies]
+docopt = "1"
+env_logger = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+mio = { workspace = true, features = ["net", "os-poll"] }
+nix = { workspace = true, features = ["net", "socket", "uio"] }
+octets = { workspace = true }
+quiche = { workspace = true }
+ring = { workspace = true }
+url = { workspace = true }
+
+[lib]
+crate-type = ["lib"]

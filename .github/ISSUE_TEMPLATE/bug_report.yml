@@ -1,0 +1,71 @@
+name: Bug report
+description: Report a reproducible Aethery problem.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Never include keys, identities, private endpoints, or unredacted traffic data.
+  - type: input
+    id: version
+    attributes:
+      label: Aethery version
+      description: Example: v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: Protocol
+      options:
+        - MASQUE
+        - WireGuard
+        - WARP-on-WARP
+        - Not protocol-specific
+    validations:
+      required: true
+  - type: input
+    id: android
+    attributes:
+      label: Android version and device ABI
+      placeholder: Android 15, arm64-v8a
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open Aethery
+        2. Select ...
+        3. Tap ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted connection log
+      description: Remove IP addresses, identities, tokens, and any personal data before posting.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I removed sensitive connection data.
+          required: true

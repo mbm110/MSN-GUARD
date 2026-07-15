@@ -1,0 +1,10 @@
+<resources>
+    <style name="Theme.Aethery" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#A4D8BB</item>
+        <item name="android:navigationBarColor">#101411</item>
+        <item name="android:statusBarColor">#101411</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>

@@ -1,0 +1,55 @@
+[package]
+name = "aether"
+version = "1.0.1"
+edition = "2021"
+rust-version = "1.88"
+autobins = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "aether"
+path = "src/bin/aether.rs"
+
+[dependencies]
+quiche = { path = "../quiche/quiche", default-features = false, features = ["boringssl-boring-crate", "qlog"] }
+boring = "4.22"
+foreign-types-shared = "0.3"
+libc = "0.2"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "io-std", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+base64 = "0.22"
+hex = "0.4"
+rand = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+ring = "0.17"
+octets = { path = "../quiche/octets" }
+log = "0.4"
+env_logger = "0.11"
+thiserror = "2"
+anyhow = "1"
+futures = "0.3"
+smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
+boringtun = "0.6"
+x25519-dalek = "=2.0.0-rc.3"
+blake2 = "0.10"
+chacha20poly1305 = "0.10"
+regex = "1"
+ipnet = "2"
+parking_lot = "0.12"
+socket2 = "0.6.4"
+h2 = "0.4"
+http = "1"
+bytes = "1"
+tokio-boring = "4.22"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+strip = true

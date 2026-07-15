@@ -1,0 +1,342 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ------------------------------------------------------------------
+  # macOS + Windows desktop targets, always on the latest runners.
+  # macOS uses macos-latest (Apple Silicon); the Intel/x86_64 binary
+  # is cross-compiled from that same runner.
+  # Windows uses windows-latest for both x86_64 and arm64.
+  # ------------------------------------------------------------------
+  desktop:
+    name: Build ${{ matrix.archive }} 
+    runs-on: ${{ matrix.os }} 
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: aether-macos-arm64.tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: aether-macos-x86_64.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: aether-windows-x86_64.zip
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            archive: aether-windows-arm64.zip
+    defaults:
+      run:
+        working-directory: aether
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }} 
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Install NASM
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} 
+
+      - name: Package archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czf ../../../${{ matrix.archive }}  aether
+
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/${{ matrix.target }}/release/aether.exe -DestinationPath ${{ matrix.archive }} 
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }} 
+          path: aether/${{ matrix.archive }} 
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Linux targets, built inside the latest Fedora container.
+  # x86_64 builds on an x86_64 runner and arm64 on a native arm64
+  # runner, both using fedora:latest so binaries link against a fresh
+  # Fedora toolchain. Rust is installed via rustup to guarantee the
+  # latest stable (>= 1.88 required by the crate).
+  # ------------------------------------------------------------------
+  linux:
+    name: Build ${{ matrix.archive }} 
+    runs-on: ${{ matrix.os }} 
+    container:
+      image: fedora:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: aether-linux-x86_64.tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: aether-linux-arm64.tar.gz
+    defaults:
+      run:
+        working-directory: aether
+    steps:
+      - name: Install system dependencies (Fedora)
+        working-directory: /
+        run: |
+          dnf -y install \
+            gcc gcc-c++ make cmake ninja-build golang nasm clang \
+            perl perl-FindBin perl-IPC-Cmd \
+            curl git tar gzip xz findutils which
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (latest stable via rustup)
+        working-directory: /
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }} 
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} 
+
+      - name: Package archive
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czf ../../../${{ matrix.archive }}  aether
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }} 
+          path: aether/${{ matrix.archive }} 
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 32-bit ARM (Raspberry Pi 2/3 class and older ARM boards).
+  # Cross-compiled on the latest Ubuntu runner with the gnueabihf
+  # toolchain, which ships the glibc hard-float cross compiler that
+  # Fedora does not package cleanly. Best-effort, never blocks release.
+  # ------------------------------------------------------------------
+  linux-armv7:
+    name: Build aether-linux-armv7.tar.gz
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: aether
+    env:
+      CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+      CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
+      CXX_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-g++
+      AR_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-ar
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-gnueabihf
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Install ARM cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+
+      - name: Build release binary
+        run: cargo build --release --target armv7-unknown-linux-gnueabihf
+
+      - name: Package archive
+        run: |
+          cd target/armv7-unknown-linux-gnueabihf/release
+          tar -czf ../../../aether-linux-armv7.tar.gz aether
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aether-linux-armv7.tar.gz
+          path: aether/aether-linux-armv7.tar.gz
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Android / Termux targets, built with the NDK via cargo-ndk on the
+  # latest Ubuntu runner (the NDK cross toolchain, not the host libc,
+  # determines the output).
+  # ------------------------------------------------------------------
+  android:
+    name: Build ${{ matrix.archive }} 
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            target: aarch64-linux-android
+            archive: aether-android-arm64.tar.gz
+          - abi: armeabi-v7a
+            target: armv7-linux-androideabi
+            archive: aether-android-armv7.tar.gz
+          - abi: x86_64
+            target: x86_64-linux-android
+            archive: aether-android-x86_64.tar.gz
+    defaults:
+      run:
+        working-directory: aether
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }} 
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Install Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build release binary
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }} 
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }} 
+        run: cargo ndk -t ${{ matrix.abi }}  --platform 24 build --release
+
+      - name: Package archive
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czf ../../../${{ matrix.archive }}  aether
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }} 
+          path: aether/${{ matrix.archive }} 
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Collect every artifact, generate SHA-256 checksums and publish.
+  # Runs even if some build legs failed, so one broken target never
+  # blocks shipping the ones that succeeded.
+  # ------------------------------------------------------------------
+  release:
+    name: Publish release
+    needs: [desktop, linux, linux-armv7, android]
+    runs-on: ubuntu-latest
+    if: ${{ always() }} && startsWith(github.ref, 'refs/tags/') 
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          shopt -s nullglob
+          files=(*.tar.gz *.zip)
+          for f in "${files[@]}"; do
+            sha256sum "$f" > "$f.sha256"
+          done
+          sha256sum "${files[@]}" > SHA256SUMS.txt
+          echo "----- SHA256SUMS.txt -----"
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          files: dist/**/*
+          body: |
+            Aether v1.0.1
+
+            Aether is a user-space proxy client. It tunnels traffic out of a filtered network and exposes a local SOCKS5 proxy on 127.0.0.1:1819. Point a browser, terminal, or system proxy at that address and your traffic leaves through the tunnel.
+
+            What's new in v1.0.1:
+
+            - Default SOCKS5 proxy port changed from 10808 to 1819 (AETHER_SOCKS env var still overrides it).
+            - Added aether.sh, a one-command Termux installer/updater that auto-detects device architecture, downloads the matching release, verifies its SHA-256 checksum, and installs the binary into $PREFIX/bin.
+
+            This release includes prebuilt binaries for:
+
+            - Linux x86_64, built on Fedora latest (aether-linux-x86_64.tar.gz)
+            - Linux arm64 / aarch64, built on Fedora latest (aether-linux-arm64.tar.gz)
+            - Linux armv7 / 32-bit ARM, e.g. Raspberry Pi 2/3 (aether-linux-armv7.tar.gz)
+            - macOS arm64 / Apple Silicon (aether-macos-arm64.tar.gz)
+            - macOS x86_64 / Intel (aether-macos-x86_64.tar.gz)
+            - Windows x86_64 (aether-windows-x86_64.zip)
+            - Windows arm64 (aether-windows-arm64.zip)
+            - Android / Termux arm64 (aether-android-arm64.tar.gz)
+            - Android / Termux armv7 (aether-android-armv7.tar.gz)
+            - Android / Termux x86_64 (aether-android-x86_64.tar.gz)
+
+            Each archive ships with a matching .sha256 file, and a combined SHA256SUMS.txt lists every checksum.
+
+            Quick start (Termux, one-line install):
+
+               curl -fsSL https://raw.githubusercontent.com/CluvexStudio/aether/main/aether.sh -o aether.sh && chmod +x aether.sh && ./aether.sh install
+
+            Quick start (other platforms):
+
+            1. Download the archive for your platform and extract it.
+            2. Run the binary and answer the prompts, or set the environment variables listed in the guides.
+            3. Point your client at socks5h://127.0.0.1:1819 and verify with:
+               curl -x socks5h://127.0.0.1:1819 https://www.cloudflare.com/cdn-cgi/trace
+
+            Verify a download (Linux/macOS):
+               sha256sum -c aether-linux-x86_64.tar.gz.sha256
+
+            See README.md and the Docs directory for transport selection, obfuscation profiles, the HTTP/2 vs HTTP/3 choice in MASQUE, and the full environment-variable reference.

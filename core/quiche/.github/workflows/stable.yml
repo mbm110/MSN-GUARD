@@ -1,0 +1,270 @@
+on: [push, pull_request]
+
+name: Stable
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  DEFAULT_OPTIONS: "--features=async,ffi,qlog --workspace"
+  # Used by `quiche_multiarch`, which can't link `boring` for foreign targets.
+  NO_BORING_OPTIONS: "--features=ffi,qlog --workspace --exclude h3i --exclude tokio-quiche"
+  RUSTFLAGS: "-D warnings"
+  RUSTTOOLCHAIN: "stable"
+
+concurrency:
+  group: ${{ github.ref }}-stable
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+jobs:
+  quiche:
+    runs-on: ubuntu-latest
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          components: clippy
+
+      - name: Install qlog-dancer dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install libexpat1-dev libfreetype6-dev libfontconfig1-dev
+
+      - name: Unused dependency check
+        uses: bnjbvr/cargo-machete@main
+
+      - name: Run cargo test
+        run: cargo test --verbose --all-targets ${{ env.DEFAULT_OPTIONS }}
+
+      # Need to run doc tests separately.
+      # (https://github.com/rust-lang/cargo/issues/6669)
+      - name: Run cargo doc test
+        run: cargo test --verbose --doc ${{ env.DEFAULT_OPTIONS }}
+
+      # NOTE: this is disabled as it fails when building changes that bump
+      # version of local crates (e.g. when doing a `qlog` release) that have not
+      # been published yet, and we couldn't find a workaround.
+      #
+      # - name: Run cargo package
+      #   run: cargo package --verbose --workspace --exclude=quiche_apps --allow-dirty
+
+      - name: Run cargo clippy
+        run: cargo clippy ${{ env.DEFAULT_OPTIONS }} -- -D warnings
+
+      - name: Run cargo clippy on examples
+        run: cargo clippy --examples ${{ env.DEFAULT_OPTIONS }} -- -D warnings
+
+      - name: Run cargo doc
+        run: cargo doc --no-deps --all-features --document-private-items
+
+      - name: Build C examples
+        run: |
+          sudo apt-get install libev-dev uthash-dev
+          make -C quiche/examples
+
+  quiche_macos:
+    strategy:
+      matrix:
+        target:
+          - "macos-15-intel"     # Intel (x86_64)
+          - "macos-latest" # Apple Silicon (M1)
+    runs-on: ${{ matrix.target }}
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTTOOLCHAIN }}
+
+      - name: Run cargo test
+        run: cargo test --verbose --all-targets ${{ env.DEFAULT_OPTIONS }}
+
+      - name: Build C examples
+        run: |
+          brew install libev uthash
+          make -C quiche/examples
+
+  quiche_ios:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: ["x86_64-apple-ios", "aarch64-apple-ios"]
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    env:
+      IPHONEOS_DEPLOYMENT_TARGET: "10.0"
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Remove cdylib from iOS build
+        run: |
+          sed -i -e 's/, "cdylib"//g' quiche/Cargo.toml
+
+      - name: Run cargo build
+        run: cargo build --target=${{ matrix.target }} --verbose
+
+  quiche_windows:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        target: ["x86_64-pc-windows-msvc", "i686-pc-windows-msvc", "x86_64-pc-windows-gnu", "i686-pc-windows-gnu"]
+        include:
+          - target: "i686-pc-windows-gnu"
+            cflags: "-mlong-double-64" # bindgen detects that Rust doesn't support 80-bit long double
+    env:
+      CFLAGS: ${{ matrix.cflags }}
+      CXXFLAGS: ${{ matrix.cflags }}
+      BINDGEN_EXTRA_CLANG_ARGS: ${{ matrix.cflags }}
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Set up MinGW for 64 bit
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        uses: bwoodsend/setup-winlibs-action@v1.10
+        with:
+          tag: 12.2.0-16.0.0-10.0.0-msvcrt-r5
+
+      - name: Set up MinGW for 32 bit
+        if: matrix.target == 'i686-pc-windows-gnu'
+        uses: bwoodsend/setup-winlibs-action@v1.10
+        with:
+          architecture: i686
+          tag: 12.2.0-16.0.0-10.0.0-msvcrt-r5
+
+      - name: Install dependencies
+        uses: crazy-max/ghaction-chocolatey@v3
+        with:
+          args: install nasm
+
+      - name: Run cargo build
+        if: endsWith(matrix.target, '-gnu')
+        run: cargo build --target=${{ matrix.target }} --verbose --all-targets ${{ env.DEFAULT_OPTIONS }} --exclude qlog-dancer
+
+      - name: Run cargo test
+        if: endsWith(matrix.target, '-msvc')
+        run: cargo test --target=${{ matrix.target }} --verbose --all-targets ${{ env.DEFAULT_OPTIONS }} --exclude qlog-dancer
+
+  quiche_multiarch:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: ["aarch64-unknown-linux-gnu","armv7-unknown-linux-gnueabihf","i686-unknown-linux-gnu"]
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTTOOLCHAIN }}
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cross
+        run: cargo-binstall -y cross
+
+      - name: Run cargo test using cross
+        run: cross test --target=${{ matrix.target }} --verbose --all-targets ${{ env.NO_BORING_OPTIONS }} --exclude qlog-dancer
+
+  http3_test:
+    runs-on: ubuntu-latest
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          components: clippy
+
+      - name: Run cargo test
+        run: cargo test --no-run --verbose --manifest-path=tools/http3_test/Cargo.toml
+
+      - name: Run cargo clippy
+        run: cargo clippy --manifest-path=tools/http3_test/Cargo.toml -- -D warnings
+
+  docker:
+    runs-on: ubuntu-latest
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Build Docker images
+        run: make docker-build
+
+  android_ndk_lts:
+    runs-on: ubuntu-latest
+    env:
+      API_LEVEL: "21"
+    strategy:
+      matrix:
+        target: ["aarch64-linux-android","armv7-linux-androideabi","x86_64-linux-android","i686-linux-android"]
+        include:
+          - target: "aarch64-linux-android"
+            arch: "arm64-v8a"
+          - target: "armv7-linux-androideabi"
+            arch: "armeabi-v7a"
+          - target: "x86_64-linux-android"
+            arch: "x86_64"
+          - target: "i686-linux-android"
+            arch: "x86"
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain for the target
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Run cargo ndk
+        run: cargo ndk --manifest-path quiche/Cargo.toml --target ${{ matrix.arch }} --platform ${{ env.API_LEVEL }} -- build --verbose --features ffi

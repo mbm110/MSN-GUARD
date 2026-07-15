@@ -1,0 +1,36 @@
+.gradle/
+.kotlin/
+.idea/
+*.iml
+local.properties
+
+# Android and Gradle output
+build/
+app/build/
+app/.cxx/
+app/.externalNativeBuild/
+app/src/main/jniLibs/
+*.apk
+*.aab
+
+# Generated Aether native artifacts
+core/android-libs/
+core/**/target/
+
+# Vendored quiche development-only fuzzing fixtures
+core/quiche/fuzz/
+
+# Device captures and temporary files
+captures/
+*.hprof
+*.tmp
+*.log
+
+# Local editor, operating-system, and signing files
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+key.properties
+*.jks
+*.keystore

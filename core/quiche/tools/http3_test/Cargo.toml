@@ -1,0 +1,19 @@
+[package]
+name = "http3_test"
+version = "0.2.0"
+authors = ["Lucas Pardue <lucaspardue.24.7@gmail.com>"]
+edition = "2018"
+publish = false
+
+[features]
+test_resets = []
+
+[dependencies]
+env_logger = "0.10"
+log = "0.4"
+mio = { version = "0.8", features = ["net", "os-poll"] }
+quiche = { path = "../../quiche" }
+ring = "0.17"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+url = "1"

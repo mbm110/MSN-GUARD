@@ -1,0 +1,50 @@
+name: Feature request
+description: Suggest a focused improvement to Aethery.
+title: "feature: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: Keep requests focused on Android client behavior. Core protocol requests may belong in Aether.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What user problem exists today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the smallest useful experience.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Android UI
+        - Android VPN/TUN integration
+        - Diagnostics and logs
+        - Build and release
+        - Aether core integration
+        - Documentation
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing feature requests.
+          required: true
+        - label: This request does not expose private connection data.
+          required: true
