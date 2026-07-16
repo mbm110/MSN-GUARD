@@ -21,5 +21,5 @@ mod wireguard;
 #[path = "main.rs"]
 mod app;
 
-pub use app::{initialize, prepare, run_cli, start, IpScan, Protocol, ScanMode, StartOptions, TunnelAddresses};
+pub use app::{initialize, prepare, run_cli, start, EndpointDiscovery, IpScan, Protocol, ScanMode, StartOptions, TunnelAddresses};
 pub use platform::{set_socket_protector, SocketProtector};

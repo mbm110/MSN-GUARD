@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag to draft
         required: true
-        default: v0.1.1
+        default: v0.2.0
 
 permissions:
   contents: write
@@ -21,10 +21,10 @@ jobs:
         include:
           - abi: arm64-v8a
             rust_target: aarch64-linux-android
-            asset: Aethery-arm64-v8.apk
+            asset: Aethery-arm64-v8a.apk
           - abi: armeabi-v7a
             rust_target: armv7-linux-androideabi
-            asset: Aethery-Arm64-v7.apk
+            asset: Aethery-armeabi-v7a.apk
 
     steps:
       - name: Check out source
@@ -63,13 +63,38 @@ jobs:
           mkdir -p app/src/main/jniLibs/${{ matrix.abi }}
           cp core/aether/target/${{ matrix.rust_target }}/release/libaether.so app/src/main/jniLibs/${{ matrix.abi }}/libaether.so
 
-      - name: Build debug APK
-        run: ./gradlew :app:assembleDebug -PtargetAbi=${{ matrix.abi }}
+      - name: Bundle sing-box core
+        env:
+          SING_BOX_VERSION: 1.13.12
+        run: |
+          case "${{ matrix.abi }}" in
+            arm64-v8a) sing_box_arch=arm64 ;;
+            armeabi-v7a) sing_box_arch=arm ;;
+          esac
+          mkdir -p "app/src/main/assets/cores/${{ matrix.abi }}"
+          curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-android-${sing_box_arch}.tar.gz" \
+            | tar -xz --strip-components=1 -C "app/src/main/assets/cores/${{ matrix.abi }}"
+
+      - name: Decode release signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.AETHERY_RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$KEYSTORE_BASE64" || { echo "Missing AETHERY_RELEASE_KEYSTORE_BASE64"; exit 1; }
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/aethery-release.jks"
+
+      - name: Build signed release APK
+        env:
+          AETHERY_KEYSTORE_PASSWORD: ${{ secrets.AETHERY_KEYSTORE_PASSWORD }}
+          AETHERY_KEY_ALIAS: ${{ secrets.AETHERY_KEY_ALIAS }}
+          AETHERY_KEY_PASSWORD: ${{ secrets.AETHERY_KEY_PASSWORD }}
+        run: |
+          test -n "$AETHERY_KEYSTORE_PASSWORD" && test -n "$AETHERY_KEY_ALIAS" && test -n "$AETHERY_KEY_PASSWORD"
+          ./gradlew :app:assembleRelease -PtargetAbi=${{ matrix.abi }} -PaetheryKeystore="$RUNNER_TEMP/aethery-release.jks"
 
       - name: Name release APK
         run: |
           mkdir -p dist
-          apk=$(find app/build/outputs/apk/debug -name "*${{ matrix.abi }}*debug.apk" -print -quit)
+          apk=$(find app/build/outputs/apk/release -name "*${{ matrix.abi }}*release.apk" -print -quit)
           test -n "$apk"
           cp "$apk" "dist/${{ matrix.asset }}"
 
@@ -97,9 +122,9 @@ jobs:
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           name: Aethery ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          draft: true
-          prerelease: true
+          draft: false
+          prerelease: false
           generate_release_notes: true
           files: |
-            dist/Aethery-arm64-v8.apk
-            dist/Aethery-Arm64-v7.apk
+            dist/Aethery-arm64-v8a.apk
+            dist/Aethery-armeabi-v7a.apk

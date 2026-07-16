@@ -1,10 +1,24 @@
 <resources>
-    <style name="Theme.Aethery" parent="android:style/Theme.Material.NoActionBar">
+    <style name="Theme.Aethery" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:fontFamily">sans</item>
-        <item name="android:colorAccent">#A4D8BB</item>
+        <item name="colorPrimary">#A4D8BB</item>
+        <item name="colorOnPrimary">#07351E</item>
+        <item name="colorSurface">#101411</item>
+        <item name="colorOnSurface">#E2E7E2</item>
+        <item name="colorSurfaceVariant">#252B27</item>
+        <item name="colorOnSurfaceVariant">#C2C9C2</item>
         <item name="android:navigationBarColor">#101411</item>
         <item name="android:statusBarColor">#101411</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.Aethery.AlertDialog</item>
+    </style>
+
+    <style name="ThemeOverlay.Aethery.AlertDialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.Aethery.Dialog</item>
+    </style>
+
+    <style name="ShapeAppearance.Aethery.Dialog" parent="ShapeAppearance.Material3.MediumComponent">
+        <item name="cornerSize">28dp</item>
     </style>
 </resources>

@@ -8,7 +8,7 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 use serde::Deserialize;
 use tokio::sync::Notify;
 
-use crate::{platform, IpScan, Protocol, ScanMode, StartOptions, TunnelAddresses};
+use crate::{platform, EndpointDiscovery, IpScan, Protocol, ScanMode, StartOptions, TunnelAddresses};
 
 static LAST_ERROR: LazyLock<Mutex<CString>> =
     LazyLock::new(|| Mutex::new(CString::new("").unwrap()));
@@ -36,6 +36,8 @@ struct NativeStartOptions {
     ip_scan: String,
     obfuscation_profile: Option<String>,
     retry_obfuscation_profiles: bool,
+    endpoint_cache_path: Option<String>,
+    endpoint_discovery: String,
 }
 
 impl Default for NativeStartOptions {
@@ -51,6 +53,8 @@ impl Default for NativeStartOptions {
             ip_scan: "v4".into(),
             obfuscation_profile: None,
             retry_obfuscation_profiles: true,
+            endpoint_cache_path: None,
+            endpoint_discovery: "cache".into(),
         }
     }
 }
@@ -75,6 +79,8 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.ip_scan = IpScan::parse(&value.ip_scan);
         options.obfuscation_profile = value.obfuscation_profile;
         options.retry_obfuscation_profiles = value.retry_obfuscation_profiles;
+        options.endpoint_cache_path = value.endpoint_cache_path.filter(|path| !path.trim().is_empty());
+        options.endpoint_discovery = EndpointDiscovery::parse(&value.endpoint_discovery);
         Ok(options)
     }
 }

@@ -291,6 +291,23 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
     }
 }
 
+pub async fn verify_cached_gateways(probe: &MasqueProbe, gateways: Vec<SocketAddr>) -> Option<ProbeResult> {
+    let stream = futures::stream::iter(
+        gateways
+            .into_iter()
+            .map(|gateway| verify_one(probe, gateway.ip(), gateway.port(), Duration::from_secs(6))),
+    )
+    .buffer_unordered(3);
+    tokio::pin!(stream);
+
+    while let Some(result) = stream.next().await {
+        if result.is_some() {
+            return result;
+        }
+    }
+    None
+}
+
 async fn verify_one(
     probe: &MasqueProbe,
     ip: IpAddr,

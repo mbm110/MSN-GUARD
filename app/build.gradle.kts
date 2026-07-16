@@ -8,6 +8,7 @@ val targetAbis = (project.findProperty("targetAbi") as String?)
     ?.map(String::trim)
     ?.filter(String::isNotEmpty)
     ?: listOf("arm64-v8a", "armeabi-v7a")
+val releaseKeystore = project.findProperty("aetheryKeystore") as String?
 
 kotlin {
     compilerOptions {
@@ -25,8 +26,8 @@ android {
         applicationId = "studio.cluvex.aethery"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.2.0"
 
     }
 
@@ -50,4 +51,23 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    if (releaseKeystore != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("AETHERY_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("AETHERY_KEY_ALIAS")
+                keyPassword = System.getenv("AETHERY_KEY_PASSWORD")
+            }
+        }
+        buildTypes.named("release") {
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
+}
+
+dependencies {
+    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("com.google.android.material:material:1.12.0")
 }

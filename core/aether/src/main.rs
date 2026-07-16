@@ -1,5 +1,10 @@
 #![allow(dead_code)]
+use std::fs;
 use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 use crate::{account, aethernoize, config, consts, dns, masque_h2, netstack, noize, prober, quic, socks, tls, tun, wg_prober, wireguard};
 use crate::error::{AetherError, Result};
@@ -22,7 +27,24 @@ pub struct StartOptions {
     pub ip_scan: IpScan,
     pub obfuscation_profile: Option<String>,
     pub retry_obfuscation_profiles: bool,
+    pub endpoint_cache_path: Option<String>,
+    pub endpoint_discovery: EndpointDiscovery,
     pub tun_fd: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointDiscovery {
+    Cache,
+    Fresh,
+}
+
+impl EndpointDiscovery {
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_lowercase().as_str() {
+            "fresh" | "fresh_scan" => Self::Fresh,
+            _ => Self::Cache,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +66,8 @@ impl StartOptions {
             ip_scan: IpScan::V4,
             obfuscation_profile: None,
             retry_obfuscation_profiles: true,
+            endpoint_cache_path: None,
+            endpoint_discovery: EndpointDiscovery::Cache,
             tun_fd: None,
         }
     }
@@ -305,6 +329,20 @@ async fn select_peer(
                 ip: options.ip_scan,
             };
 
+            if options.endpoint_discovery == EndpointDiscovery::Cache {
+                let cached = cached_masque_gateways(options);
+                if !cached.is_empty() {
+                    crate::ffi::record_log(format!("Checking {} cached MASQUE gateway(s)", cached.len()));
+                    if let Some(best) = prober::verify_cached_gateways(&probe, cached).await {
+                        cache_masque_gateway(options, best);
+                        spawn_masque_cache_refresh(probe.clone(), options.endpoint_cache_path.clone());
+                        log::info!("[+] using cached MASQUE gateway {}:{}", best.ip, best.port);
+                        return Ok(SocketAddr::new(best.ip, best.port));
+                    }
+                    crate::ffi::record_log("Cached gateways did not respond; starting a fresh scan");
+                }
+            }
+
             let best = match prober::hunt_best_gateway(&probe, options.scan_mode).await {
                 Ok(best) => best,
                 Err(error) if !masque_h2::enabled() => {
@@ -315,6 +353,10 @@ async fn select_peer(
                 }
                 Err(error) => return Err(error),
             };
+            cache_masque_gateway(options, best);
+            if options.endpoint_discovery == EndpointDiscovery::Cache {
+                spawn_masque_cache_refresh(probe.clone(), options.endpoint_cache_path.clone());
+            }
             log::info!("[+] selected MASQUE gateway {}:{} (rtt {:?})", best.ip, best.port, best.rtt);
             crate::ffi::record_log(format!("Selected {}:{} ({:?})", best.ip, best.port, best.rtt));
             Ok(SocketAddr::new(best.ip, best.port))
@@ -922,6 +964,77 @@ async fn select_ip_version() -> prober::IpScan {
     }
 }
 
+const MAX_CACHED_MASQUE_GATEWAYS: usize = 12;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedMasqueGateway {
+    ip: String,
+    port: u16,
+    rtt_ms: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct MasqueGatewayCache {
+    gateways: Vec<CachedMasqueGateway>,
+}
+
+fn cached_masque_gateways(options: &StartOptions) -> Vec<SocketAddr> {
+    let Some(path) = options.endpoint_cache_path.as_deref() else { return Vec::new() };
+    let Ok(contents) = fs::read_to_string(path) else { return Vec::new() };
+    let Ok(cache) = serde_json::from_str::<MasqueGatewayCache>(&contents) else { return Vec::new() };
+    cache
+        .gateways
+        .into_iter()
+        .filter_map(|entry| entry.ip.parse::<IpAddr>().ok().map(|ip| (ip, entry.port, entry.rtt_ms)))
+        .filter(|(ip, _, _)| (ip.is_ipv4() && options.ip_scan.want_v4()) || (ip.is_ipv6() && options.ip_scan.want_v6()))
+        .take(MAX_CACHED_MASQUE_GATEWAYS)
+        .map(|(ip, port, _)| SocketAddr::new(ip, port))
+        .collect()
+}
+
+fn cache_masque_gateway(options: &StartOptions, gateway: prober::ProbeResult) {
+    let Some(path) = options.endpoint_cache_path.as_deref() else { return };
+    let mut cache = fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<MasqueGatewayCache>(&contents).ok())
+        .unwrap_or_default();
+    cache.gateways.retain(|entry| !(entry.ip == gateway.ip.to_string() && entry.port == gateway.port));
+    cache.gateways.push(CachedMasqueGateway {
+        ip: gateway.ip.to_string(),
+        port: gateway.port,
+        rtt_ms: gateway.rtt.as_millis().min(u128::from(u64::MAX)) as u64,
+    });
+    cache.gateways.sort_by_key(|entry| entry.rtt_ms);
+    cache.gateways.truncate(MAX_CACHED_MASQUE_GATEWAYS);
+    let Some(parent) = Path::new(path).parent() else { return };
+    if fs::create_dir_all(parent).is_err() { return }
+    if let Ok(json) = serde_json::to_vec(&cache) {
+        let temporary = format!("{path}.tmp");
+        if fs::write(&temporary, json).is_ok() {
+            let _ = fs::rename(temporary, path);
+        }
+    }
+}
+
+fn spawn_masque_cache_refresh(probe: prober::MasqueProbe, cache_path: Option<String>) {
+    let Some(path) = cache_path else { return };
+    tokio::spawn(async move {
+        crate::ffi::record_log("Refreshing MASQUE gateway cache in the background");
+        loop {
+            if let Ok(gateway) = prober::hunt_best_gateway(&probe, ScanMode::Stealth).await {
+                // ponytail: reuse the existing atomic cache writer instead of adding a second cache path.
+                let options = StartOptions {
+                    endpoint_cache_path: Some(path.clone()),
+                    ..StartOptions::new(Protocol::Masque, String::new())
+                };
+                cache_masque_gateway(&options, gateway);
+                crate::ffi::record_log(format!("Cached gateway {}:{}", gateway.ip, gateway.port));
+            }
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -935,5 +1048,29 @@ mod tests {
         assert_eq!(options.ip_scan, IpScan::V4);
         assert_eq!(options.masque_profile(), "firewall");
         assert!(options.forced_peer.is_none());
+        assert_eq!(options.endpoint_discovery, EndpointDiscovery::Cache);
+    }
+
+    #[test]
+    fn cached_masque_gateways_are_persisted_and_filtered_by_ip_family() {
+        let path = std::env::temp_dir().join(format!("aether-cache-{}.json", std::process::id()));
+        let mut options = StartOptions::new(Protocol::Masque, "aether.toml");
+        options.endpoint_cache_path = Some(path.to_string_lossy().into_owned());
+
+        cache_masque_gateway(&options, prober::ProbeResult {
+            ip: "162.159.198.1".parse().unwrap(),
+            port: 443,
+            rtt: Duration::from_millis(20),
+        });
+        cache_masque_gateway(&options, prober::ProbeResult {
+            ip: "2606:4700:d0::a29f:c602".parse().unwrap(),
+            port: 443,
+            rtt: Duration::from_millis(10),
+        });
+
+        assert_eq!(cached_masque_gateways(&options), vec!["162.159.198.1:443".parse().unwrap()]);
+        options.ip_scan = IpScan::Both;
+        assert_eq!(cached_masque_gateways(&options).len(), 2);
+        let _ = fs::remove_file(path);
     }
 }
