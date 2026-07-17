@@ -8,7 +8,7 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 use serde::Deserialize;
 use tokio::sync::Notify;
 
-use crate::{platform, EndpointDiscovery, IpScan, Protocol, ScanMode, StartOptions, TunnelAddresses};
+use crate::{platform, EndpointDiscovery, IpScan, MasqueTransport, Protocol, ScanMode, StartOptions, TunnelAddresses};
 
 static LAST_ERROR: LazyLock<Mutex<CString>> =
     LazyLock::new(|| Mutex::new(CString::new("").unwrap()));
@@ -38,6 +38,7 @@ struct NativeStartOptions {
     retry_obfuscation_profiles: bool,
     endpoint_cache_path: Option<String>,
     endpoint_discovery: String,
+    masque_transport: String,
 }
 
 impl Default for NativeStartOptions {
@@ -55,6 +56,7 @@ impl Default for NativeStartOptions {
             retry_obfuscation_profiles: true,
             endpoint_cache_path: None,
             endpoint_discovery: "cache".into(),
+            masque_transport: "h3".into(),
         }
     }
 }
@@ -81,6 +83,7 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.retry_obfuscation_profiles = value.retry_obfuscation_profiles;
         options.endpoint_cache_path = value.endpoint_cache_path.filter(|path| !path.trim().is_empty());
         options.endpoint_discovery = EndpointDiscovery::parse(&value.endpoint_discovery);
+        options.masque_transport = MasqueTransport::parse(&value.masque_transport);
         Ok(options)
     }
 }
@@ -336,12 +339,13 @@ mod tests {
     #[test]
     fn parses_android_start_options() {
         let native: NativeStartOptions = serde_json::from_str(
-            r#"{"config_path":"/data/user/0/app/files/aether.toml","protocol":"wireguard"}"#,
+            r#"{"config_path":"/data/user/0/app/files/aether.toml","protocol":"masque","masque_transport":"h2"}"#,
         )
         .unwrap();
         let options = StartOptions::try_from(native).unwrap();
 
-        assert_eq!(options.protocol, Protocol::WireGuard);
+        assert_eq!(options.protocol, Protocol::Masque);
+        assert_eq!(options.masque_transport, MasqueTransport::H2);
         assert_eq!(options.listen, "127.0.0.1:1819".parse().unwrap());
         assert_eq!(options.scan_mode, ScanMode::Balanced);
     }

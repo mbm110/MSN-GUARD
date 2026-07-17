@@ -16,6 +16,7 @@ app/src/main/jniLibs/
 # Generated Aether native artifacts
 core/android-libs/
 core/**/target/
+core/**/target-android/
 
 # Vendored quiche development-only fuzzing fixtures
 core/quiche/fuzz/

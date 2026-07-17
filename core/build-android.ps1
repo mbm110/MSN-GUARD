@@ -8,6 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $crate = Join-Path $PSScriptRoot 'aether'
+$target = Join-Path $crate 'target-android'
 $sdk = Join-Path $env:LOCALAPPDATA 'Android\Sdk'
 $ndk = Join-Path $sdk 'ndk\26.3.11579264'
 $bin = Join-Path $ndk 'toolchains\llvm\prebuilt\windows-x86_64\bin'
@@ -24,6 +25,7 @@ $env:ANDROID_NDK_ROOT = $ndk
 $env:LIBCLANG_PATH = 'C:\Program Files\LLVM\bin'
 $env:CMAKE = $cmake
 $env:CMAKE_GENERATOR = 'Ninja'
+$env:CARGO_TARGET_DIR = $target
 $env:PATH = "$(Split-Path $cmake -Parent);$env:PATH"
 
 # boring-sys builds BoringSSL before its known Windows second-configure failure.
@@ -40,7 +42,7 @@ try {
 finally {
     Pop-Location
 }
-$bsslOut = Get-ChildItem -LiteralPath (Join-Path $crate 'target\aarch64-linux-android\release\build') -Directory -Filter 'boring-sys-*' |
+$bsslOut = Get-ChildItem -LiteralPath (Join-Path $target 'aarch64-linux-android\release\build') -Directory -Filter 'boring-sys-*' |
     ForEach-Object { Join-Path $_.FullName 'out' } |
     Where-Object { Test-Path -LiteralPath (Join-Path $_ 'build\libssl.a') } |
     Select-Object -Last 1
@@ -69,7 +71,7 @@ try {
     cargo build --release --lib --target aarch64-linux-android
     $destination = Join-Path $root "core\android-libs\$Abi"
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
-    Copy-Item -LiteralPath '.\target\aarch64-linux-android\release\libaether.so' -Destination (Join-Path $destination 'libaether.so') -Force
+    Copy-Item -LiteralPath (Join-Path $target 'aarch64-linux-android\release\libaether.so') -Destination (Join-Path $destination 'libaether.so') -Force
 }
 finally {
     Pop-Location

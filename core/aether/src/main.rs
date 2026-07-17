@@ -29,7 +29,23 @@ pub struct StartOptions {
     pub retry_obfuscation_profiles: bool,
     pub endpoint_cache_path: Option<String>,
     pub endpoint_discovery: EndpointDiscovery,
+    pub masque_transport: MasqueTransport,
     pub tun_fd: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MasqueTransport {
+    H3,
+    H2,
+}
+
+impl MasqueTransport {
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_lowercase().as_str() {
+            "h2" | "http2" | "http/2" => Self::H2,
+            _ => Self::H3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +84,7 @@ impl StartOptions {
             retry_obfuscation_profiles: true,
             endpoint_cache_path: None,
             endpoint_discovery: EndpointDiscovery::Cache,
+            masque_transport: MasqueTransport::H3,
             tun_fd: None,
         }
     }
@@ -131,6 +148,7 @@ pub async fn start(options: StartOptions) -> Result<()> {
 
     match options.protocol {
         Protocol::Masque => {
+            masque_h2::set_preferred(options.masque_transport == MasqueTransport::H2);
             let config_path = masque_config_path(&options);
             let identity = load_or_provision_masque(&config_path).await?;
             log::info!(

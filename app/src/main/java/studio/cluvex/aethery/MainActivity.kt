@@ -435,6 +435,7 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(4); bottomMargin = dp(20); leftMargin = dp(48) })
         val options = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val discoveryOptions = mutableMapOf<EndpointDiscovery, SelectionOption>()
+        val transportOptions = mutableMapOf<MasqueTransport, SelectionOption>()
         val modeOptions = mutableMapOf<ScanMode, SelectionOption>()
         val targetOptions = mutableMapOf<ScanTarget, SelectionOption>()
         options.addView(label("MASQUE GATEWAY DISCOVERY", 12f, MUTED).apply { letterSpacing = 0.1f })
@@ -446,6 +447,23 @@ class MainActivity : Activity() {
                 discoveryOptions.forEach { (item, view) -> setSelectionState(view, item == chosen, animate = true) }
             }
             discoveryOptions[discovery] = option
+            options.addView(option.row, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(68),
+            ).apply { topMargin = if (index == 0) dp(10) else dp(8) })
+        }
+        options.addView(label("MASQUE TRANSPORT", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(20) })
+        MasqueTransport.entries.forEachIndexed { index, transport ->
+            val option = createMasqueTransportOption(transport) { chosen ->
+                getSharedPreferences(SETTINGS, MODE_PRIVATE).edit().putString(DEFAULT_MASQUE_TRANSPORT, chosen.coreName).apply()
+                scanValue.text = scanSummary()
+                scannerSelector.contentDescription = "Scanner options, ${scanSummary()}"
+                transportOptions.forEach { (item, view) -> setSelectionState(view, item == chosen, animate = true) }
+            }
+            transportOptions[transport] = option
             options.addView(option.row, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dp(68),
@@ -576,6 +594,33 @@ class MainActivity : Activity() {
             val labels = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
             labels.addView(title)
             labels.addView(label(mode.description, 13f, MUTED), LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(2) })
+            addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(indicator)
+        }
+        return SelectionOption(row, title, indicator, 18).also { setSelectionState(it, selected, animate = false) }
+    }
+
+    private fun createMasqueTransportOption(
+        transport: MasqueTransport,
+        onSelect: (MasqueTransport) -> Unit,
+    ): SelectionOption {
+        val selected = transport == defaultMasqueTransport()
+        val title = label(transport.label, 16f, INK, TypefaceStyle.MEDIUM)
+        val indicator = label("SELECTED", 11f, primary, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val row = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(18), 0, dp(18), 0)
+            contentDescription = "Use ${transport.label} for MASQUE scanning"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onSelect(transport) }
+            val labels = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+            labels.addView(title)
+            labels.addView(label(transport.description, 13f, MUTED), LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(2) })
@@ -1306,6 +1351,7 @@ class MainActivity : Activity() {
         put("ip_scan", defaultScan().coreName)
         put("endpoint_cache_path", File(filesDir, "masque-gateway-cache.json").absolutePath)
         put("endpoint_discovery", defaultEndpointDiscovery().coreName)
+        put("masque_transport", defaultMasqueTransport().coreName)
     }.toString()
 
     private fun renderStatus() {
@@ -1455,7 +1501,13 @@ class MainActivity : Activity() {
         return EndpointDiscovery.entries.firstOrNull { it.coreName == name } ?: EndpointDiscovery.CACHE
     }
 
-    private fun scanSummary(): String = "${defaultScan().label} · ${defaultScanMode().label}"
+    private fun defaultMasqueTransport(): MasqueTransport {
+        val name = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+            .getString(DEFAULT_MASQUE_TRANSPORT, MasqueTransport.H3.coreName)
+        return MasqueTransport.entries.firstOrNull { it.coreName == name } ?: MasqueTransport.H3
+    }
+
+    private fun scanSummary(): String = "${defaultScan().label} · ${defaultScanMode().label} · ${defaultMasqueTransport().label}"
 
     private fun socksPort(): Int = getSharedPreferences(SETTINGS, MODE_PRIVATE)
         .getInt(DEFAULT_SOCKS_PORT, DEFAULT_SOCKS_PORT_VALUE)
@@ -1513,6 +1565,15 @@ class MainActivity : Activity() {
         STEALTH("Stealth", "stealth", "Quiet, patient probing"),
     }
 
+    private enum class MasqueTransport(
+        val label: String,
+        val coreName: String,
+        val description: String,
+    ) {
+        H3("HTTP/3", "h3", "QUIC; best on healthy UDP networks"),
+        H2("HTTP/2", "h2", "TCP; use when UDP or QUIC is blocked"),
+    }
+
     private enum class EndpointDiscovery(
         val label: String,
         val coreName: String,
@@ -1542,6 +1603,7 @@ class MainActivity : Activity() {
         const val DEFAULT_SCAN = "default_scan"
         const val DEFAULT_SCAN_MODE = "default_scan_mode"
         const val ENDPOINT_DISCOVERY = "endpoint_discovery"
+        const val DEFAULT_MASQUE_TRANSPORT = "default_masque_transport"
         const val DEFAULT_SOCKS_PORT = "default_socks_port"
         const val DEFAULT_SOCKS_PORT_VALUE = 1819
         const val FALLBACK_CANVAS = 0xFF101411.toInt()

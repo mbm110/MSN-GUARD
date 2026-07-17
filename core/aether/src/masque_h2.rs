@@ -19,6 +19,27 @@ use crate::quic::{AssignedAddr, Control, Internals};
 const H2_ALPN: &[u8] = b"\x02h2";
 const CHROME_GROUPS: &str = "P-256:X25519:P-384";
 static H2_FALLBACK: AtomicBool = AtomicBool::new(false);
+static H2_PREFERRED: AtomicBool = AtomicBool::new(false);
+
+fn h2_keepalive_interval() -> Duration {
+    Duration::from_secs(
+        std::env::var("AETHER_MASQUE_H2_KEEPALIVE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(15),
+    )
+}
+
+fn h2_keepalive_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("AETHER_MASQUE_H2_KEEPALIVE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(20),
+    )
+}
 
 async fn connect_tcp(peer: SocketAddr) -> Result<TcpStream> {
     let socket = if peer.is_ipv4() {
@@ -41,7 +62,7 @@ pub struct H2TunnelConfig {
 }
 
 pub fn enabled() -> bool {
-    if H2_FALLBACK.load(Ordering::Acquire) {
+    if H2_PREFERRED.load(Ordering::Acquire) || H2_FALLBACK.load(Ordering::Acquire) {
         return true;
     }
     match std::env::var("AETHER_MASQUE_HTTP2") {
@@ -51,6 +72,11 @@ pub fn enabled() -> bool {
         }
         Err(_) => false,
     }
+}
+
+pub fn set_preferred(enabled: bool) {
+    H2_PREFERRED.store(enabled, Ordering::Release);
+    H2_FALLBACK.store(false, Ordering::Release);
 }
 
 pub fn enable_fallback() {
@@ -193,9 +219,12 @@ pub async fn run(
         String::from_utf8_lossy(tls.ssl().selected_alpn_protocol().unwrap_or(b""))
     );
 
-    let (h2, connection) = h2::client::handshake(tls)
+    let (h2, mut connection) = h2::client::handshake(tls)
         .await
         .map_err(|e| AetherError::Masque(format!("h2 handshake: {e}")))?;
+    let mut ping_pong = connection.ping_pong().ok_or_else(|| {
+        AetherError::Masque("h2 connection does not support ping".into())
+    })?;
     tokio::spawn(async move {
         if let Err(e) = connection.await {
             log::debug!("[h2] connection driver ended: {e}");
@@ -229,10 +258,39 @@ pub async fn run(
 
     let mut recv_body = response.into_body();
     let mut capsules = CapsuleParser::new();
+    let mut keepalive_interval = tokio::time::interval(h2_keepalive_interval());
+    keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut awaiting_pong = false;
+    let mut pong_deadline: Option<Instant> = None;
+    let keepalive_timeout = h2_keepalive_timeout();
 
     loop {
+        if let Some(deadline) = pong_deadline {
+            if Instant::now() >= deadline {
+                let _ = send_stream.send_data(Bytes::new(), true);
+                return Err(AetherError::Masque("h2 keepalive timeout".into()));
+            }
+        }
+
         tokio::select! {
             biased;
+
+            _ = keepalive_interval.tick(), if !awaiting_pong => {
+                if ping_pong.send_ping(h2::Ping::opaque()).is_ok() {
+                    awaiting_pong = true;
+                    pong_deadline = Some(Instant::now() + keepalive_timeout);
+                }
+            }
+
+            pong = std::future::poll_fn(|cx| ping_pong.poll_pong(cx)), if awaiting_pong => {
+                match pong {
+                    Ok(_) => {
+                        awaiting_pong = false;
+                        pong_deadline = None;
+                    }
+                    Err(e) => return Err(AetherError::Masque(format!("h2 keepalive: {e}"))),
+                }
+            }
 
             ctrl = ctrl_rx.recv() => {
                 match ctrl {
