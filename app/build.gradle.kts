@@ -67,7 +67,35 @@ android {
     }
 }
 
-dependencies {
+    dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("com.google.android.material:material:1.12.0")
+}
+
+targetAbis.forEach { abi ->
+    val taskName = "buildRustCore${abi.split('-').joinToString("") { it.replaceFirstChar { char -> char.uppercase() } }}"
+    tasks.register<Exec>(taskName) {
+        group = "build"
+        description = "Builds the Rust core library for Android ($abi)"
+
+        val script = project.rootProject.file("core/build-android.ps1").absolutePath
+
+        environment("JAVA_HOME", System.getProperty("java.home"))
+        environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
+
+        commandLine("powershell.exe", "-ExecutionPolicy", "Bypass", "-File", script, "-Abi", abi)
+
+        inputs.dir(project.rootProject.file("core/aether/src"))
+        inputs.file(project.rootProject.file("core/aether/Cargo.toml"))
+        outputs.file(project.file("src/main/jniLibs/$abi/libaether.so"))
+    }
+}
+
+project.afterEvaluate {
+    tasks.named("preBuild").configure {
+        targetAbis.forEach { abi ->
+            val taskName = "buildRustCore${abi.split('-').joinToString("") { it.replaceFirstChar { char -> char.uppercase() } }}"
+            dependsOn(taskName)
+        }
+    }
 }
