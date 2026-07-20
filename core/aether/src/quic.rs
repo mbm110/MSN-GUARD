@@ -54,6 +54,7 @@ pub struct TunnelConfig {
     pub key_pem: Vec<u8>,
     pub ech_config_list: Option<Vec<u8>>,
     pub noize: NoizeConfig,
+    pub tls_curve_preset: crate::TlsCurvePreset,
 }
 
 pub struct Channels {
@@ -156,6 +157,7 @@ pub async fn run(
         cert_pem: &cfg.cert_pem,
         key_pem: &cfg.key_pem,
         pin_endpoint: false,
+        curve_preset: cfg.tls_curve_preset,
     })?;
 
     let mut current_ech = cfg.ech_config_list.clone();
@@ -518,6 +520,7 @@ pub struct VerifyParams {
     pub key_pem: Vec<u8>,
     pub ech_config_list: Option<Vec<u8>>,
     pub noize: NoizeConfig,
+    pub tls_curve_preset: crate::TlsCurvePreset,
     pub timeout: Duration,
 }
 
@@ -531,6 +534,7 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
         cert_pem: &p.cert_pem,
         key_pem: &p.key_pem,
         pin_endpoint: false,
+        curve_preset: p.tls_curve_preset,
     })?;
 
     let scid_bytes = random_scid();

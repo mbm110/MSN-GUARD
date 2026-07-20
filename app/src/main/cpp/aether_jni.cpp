@@ -6,6 +6,7 @@
 extern "C" {
 int aether_prepare_json(const char* json);
 const char* aether_last_result();
+int aether_start_json(const char* json);
 int aether_start_json_with_tun(const char* json, int tun_fd);
 int aether_stop();
 int aether_is_running();
@@ -74,6 +75,13 @@ Java_studio_cluvex_aethery_NativeCore_nativeStart(JNIEnv* env, jobject, jstring 
     const auto config_text = copy_jstring(env, config);
     if (config_text.empty()) return -1;
     return aether_start_json_with_tun(config_text.c_str(), tun_fd);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_studio_cluvex_aethery_NativeCore_nativeStartProxy(JNIEnv* env, jobject, jstring config) {
+    const auto config_text = copy_jstring(env, config);
+    if (config_text.empty()) return -1;
+    return aether_start_json(config_text.c_str());
 }
 
 extern "C" JNIEXPORT jint JNICALL

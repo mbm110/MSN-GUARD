@@ -109,6 +109,7 @@ pub struct WgProbe {
     pub client_id: [u8; 3],
     pub local_ipv4: Ipv4Addr,
     pub aethernoize: AetherNoizeConfig,
+    pub data_check: bool,
     pub ports: Vec<u16>,
     pub ip: IpScan,
 }
@@ -237,6 +238,7 @@ async fn verify_one_wg(
         probe.client_id,
         probe.local_ipv4,
         &probe.aethernoize,
+        probe.data_check,
         timeout,
     )
     .await

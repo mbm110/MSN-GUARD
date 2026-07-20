@@ -9,6 +9,7 @@ use foreign_types_shared::ForeignTypeRef;
 
 use crate::consts;
 use crate::error::{AetherError, Result};
+use crate::TlsCurvePreset;
 
 extern "C" {
     fn SSL_set1_ech_config_list(
@@ -30,6 +31,7 @@ pub struct TlsParams<'a> {
     pub cert_pem: &'a [u8],
     pub key_pem: &'a [u8],
     pub pin_endpoint: bool,
+    pub curve_preset: TlsCurvePreset,
 }
 
 pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
@@ -44,8 +46,10 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
         .map_err(|e| AetherError::Tls(e.to_string()))?;
 
     builder.set_grease_enabled(true);
-    let groups = std::env::var("AETHER_TLS_GROUPS").ok();
-    let groups = groups.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(CHROME_GROUPS);
+    let groups = match params.curve_preset {
+        TlsCurvePreset::Chrome => CHROME_GROUPS,
+        TlsCurvePreset::Compatibility => "P-256:X25519",
+    };
     builder
         .set_curves_list(groups)
         .map_err(|e| AetherError::Tls(e.to_string()))?;

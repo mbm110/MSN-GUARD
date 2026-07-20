@@ -34,11 +34,12 @@ Android UI + Android VPN/TUN
 ## Highlights
 
 - Native Android UI with one-tap connect, connection state, motion, and live logs.
-- Android `VpnService` TUN integration: device traffic flows through the selected tunnel only after the core reports readiness.
+- Connection type picker: **VPN** routes device traffic through Android `VpnService`; **Proxy** exposes local SOCKS5 at `127.0.0.1:1819` by default for apps configured to use it.
 - **MASQUE** over HTTP/3, with HTTP/2 fallback when available.
 - **WireGuard** for networks where it is reachable.
 - **WARP-on-WARP** (`gool`) support through the Aether core.
-- Automatic endpoint scanning with IP-level diagnostics in the connection log.
+- Automatic endpoint scanning with IP-level diagnostics, cached-gateway reconnect, and Ironclad verification.
+- Retained Aether v1.3.0 Android FFI core builds into `libaether.so`; it is excluded from GitHub language statistics.
 - App-level default protocol setting and direct links to releases/source.
 
 ## Protocol notes
@@ -72,25 +73,35 @@ Install an APK from Android Downloads after allowing installs from the source ap
 - Android NDK `26.3.11579264`
 - CMake `3.22.1`
 - JDK 17
-- Rust stable, including the Android target for the ABI you need
+- Rust stable with required Android targets:
+
+  ```powershell
+  rustup target add aarch64-linux-android armv7-linux-androideabi
+  ```
+
 - `cargo-ndk`
 
-### arm64-v8a
+### Build APKs
+
+Gradle builds and stages matching Aether library automatically:
 
 ```powershell
-.\core\build-android.ps1
-New-Item -ItemType Directory -Force app\src\main\jniLibs\arm64-v8a
-Copy-Item core\android-libs\arm64-v8a\libaether.so app\src\main\jniLibs\arm64-v8a\libaether.so -Force
 .\gradlew.bat :app:assembleDebug -PtargetAbi=arm64-v8a
+.\gradlew.bat :app:assembleDebug -PtargetAbi=armeabi-v7a
+```
+
+Build both ABI splits:
+
+```powershell
+.\gradlew.bat :app:assembleDebug
 ```
 
 APK output:
 
 ```text
 app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
+app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
 ```
-
-For armv7, build Aether for `armeabi-v7a`, copy the resulting `libaether.so` to `app/src/main/jniLibs/armeabi-v7a/`, then run Gradle with `-PtargetAbi=armeabi-v7a`.
 
 ## CI releases
 
