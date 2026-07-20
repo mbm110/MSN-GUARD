@@ -90,7 +90,9 @@ targetAbis.forEach { abi ->
         inputs.file(rootProject.file("core/aether/Cargo.lock"))
         inputs.dir(rootProject.file("core/quiche"))
         inputs.file(rootProject.file("core/build-android.ps1"))
-        outputs.file(file("src/main/jniLibs/$abi/libaether.so"))
+        val output = file("src/main/jniLibs/$abi/libaether.so")
+        outputs.file(output)
+        onlyIf { !output.exists() }
     }
     tasks.named("preBuild").configure { dependsOn(taskName) }
 }
