@@ -36,7 +36,9 @@ class AetherVpnService : VpnService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_CONNECT -> intent.getStringExtra(EXTRA_CONFIG)?.let(::startTunnel)
+            ACTION_CONNECT -> intent.getStringExtra(EXTRA_CONFIG)?.let { config ->
+                startTunnel(config, intent.getBooleanExtra(EXTRA_VPN_MODE, true))
+            }
             ACTION_DISCONNECT -> stopTunnel()
         }
         return Service.START_NOT_STICKY
@@ -51,36 +53,43 @@ class AetherVpnService : VpnService() {
 
     fun protectSocket(fd: Int): Boolean = protect(fd)
 
-    private fun startTunnel(config: String) {
+    private fun startTunnel(config: String, vpnMode: Boolean) {
         if (!connected.compareAndSet(false, true)) return
         stopRequested.set(false)
         startAsForeground()
-        watchTraffic()
+        if (vpnMode) watchTraffic()
         sendStatus(STATUS_STARTING)
         worker.execute {
             try {
-                ConnectionLog.record("Preparing ${config.substringAfter("\"protocol\":\"").substringBefore('\"').uppercase()} identity")
-                val addresses = NativeCore.prepare(config)
-                ConnectionLog.record("Creating Android VPN interface")
-                tun = Builder()
-                    .setSession("Aethery")
-                    .setMtu(1280)
-                    .addAddress(addresses.ipv4, 32)
-                    .addAddress(addresses.ipv6, 128)
-                    .addRoute("0.0.0.0", 0)
-                    .addRoute("::", 0)
-                    .addDnsServer("1.1.1.1")
-                    .applySplitTunneling()
-                    .establish() ?: error("Android could not establish the VPN interface")
-
-                NativeCore.attach(this)
-                ConnectionLog.record("Scanning MASQUE gateways")
-                sendStatus(STATUS_SCANNING)
-                watchReadiness()
-                val result = NativeCore.start(config, tun!!.fd)
+                val protocol = config.substringAfter("\"protocol\":\"").substringBefore('\"').uppercase()
+                ConnectionLog.record("Preparing $protocol identity")
+                val result = if (vpnMode) {
+                    val addresses = NativeCore.prepare(config)
+                    ConnectionLog.record("Creating Android VPN interface")
+                    tun = Builder()
+                        .setSession("Aethery")
+                        .setMtu(1280)
+                        .addAddress(addresses.ipv4, 32)
+                        .addAddress(addresses.ipv6, 128)
+                        .addRoute("0.0.0.0", 0)
+                        .addRoute("::", 0)
+                        .addDnsServer("1.1.1.1")
+                        .applySplitTunneling()
+                        .establish() ?: error("Android could not establish the VPN interface")
+                    NativeCore.attach(this)
+                    ConnectionLog.record("Scanning gateways for VPN")
+                    sendStatus(STATUS_SCANNING)
+                    watchReadiness()
+                    NativeCore.start(config, tun!!.fd)
+                } else {
+                    ConnectionLog.record("Starting local SOCKS5 proxy")
+                    sendStatus(STATUS_SCANNING)
+                    watchReadiness()
+                    NativeCore.startProxy(config)
+                }
                 check(result == 0) { NativeCore.lastError() }
                 check(stopRequested.get()) {
-                    NativeCore.lastError().ifBlank { "MASQUE tunnel closed before setup completed" }
+                    NativeCore.lastError().ifBlank { "Tunnel closed before setup completed" }
                 }
                 sendStatus(STATUS_DISCONNECTED)
             } catch (error: Exception) {
@@ -224,6 +233,7 @@ class AetherVpnService : VpnService() {
         const val ACTION_DISCONNECT = "studio.cluvex.aethery.DISCONNECT"
         const val ACTION_STATUS = "studio.cluvex.aethery.STATUS"
         const val EXTRA_CONFIG = "config"
+        const val EXTRA_VPN_MODE = "vpn_mode"
         const val EXTRA_STATUS = "status"
         const val EXTRA_DETAIL = "detail"
         const val STATUS_CONNECTING = "connecting"

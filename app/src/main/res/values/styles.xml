@@ -14,6 +14,12 @@
         <item name="materialAlertDialogTheme">@style/ThemeOverlay.Aethery.AlertDialog</item>
     </style>
 
+    <style name="Theme.Aethery.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">#101411</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="postSplashScreenTheme">@style/Theme.Aethery</item>
+    </style>
+
     <style name="ThemeOverlay.Aethery.AlertDialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
         <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.Aethery.Dialog</item>
     </style>

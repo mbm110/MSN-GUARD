@@ -8,7 +8,7 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 use serde::Deserialize;
 use tokio::sync::Notify;
 
-use crate::{platform, EndpointDiscovery, IpScan, MasqueTransport, Protocol, ScanMode, StartOptions, TunnelAddresses};
+use crate::{platform, EndpointDiscovery, IpScan, MasqueTransport, Protocol, ScanMode, StartOptions, TlsCurvePreset, TunnelAddresses};
 
 static LAST_ERROR: LazyLock<Mutex<CString>> =
     LazyLock::new(|| Mutex::new(CString::new("").unwrap()));
@@ -39,6 +39,8 @@ struct NativeStartOptions {
     endpoint_cache_path: Option<String>,
     endpoint_discovery: String,
     masque_transport: String,
+    tls_curve_preset: String,
+    wireguard_data_check: bool,
 }
 
 impl Default for NativeStartOptions {
@@ -57,6 +59,8 @@ impl Default for NativeStartOptions {
             endpoint_cache_path: None,
             endpoint_discovery: "cache".into(),
             masque_transport: "h3".into(),
+            tls_curve_preset: "chrome".into(),
+            wireguard_data_check: true,
         }
     }
 }
@@ -84,6 +88,8 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.endpoint_cache_path = value.endpoint_cache_path.filter(|path| !path.trim().is_empty());
         options.endpoint_discovery = EndpointDiscovery::parse(&value.endpoint_discovery);
         options.masque_transport = MasqueTransport::parse(&value.masque_transport);
+        options.tls_curve_preset = TlsCurvePreset::parse(&value.tls_curve_preset);
+        options.wireguard_data_check = value.wireguard_data_check;
         Ok(options)
     }
 }
@@ -348,6 +354,20 @@ mod tests {
         assert_eq!(options.masque_transport, MasqueTransport::H2);
         assert_eq!(options.listen, "127.0.0.1:1819".parse().unwrap());
         assert_eq!(options.scan_mode, ScanMode::Balanced);
+        assert_eq!(options.tls_curve_preset, TlsCurvePreset::Chrome);
+        assert!(options.wireguard_data_check);
+    }
+
+    #[test]
+    fn parses_advanced_android_start_options() {
+        let native: NativeStartOptions = serde_json::from_str(
+            r#"{"config_path":"aether.toml","tls_curve_preset":"compatibility","wireguard_data_check":false}"#,
+        )
+        .unwrap();
+        let options = StartOptions::try_from(native).unwrap();
+
+        assert_eq!(options.tls_curve_preset, TlsCurvePreset::Compatibility);
+        assert!(!options.wireguard_data_check);
     }
 
     #[test]

@@ -11,11 +11,20 @@ use crate::noize::NoizeConfig;
 use crate::quic;
 
 pub const MASQUE_CIDRS_V4: &[&str] = &[
+    "162.159.36.0/24",
+    "162.159.46.0/24",
     "162.159.192.0/24",
     "162.159.193.0/24",
     "162.159.195.0/24",
     "162.159.196.0/24",
+    "162.159.197.0/24",
     "162.159.198.0/24",
+    "162.159.204.0/24",
+    "172.65.251.0/24",
+    "188.114.96.0/24",
+    "188.114.97.0/24",
+    "188.114.98.0/24",
+    "188.114.99.0/24",
 ];
 
 pub const MASQUE_SEEDS: &[&str] = &[
@@ -27,9 +36,13 @@ pub const MASQUE_SEEDS: &[&str] = &[
     "162.159.196.1",
 ];
 
-pub const MASQUE_PORTS: &[u16] = &[443];
+pub const MASQUE_PORTS: &[u16] = &[443, 500, 1701, 4443, 8443, 8095];
 
-pub const MASQUE_CIDRS_V6: &[&str] = &["2606:4700:d0::/48", "2606:4700:d1::/48"];
+pub const MASQUE_CIDRS_V6: &[&str] = &[
+    "2606:4700:d0::/48",
+    "2606:4700:d1::/48",
+    "2606:4700:102::/48",
+];
 
 pub const MASQUE_SEEDS_V6: &[&str] = &["2606:4700:d0::a29f:c602", "2606:4700:d1::a29f:c602", "2606:4700:d0::a29f:c601", "2606:4700:d0::a29f:c001"];
 
@@ -79,6 +92,7 @@ pub enum ScanMode {
     Balanced,
     Thorough,
     Stealth,
+    Ironclad,
 }
 
 impl ScanMode {
@@ -87,6 +101,7 @@ impl ScanMode {
             "turbo" | "fast" => ScanMode::Turbo,
             "thorough" | "deep" | "pro" => ScanMode::Thorough,
             "stealth" | "quiet" => ScanMode::Stealth,
+            "ironclad" | "real" | "verify" | "guaranteed" => ScanMode::Ironclad,
             _ => ScanMode::Balanced,
         }
     }
@@ -97,6 +112,7 @@ impl ScanMode {
             ScanMode::Balanced => "balanced",
             ScanMode::Thorough => "thorough",
             ScanMode::Stealth => "stealth",
+            ScanMode::Ironclad => "ironclad",
         }
     }
 
@@ -142,6 +158,16 @@ impl ScanMode {
                 full_subnet: false,
                 sample_per_cidr: 64,
             },
+            ScanMode::Ironclad => Strategy {
+                concurrency: 4,
+                per_probe_timeout: Duration::from_millis(15000),
+                overall_deadline: Duration::from_secs(180),
+                quiet_after_first: Duration::from_secs(15),
+                target_successes: 3,
+                early_exit_first: false,
+                full_subnet: false,
+                sample_per_cidr: 140,
+            },
         }
     }
 }
@@ -166,6 +192,7 @@ pub struct MasqueProbe {
     pub key_pem: Arc<[u8]>,
     pub ech_config_list: Option<Arc<[u8]>>,
     pub noize: NoizeConfig,
+    pub tls_curve_preset: crate::TlsCurvePreset,
     pub ports: Vec<u16>,
     pub ip: IpScan,
 }
@@ -208,10 +235,11 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
         st.overall_deadline,
     );
 
+    let ironclad = mode == ScanMode::Ironclad;
     let stream = futures::stream::iter(
         candidates
             .into_iter()
-            .map(|(ip, port)| verify_one(probe, ip, port, timeout)),
+            .map(|(ip, port)| verify_one(probe, ip, port, timeout, ironclad)),
     )
     .buffer_unordered(st.concurrency);
     tokio::pin!(stream);
@@ -295,7 +323,7 @@ pub async fn verify_cached_gateways(probe: &MasqueProbe, gateways: Vec<SocketAdd
     let stream = futures::stream::iter(
         gateways
             .into_iter()
-            .map(|gateway| verify_one(probe, gateway.ip(), gateway.port(), Duration::from_secs(6))),
+            .map(|gateway| verify_one(probe, gateway.ip(), gateway.port(), Duration::from_secs(6), false)),
     )
     .buffer_unordered(3);
     tokio::pin!(stream);
@@ -313,6 +341,7 @@ async fn verify_one(
     ip: IpAddr,
     port: u16,
     timeout: Duration,
+    ironclad: bool,
 ) -> Option<ProbeResult> {
     let transport = if crate::masque_h2::enabled() { "HTTP/2" } else { "HTTP/3" };
     crate::ffi::record_log(format!("Scanning {ip}:{port} via {transport}"));
@@ -347,17 +376,31 @@ async fn verify_one(
         key_pem: probe.key_pem.to_vec(),
         ech_config_list: probe.ech_config_list.as_ref().map(|a| a.to_vec()),
         noize: probe.noize.clone(),
+        tls_curve_preset: probe.tls_curve_preset,
         timeout,
     };
 
-    match quic::verify_masque(&vp).await {
-        Ok(rtt) => {
+    let verify = async {
+        let rtt = quic::verify_masque(&vp).await?;
+        if ironclad {
+            quic::verify_masque(&vp).await?;
+        }
+        Ok::<_, AetherError>(rtt)
+    };
+
+    match tokio::time::timeout(timeout, verify).await {
+        Ok(Ok(rtt)) => {
             crate::ffi::record_log(format!("Accepted {ip}:{port} ({rtt:?})"));
             Some(ProbeResult { ip, port, rtt })
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             crate::ffi::record_log(format!("Rejected {ip}:{port}: {e}"));
             log::debug!("probe {ip}:{port} -> {e}");
+            None
+        }
+        Err(_) => {
+            crate::ffi::record_log(format!("Rejected {ip}:{port}: probe timeout"));
+            log::debug!("probe {ip}:{port} timed out; probe future dropped");
             None
         }
     }

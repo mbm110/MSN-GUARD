@@ -18,10 +18,14 @@ $clangPrefix = switch ($Abi) {
     "arm64-v8a" { "aarch64-linux-android" }
     "armeabi-v7a" { "armv7a-linux-androideabi" }
 }
+$includeArch = switch ($Abi) {
+    'arm64-v8a' { 'aarch64-linux-android' }
+    'armeabi-v7a' { 'arm-linux-androideabi' }
+}
 
 # Ensure Rust target is installed
-$installedTargets = rustup target list --installed
-if ($installedTargets -notcontains $targetTriple) {
+$installedTargets = & rustup target list --installed
+if ($LASTEXITCODE -ne 0 -or $targetTriple -notin $installedTargets) {
     Write-Host "Error: Rust target $targetTriple is not installed." -ForegroundColor Red
     Write-Host "Please run: rustup target add $targetTriple" -ForegroundColor Yellow
     exit 1
@@ -98,34 +102,31 @@ $env:BORING_BSSL_INCLUDE_PATH = (Join-Path $bsslOut 'boringssl/src/include').Rep
 $env:BORING_BSSL_ASSUME_PATCHED = '1'
 $env:CLANG_PATH = (Join-Path $bin 'clang.exe').Replace('\', '/')
 
-Set-Item -Path "env:CARGO_TARGET_$($rustEnvSuffix)_LINKER" -Value (Join-Path $bin "$clangPrefix$Api-clang.cmd").Replace('\', '/')
-Set-Item -Path "env:CARGO_TARGET_$($rustEnvSuffix)_AR" -Value (Join-Path $bin 'llvm-ar.exe').Replace('\', '/')
-
-$rustTargetTriple = $targetTriple.Replace("-", "_")
-Set-Item -Path "env:AR_$rustTargetTriple" -Value (Get-Item "env:CARGO_TARGET_$($rustEnvSuffix)_AR").Value
-Set-Item -Path "env:CC_$rustTargetTriple" -Value (Join-Path $bin 'clang.exe').Replace('\', '/')
-Set-Item -Path "env:CXX_$rustTargetTriple" -Value (Join-Path $bin 'clang++.exe').Replace('\', '/')
-Set-Item -Path "env:CFLAGS_$rustTargetTriple" -Value "--target=$clangPrefix$Api"
-Set-Item -Path "env:CXXFLAGS_$rustTargetTriple" -Value "--target=$clangPrefix$Api"
-
-$includeSuffix = switch ($Abi) {
-    "arm64-v8a" { "aarch64-linux-android" }
-    "armeabi-v7a" { "arm-linux-androideabi" }
-}
-Set-Item -Path "env:BINDGEN_EXTRA_CLANG_ARGS_$rustTargetTriple" -Value "--target=$clangPrefix$Api --sysroot=$sysroot -I$sysroot/usr/include/$includeSuffix"
+$rustEnvSuffix = $targetTriple.ToUpper().Replace('-', '_')
+$rustTargetSuffix = $targetTriple.Replace('-', '_')
+Set-Item "Env:CARGO_TARGET_${rustEnvSuffix}_LINKER" (Join-Path $bin "$clangPrefix$Api-clang.cmd").Replace('\', '/')
+Set-Item "Env:CARGO_TARGET_${rustEnvSuffix}_AR" (Join-Path $bin 'llvm-ar.exe').Replace('\', '/')
+Set-Item "Env:AR_$rustTargetSuffix" (Get-Item "Env:CARGO_TARGET_${rustEnvSuffix}_AR").Value.Replace('\', '/')
+Set-Item "Env:CC_$rustTargetSuffix" (Join-Path $bin 'clang.exe').Replace('\', '/')
+Set-Item "Env:CXX_$rustTargetSuffix" (Join-Path $bin 'clang++.exe').Replace('\', '/')
+Set-Item "Env:CFLAGS_$rustTargetSuffix" "--target=$clangPrefix$Api"
+Set-Item "Env:CXXFLAGS_$rustTargetSuffix" "--target=$clangPrefix$Api"
+Set-Item "Env:BINDGEN_EXTRA_CLANG_ARGS_$rustTargetSuffix" "--target=$clangPrefix$Api --sysroot=$sysroot -I$sysroot/usr/include/$includeArch"
 
 $env:RUSTFLAGS = "$env:RUSTFLAGS -C link-arg=-Wl,-soname,libaether.so -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384".Trim()
 
 Push-Location $crate
 try {
     cargo build --release --lib --target $targetTriple
-    $destination = (Join-Path $root "core/android-libs/$Abi").Replace('\', '/')
-    New-Item -ItemType Directory -Path $destination -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path $target "$targetTriple/release/libaether.so").Replace('\', '/') -Destination (Join-Path $destination 'libaether.so').Replace('\', '/') -Force
-
-    $appDest = (Join-Path $root "app/src/main/jniLibs/$Abi").Replace('\', '/')
-    New-Item -ItemType Directory -Path $appDest -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path $target "$targetTriple/release/libaether.so").Replace('\', '/') -Destination (Join-Path $appDest 'libaether.so').Replace('\', '/') -Force
+    $library = (Join-Path $target "$targetTriple/release/libaether.so").Replace('\', '/')
+    foreach ($destination in @(
+        (Join-Path $root "core/android-libs/$Abi"),
+        (Join-Path $root "app/src/main/jniLibs/$Abi")
+    )) {
+        $destPath = $destination.Replace('\', '/')
+        New-Item -ItemType Directory -Path $destPath -Force | Out-Null
+        Copy-Item -LiteralPath $library -Destination (Join-Path $destPath 'libaether.so').Replace('\', '/') -Force
+    }
 }
 finally {
     Pop-Location

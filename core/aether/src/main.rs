@@ -30,6 +30,8 @@ pub struct StartOptions {
     pub endpoint_cache_path: Option<String>,
     pub endpoint_discovery: EndpointDiscovery,
     pub masque_transport: MasqueTransport,
+    pub tls_curve_preset: TlsCurvePreset,
+    pub wireguard_data_check: bool,
     pub tun_fd: Option<i32>,
 }
 
@@ -52,6 +54,21 @@ impl MasqueTransport {
 pub enum EndpointDiscovery {
     Cache,
     Fresh,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsCurvePreset {
+    Chrome,
+    Compatibility,
+}
+
+impl TlsCurvePreset {
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_lowercase().as_str() {
+            "compatibility" | "compatible" => Self::Compatibility,
+            _ => Self::Chrome,
+        }
+    }
 }
 
 impl EndpointDiscovery {
@@ -85,6 +102,8 @@ impl StartOptions {
             endpoint_cache_path: None,
             endpoint_discovery: EndpointDiscovery::Cache,
             masque_transport: MasqueTransport::H3,
+            tls_curve_preset: TlsCurvePreset::Chrome,
+            wireguard_data_check: true,
             tun_fd: None,
         }
     }
@@ -166,6 +185,7 @@ pub async fn start(options: StartOptions) -> Result<()> {
                 ech,
                 options.listen,
                 options.masque_profile(),
+                options.tls_curve_preset,
                 options.tun_fd,
             )
             .await
@@ -343,6 +363,7 @@ async fn select_peer(
                 key_pem: std::sync::Arc::from(identity.key_pem.clone()),
                 ech_config_list: None,
                 noize: noize_config(options.masque_profile()),
+                tls_curve_preset: options.tls_curve_preset,
                 ports: prober::MASQUE_PORTS.to_vec(),
                 ip: options.ip_scan,
             };
@@ -390,6 +411,7 @@ async fn select_peer(
                 client_id: identity.client_id.clone(),
                 local_ipv4: identity.ipv4.parse().map_err(|_| AetherError::Other("invalid ipv4".into()))?,
                 aethernoize: aethernoize_config(options.wireguard_profile()),
+                data_check: options.wireguard_data_check,
                 ports: wireguard::WG_PORTS.to_vec(),
                 ip: options.ip_scan,
             };
@@ -440,6 +462,7 @@ async fn run_masque_tunnel(
     ech: Option<Vec<u8>>,
     listen: SocketAddr,
     obfuscation_profile: &str,
+    tls_curve_preset: TlsCurvePreset,
     tun_fd: Option<i32>,
 ) -> Result<()> {
     let (chans, internals) = quic::channels();
@@ -453,6 +476,7 @@ async fn run_masque_tunnel(
         key_pem: identity.key_pem.clone(),
         ech_config_list: ech,
         noize: noize_config(obfuscation_profile),
+        tls_curve_preset,
     };
 
     let quic::Channels {
@@ -557,6 +581,7 @@ async fn hunt_wg_peer_with_profile(
     mode_str: &str,
     ip: prober::IpScan,
     profile: aethernoize::AetherNoizeConfig,
+    data_check: bool,
 ) -> Result<SocketAddr> {
     let mode = wg_prober::WgScanMode::parse(mode_str);
     let private_key = identity.private_key_bytes()?;
@@ -571,6 +596,7 @@ async fn hunt_wg_peer_with_profile(
             .parse()
             .map_err(|_| AetherError::Other("invalid ipv4".into()))?,
         aethernoize: profile,
+        data_check,
         ports: wireguard::WG_PORTS.to_vec(),
         ip,
     };
@@ -610,6 +636,7 @@ async fn run_wireguard(
                 identity.client_id,
                 ipv4,
                 profile,
+                options.wireguard_data_check,
                 std::time::Duration::from_secs(10),
             )
             .await
@@ -636,6 +663,7 @@ async fn run_wireguard(
                 options.scan_mode.label(),
                 options.ip_scan,
                 profile.clone(),
+                options.wireguard_data_check,
             )
             .await
             {
@@ -658,7 +686,7 @@ async fn run_wireguard(
 
     let (peer, profile) = selected.ok_or(AetherError::NoCleanEndpoint)?;
     log::info!("[+] using cloudflare edge {peer}");
-    run_wireguard_tunnel(identity, peer, profile, listen, options.tun_fd).await
+    run_wireguard_tunnel(identity, peer, profile, listen, options.wireguard_data_check, options.tun_fd).await
 }
 
 async fn run_wireguard_tunnel(
@@ -666,6 +694,7 @@ async fn run_wireguard_tunnel(
     peer: SocketAddr,
     aethernoize: aethernoize::AetherNoizeConfig,
     listen: SocketAddr,
+    wireguard_data_check: bool,
     tun_fd: Option<i32>,
 ) -> Result<()> {
     log::info!("[*] confirming WireGuard handshake + data flow with {peer}...");
@@ -682,6 +711,7 @@ async fn run_wireguard_tunnel(
         identity.client_id,
         ipv4,
         &aethernoize,
+        wireguard_data_check,
         std::time::Duration::from_secs(10),
     )
     .await;
@@ -866,6 +896,7 @@ async fn run_warp_in_warp(
             forwarder,
             aethernoize::from_profile("off"),
             listen,
+            true,
             Some(fd),
         )
         .await;

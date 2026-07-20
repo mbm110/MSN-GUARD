@@ -353,9 +353,9 @@ pub async fn verify_endpoint(
     client_id: [u8; 3],
     local_ipv4: Ipv4Addr,
     aethernoize: &AetherNoizeConfig,
+    data_check: bool,
     timeout: Duration,
 ) -> Result<Duration> {
-    let data_check = std::env::var("AETHER_WG_NO_DATA_CHECK").is_err();
     log::debug!("[wg] verify {} obf={} data_check={}", peer, aethernoize.is_enabled(), data_check);
 
     let bind = if peer.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
