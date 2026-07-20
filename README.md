@@ -15,7 +15,7 @@
   <a href="https://github.com/CluvexStudio/Aether"><img src="https://img.shields.io/badge/core-Aether-101411?style=for-the-badge" alt="Aether core"></a>
 </p>
 
-> **v0.1.1** — Aethery is an Android app around the [Aether core](https://github.com/CluvexStudio/Aether). It is not a replacement or fork of Aether's networking engine.
+> **v0.4.0** — Aethery is an Android app around the [Aether core](https://github.com/CluvexStudio/Aether). It is not a replacement or fork of Aether's networking engine.
 
 ## What Aethery does
 
