@@ -31,11 +31,13 @@ import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
+import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import android.widget.EditText
 import android.widget.CheckBox
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import com.google.android.material.color.DynamicColors
@@ -66,9 +68,15 @@ class MainActivity : Activity() {
     private var receiverRegistered = false
     private var showingSettings = false
     private var showingLogs = false
+    private var showingScanner = false
+    private var showingMode = false
+    private var showingDefaultProtocol = false
     private var settingsPage: View? = null
     private var tunnelControlsPage: View? = null
     private var logsPage: View? = null
+    private var scannerPage: View? = null
+    private var modePage: View? = null
+    private var defaultProtocolPage: View? = null
     private var splitTunnelPage: View? = null
     private var splitTunnelAppsPage: View? = null
     @Volatile private var cachedUserApps: List<ApplicationInfo>? = null
@@ -81,8 +89,9 @@ class MainActivity : Activity() {
     private val DIVIDER by lazy { dynamicColor(android.R.color.system_neutral2_600, FALLBACK_DIVIDER) }
     private val primary by lazy { dynamicColor(android.R.color.system_accent1_300, FALLBACK_PRIMARY) }
     private val primaryContainer by lazy { dynamicColor(android.R.color.system_accent1_800, FALLBACK_PRIMARY_CONTAINER) }
-    private val connected by lazy { dynamicColor(android.R.color.system_accent2_300, FALLBACK_CONNECTED) }
-    private val connectedContainer by lazy { dynamicColor(android.R.color.system_accent2_800, FALLBACK_CONNECTED_CONTAINER) }
+    private val connected = 0xFF22C55E.toInt()
+    private val connectedContainer = 0xFF052E16.toInt()
+    private val motionInterpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -265,11 +274,17 @@ class MainActivity : Activity() {
             ).apply { topMargin = dp(2) })
         }
         addView(titles, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        addView(label("⚙", 28f, INK).apply {
-            gravity = Gravity.CENTER
+        addView(ImageView(this@MainActivity).apply {
+            setImageResource(R.drawable.ic_settings)
             contentDescription = "Settings"
             isClickable = true
             isFocusable = true
+            val p = dp(12)
+            setPadding(p, p, p, p)
+            setColorFilter(INK)
+            val outValue = android.util.TypedValue()
+            context.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, outValue, true)
+            setBackgroundResource(outValue.resourceId)
             setOnClickListener { openSettingsScreen() }
         }, LinearLayout.LayoutParams(dp(48), dp(48)))
     }
@@ -326,7 +341,7 @@ class MainActivity : Activity() {
         contentDescription = "Connection mode, ${selectedProtocol.label}"
         isClickable = true
         isFocusable = true
-        setOnClickListener { showModeSheet() }
+        setOnClickListener { openModeScreen() }
 
         addView(label("MODE", 12f, MUTED).apply { letterSpacing = 0.1f })
         addView(modeValue, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
@@ -355,7 +370,7 @@ class MainActivity : Activity() {
     private fun createLogSelector(): LinearLayout = LinearLayout(this).apply {
         gravity = Gravity.CENTER_VERTICAL
         orientation = LinearLayout.HORIZONTAL
-        setPadding(dp(20), 0, dp(18), 0)
+        setPadding(dp(18), 0, dp(14), 0)
         background = roundedBackground(SURFACE_VARIANT, 18, DIVIDER)
         contentDescription = "View connection log"
         isClickable = true
@@ -363,31 +378,38 @@ class MainActivity : Activity() {
         setOnClickListener { openLogsScreen() }
 
         addView(label("LOG", 12f, MUTED).apply { letterSpacing = 0.1f })
-        addView(label("Events", 14f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(
+        addView(label("Events", 14f, INK, TypefaceStyle.MEDIUM, singleLine = true), LinearLayout.LayoutParams(
             0,
             ViewGroup.LayoutParams.WRAP_CONTENT,
             1f,
-        ).apply { leftMargin = dp(16) })
-        addView(ChevronView(this@MainActivity, MUTED), LinearLayout.LayoutParams(dp(24), dp(24)))
+        ).apply { leftMargin = dp(12) })
+        addView(ChevronView(this@MainActivity, MUTED), LinearLayout.LayoutParams(dp(22), dp(22)))
     }
 
     private fun createScannerSelector(): LinearLayout = LinearLayout(this).apply {
         gravity = Gravity.CENTER_VERTICAL
         orientation = LinearLayout.HORIZONTAL
-        setPadding(dp(16), 0, dp(14), 0)
+        setPadding(dp(14), 0, dp(10), 0)
         background = roundedBackground(SURFACE_VARIANT, 18, DIVIDER)
         contentDescription = "Scanner options, ${scanSummary()}"
         isClickable = true
         isFocusable = true
-        setOnClickListener { showScannerSheet() }
+        setOnClickListener { openScannerScreen() }
 
-        addView(label("SCANNER", 12f, MUTED).apply { letterSpacing = 0.08f })
-        addView(scanValue, LinearLayout.LayoutParams(
+        addView(label("SCAN", 12f, MUTED).apply { letterSpacing = 0.08f })
+        addView(scanValue.apply {
+            (scanValue.layoutParams as? LinearLayout.LayoutParams)?.let {
+                it.leftMargin = dp(8)
+                scanValue.layoutParams = it
+            }
+            setSingleLine(true)
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(
             0,
             ViewGroup.LayoutParams.WRAP_CONTENT,
             1f,
-        ).apply { leftMargin = dp(10) })
-        addView(ChevronView(this@MainActivity, MUTED), LinearLayout.LayoutParams(dp(20), dp(20)))
+        ).apply { leftMargin = dp(8) })
+        addView(ChevronView(this@MainActivity, MUTED), LinearLayout.LayoutParams(dp(18), dp(18)))
     }
 
     private fun openLogsScreen() {
@@ -469,23 +491,76 @@ class MainActivity : Activity() {
         logsPage = page
         pageHost.addView(page)
         page.requestApplyInsets()
-        page.alpha = 0f
-        page.translationX = dp(20).toFloat()
-        page.animate().alpha(1f).translationX(0f)
-            .setDuration(PAGE_ANIMATION_MS)
-            .setInterpolator(DecelerateInterpolator())
-            .start()
+        animatePageOpen(page)
     }
 
     private fun closeLogsScreen() {
         showingLogs = false
-        val page = logsPage ?: return
-        logsPage = null
-        page.animate().alpha(0f).translationX(dp(20).toFloat())
-            .setDuration(LOG_CLOSE_ANIMATION_MS)
-            .setInterpolator(DecelerateInterpolator())
-            .withEndAction { if (page.parent == pageHost) pageHost.removeView(page) }
+        logsPage?.let { animatePageClose(it) { logsPage = null } }
+    }
+
+    private fun animatePageOpen(page: View) {
+        page.alpha = 0f
+        page.translationY = dp(24).toFloat()
+        page.scaleX = 0.92f
+        page.scaleY = 0.92f
+
+        val behind = if (pageHost.childCount > 1) pageHost.getChildAt(pageHost.childCount - 2) else mainRoot
+        behind.animate()
+            .alpha(0.5f)
+            .scaleX(0.94f)
+            .scaleY(0.94f)
+            .setDuration(PAGE_ANIMATION_MS)
+            .setInterpolator(motionInterpolator)
             .start()
+
+        page.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(PAGE_ANIMATION_MS)
+            .setInterpolator(motionInterpolator)
+            .start()
+    }
+
+    private fun animatePageClose(page: View, onEnd: () -> Unit) {
+        page.animate()
+            .alpha(0f)
+            .translationY(dp(24).toFloat())
+            .scaleX(0.92f)
+            .scaleY(0.92f)
+            .setDuration(LOG_CLOSE_ANIMATION_MS)
+            .setInterpolator(motionInterpolator)
+            .withEndAction {
+                if (page.parent == pageHost) pageHost.removeView(page)
+                onEnd()
+            }
+            .start()
+
+        val behind = if (pageHost.childCount > 1) pageHost.getChildAt(pageHost.childCount - 2) else mainRoot
+        behind.animate()
+            .alpha(1f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(LOG_CLOSE_ANIMATION_MS)
+            .setInterpolator(motionInterpolator)
+            .start()
+    }
+
+    private fun staggerListItems(container: ViewGroup) {
+        for (i in 0 until container.childCount) {
+            val child = container.getChildAt(i)
+            child.alpha = 0f
+            child.translationY = dp(12).toFloat()
+            child.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(PAGE_ANIMATION_MS)
+                .setStartDelay(80L + i * 32L)
+                .setInterpolator(motionInterpolator)
+                .start()
+        }
     }
 
     private fun connectionLogText(): String {
@@ -493,42 +568,60 @@ class MainActivity : Activity() {
         return events.joinToString("\n").ifBlank { "No connection events yet" }
     }
 
-    private fun showScannerSheet() {
+    private fun openScannerScreen(animate: Boolean = true) {
         if (visualState == ConnectionControl.State.CONNECTING ||
             visualState == ConnectionControl.State.CONNECTED ||
             NativeCore.isRunning()
         ) return
 
-        val dialog = Dialog(this).apply {
-            requestWindowFeature(Window.FEATURE_NO_TITLE)
-            setCanceledOnTouchOutside(true)
+        showingScanner = true
+        scannerPage?.let(pageHost::removeView)
+
+        val page = FrameLayout(this).apply { setBackgroundColor(CANVAS) }
+        val scroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
         }
-        val sheet = LinearLayout(this).apply {
+        val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(24), dp(24), dp(24))
-            background = roundedBackground(SURFACE, 28, SURFACE)
+            setPadding(dp(24), dp(16), dp(24), dp(24))
         }
-        val titleRow = LinearLayout(this).apply {
+
+        val header = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
-            addView(label("\u2190", 28f, INK).apply {
-                gravity = Gravity.CENTER
-                contentDescription = "Close scanner options"
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(R.drawable.ic_back)
+                contentDescription = "Back"
                 isClickable = true
                 isFocusable = true
-                setOnClickListener { dialog.dismiss() }
+                val p = dp(12)
+                setPadding(p, p, p, p)
+                setColorFilter(INK)
+                val outValue = android.util.TypedValue()
+                context.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, outValue, true)
+                setBackgroundResource(outValue.resourceId)
+                setOnClickListener { closeScannerScreen() }
             }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            addView(label("Scanner options", 22f, INK, TypefaceStyle.MEDIUM))
+            addView(label("Scanner options", 22f, INK, TypefaceStyle.MEDIUM).apply {
+                setPadding(dp(4), 0, 0, 0)
+            })
         }
-        sheet.addView(titleRow)
-        sheet.addView(label("Choose Aether's endpoint-discovery budget and address families", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(header, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(4); bottomMargin = dp(20); leftMargin = dp(48) })
+        ).apply { bottomMargin = dp(8) })
+
+        content.addView(label("Choose Aether's endpoint-discovery budget and address families", 14f, MUTED), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
+
         val options = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val discoveryOptions = mutableMapOf<EndpointDiscovery, SelectionOption>()
         val transportOptions = mutableMapOf<MasqueTransport, SelectionOption>()
         val modeOptions = mutableMapOf<ScanMode, SelectionOption>()
         val targetOptions = mutableMapOf<ScanTarget, SelectionOption>()
+
         options.addView(label("MASQUE GATEWAY DISCOVERY", 12f, MUTED).apply { letterSpacing = 0.1f })
         EndpointDiscovery.entries.forEachIndexed { index, discovery ->
             val option = createEndpointDiscoveryOption(discovery) { chosen ->
@@ -543,6 +636,7 @@ class MainActivity : Activity() {
                 dp(68),
             ).apply { topMargin = if (index == 0) dp(10) else dp(8) })
         }
+
         options.addView(label("MASQUE TRANSPORT", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -560,6 +654,7 @@ class MainActivity : Activity() {
                 dp(68),
             ).apply { topMargin = if (index == 0) dp(10) else dp(8) })
         }
+
         options.addView(label("SCAN MODE", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -577,6 +672,7 @@ class MainActivity : Activity() {
                 dp(68),
             ).apply { topMargin = if (index == 0) dp(10) else dp(8) })
         }
+
         options.addView(label("IP VERSION", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -594,29 +690,34 @@ class MainActivity : Activity() {
                 dp(68),
             ).apply { topMargin = if (index == 0) dp(10) else dp(8) })
         }
-        sheet.addView(ScrollView(this).apply {
-            isFillViewport = true
-            isVerticalFadingEdgeEnabled = true
-            addView(options)
-        }, LinearLayout.LayoutParams(
+
+        content.addView(options)
+        scroll.addView(content)
+        page.addView(scroll, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            minOf(dp(340), (resources.displayMetrics.heightPixels - dp(210)).coerceAtLeast(dp(180))),
+            ViewGroup.LayoutParams.MATCH_PARENT,
         ))
-        val container = FrameLayout(this).apply {
-            setPadding(dp(16), 0, dp(16), dp(16))
-            addView(sheet, FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ))
+
+        page.setOnApplyWindowInsetsListener { _, insets ->
+            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24))
+            insets
         }
-        dialog.setContentView(container)
-        dialog.show()
-        dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setDimAmount(0.62f)
-            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
-            setGravity(Gravity.BOTTOM)
+
+        scannerPage = page
+        pageHost.addView(page, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+        page.requestApplyInsets()
+        if (animate) {
+            animatePageOpen(page)
+            staggerListItems(options)
         }
+    }
+
+    private fun closeScannerScreen() {
+        showingScanner = false
+        scannerPage?.let { animatePageClose(it) { scannerPage = null } }
     }
 
     private fun createScannerOption(target: ScanTarget, onSelect: (ScanTarget) -> Unit): SelectionOption {
@@ -797,176 +898,166 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun showModeSheet() {
+    private fun openModeScreen() {
         if (visualState == ConnectionControl.State.CONNECTING ||
             visualState == ConnectionControl.State.CONNECTED ||
             NativeCore.isRunning()
         ) return
 
-        val dialog = Dialog(this).apply {
-            requestWindowFeature(Window.FEATURE_NO_TITLE)
-            setCanceledOnTouchOutside(true)
-        }
-        val sheet = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(24), dp(24), dp(24))
-            background = roundedBackground(SURFACE, 28, SURFACE)
-        }
-        sheet.addView(label("Connection mode", 22f, INK, TypefaceStyle.MEDIUM))
-        sheet.addView(label("Choose how Aethery connects", 14f, MUTED), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(4); bottomMargin = dp(20) })
-        Protocol.entries.forEachIndexed { index, protocol ->
-            sheet.addView(createModeOption(protocol, dialog), LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(76),
-            ).apply { if (index > 0) topMargin = dp(10) })
-        }
+        showingMode = true
+        modePage?.let(pageHost::removeView)
 
-        val container = FrameLayout(this).apply {
-            setPadding(dp(16), 0, dp(16), dp(16))
-            addView(sheet, FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ))
-        }
-        dialog.setContentView(container)
-        dialog.show()
-        dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setDimAmount(0.62f)
-            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
-            setGravity(Gravity.BOTTOM)
-        }
-    }
-
-    private fun showSettingsPage() {
-        showingSettings = true
         val page = FrameLayout(this).apply { setBackgroundColor(CANVAS) }
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), 0, dp(24), dp(24))
+            setPadding(dp(24), dp(16), dp(24), dp(24))
         }
+
         val header = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
-            addView(label("\u2190", 32f, INK).apply {
-                gravity = Gravity.CENTER
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(R.drawable.ic_back)
                 contentDescription = "Back"
                 isClickable = true
                 isFocusable = true
-                setOnClickListener { showMainPage() }
-            }, LinearLayout.LayoutParams(dp(48), dp(56)))
-            addView(label("Settings", 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(
-                0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                1f,
-            ))
+                val p = dp(12)
+                setPadding(p, p, p, p)
+                setColorFilter(INK)
+                val outValue = android.util.TypedValue()
+                context.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, outValue, true)
+                setBackgroundResource(outValue.resourceId)
+                setOnClickListener { closeModeScreen() }
+            }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label("Connection mode", 22f, INK, TypefaceStyle.MEDIUM).apply {
+                setPadding(dp(4), 0, 0, 0)
+            })
         }
-        content.addView(header)
-        content.addView(label("Version ${appVersion()}", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(header, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(36) })
-        content.addView(label("DEFAULT PROTOCOL", 12f, MUTED).apply { letterSpacing = 0.1f })
+        ).apply { bottomMargin = dp(8) })
+
+        content.addView(label("Choose how Aethery connects", 14f, MUTED), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
+
+        val options = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         Protocol.entries.forEachIndexed { index, protocol ->
-            content.addView(createDefaultProtocolOption(protocol), LinearLayout.LayoutParams(
+            options.addView(createModeOption(protocol), LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dp(76),
-            ).apply { topMargin = if (index == 0) dp(16) else dp(12) })
+            ).apply { if (index > 0) topMargin = dp(12) })
         }
-        content.addView(label("CORE SOCKS PORT", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(28) })
-        val portField = EditText(this).apply {
-            setText(socksPort().toString())
-            setTextColor(INK)
-            setHintTextColor(MUTED)
-            textSize = 16f
-            inputType = InputType.TYPE_CLASS_NUMBER
-            setSingleLine(true)
-            setSelectAllOnFocus(false)
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(18), 0, dp(12), 0)
-            background = roundedBackground(SURFACE_VARIANT, 16, SURFACE_VARIANT)
-            contentDescription = "Core SOCKS port"
-        }
-        val portRow = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            orientation = LinearLayout.HORIZONTAL
-            addView(portField, LinearLayout.LayoutParams(0, dp(52), 1f))
-            addView(createSettingsButton("Apply") { applySocksPort(portField) }, LinearLayout.LayoutParams(
-                dp(92),
-                dp(52),
-            ).apply { leftMargin = dp(10) })
-        }
-        content.addView(portRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
-        content.addView(label("Used by Aether's local SOCKS listener; Android VPN/TUN routes do not use this port.", 12f, MUTED), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(6) })
-        content.addView(label("ADVANCED", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(28) })
-        content.addView(createSettingsButton("Split tunneling") { openSplitTunnelScreen() }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(52),
-        ).apply { topMargin = dp(10) })
+
+        content.addView(options)
         page.addView(content, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply {
-            leftMargin = dp(24)
-            rightMargin = dp(24)
-            topMargin = dp(16)
-        })
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+
         page.setOnApplyWindowInsetsListener { _, insets ->
-            (content.layoutParams as FrameLayout.LayoutParams).apply {
-                topMargin = insets.systemWindowInsetTop + dp(16)
-                content.layoutParams = this
-            }
+            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24))
             insets
         }
-        setContentView(page)
+
+        modePage = page
+        pageHost.addView(page)
+        page.requestApplyInsets()
+        animatePageOpen(page)
+        staggerListItems(options)
     }
 
-    private fun showMainPage() {
-        showingSettings = false
-        setContentView(mainRoot)
+    private fun closeModeScreen() {
+        showingMode = false
+        modePage?.let { animatePageClose(it) { modePage = null } }
     }
+
+    private fun createModeOption(protocol: Protocol): LinearLayout {
+        val selected = protocol == selectedProtocol
+        return LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(20), 0, dp(20), 0)
+            background = roundedBackground(
+                if (selected) primaryContainer else SURFACE_VARIANT,
+                20,
+                if (selected) primary else SURFACE_VARIANT,
+            )
+            isClickable = protocol.androidAvailable
+            isFocusable = protocol.androidAvailable
+            alpha = if (protocol.androidAvailable) 1f else DISABLED_ALPHA
+            setOnClickListener {
+                if (!protocol.androidAvailable) return@setOnClickListener
+                if (protocol != selectedProtocol) updateConnectionMode(protocol)
+                closeModeScreen()
+            }
+
+            val texts = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+            texts.addView(label(protocol.label, 16f, INK, TypefaceStyle.MEDIUM))
+            texts.addView(label(protocol.description, 13f, MUTED), LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(2) })
+
+            addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            if (selected) addView(label("CURRENT", 11f, primary, TypefaceStyle.MEDIUM).apply {
+                letterSpacing = 0.08f
+            }) else if (!protocol.androidAvailable) addView(label("DESKTOP ONLY", 11f, MUTED, TypefaceStyle.MEDIUM).apply {
+                letterSpacing = 0.05f
+            })
+        }
+    }
+
 
     private fun openSettingsScreen(animate: Boolean = true) {
         showingSettings = true
         settingsPage?.let(pageHost::removeView)
 
         val page = FrameLayout(this).apply { setBackgroundColor(CANVAS) }
-        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val scroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(16), dp(24), dp(24))
+        }
+
         val header = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
-            addView(label("\u2190", 32f, INK).apply {
-                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(R.drawable.ic_back)
                 contentDescription = "Back"
                 isClickable = true
                 isFocusable = true
+                val p = dp(12)
+                setPadding(p, p, p, p)
+                setColorFilter(INK)
+                val outValue = android.util.TypedValue()
+                context.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, outValue, true)
+                setBackgroundResource(outValue.resourceId)
                 setOnClickListener { closeSettingsScreen() }
-            }, LinearLayout.LayoutParams(dp(48), dp(56)))
-            addView(label("Settings", 22f, INK, TypefaceStyle.MEDIUM))
+            }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label("Settings", 22f, INK, TypefaceStyle.MEDIUM).apply {
+                setPadding(dp(4), 0, 0, 0)
+            })
         }
-        content.addView(header)
-        content.addView(label("DEFAULT PROTOCOL", 12f, MUTED).apply { letterSpacing = 0.1f })
-        content.addView(createSettingsButton("${defaultProtocol().label} ›") { showDefaultProtocolSheet() }, LinearLayout.LayoutParams(
+        content.addView(header, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(52),
-        ).apply { topMargin = dp(10) })
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { bottomMargin = dp(16) })
+
+        content.addView(label("DEFAULT PROTOCOL", 12f, MUTED).apply { letterSpacing = 0.1f })
+        content.addView(createSettingsButton("${defaultProtocol().label} ›") { openDefaultProtocolScreen() }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(56),
+        ).apply { topMargin = dp(8) })
+
         content.addView(label("CORE SOCKS PORT", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(28) })
+        ).apply { topMargin = dp(24) })
         val portField = EditText(this).apply {
             setText(socksPort().toString())
             setTextColor(INK)
@@ -981,23 +1072,26 @@ class MainActivity : Activity() {
         }
         content.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
-            addView(portField, LinearLayout.LayoutParams(0, dp(52), 1f))
-            addView(createSettingsButton("Apply") { applySocksPort(portField) }, LinearLayout.LayoutParams(
-                dp(92),
-                dp(52),
+            addView(portField, LinearLayout.LayoutParams(0, dp(56), 1f))
+            addView(createSettingsButton("Apply", backgroundOverride = primary, textColorOverride = primaryContainer) {
+                applySocksPort(portField)
+            }, LinearLayout.LayoutParams(
+                dp(96),
+                dp(56),
             ).apply { leftMargin = dp(10) })
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
+        ).apply { topMargin = dp(8) })
         content.addView(label("Used by Aether's local SOCKS listener; Android VPN/TUN routes do not use this port.", 12f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(6) })
+
         content.addView(label("NATIVE SPLIT TUNNELING", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(28) })
+        ).apply { topMargin = dp(24) })
         content.addView(createSettingsButton("${splitTunnelSummary()} ›") { openSplitTunnelScreen() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(52),
@@ -1010,49 +1104,32 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(52),
         ).apply { topMargin = dp(10) })
-        page.addView(content, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply {
-            leftMargin = dp(24)
-            rightMargin = dp(24)
-            topMargin = dp(16)
-        })
 
-        val footer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(label("Version ${appVersion()}", 14f, MUTED))
-            addView(createSettingsButton("Check for updates") {
-                appUpdater.checkForUpdate()
-            }, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(52),
-            ).apply { topMargin = dp(12) })
-            addView(createSettingsButton("Aethery on GitHub", R.drawable.ic_github) {
-                openLink("https://github.com/ZethRise/Aethery")
-            }, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(52),
-            ).apply { topMargin = dp(10) })
-        }
-        page.addView(footer, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.BOTTOM,
-        ).apply {
-            leftMargin = dp(24)
-            rightMargin = dp(24)
-            bottomMargin = dp(24)
+        content.addView(label("Version ${appVersion()}", 14f, MUTED).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(32), 0, 0)
         })
+        content.addView(createSettingsButton("Check for updates") {
+            appUpdater.checkForUpdate()
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(56),
+        ).apply { topMargin = dp(12) })
+        content.addView(createSettingsButton("Aethery on GitHub", R.drawable.ic_github) {
+            openLink("https://github.com/ZethRise/Aethery")
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(56),
+        ).apply { topMargin = dp(10) })
+
+        scroll.addView(content)
+        page.addView(scroll, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+
         page.setOnApplyWindowInsetsListener { _, insets ->
-            (content.layoutParams as FrameLayout.LayoutParams).apply {
-                topMargin = insets.systemWindowInsetTop + dp(16)
-                content.layoutParams = this
-            }
-            (footer.layoutParams as FrameLayout.LayoutParams).apply {
-                bottomMargin = insets.systemWindowInsetBottom + dp(24)
-                footer.layoutParams = this
-            }
+            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24))
             insets
         }
 
@@ -1063,12 +1140,8 @@ class MainActivity : Activity() {
         ))
         page.requestApplyInsets()
         if (animate) {
-            page.alpha = 0f
-            page.translationX = dp(32).toFloat()
-            mainRoot.animate().alpha(0.65f).translationX(-dp(12).toFloat())
-                .setDuration(PAGE_ANIMATION_MS).setInterpolator(DecelerateInterpolator()).start()
-            page.animate().alpha(1f).translationX(0f)
-                .setDuration(PAGE_ANIMATION_MS).setInterpolator(DecelerateInterpolator()).start()
+            animatePageOpen(page)
+            staggerListItems(content)
         }
     }
 
@@ -1084,7 +1157,7 @@ class MainActivity : Activity() {
         }
         content.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
-            addView(label("←", 32f, INK).apply {
+            addView(label("\u2190", 32f, INK).apply {
                 contentDescription = "Back to settings"
                 isClickable = true
                 isFocusable = true
@@ -1174,7 +1247,7 @@ class MainActivity : Activity() {
         }
         sheet.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
-            addView(label("←", 28f, INK).apply {
+            addView(label("\u2190", 28f, INK).apply {
                 contentDescription = "Close obfuscation options"
                 isClickable = true
                 isFocusable = true
@@ -1278,7 +1351,7 @@ class MainActivity : Activity() {
         }
         sheet.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
-            addView(label("←", 28f, INK).apply {
+            addView(label("\u2190", 28f, INK).apply {
                 contentDescription = "Close manual endpoint"
                 isClickable = true
                 isFocusable = true
@@ -1339,7 +1412,7 @@ class MainActivity : Activity() {
         }
         sheet.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
-            addView(label("←", 28f, INK).apply {
+            addView(label("\u2190", 28f, INK).apply {
                 contentDescription = "Close $title"
                 isClickable = true
                 isFocusable = true
@@ -1394,15 +1467,7 @@ class MainActivity : Activity() {
 
     private fun closeSettingsScreen() {
         showingSettings = false
-        val page = settingsPage ?: return
-        page.animate().alpha(0f).translationX(dp(32).toFloat())
-            .setDuration(PAGE_ANIMATION_MS).setInterpolator(DecelerateInterpolator())
-            .withEndAction {
-                pageHost.removeView(page)
-                settingsPage = null
-            }.start()
-        mainRoot.animate().alpha(1f).translationX(0f)
-            .setDuration(PAGE_ANIMATION_MS).setInterpolator(DecelerateInterpolator()).start()
+        settingsPage?.let { animatePageClose(it) { settingsPage = null } }
     }
 
     private fun openSplitTunnelScreen() {
@@ -1427,14 +1492,15 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(20) })
         content.addView(label("MODE", 12f, MUTED).apply { letterSpacing = 0.1f })
-        var selectedMode = settings.mode()
         val modeOptions = mutableMapOf<SplitTunnelSettings.Mode, SelectionOption>()
         SplitTunnelSettings.Mode.entries.forEachIndexed { index, mode ->
-            val option = createSplitModeOption(mode, selectedMode) { chosen ->
-                if (chosen != selectedMode) {
-                    selectedMode = chosen
-                    settings.save(selectedMode, selected)
-                    modeOptions.forEach { (item, view) -> setSelectionState(view, item == selectedMode, animate = true) }
+            val option = createSplitModeOption(mode, settings.mode()) { chosen ->
+                if (chosen == SplitTunnelSettings.Mode.ALL) {
+                    settings.save(chosen, selected)
+                    closeSplitTunnelScreen()
+                    openSettingsScreen(animate = false)
+                } else {
+                    openSplitTunnelAppsScreen(chosen, selected)
                 }
             }
             modeOptions[mode] = option
@@ -1443,22 +1509,7 @@ class MainActivity : Activity() {
                 dp(58),
             ).apply { topMargin = if (index == 0) dp(10) else dp(8) })
         }
-        content.addView(label("APPS", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(24) })
-        content.addView(createSettingsButton("Select apps ›") { openSplitTunnelAppsScreen(selected) }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(52),
-        ).apply { topMargin = dp(8) })
-        content.addView(createSettingsButton("Save split tunneling") {
-            settings.save(settings.mode(), selected)
-            ConnectionLog.record("Saved split tunnel: ${settings.mode().label}, ${selected.size} app(s)")
-            closeSplitTunnelScreen()
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(52),
-        ).apply { topMargin = dp(12) })
+
         page.addView(content, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1479,16 +1530,13 @@ class MainActivity : Activity() {
         splitTunnelPage = page
         pageHost.addView(page)
         page.requestApplyInsets()
-        page.alpha = 0f
-        page.translationX = dp(20).toFloat()
-        page.animate().alpha(1f).translationX(0f)
-            .setDuration(PAGE_ANIMATION_MS)
-            .setInterpolator(DecelerateInterpolator())
-            .start()
+        animatePageOpen(page)
+        staggerListItems(content)
     }
 
-    private fun openSplitTunnelAppsScreen(selected: MutableSet<String>) {
+    private fun openSplitTunnelAppsScreen(mode: SplitTunnelSettings.Mode, selected: MutableSet<String>) {
         splitTunnelAppsPage?.let(pageHost::removeView)
+        val settings = SplitTunnelSettings(this)
         val page = FrameLayout(this).apply { setBackgroundColor(CANVAS) }
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(LinearLayout(this).apply {
@@ -1501,7 +1549,7 @@ class MainActivity : Activity() {
             }, LinearLayout.LayoutParams(dp(48), dp(56)))
             addView(label("Apps", 22f, INK, TypefaceStyle.MEDIUM))
         })
-        content.addView(label("Select apps for split tunneling", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label("Select apps to ${if (mode == SplitTunnelSettings.Mode.INCLUDE) "include" else "exclude"}", 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(16) })
@@ -1550,7 +1598,7 @@ class MainActivity : Activity() {
         page.translationX = dp(20).toFloat()
         page.animate().alpha(1f).translationX(0f)
             .setDuration(PAGE_ANIMATION_MS)
-            .setInterpolator(DecelerateInterpolator())
+            .setInterpolator(motionInterpolator)
             .start()
         loadUserApps { apps ->
             if (splitTunnelAppsPage !== page) return@loadUserApps
@@ -1665,23 +1713,11 @@ class MainActivity : Activity() {
     }
 
     private fun closeSplitTunnelScreen() {
-        val page = splitTunnelPage ?: return
-        splitTunnelPage = null
-        page.animate().alpha(0f).translationX(dp(20).toFloat())
-            .setDuration(LOG_CLOSE_ANIMATION_MS)
-            .setInterpolator(DecelerateInterpolator())
-            .withEndAction { if (page.parent == pageHost) pageHost.removeView(page) }
-            .start()
+        splitTunnelPage?.let { animatePageClose(it) { splitTunnelPage = null } }
     }
 
     private fun closeSplitTunnelAppsScreen() {
-        val page = splitTunnelAppsPage ?: return
-        splitTunnelAppsPage = null
-        page.animate().alpha(0f).translationX(dp(20).toFloat())
-            .setDuration(LOG_CLOSE_ANIMATION_MS)
-            .setInterpolator(DecelerateInterpolator())
-            .withEndAction { if (page.parent == pageHost) pageHost.removeView(page) }
-            .start()
+        splitTunnelAppsPage?.let { animatePageClose(it) { splitTunnelAppsPage = null } }
     }
 
     private fun loadUserApps(onLoaded: (List<ApplicationInfo>) -> Unit) {
@@ -1711,8 +1747,81 @@ class MainActivity : Activity() {
             tunnelControlsPage != null -> closeTunnelControlsScreen()
             showingLogs -> closeLogsScreen()
             showingSettings -> closeSettingsScreen()
+            showingScanner -> closeScannerScreen()
+            showingMode -> closeModeScreen()
+            showingDefaultProtocol -> closeDefaultProtocolScreen()
             else -> super.onBackPressed()
         }
+    }
+
+    private fun openDefaultProtocolScreen() {
+        showingDefaultProtocol = true
+        defaultProtocolPage?.let(pageHost::removeView)
+
+        val page = FrameLayout(this).apply { setBackgroundColor(CANVAS) }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(16), dp(24), dp(24))
+        }
+
+        val header = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(R.drawable.ic_back)
+                contentDescription = "Back"
+                isClickable = true
+                isFocusable = true
+                val p = dp(12)
+                setPadding(p, p, p, p)
+                setColorFilter(INK)
+                val outValue = android.util.TypedValue()
+                context.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, outValue, true)
+                setBackgroundResource(outValue.resourceId)
+                setOnClickListener { closeDefaultProtocolScreen() }
+            }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label("Default protocol", 22f, INK, TypefaceStyle.MEDIUM).apply {
+                setPadding(dp(4), 0, 0, 0)
+            })
+        }
+        content.addView(header, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { bottomMargin = dp(8) })
+
+        content.addView(label("Used for your next connection", 14f, MUTED), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
+
+        val options = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        Protocol.entries.forEachIndexed { index, protocol ->
+            options.addView(createDefaultProtocolOption(protocol), LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(76),
+            ).apply { if (index > 0) topMargin = dp(12) })
+        }
+
+        content.addView(options)
+        page.addView(content, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+
+        page.setOnApplyWindowInsetsListener { _, insets ->
+            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24))
+            insets
+        }
+
+        defaultProtocolPage = page
+        pageHost.addView(page)
+        page.requestApplyInsets()
+        animatePageOpen(page)
+        staggerListItems(options)
+    }
+
+    private fun closeDefaultProtocolScreen() {
+        showingDefaultProtocol = false
+        defaultProtocolPage?.let { animatePageClose(it) { defaultProtocolPage = null } }
     }
 
     private fun createDefaultProtocolOption(protocol: Protocol): LinearLayout {
@@ -1720,10 +1829,10 @@ class MainActivity : Activity() {
         return LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(18), 0, dp(18), 0)
+            setPadding(dp(20), 0, dp(20), 0)
             background = roundedBackground(
                 if (selected) primaryContainer else SURFACE_VARIANT,
-                18,
+                20,
                 if (selected) primary else SURFACE_VARIANT,
             )
             isClickable = true
@@ -1731,6 +1840,7 @@ class MainActivity : Activity() {
             contentDescription = "Set ${protocol.label} as default"
             setOnClickListener {
                 setDefaultProtocol(protocol)
+                closeDefaultProtocolScreen()
                 openSettingsScreen(animate = false)
             }
             addView(label(protocol.label, 16f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(
@@ -1741,49 +1851,6 @@ class MainActivity : Activity() {
             if (selected) addView(label("DEFAULT", 11f, primary, TypefaceStyle.MEDIUM).apply {
                 letterSpacing = 0.08f
             })
-        }
-    }
-
-    private fun showDefaultProtocolSheet() {
-        val dialog = Dialog(this).apply {
-            requestWindowFeature(Window.FEATURE_NO_TITLE)
-            setCanceledOnTouchOutside(true)
-        }
-        val sheet = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(24), dp(24), dp(24))
-            background = roundedBackground(SURFACE, 28, SURFACE)
-        }
-        sheet.addView(label("Default protocol", 22f, INK, TypefaceStyle.MEDIUM))
-        sheet.addView(label("Used for your next connection", 14f, MUTED), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(4); bottomMargin = dp(20) })
-        Protocol.entries.forEachIndexed { index, protocol ->
-            sheet.addView(createDefaultProtocolOption(protocol).apply {
-                setOnClickListener {
-                    setDefaultProtocol(protocol)
-                    dialog.dismiss()
-                    openSettingsScreen(animate = false)
-                }
-            }, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(68),
-            ).apply { if (index > 0) topMargin = dp(8) })
-        }
-        dialog.setContentView(FrameLayout(this).apply {
-            setPadding(dp(16), 0, dp(16), dp(16))
-            addView(sheet, FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ))
-        })
-        dialog.show()
-        dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setDimAmount(0.62f)
-            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
-            setGravity(Gravity.BOTTOM)
         }
     }
 
@@ -1810,40 +1877,6 @@ class MainActivity : Activity() {
             .start()
     }
 
-    private fun createModeOption(protocol: Protocol, dialog: Dialog): LinearLayout {
-        val selected = protocol == selectedProtocol
-        return LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(18), 0, dp(18), 0)
-            background = roundedBackground(
-                if (selected) primaryContainer else SURFACE_VARIANT,
-                18,
-                if (selected) primary else SURFACE_VARIANT,
-            )
-            contentDescription = "Use ${protocol.label} mode"
-            isClickable = protocol.androidAvailable
-            isFocusable = protocol.androidAvailable
-            alpha = if (protocol.androidAvailable) 1f else DISABLED_ALPHA
-            setOnClickListener {
-                if (!protocol.androidAvailable) return@setOnClickListener
-                updateConnectionMode(protocol)
-                dialog.dismiss()
-            }
-            val texts = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
-            texts.addView(label(protocol.label, 16f, INK, TypefaceStyle.MEDIUM))
-            texts.addView(label(protocol.description, 13f, MUTED), LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(2) })
-            addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            if (selected) addView(label("CURRENT", 11f, primary, TypefaceStyle.MEDIUM).apply {
-                letterSpacing = 0.08f
-            }) else if (!protocol.androidAvailable) addView(label("DESKTOP ONLY", 11f, MUTED, TypefaceStyle.MEDIUM).apply {
-                letterSpacing = 0.08f
-            })
-        }
-    }
 
     private fun toggleTunnel() {
         if (NativeCore.isRunning()) {
@@ -1979,21 +2012,26 @@ class MainActivity : Activity() {
         textSize: Float,
         color: Int,
         style: TypefaceStyle = TypefaceStyle.REGULAR,
+        singleLine: Boolean = false,
     ): TextView = TextView(this).apply {
         this.text = text
         this.textSize = textSize
         setTextColor(color)
+        if (singleLine) {
+            setSingleLine(true)
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
         typeface = when (style) {
             TypefaceStyle.REGULAR -> android.graphics.Typeface.create("sans", android.graphics.Typeface.NORMAL)
             TypefaceStyle.MEDIUM -> android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
         }
     }
 
-    private fun roundedBackground(fill: Int, radius: Int, stroke: Int): GradientDrawable =
+    private fun roundedBackground(fill: Int, radius: Int, stroke: Int, strokeWidth: Int = 1): GradientDrawable =
         GradientDrawable().apply {
             setColor(fill)
             cornerRadius = dp(radius).toFloat()
-            setStroke(dp(1), stroke)
+            setStroke(dp(strokeWidth), stroke)
         }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
@@ -2004,18 +2042,21 @@ class MainActivity : Activity() {
     private fun createSettingsButton(
         text: String,
         icon: Int? = null,
+        backgroundOverride: Int? = null,
+        textColorOverride: Int? = null,
         onClick: () -> Unit,
-    ): TextView = label(text, 15f, INK, TypefaceStyle.MEDIUM).apply {
-        gravity = Gravity.CENTER_VERTICAL
+    ): TextView = label(text, 15f, textColorOverride ?: INK, TypefaceStyle.MEDIUM).apply {
+        gravity = Gravity.CENTER
         setPadding(dp(18), 0, dp(18), 0)
-        background = roundedBackground(SURFACE_VARIANT, 16, SURFACE_VARIANT)
+        background = roundedBackground(backgroundOverride ?: SURFACE_VARIANT, 16, backgroundOverride ?: SURFACE_VARIANT)
         isClickable = true
         isFocusable = true
         contentDescription = text
         icon?.let {
             setCompoundDrawablesRelativeWithIntrinsicBounds(it, 0, 0, 0)
             compoundDrawablePadding = dp(12)
-            compoundDrawablesRelative[0]?.setTint(primary)
+            compoundDrawablesRelative[0]?.setTint(textColorOverride ?: primary)
+            gravity = Gravity.CENTER_VERTICAL
         }
         setOnClickListener { onClick() }
     }
@@ -2207,8 +2248,6 @@ class MainActivity : Activity() {
         const val FALLBACK_DIVIDER = 0xFF3B473E.toInt()
         const val FALLBACK_PRIMARY = 0xFFA4D8BB.toInt()
         const val FALLBACK_PRIMARY_CONTAINER = 0xFF1F4030.toInt()
-        const val FALLBACK_CONNECTED = 0xFF67D89C.toInt()
-        const val FALLBACK_CONNECTED_CONTAINER = 0xFF123B27.toInt()
         const val ERROR = 0xFFFFB4AB.toInt()
         const val DISABLED_ALPHA = 0.48f
     }
@@ -2289,7 +2328,9 @@ private class ConnectionControl(
 
         paint.style = Paint.Style.FILL
         paint.color = palette.container
-        paint.setShadowLayer(dp(12).toFloat(), 0f, dp(5).toFloat(), 0x44000000)
+        val shadowAlpha = if (state == State.CONNECTED) 0x88 else 0x44
+        val shadowColor = (shadowAlpha shl 24) or (if (state == State.CONNECTED) palette.accent and 0xFFFFFF else 0x000000)
+        paint.setShadowLayer(dp(if (state == State.CONNECTED) 18 else 12).toFloat(), 0f, dp(5).toFloat(), shadowColor)
         canvas.drawCircle(centerX, centerY, radius, paint)
         paint.clearShadowLayer()
 
@@ -2302,8 +2343,8 @@ private class ConnectionControl(
         arcBounds.set(centerX - iconRadius, centerY - iconRadius, centerX + iconRadius, centerY + iconRadius)
         paint.strokeWidth = dp(3).toFloat()
         paint.strokeCap = Paint.Cap.ROUND
-        canvas.drawArc(arcBounds, 42f, 276f, false, paint)
-        canvas.drawLine(centerX, centerY - dp(33), centerX, centerY - dp(3), paint)
+        canvas.drawArc(arcBounds, 330f, 240f, false, paint)
+        canvas.drawLine(centerX, centerY - dp(28), centerX, centerY - dp(6), paint)
         paint.strokeCap = Paint.Cap.BUTT
 
         if (state == State.CONNECTING) {
@@ -2378,6 +2419,8 @@ private class ConnectionControl(
     }
 
     private fun dp(value: Int): Int = (value * density).roundToInt()
+
+    private fun preferences() = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
     private data class Palette(val container: Int, val accent: Int)
 
