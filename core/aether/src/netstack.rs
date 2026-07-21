@@ -10,6 +10,7 @@ use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address,
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{AetherError, Result};
+use crate::ffi;
 
 const TCP_BUF: usize = 512 * 1024;
 const UDP_BUF: usize = 128 * 1024;
@@ -407,6 +408,10 @@ async fn run(
     mut inbound_rx: mpsc::Receiver<Vec<u8>>,
     outbound_tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
+    let mut rx_total = 0u64;
+    let mut tx_total = 0u64;
+    let mut last_report = std::time::Instant::now();
+
     loop {
         let now = Instant::now();
         let poll_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -418,7 +423,12 @@ async fn run(
         }
         service_tcp(&mut s).await;
         service_udp(&mut s).await;
-        flush_tx(&mut s, &outbound_tx).await;
+        tx_total += flush_tx(&mut s, &outbound_tx).await;
+
+        if last_report.elapsed() >= std::time::Duration::from_millis(1000) {
+            ffi::emit_traffic(tx_total, rx_total);
+            last_report = std::time::Instant::now();
+        }
 
         let delay = s
             .iface
@@ -431,11 +441,16 @@ async fn run(
             maybe = inbound_rx.recv() => {
                 match maybe {
                     Some(pkt) => {
+                        rx_total += pkt.len() as u64;
                         s.device.rx.push_back(pkt);
                         let mut n = 0;
                         while n < MAX_INGEST_PER_TICK {
                             match inbound_rx.try_recv() {
-                                Ok(p) => { s.device.rx.push_back(p); n += 1; }
+                                Ok(p) => {
+                                    rx_total += p.len() as u64;
+                                    s.device.rx.push_back(p);
+                                    n += 1;
+                                }
                                 Err(_) => break,
                             }
                         }
@@ -695,10 +710,14 @@ async fn service_udp(s: &mut NetStack) {
     }
 }
 
-async fn flush_tx(s: &mut NetStack, outbound_tx: &mpsc::Sender<Vec<u8>>) {
+async fn flush_tx(s: &mut NetStack, outbound_tx: &mpsc::Sender<Vec<u8>>) -> u64 {
+    let mut sent = 0u64;
     while let Some(pkt) = s.device.tx.pop_front() {
+        let len = pkt.len() as u64;
         if outbound_tx.send(pkt).await.is_err() {
-            return;
+            return sent;
         }
+        sent += len;
     }
+    sent
 }

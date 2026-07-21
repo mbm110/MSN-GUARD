@@ -3,13 +3,32 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use crate::{platform, EndpointDiscovery, IpScan, MasqueTransport, Protocol, ScanMode, StartOptions, TlsCurvePreset, TunnelAddresses};
 
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Event {
+    Status {
+        status: String,
+        detail: Option<String>,
+    },
+    Traffic {
+        tx: u64,
+        rx: u64,
+    },
+    Log {
+        message: String,
+    },
+}
+
+pub type EventCallback = unsafe extern "C" fn(json: *const c_char);
+
+static EVENT_CALLBACK: RwLock<Option<EventCallback>> = RwLock::new(None);
 static LAST_ERROR: LazyLock<Mutex<CString>> =
     LazyLock::new(|| Mutex::new(CString::new("").unwrap()));
 static LAST_RESULT: LazyLock<Mutex<CString>> =
@@ -22,6 +41,33 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static STOP_NOTIFY: OnceLock<Notify> = OnceLock::new();
+
+#[no_mangle]
+pub extern "C" fn aether_set_event_callback(callback: Option<EventCallback>) {
+    *EVENT_CALLBACK.write().unwrap() = callback;
+}
+
+pub(crate) fn emit_event(event: Event) {
+    let Some(callback) = *EVENT_CALLBACK.read().unwrap() else {
+        return;
+    };
+    if let Ok(json) = serde_json::to_string(&event) {
+        if let Ok(c_str) = CString::new(json) {
+            unsafe { callback(c_str.as_ptr()) };
+        }
+    }
+}
+
+pub(crate) fn emit_status(status: impl ToString, detail: Option<String>) {
+    emit_event(Event::Status {
+        status: status.to_string(),
+        detail,
+    });
+}
+
+pub(crate) fn emit_traffic(tx: u64, rx: u64) {
+    emit_event(Event::Traffic { tx, rx });
+}
 
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -112,6 +158,7 @@ fn clear_logs() {
 
 pub(crate) fn record_log(message: impl ToString) {
     let text = message.to_string().replace('\0', " ");
+    emit_event(Event::Log { message: text.clone() });
     let snapshot = {
         let mut logs = LOGS.lock().unwrap();
         if logs.len() == 400 {
@@ -206,6 +253,7 @@ unsafe fn aether_start_json_inner(json: *const c_char, tun_fd: Option<i32>) -> i
         STOP_REQUESTED.store(false, Ordering::Release);
         READY.store(false, Ordering::Release);
         clear_logs();
+        emit_status("starting", None);
         record_log("Native tunnel started");
 
         let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -335,6 +383,7 @@ pub extern "C" fn aether_is_ready() -> i32 {
 
 pub(crate) fn mark_ready() {
     READY.store(true, Ordering::Release);
+    emit_status("connected", None);
 }
 
 

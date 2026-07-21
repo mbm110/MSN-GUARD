@@ -14,12 +14,14 @@ int aether_is_ready();
 const char* aether_last_error();
 const char* aether_last_log();
 void aether_set_socket_protector(int (*protector)(int));
+void aether_set_event_callback(void (*callback)(const char*));
 }
 
 namespace {
 JavaVM* g_vm = nullptr;
 jobject g_service = nullptr;
 jmethodID g_protect_socket = nullptr;
+jmethodID g_on_event = nullptr;
 std::mutex g_service_mutex;
 
 std::string copy_jstring(JNIEnv* env, jstring value) {
@@ -29,6 +31,31 @@ std::string copy_jstring(JNIEnv* env, jstring value) {
     std::string result(chars);
     env->ReleaseStringUTFChars(value, chars);
     return result;
+}
+
+void on_event(const char* json) {
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (g_vm == nullptr) return;
+    if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+        attached = true;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_service_mutex);
+        if (g_service != nullptr && g_on_event != nullptr) {
+            jstring jjson = env->NewStringUTF(json);
+            env->CallVoidMethod(g_service, g_on_event, jjson);
+            env->DeleteLocalRef(jjson);
+        }
+    }
+
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+    }
+    if (attached) g_vm->DetachCurrentThread();
 }
 
 int protect_socket(int fd) {
@@ -117,17 +144,21 @@ Java_studio_cluvex_aethery_NativeCore_nativeAttach(JNIEnv* env, jobject, jobject
     g_service = env->NewGlobalRef(service);
     const jclass type = env->GetObjectClass(service);
     g_protect_socket = env->GetMethodID(type, "protectSocket", "(I)Z");
+    g_on_event = env->GetMethodID(type, "onEvent", "(Ljava/lang/String;)V");
     env->DeleteLocalRef(type);
     aether_set_socket_protector(protect_socket);
+    aether_set_event_callback(on_event);
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_studio_cluvex_aethery_NativeCore_nativeDetach(JNIEnv* env, jobject) {
     std::lock_guard<std::mutex> lock(g_service_mutex);
+    aether_set_event_callback(nullptr);
     aether_set_socket_protector(nullptr);
     if (g_service != nullptr) env->DeleteGlobalRef(g_service);
     g_service = nullptr;
     g_protect_socket = nullptr;
+    g_on_event = nullptr;
 }
 
 JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void*) {

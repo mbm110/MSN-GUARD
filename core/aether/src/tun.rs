@@ -10,6 +10,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 
 use crate::error::{AetherError, Result};
+use crate::ffi;
 
 /// Bridges Android's packet TUN file descriptor with Aether's raw-IP tunnel.
 #[cfg(unix)]
@@ -33,11 +34,17 @@ pub async fn bridge(
     // SAFETY: `fd` is successful duplicate, now owned by File.
     let tun = AsyncFd::new(unsafe { File::from_raw_fd(fd) })?;
     let mut packet = vec![0u8; 65_535];
+    let mut rx_total = 0u64;
+    let mut tx_total = 0u64;
+    let mut last_report = std::time::Instant::now();
 
     loop {
         tokio::select! {
             tunnel_packet = inbound_rx.recv() => match tunnel_packet {
-                Some(packet) => write_packet(&tun, &packet).await?,
+                Some(packet) => {
+                    rx_total += packet.len() as u64;
+                    write_packet(&tun, &packet).await?;
+                },
                 None => return Ok(()),
             },
             read = read_packet(&tun, &mut packet) => {
@@ -45,9 +52,15 @@ pub async fn bridge(
                 if length == 0 {
                     return Ok(());
                 }
+                tx_total += length as u64;
                 outbound_tx.send(packet[..length].to_vec()).await
                     .map_err(|_| AetherError::Other("tunnel outbound channel closed".into()))?;
             },
+        }
+
+        if last_report.elapsed() >= std::time::Duration::from_millis(1000) {
+            ffi::emit_traffic(tx_total, rx_total);
+            last_report = std::time::Instant::now();
         }
     }
 }
