@@ -24,6 +24,14 @@ class SplitTunnelSettings(context: Context) {
             .apply()
     }
 
+    fun cleanup(installedPackages: Set<String>) {
+        val current = packages()
+        val filtered = current.filter { it in installedPackages }.toSet()
+        if (filtered.size != current.size) {
+            preferences.edit().putStringSet(PACKAGES, filtered).apply()
+        }
+    }
+
     private companion object {
         const val PREFERENCES = "split_tunneling"
         const val MODE = "mode"
