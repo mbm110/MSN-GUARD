@@ -29,6 +29,10 @@ object NativeCore {
     fun attach(service: AetherVpnService) = nativeAttach(service)
     fun detach() = nativeDetach()
 
+    interface CoreCallback {
+        fun onEvent(json: String)
+    }
+
     @JvmStatic private external fun nativePrepare(config: String): Int
     @JvmStatic private external fun nativeLastResult(): String
     @JvmStatic private external fun nativeStart(config: String, tunFd: Int): Int
