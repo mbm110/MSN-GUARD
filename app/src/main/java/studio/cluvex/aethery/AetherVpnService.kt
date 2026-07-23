@@ -180,26 +180,53 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
 
     private fun Builder.applySplitTunneling(): Builder {
         val settings = SplitTunnelSettings(this@AetherVpnService)
+        val mode = settings.mode()
         val packages = settings.packages()
-        if (settings.mode() == SplitTunnelSettings.Mode.ALL) return this
+
+        // Always exclude Aethery in Exclude or All mode to prevent routing loops.
+        if (mode == SplitTunnelSettings.Mode.EXCLUDE || mode == SplitTunnelSettings.Mode.ALL) {
+            try {
+                addDisallowedApplication(packageName)
+            } catch (_: Exception) {
+                // Should not happen for own package
+            }
+        }
+
+        if (mode == SplitTunnelSettings.Mode.ALL) return this
         if (packages.isEmpty()) {
-            check(settings.mode() != SplitTunnelSettings.Mode.INCLUDE) {
-                "Select at least one app for split tunneling"
+            check(mode != SplitTunnelSettings.Mode.INCLUDE) {
+                "No apps selected for tunnel. Connection aborted for safety."
             }
             return this
         }
-        packages.forEach { packageName ->
+
+        var addedCount = 0
+        packages.forEach { pkg ->
             try {
-                when (settings.mode()) {
-                    SplitTunnelSettings.Mode.INCLUDE -> addAllowedApplication(packageName)
-                    SplitTunnelSettings.Mode.EXCLUDE -> addDisallowedApplication(packageName)
-                    SplitTunnelSettings.Mode.ALL -> Unit
+                when (mode) {
+                    SplitTunnelSettings.Mode.INCLUDE -> {
+                        addAllowedApplication(pkg)
+                        addedCount++
+                    }
+                    SplitTunnelSettings.Mode.EXCLUDE -> {
+                        if (pkg != packageName) {
+                            addDisallowedApplication(pkg)
+                            addedCount++
+                        }
+                    }
                 }
             } catch (_: android.content.pm.PackageManager.NameNotFoundException) {
-                ConnectionLog.record("Split tunnel skipped removed app: $packageName")
+                Log.w(LOG_TAG, "Split tunnel skipped missing app: $pkg")
+            } catch (e: Exception) {
+                Log.e(LOG_TAG, "Failed to add $pkg to split tunnel: ${e.message}")
             }
         }
-        ConnectionLog.record("Split tunnel ${settings.mode().label.lowercase()}: ${packages.size} app(s)")
+
+        if (mode == SplitTunnelSettings.Mode.INCLUDE && addedCount == 0) {
+            error("Selected apps are no longer installed. Connection aborted.")
+        }
+
+        ConnectionLog.record("Split tunnel ${mode.label.lowercase()}: $addedCount app(s)")
         return this
     }
 
