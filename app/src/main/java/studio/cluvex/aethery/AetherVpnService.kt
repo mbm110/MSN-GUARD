@@ -5,8 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.service.quicksettings.TileService
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -24,6 +26,8 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
     private val stopRequested = AtomicBoolean(false)
     private var tun: ParcelFileDescriptor? = null
     private var lastTrafficSampleMs = 0L
+    private var currentTx = 0L
+    private var currentRx = 0L
 
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
 
@@ -57,6 +61,8 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
                 "traffic" -> {
                     val tx = event.getLong("tx")
                     val rx = event.getLong("rx")
+                    currentTx = tx
+                    currentRx = rx
                     updateTrafficNotification(tx, rx)
                 }
                 "log" -> {
@@ -100,7 +106,13 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
                 
                 if (result != 0 && !stopRequested.get()) {
                     val detail = NativeCore.lastError().ifBlank { "Tunnel exited with code $result" }
+                    ConnectionLog.record("Native tunnel exited: $detail")
                     sendStatus(STATUS_FAILED, detail)
+                } else if (stopRequested.get()) {
+                    sendStatus(STATUS_DISCONNECTED)
+                } else {
+                    ConnectionLog.record("Native tunnel exited normally")
+                    sendStatus(STATUS_DISCONNECTED)
                 }
             } catch (error: Exception) {
                 val detail = NativeCore.lastError().ifBlank { error.message ?: "Tunnel setup failed" }
@@ -120,7 +132,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
     private fun stopTunnel(notify: Boolean = true) {
         stopRequested.set(true)
         NativeCore.stop()
-        if (notify) sendStatus(STATUS_DISCONNECTED)
+        if (notify && !connected.get()) sendStatus(STATUS_DISCONNECTED)
     }
 
     private fun sendStatus(status: String, detail: String? = null) {
@@ -129,6 +141,10 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
             .setPackage(packageName)
             .putExtra(EXTRA_STATUS, status)
             .apply { detail?.let { putExtra(EXTRA_DETAIL, it) } })
+        TileService.requestListeningState(
+            this,
+            ComponentName(this, AetherTileService::class.java),
+        )
     }
 
     private fun updateTrafficNotification(tx: Long, rx: Long) {
@@ -136,7 +152,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         if (now - lastTrafficSampleMs < 900) return // Throttle UI updates
         
         getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, notification("↓ ${formatBytes(rx)}  ↑ ${formatBytes(tx)}"))
+            .notify(NOTIFICATION_ID, notification(tx, rx))
         lastTrafficSampleMs = now
     }
 
@@ -154,7 +170,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
             getString(R.string.vpn_channel_name),
             NotificationManager.IMPORTANCE_LOW,
         ))
-        val notification = notification(getString(R.string.vpn_notification))
+        val notification = notification(0, 0)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
@@ -162,19 +178,38 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         }
     }
 
-    private fun notification(content: String): Notification {
-        val stopIntent = PendingIntent.getService(
+    private fun notification(tx: Long, rx: Long): Notification {
+        val openAppIntent = PendingIntent.getActivity(
             this,
             0,
+            Intent(this, MainActivity::class.java).addFlags(
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP,
+            ),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val disconnectIntent = PendingIntent.getService(
+            this,
+            1,
             Intent(this, AetherVpnService::class.java).setAction(ACTION_DISCONNECT),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val contentText = if (tx > 0 || rx > 0) {
+            "${getString(R.string.vpn_download)}: ${formatBytes(rx)}  ${getString(R.string.vpn_upload)}: ${formatBytes(tx)}"
+        } else {
+            getString(R.string.vpn_notification)
+        }
+
         return Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_notification)
+            .setSmallIcon(R.drawable.aethery_notification)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText(content)
+            .setContentText(contentText)
+            .setContentIntent(openAppIntent)
             .setOnlyAlertOnce(true)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopIntent)
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                getString(R.string.vpn_disconnect),
+                disconnectIntent,
+            )
             .build()
     }
 

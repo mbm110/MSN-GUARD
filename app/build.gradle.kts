@@ -26,8 +26,8 @@ android {
         applicationId = "studio.cluvex.aethery"
         minSdk = 26
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.4.0"
+        versionCode = 6
+        versionName = "0.5.0"
 
     }
 
@@ -78,18 +78,27 @@ targetAbis.forEach { abi ->
     tasks.register<Exec>(taskName) {
         group = "build"
         description = "Builds Aether for Android $abi"
-        commandLine(
-            "powershell.exe",
-            "-ExecutionPolicy", "Bypass",
-            "-File", rootProject.file("core/build-android.ps1").absolutePath,
-            "-Abi", abi,
-        )
+        val buildScript = if (org.gradle.internal.os.OperatingSystem.current().isWindows) {
+            rootProject.file("core/build-android.ps1")
+        } else {
+            rootProject.file("core/build-android.sh")
+        }
+        if (org.gradle.internal.os.OperatingSystem.current().isWindows) {
+            commandLine(
+                "powershell.exe",
+                "-ExecutionPolicy", "Bypass",
+                "-File", buildScript.absolutePath,
+                "-Abi", abi,
+            )
+        } else {
+            commandLine("bash", buildScript.absolutePath, "--abi", abi)
+        }
         environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
         inputs.dir(rootProject.file("core/aether/src"))
         inputs.file(rootProject.file("core/aether/Cargo.toml"))
         inputs.file(rootProject.file("core/aether/Cargo.lock"))
         inputs.dir(rootProject.file("core/quiche"))
-        inputs.file(rootProject.file("core/build-android.ps1"))
+        inputs.file(buildScript)
         val output = file("src/main/jniLibs/$abi/libaether.so")
         outputs.file(output)
         onlyIf { !output.exists() }

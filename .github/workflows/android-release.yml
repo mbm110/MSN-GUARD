@@ -122,7 +122,7 @@ jobs:
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           name: Aethery ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          draft: false
+          draft: true
           prerelease: false
           generate_release_notes: true
           files: |

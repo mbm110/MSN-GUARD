@@ -4,6 +4,9 @@
 *.iml
 local.properties
 
+# AI-generated local artifacts
+.artifacts/
+
 # Android and Gradle output
 build/
 app/build/

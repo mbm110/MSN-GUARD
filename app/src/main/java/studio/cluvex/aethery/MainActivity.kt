@@ -1,7 +1,6 @@
 package studio.cluvex.aethery
 
 import android.animation.ValueAnimator
-import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import android.app.Activity
 import android.app.Dialog
 import android.content.BroadcastReceiver
@@ -16,6 +15,7 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.widget.ImageView.ScaleType
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
@@ -78,6 +78,13 @@ class MainActivity : Activity() {
     private var splitTunnelAppsPage: View? = null
     @Volatile private var cachedUserApps: List<ApplicationInfo>? = null
     private var latencyRequest = 0
+    private val statusHandler = Handler(Looper.getMainLooper())
+    private val statusPoll = object : Runnable {
+        override fun run() {
+            renderStatus()
+            statusHandler.postDelayed(this, STATUS_POLL_MS)
+        }
+    }
     private val CANVAS by lazy { dynamicColor(android.R.color.system_neutral1_900, FALLBACK_CANVAS) }
     private val SURFACE by lazy { dynamicColor(android.R.color.system_neutral1_800, FALLBACK_SURFACE) }
     private val SURFACE_VARIANT by lazy { dynamicColor(android.R.color.system_neutral2_800, FALLBACK_SURFACE_VARIANT) }
@@ -104,7 +111,6 @@ class MainActivity : Activity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        installSplashScreen()
         DynamicColors.applyToActivityIfAvailable(this)
         super.onCreate(savedInstanceState)
         configureSystemBars()
@@ -188,9 +194,11 @@ class MainActivity : Activity() {
             registerReceiver(statusReceiver, filter)
         }
         receiverRegistered = true
+        statusPoll.run()
     }
 
     override fun onStop() {
+        statusHandler.removeCallbacks(statusPoll)
         if (receiverRegistered) {
             unregisterReceiver(statusReceiver)
             receiverRegistered = false
@@ -219,26 +227,37 @@ class MainActivity : Activity() {
             setBackgroundColor(CANVAS)
             isClickable = true
         }
-        val splashView = JarvisSplashView(this)
-        overlay.addView(splashView, FrameLayout.LayoutParams(dp(320), dp(320), Gravity.CENTER))
-        
+        val logo = ImageView(this).apply {
+            setImageResource(R.drawable.aethery_splash_logo)
+            contentDescription = getString(R.string.app_name)
+            scaleType = ScaleType.FIT_CENTER
+            alpha = 0f
+            scaleX = 0.82f
+            scaleY = 0.82f
+        }
+        overlay.addView(logo, FrameLayout.LayoutParams(dp(198), dp(276), Gravity.CENTER))
         pageHost.addView(overlay)
-        
-        overlay.alpha = 0f
-        overlay.animate()
+
+        logo.animate()
             .alpha(1f)
-            .setDuration(400)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(500)
+            .setInterpolator(PathInterpolator(0.2f, 0f, 0f, 1f))
             .withEndAction {
-                Handler(Looper.getMainLooper()).postDelayed({
-                    overlay.animate()
-                        .alpha(0f)
-                        .scaleX(1.4f)
-                        .scaleY(1.4f)
-                        .setDuration(600)
-                        .setInterpolator(PathInterpolator(0.4f, 0f, 0.2f, 1f))
-                        .withEndAction { pageHost.removeView(overlay) }
-                        .start()
-                }, 2800)
+                logo.animate()
+                    .scaleX(1.05f)
+                    .scaleY(1.05f)
+                    .setDuration(700)
+                    .setInterpolator(PathInterpolator(0.4f, 0f, 0.2f, 1f))
+                    .withEndAction {
+                        overlay.animate()
+                            .alpha(0f)
+                            .setDuration(300)
+                            .withEndAction { pageHost.removeView(overlay) }
+                            .start()
+                    }
+                    .start()
             }
             .start()
     }
@@ -274,7 +293,12 @@ class MainActivity : Activity() {
         gravity = Gravity.CENTER_VERTICAL
         val titles = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.VERTICAL
-            addView(label("Aethery", 22f, INK, TypefaceStyle.MEDIUM))
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(R.drawable.aethery_logo)
+                contentDescription = getString(R.string.app_name)
+                scaleType = ScaleType.CENTER_INSIDE
+                adjustViewBounds = true
+            }, LinearLayout.LayoutParams(dp(36), dp(40)))
             addView(label("Private connection", 14f, MUTED), LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2133,177 +2157,11 @@ class MainActivity : Activity() {
 
     private enum class TypefaceStyle { REGULAR, MEDIUM }
 
-    private class JarvisSplashView(context: Context) : View(context) {
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private var time = 0f
-        private var assemblyProgress = 0f
-        private val shards = mutableListOf<Shard>()
-
-        init {
-            // HUD Rotation Timing
-            ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = 40000
-                repeatCount = ValueAnimator.INFINITE
-                interpolator = android.view.animation.LinearInterpolator()
-                addUpdateListener {
-                    time = it.animatedFraction * 100
-                    invalidate()
-                }
-                start()
-            }
-
-            // Cinematic Assembly (Pouring down)
-            ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = 2200
-                interpolator = PathInterpolator(0.3f, 0f, 0.1f, 1f)
-                addUpdateListener {
-                    assemblyProgress = it.animatedValue as Float
-                    invalidate()
-                }
-                start()
-            }
-
-            createOfficialShards()
-            setLayerType(LAYER_TYPE_SOFTWARE, null)
-        }
-
-        private fun createOfficialShards() {
-            // Geometry based on 1024x1024 SVG, centered at 512,512
-            // Viewbox translation to 0,0 center for easier math: Subtract 512
-            
-            // 1. A-Frame Subdivisions (~12 shards)
-            val leftPoints = listOf(floatArrayOf(282f, 770f), floatArrayOf(397f, 495f), floatArrayOf(512f, 220f))
-            val rightPoints = listOf(floatArrayOf(512f, 220f), floatArrayOf(627f, 495f), floatArrayOf(742f, 770f))
-            
-            addSubdividedPath(leftPoints, Color.WHITE, 76f, 6)
-            addSubdividedPath(rightPoints, Color.WHITE, 76f, 6)
-            
-            // 2. Crossbar Subdivisions (~6 shards)
-            val crossPoints = listOf(floatArrayOf(390f, 586f), floatArrayOf(634f, 586f))
-            addSubdividedPath(crossPoints, Color.WHITE, 57f, 6)
-            
-            // 3. Bottom Line Subdivisions (Neon Gradient Simulation, ~8 shards)
-            val bottomColors = intArrayOf(0xFF75FFE1.toInt(), 0xFF23D7FF.toInt(), 0xFF6A68FF.toInt(), 0xFFF04DFF.toInt())
-            for (i in 0 until 8) {
-                val startX = 284f + (i * (740f - 284f) / 8f)
-                val endX = 284f + ((i + 1) * (740f - 284f) / 8f)
-                val colorIdx = (i / 2).coerceAtMost(3)
-                shards.add(Shard(createPath { 
-                    moveTo(startX - 512f, 838f - 512f)
-                    lineTo(endX - 512f, 838f - 512f)
-                }, bottomColors[colorIdx], 12f))
-            }
-            
-            // 4. Apex Crystal
-            shards.add(Shard(createPath { addCircle(512f - 512f, 220f - 512f, 19f, android.graphics.Path.Direction.CW) }, 0xFFBFFFFF.toInt(), 0f, fill = true))
-        }
-
-        private fun addSubdividedPath(points: List<FloatArray>, color: Int, width: Float, count: Int) {
-            for (i in 0 until points.size - 1) {
-                val start = points[i]
-                val end = points[i+1]
-                for (j in 0 until count) {
-                    val sX = start[0] + (j.toFloat() * (end[0] - start[0]) / count.toFloat())
-                    val sY = start[1] + (j.toFloat() * (end[1] - start[1]) / count.toFloat())
-                    val eX = start[0] + ((j + 1).toFloat() * (end[0] - start[0]) / count.toFloat())
-                    val eY = start[1] + ((j + 1).toFloat() * (end[1] - start[1]) / count.toFloat())
-                    shards.add(Shard(createPath {
-                        moveTo(sX - 512f, sY - 512f)
-                        lineTo(eX - 512f, eY - 512f)
-                    }, color, width))
-                }
-            }
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            val cx = width / 2f
-            val cy = height / 2f
-            val scale = width / 1024f
-            
-            canvas.save()
-            canvas.translate(cx, cy)
-            canvas.scale(scale * 1.05f, scale * 1.05f)
-
-            // 1. Designer HUD Rings (Delayed Reveal)
-            val ringProgress = (assemblyProgress * 2f - 0.8f).coerceIn(0f, 1f)
-            if (ringProgress > 0) {
-                paint.style = Paint.Style.STROKE
-                paint.shader = null
-                
-                // Outer static ring (#1A2230)
-                paint.color = 0xFF1A2230.toInt()
-                paint.alpha = (ringProgress * 255).toInt()
-                paint.strokeWidth = 5f
-                canvas.drawCircle(0f, 0f, 425f, paint)
-
-                // Neon rotating ring (Gradient)
-                canvas.save()
-                canvas.rotate(time * 30f, 0f, 0f)
-                val neonShader = android.graphics.SweepGradient(0f, 0f, 
-                    intArrayOf(0xFF75FFE1.toInt(), 0xFF23D7FF.toInt(), 0xFF6A68FF.toInt(), 0xFFF04DFF.toInt(), 0xFF75FFE1.toInt()), null)
-                paint.shader = neonShader
-                paint.alpha = (ringProgress * 150).toInt() // Semi-transparent like designer
-                paint.strokeWidth = 7f
-                canvas.drawCircle(0f, 0f, 335f, paint)
-                paint.shader = null
-                canvas.restore()
-            }
-
-            // 2. Fragment Assembly Animation
-            shards.forEachIndexed { i, shard ->
-                // Staggered reveal based on index
-                val startThreshold = (i * 0.015f)
-                val p = ((assemblyProgress - startThreshold) / (1f - startThreshold)).coerceIn(0f, 1f)
-                if (p <= 0) return@forEachIndexed
-                
-                canvas.save()
-                
-                // Physics: Converge from scattered initial state to target (0,0)
-                val currentX = shard.startX * (1f - p)
-                val currentY = shard.startY * (1f - p)
-                val currentRotation = shard.startRot * (1f - p)
-                val currentAlpha = (p * 255).toInt()
-                
-                canvas.translate(currentX, currentY)
-                canvas.rotate(currentRotation, 0f, 0f)
-                
-                paint.color = shard.color
-                paint.alpha = currentAlpha
-                paint.strokeWidth = shard.strokeWidth
-                paint.style = if (shard.fill) Paint.Style.FILL else Paint.Style.STROKE
-                paint.strokeCap = Paint.Cap.ROUND
-                
-                // Ignite Glow on Snap
-                if (p > 0.95f) {
-                    val ignite = (p - 0.95f) * 20f // 0 to 1
-                    paint.setShadowLayer(10f + ignite * 20f, 0f, 0f, shard.color)
-                } else if (shard.color == Color.WHITE) {
-                    paint.setShadowLayer(8f, 0f, 0f, 0x88FFFFFF.toInt())
-                }
-
-                canvas.drawPath(shard.path, paint)
-                paint.clearShadowLayer()
-                canvas.restore()
-            }
-
-            canvas.restore()
-        }
-
-        private fun createPath(action: android.graphics.Path.() -> Unit): android.graphics.Path {
-            return android.graphics.Path().apply(action)
-        }
-
-        private class Shard(val path: android.graphics.Path, val color: Int, val strokeWidth: Float, val fill: Boolean = false) {
-            val startX = (Math.random() * 2000 - 1000).toFloat()
-            val startY = (Math.random() * -2000 - 500).toFloat()
-            val startRot = (Math.random() * 720 - 360).toFloat()
-        }
-    }
-
     private companion object {
         const val VPN_REQUEST = 100
         const val NOTIFICATION_PERMISSION_REQUEST = 101
         const val LOG_REFRESH_MS = 750L
+        const val STATUS_POLL_MS = 2_000L
         const val PAGE_ANIMATION_MS = 220L
         const val LOG_CLOSE_ANIMATION_MS = 160L
         const val PING_URL = "https://www.google.com/generate_204"
@@ -2391,16 +2249,15 @@ private class ConnectionControl(
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val desired = dp(176)
+        val desired = dp(196)
         setMeasuredDimension(resolveSize(desired, widthMeasureSpec), resolveSize(desired, heightMeasureSpec))
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val size = min(width, height).toFloat()
         val centerX = width / 2f
         val centerY = height / 2f
-        val radius = size / 2f - dp(10) + if (state == State.CONNECTING) dp(3) * pulse else 0f
+        val radius = dp(78).toFloat() + if (state == State.CONNECTING) dp(3) * pulse else 0f
         val palette = when (state) {
             State.DISCONNECTED, State.CONNECTING -> Palette(primaryContainer, primary)
             State.CONNECTED -> Palette(CONNECTED_BRIGHT_CONTAINER, CONNECTED_BRIGHT)
@@ -2411,7 +2268,7 @@ private class ConnectionControl(
         paint.color = palette.container
         val shadowAlpha = if (state == State.CONNECTED) 0x88 else 0x44
         val shadowColor = (shadowAlpha shl 24) or (if (state == State.CONNECTED) palette.accent and 0xFFFFFF else 0x000000)
-        paint.setShadowLayer(dp(if (state == State.CONNECTED) 18 else 12).toFloat(), 0f, dp(5).toFloat(), shadowColor)
+        paint.setShadowLayer(dp(if (state == State.CONNECTED) 18 else 12).toFloat(), 0f, 0f, shadowColor)
         canvas.drawCircle(centerX, centerY, radius, paint)
         paint.clearShadowLayer()
 
@@ -2448,6 +2305,8 @@ private class ConnectionControl(
             paint.strokeWidth = dp(2 + (pulse * 2f).roundToInt()).toFloat()
             canvas.drawCircle(centerX, centerY, radius + dp(5) + pulse * dp(5), paint)
         }
+
+
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean = when (event.actionMasked) {
