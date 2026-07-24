@@ -5,7 +5,7 @@ Thanks for improving Aethery. This project is an Android client around the [Aeth
 ## Before opening an issue
 
 1. Update to the latest draft or published build.
-2. Check [open issues](https://github.com/ZethRise/Aethery/issues) for duplicates.
+2. Check [open issues](https://git.diastom.xyz/ZethRise/Aethery/issues) for duplicates.
 3. Use the bug or feature form. Include protocol, Android version, device ABI, and a redacted connection log for connection reports.
 4. Never post keys, provisioning identities, private endpoints, full IP scans, or traffic captures in a public issue.
 
@@ -26,7 +26,7 @@ The Android app loads `libaether.so` from `app/src/main/jniLibs/<abi>/`. Build o
 
 ## Pull requests
 
-1. Start from the latest `main` branch.
+1. Start from the latest `master` branch.
 2. Keep each pull request focused on one problem.
 3. Explain the user-visible change and test coverage in the description.
 4. Run the relevant Gradle build before requesting review.

@@ -9,7 +9,7 @@
 
 ## Reporting a vulnerability
 
-Please report vulnerabilities privately through [GitHub Security Advisories](https://github.com/ZethRise/Aethery/security/advisories/new).
+Please report vulnerabilities privately through [Gitea Security Advisories](https://git.diastom.xyz/ZethRise/Aethery/security/advisories/new).
 
 Include:
 

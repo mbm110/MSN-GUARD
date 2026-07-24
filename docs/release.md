@@ -1,10 +1,10 @@
 # Release guide
 
-The Android release workflow runs only when manually started from GitHub Actions. Commits and tags do not start builds.
+The Android release workflow runs only when manually started from Gitea Actions. Commits and tags do not start builds.
 
 ## Create draft release
 
-1. Open **Actions** and select **Build Android APKs**.
+1. Open **Gitea Actions** and select **Build Android APKs**.
 2. Select **Run workflow**.
 3. Enter release tag, such as `v0.5.0`.
 4. Start workflow.
@@ -20,7 +20,7 @@ Review generated notes and both APKs, then publish draft when ready.
 
 ## CI prerequisite
 
-GitHub Actions uses Linux. Keep `gradlew` executable in Git:
+Gitea Actions uses Linux. Keep `gradlew` executable in Git:
 
 ```bash
 git update-index --chmod=+x gradlew

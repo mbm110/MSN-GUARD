@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ZethRise/Aethery/releases"><img src="https://img.shields.io/github/v/release/ZethRise/Aethery?display_name=tag&style=for-the-badge&color=74c69d" alt="Release"></a>
-  <a href="https://github.com/ZethRise/Aethery/actions/workflows/android-release.yml"><img src="https://img.shields.io/github/actions/workflow/status/ZethRise/Aethery/android-release.yml?branch=main&style=for-the-badge&label=Android%20build" alt="Android build"></a>
+  <a href="https://git.diastom.xyz/ZethRise/Aethery/releases"><img src="https://img.shields.io/badge/releases-Gitea-74c69d?style=for-the-badge" alt="Releases"></a>
+  <a href="https://git.diastom.xyz/ZethRise/Aethery/actions"><img src="https://img.shields.io/badge/CI-Gitea%20Actions-74c69d?style=for-the-badge" alt="Android build"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-6c5ce7?style=for-the-badge" alt="AGPL-3.0"></a>
   <a href="https://github.com/CluvexStudio/Aether"><img src="https://img.shields.io/badge/core-Aether-101411?style=for-the-badge" alt="Aether core"></a>
 </p>
@@ -41,7 +41,7 @@ Android UI + Android VPN/TUN
 - **WireGuard** for networks where it is reachable.
 - **WARP-on-WARP** (`gool`) support through the Aether core.
 - Automatic endpoint scanning with IP-level diagnostics, cached-gateway reconnect, and Ironclad verification.
-- Retained Aether v1.3.0 Android FFI core builds into `libaether.so`; it is excluded from GitHub language statistics.
+- Retained Aether v1.3.0 Android FFI core builds into `libaether.so`; it is excluded from repository language statistics.
 - App-level default protocol setting and direct links to releases/source.
 
 ## Protocol notes
@@ -56,7 +56,7 @@ Network filtering differs by provider and location. A protocol appearing connect
 
 ## Download
 
-Draft and published builds are available from [GitHub Releases](https://github.com/ZethRise/Aethery/releases).
+Draft and published builds are available from [Gitea Releases](https://git.diastom.xyz/ZethRise/Aethery/releases).
 
 | Device ABI | Asset |
 | --- | --- |
@@ -105,15 +105,15 @@ app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
 
 ## CI releases
 
-The [Android release workflow](.github/workflows/android-release.yml) runs manually and builds signed release APKs for `arm64-v8a` and `armeabi-v7a`. It uploads direct `.apk` files to a **draft** GitHub Release. See the [release guide](docs/release.md).
+The [Android release workflow](.gitea/workflows/android-release.yml) runs manually and builds signed release APKs for `arm64-v8a` and `armeabi-v7a`. It uploads direct `.apk` files to a **draft** Gitea Release. See the [release guide](docs/release.md).
 
 To prepare v0.5.0:
 
 ```text
-Open Actions, select Build Android APKs, choose Run workflow, and enter v0.5.0 as the release tag.
+Open Gitea Actions, select Build Android APKs, choose Run workflow, and enter v0.5.0 as the release tag.
 ```
 
-Review the draft assets and release note in GitHub, then publish the release when ready.
+Review the draft assets and release note in Gitea, then publish the release when ready.
 
 ## Project layout
 
@@ -121,12 +121,12 @@ Review the draft assets and release note in GitHub, then publish the release whe
 app/                 Android application and JNI bridge
 core/aether/         Aether Rust core used by this client
 core/quiche/         QUIC/HTTP3 dependency used by Aether
-.github/             issue forms and Android release workflow
+.gitea/             issue forms and Android release workflow
 ```
 
 ## Contributing
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull request. Bug and feature forms are available from [New issue](https://github.com/ZethRise/Aethery/issues/new/choose).
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull request. Bug and feature forms are available from [New issue](https://git.diastom.xyz/ZethRise/Aethery/issues/new/choose).
 
 ## Security
 
