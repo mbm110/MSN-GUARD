@@ -8,9 +8,6 @@ on:
         required: true
         default: v0.3.0
 
-permissions:
-  contents: write
-
 jobs:
   build:
     name: Build ${{ matrix.abi }}
@@ -42,9 +39,9 @@ jobs:
       - name: Install Android NDK and CMake
         run: |
           sdkmanager "ndk;26.3.11579264" "cmake;3.22.1"
-          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITEA_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITEA_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITEA_ENV"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -107,7 +104,7 @@ jobs:
 
   draft-release:
     name: Create draft release
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    if: gitea.event_name == 'workflow_dispatch' || startsWith(gitea.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -118,10 +115,10 @@ jobs:
           merge-multiple: true
 
       - name: Upload direct APK assets to draft release
-        uses: softprops/action-gh-release@v2
+        uses: https://gitea.com/gitea/release-action@main
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          name: Aethery ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          tag_name: ${{ gitea.event_name == 'workflow_dispatch' && inputs.tag || gitea.ref_name }}
+          release_name: Aethery ${{ gitea.event_name == 'workflow_dispatch' && inputs.tag || gitea.ref_name }}
           draft: true
           prerelease: false
           generate_release_notes: true
