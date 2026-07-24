@@ -15,7 +15,7 @@
   <a href="https://github.com/CluvexStudio/Aether"><img src="https://img.shields.io/badge/core-Aether-101411?style=for-the-badge" alt="Aether core"></a>
 </p>
 
-> **v0.4.0** — Aethery is an Android app around the [Aether core](https://github.com/CluvexStudio/Aether). It is not a replacement or fork of Aether's networking engine.
+> **v0.5.0** — Aethery is an Android app around the [Aether core](https://github.com/CluvexStudio/Aether). It is not a replacement or fork of Aether's networking engine.
 
 ## What Aethery does
 
@@ -34,6 +34,8 @@ Android UI + Android VPN/TUN
 ## Highlights
 
 - Native Android UI with one-tap connect, connection state, motion, and live logs.
+- Quick Settings tile uses last saved settings for connect/disconnect without opening app.
+- Foreground notification shows upload/download totals, opens app on tap, and provides Disconnect action.
 - Connection type picker: **VPN** routes device traffic through Android `VpnService`; **Proxy** exposes local SOCKS5 at `127.0.0.1:1819` by default for apps configured to use it.
 - **MASQUE** over HTTP/3, with HTTP/2 fallback when available.
 - **WireGuard** for networks where it is reachable.
@@ -58,10 +60,8 @@ Draft and published builds are available from [GitHub Releases](https://github.c
 
 | Device ABI | Asset |
 | --- | --- |
-| 64-bit ARM | `Aethery-arm64-v8.apk` |
-| 32-bit ARM | `Aethery-Arm64-v7.apk` |
-
-The second filename intentionally follows the current release naming convention, while its contents target `armeabi-v7a`.
+| 64-bit ARM | `Aethery-arm64-v8a.apk` |
+| 32-bit ARM | `Aethery-armeabi-v7a.apk` |
 
 Install an APK from Android Downloads after allowing installs from the source application when Android asks.
 
@@ -105,12 +105,12 @@ app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
 
 ## CI releases
 
-The [Android release workflow](.github/workflows/android-release.yml) runs manually and builds debug APKs for `arm64-v8a` and `armeabi-v7a`. It uploads only direct `.apk` files to a **draft** GitHub Release. See the [release guide](docs/release.md).
+The [Android release workflow](.github/workflows/android-release.yml) runs manually and builds signed release APKs for `arm64-v8a` and `armeabi-v7a`. It uploads direct `.apk` files to a **draft** GitHub Release. See the [release guide](docs/release.md).
 
-To prepare v0.1.1:
+To prepare v0.5.0:
 
-```bash
-Open **Actions**, select **Build Android APKs**, choose **Run workflow**, and enter `v0.1.1` as the release tag.
+```text
+Open Actions, select Build Android APKs, choose Run workflow, and enter v0.5.0 as the release tag.
 ```
 
 Review the draft assets and release note in GitHub, then publish the release when ready.

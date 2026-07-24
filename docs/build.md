@@ -9,29 +9,26 @@
 - Rust stable with Android targets
 - `cargo-ndk`
 
-## Build arm64 debug APK
+## Build debug APKs
 
-From repository root in PowerShell:
+Gradle invokes `core/build-android.ps1` on Windows or `core/build-android.sh` on Linux/macOS when matching `libaether.so` is missing. Run from repository root:
 
 ```powershell
-.\core\build-android.ps1
-New-Item -ItemType Directory -Force app\src\main\jniLibs\arm64-v8a
-Copy-Item core\android-libs\arm64-v8a\libaether.so app\src\main\jniLibs\arm64-v8a\libaether.so -Force
 .\gradlew.bat :app:assembleDebug -PtargetAbi=arm64-v8a
+.\gradlew.bat :app:assembleDebug -PtargetAbi=armeabi-v7a
 ```
 
-APK output:
+Build both ABI splits:
+
+```powershell
+.\gradlew.bat :app:assembleDebug
+```
+
+APK outputs:
 
 ```text
 app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
-```
-
-## Build armv7 debug APK
-
-Build Aether for `armeabi-v7a`, place its output at `app/src/main/jniLibs/armeabi-v7a/libaether.so`, then run:
-
-```powershell
-.\gradlew.bat :app:assembleDebug -PtargetAbi=armeabi-v7a
+app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
 ```
 
 ## Linux and macOS

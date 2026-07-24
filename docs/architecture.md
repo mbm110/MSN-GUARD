@@ -14,9 +14,11 @@ NativeCore (Kotlin) ── JNI ── aether_jni (C++) ── libaether.so (Rust
 
 ## Android layer
 
-- `MainActivity` presents connection controls, protocol selection, diagnostics, and connection status.
+- `MainActivity` presents connection controls, protocol selection, diagnostics, and connection status. While visible, it reconciles UI state with `NativeCore.isRunning()`.
 - `AetherVpnService` creates the Android TUN interface, runs as a foreground service, and owns connect/disconnect lifecycle.
-- The service reports `connecting`, `connected`, `failed`, and `disconnected` status broadcasts to the UI.
+- `AetherTileService` exposes an Android Quick Settings tile for connect/disconnect with last saved settings.
+- The service reports `connecting`, `connected`, `failed`, and `disconnected` status broadcasts to the UI and refreshes the Quick Tile.
+- Native terminal exit logs its reason and updates UI/tile state instead of leaving stale Connected state.
 - Connection is shown as connected only after `NativeCore.isReady()` reports tunnel readiness.
 
 ## Native bridge
