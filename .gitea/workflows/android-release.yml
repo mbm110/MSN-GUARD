@@ -24,6 +24,11 @@ jobs:
             asset: Aethery-armeabi-v7a.apk
 
     steps:
+      - name: Install Node.js
+        run: |
+          apt-get update
+          apt-get install -y nodejs npm
+
       - name: Check out source
         uses: actions/checkout@v4
 
