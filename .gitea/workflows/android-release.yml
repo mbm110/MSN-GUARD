@@ -101,7 +101,7 @@ jobs:
           cp "$apk" "dist/${{ matrix.asset }}"
 
       - name: Upload APK for release job
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
@@ -114,7 +114,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download APKs
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
