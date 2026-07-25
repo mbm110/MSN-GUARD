@@ -143,6 +143,7 @@ jobs:
             curl --fail-with-body --silent --show-error \
               --request POST \
               --header "Authorization: token $AETHERY_RELEASE_TOKEN" \
-              --form "attachment=@$apk" \
+              --header "Content-Type: application/octet-stream" \
+              --data-binary "@$apk" \
               "$GITEA_SERVER_URL/api/v1/repos/$GITEA_REPOSITORY/releases/$release_id/assets?name=$(basename "$apk")"
           done
