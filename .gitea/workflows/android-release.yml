@@ -119,17 +119,30 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Upload direct APK assets to draft release
-        uses: https://github.com/gitea/gitea-release-action@v1
-        with:
-          direction: upload
-          url: ${{ gitea.server_url }}
-          token: ${{ secrets.AETHERY_RELEASE_TOKEN }}
-          tag_name: ${{ gitea.event_name == 'workflow_dispatch' && inputs.tag || gitea.ref_name }}
-          release_name: Aethery ${{ gitea.event_name == 'workflow_dispatch' && inputs.tag || gitea.ref_name }}
-          draft: true
-          prerelease: false
-          generate_release_notes: true
-          files: |
-            dist/Aethery-arm64-v8a.apk
-            dist/Aethery-armeabi-v7a.apk
+      - name: Create draft release and upload APKs
+        env:
+          AETHERY_RELEASE_TOKEN: ${{ secrets.AETHERY_RELEASE_TOKEN }}
+          RELEASE_TAG: ${{ gitea.event_name == 'workflow_dispatch' && inputs.tag || gitea.ref_name }}
+          GITEA_SERVER_URL: ${{ gitea.server_url }}
+          GITEA_REPOSITORY: ${{ gitea.repository }}
+        run: |
+          set -eu
+          test -n "$AETHERY_RELEASE_TOKEN"
+          test -n "$RELEASE_TAG"
+          test -n "$GITEA_SERVER_URL"
+          test -n "$GITEA_REPOSITORY"
+          release_json=$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Authorization: token $AETHERY_RELEASE_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data "{\"tag_name\":\"$RELEASE_TAG\",\"target_commitish\":\"${GITEA_SHA}\",\"name\":\"Aethery $RELEASE_TAG\",\"draft\":true,\"prerelease\":false}" \
+            "$GITEA_SERVER_URL/api/v1/repos/$GITEA_REPOSITORY/releases")
+          release_id=$(printf '%s' "$release_json" | sed -n 's/.*\"id\":\([0-9][0-9]*\).*/\1/p' | head -n 1)
+          test -n "$release_id"
+          for apk in dist/Aethery-arm64-v8a.apk dist/Aethery-armeabi-v7a.apk; do
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Authorization: token $AETHERY_RELEASE_TOKEN" \
+              --form "attachment=@$apk" \
+              "$GITEA_SERVER_URL/api/v1/repos/$GITEA_REPOSITORY/releases/$release_id/assets?name=$(basename "$apk")"
+          done
