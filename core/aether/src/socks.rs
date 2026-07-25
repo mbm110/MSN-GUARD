@@ -136,7 +136,7 @@ async fn resolve(stack: &StackHandle, target: Target) -> Result<IpAddr> {
     }
 }
 
-async fn dns_resolve(stack: &StackHandle, name: &str) -> Result<IpAddr> {
+pub(crate) async fn dns_resolve(stack: &StackHandle, name: &str) -> Result<IpAddr> {
     let udp = stack.open_udp().await?;
     let server: SocketAddr = "1.1.1.1:53".parse().unwrap();
 

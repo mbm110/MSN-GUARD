@@ -35,7 +35,6 @@ pub async fn fetch_ech_config() -> Result<Vec<u8>> {
 async fn query_ech(server: SocketAddr, host: &str) -> Result<Vec<u8>> {
     let bind = if server.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
     let sock = UdpSocket::bind(bind).await?;
-    crate::platform::protect_socket(&sock)?;
     sock.connect(server).await?;
 
     let query = build_query(host, RR_HTTPS);

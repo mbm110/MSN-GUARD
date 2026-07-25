@@ -1,5 +1,8 @@
+use std::net::Ipv4Addr;
+
 use octets::{Octets, OctetsMut};
 use quiche::h3;
+use rand::Rng;
 
 use crate::consts;
 use crate::error::{AetherError, Result};
@@ -234,4 +237,68 @@ fn varint_len(v: u64) -> usize {
 
 fn oct(e: octets::BufferTooShortError) -> AetherError {
     AetherError::Capsule(e.to_string())
+}
+
+pub fn build_dns_probe_packet(src: Ipv4Addr) -> Vec<u8> {
+    let dns = probe_dns_query();
+    let udp_len = 8 + dns.len();
+    let total_len = 20 + udp_len;
+
+    let mut pkt = Vec::with_capacity(total_len);
+
+    pkt.push(0x45);
+    pkt.push(0x00);
+    pkt.extend_from_slice(&(total_len as u16).to_be_bytes());
+    let id: u16 = rand::random();
+    pkt.extend_from_slice(&id.to_be_bytes());
+    pkt.extend_from_slice(&[0x00, 0x00]);
+    pkt.push(64);
+    pkt.push(17);
+    pkt.extend_from_slice(&[0x00, 0x00]);
+    pkt.extend_from_slice(&src.octets());
+    pkt.extend_from_slice(&Ipv4Addr::new(8, 8, 8, 8).octets());
+    let csum = ipv4_header_checksum(&pkt[0..20]);
+    pkt[10..12].copy_from_slice(&csum.to_be_bytes());
+
+    let sport: u16 = rand::thread_rng().gen_range(20000..60000);
+    pkt.extend_from_slice(&sport.to_be_bytes());
+    pkt.extend_from_slice(&53u16.to_be_bytes());
+    pkt.extend_from_slice(&(udp_len as u16).to_be_bytes());
+    pkt.extend_from_slice(&[0x00, 0x00]);
+
+    pkt.extend_from_slice(&dns);
+    pkt
+}
+
+fn probe_dns_query() -> Vec<u8> {
+    let id: u16 = rand::random();
+    let mut q = Vec::with_capacity(32);
+    q.extend_from_slice(&id.to_be_bytes());
+    q.extend_from_slice(&[0x01, 0x00]);
+    q.extend_from_slice(&[0x00, 0x01]);
+    q.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    for label in ["cloudflare", "com"] {
+        q.push(label.len() as u8);
+        q.extend_from_slice(label.as_bytes());
+    }
+    q.push(0x00);
+    q.extend_from_slice(&[0x00, 0x01]);
+    q.extend_from_slice(&[0x00, 0x01]);
+    q
+}
+
+fn ipv4_header_checksum(header: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i = 0;
+    while i + 1 < header.len() {
+        sum += u16::from_be_bytes([header[i], header[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < header.len() {
+        sum += (header[i] as u32) << 8;
+    }
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
 }

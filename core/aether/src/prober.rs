@@ -172,6 +172,8 @@ impl ScanMode {
     }
 }
 
+const IRONCLAD_TCPING_TIMEOUT: Duration = Duration::from_secs(10);
+
 struct Strategy {
     concurrency: usize,
     per_probe_timeout: Duration,
@@ -195,6 +197,7 @@ pub struct MasqueProbe {
     pub tls_curve_preset: crate::TlsCurvePreset,
     pub ports: Vec<u16>,
     pub ip: IpScan,
+    pub local_ipv4: Ipv4Addr,
 }
 
 pub async fn host_has_ipv6() -> bool {
@@ -210,7 +213,8 @@ pub async fn host_has_ipv6() -> bool {
 }
 
 pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<ProbeResult> {
-    let st = mode.strategy();
+    let mut st = mode.strategy();
+    st.concurrency = crate::sysprofile::cap_concurrency(st.concurrency);
     let timeout = st.per_probe_timeout;
     let mut effective_ip = probe.ip;
     if probe.ip.want_v6() && !host_has_ipv6().await {
@@ -236,6 +240,7 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
     );
 
     let ironclad = mode == ScanMode::Ironclad;
+
     let stream = futures::stream::iter(
         candidates
             .into_iter()
@@ -283,8 +288,8 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
                             _ => pr,
                         });
                         found += 1;
-                        
-                        if st.target_successes > 0 && found >= st.target_successes {
+
+                        if st.target_successes > 0 && found >= st.target_successes && quiet_until.is_none() {
                             log::info!("[+] reached target of {} gateways, selecting best", st.target_successes);
                             if !st.quiet_after_first.is_zero() {
                                 quiet_until = Some(Instant::now() + st.quiet_after_first);
@@ -343,6 +348,31 @@ async fn verify_one(
     timeout: Duration,
     ironclad: bool,
 ) -> Option<ProbeResult> {
+    if ironclad {
+        let params = crate::tunnelping::MasquePingParams {
+            peer: SocketAddr::new(ip, port),
+            sni: probe.sni.clone(),
+            authority: probe.authority.clone(),
+            path: probe.path.clone(),
+            cert_pem: probe.cert_pem.to_vec(),
+            key_pem: probe.key_pem.to_vec(),
+            noize: probe.noize.clone(),
+            local_ipv4: probe.local_ipv4,
+            local_ipv4_str: probe.local_ipv4.to_string(),
+            local_ipv6_str: String::new(),
+        };
+        return match crate::tunnelping::masque_http_ping(&params, IRONCLAD_TCPING_TIMEOUT).await {
+            Ok(rtt) => {
+                log::info!("[+] ironclad verified {ip}:{port} real http round trip rtt={:?}", rtt);
+                Some(ProbeResult { ip, port, rtt })
+            }
+            Err(e) => {
+                log::trace!("[-] ironclad {ip}:{port} failed real http check: {e}");
+                None
+            }
+        };
+    }
+
     let transport = if crate::masque_h2::enabled() { "HTTP/2" } else { "HTTP/3" };
     crate::ffi::record_log(format!("Scanning {ip}:{port} via {transport}"));
     if crate::masque_h2::enabled() {
@@ -353,6 +383,10 @@ async fn verify_one(
             path: probe.path.clone(),
             cert_pem: probe.cert_pem.to_vec(),
             key_pem: probe.key_pem.to_vec(),
+            local_ipv4: probe.local_ipv4,
+            quiet: true,
+            pin_endpoint: true,
+            expected_pins: crate::consts::MASQUE_PINS.iter().map(|p| p.to_vec()).collect(),
         };
         return match crate::masque_h2::verify_h2(&cfg, timeout).await {
             Ok(rtt) => {
@@ -361,7 +395,7 @@ async fn verify_one(
             }
             Err(e) => {
                 crate::ffi::record_log(format!("Rejected {ip}:{port}: {e}"));
-                log::debug!("h2 probe {ip}:{port} -> {e}");
+                log::trace!("h2 probe {ip}:{port} -> {e}");
                 None
             }
         };
@@ -378,6 +412,7 @@ async fn verify_one(
         noize: probe.noize.clone(),
         tls_curve_preset: probe.tls_curve_preset,
         timeout,
+        local_ipv4: probe.local_ipv4,
     };
 
     let verify = async {
