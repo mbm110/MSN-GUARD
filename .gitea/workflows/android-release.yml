@@ -39,9 +39,9 @@ jobs:
       - name: Install Android NDK and CMake
         run: |
           sdkmanager "ndk;26.3.11579264" "cmake;3.22.1"
-          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITEA_ENV"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITEA_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITEA_ENV"
+          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
 
       - name: Install bindgen dependency
         run: |
@@ -109,7 +109,7 @@ jobs:
 
   draft-release:
     name: Create draft release
-    if: gitea.event_name == 'workflow_dispatch' || startsWith(gitea.ref, 'refs/tags/')
+    if: forgejo.event_name == 'workflow_dispatch' || startsWith(forgejo.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -122,21 +122,21 @@ jobs:
       - name: Create draft release and upload APKs
         env:
           AETHERY_RELEASE_TOKEN: ${{ secrets.AETHERY_RELEASE_TOKEN }}
-          RELEASE_TAG: ${{ gitea.event_name == 'workflow_dispatch' && inputs.tag || gitea.ref_name }}
-          GITEA_SERVER_URL: ${{ gitea.server_url }}
-          GITEA_REPOSITORY: ${{ gitea.repository }}
+          RELEASE_TAG: ${{ forgejo.event_name == 'workflow_dispatch' && inputs.tag || forgejo.ref_name }}
+          FORGEJO_SERVER_URL: ${{ forgejo.server_url }}
+          FORGEJO_REPOSITORY: ${{ forgejo.repository }}
         run: |
           set -eu
           test -n "$AETHERY_RELEASE_TOKEN"
           test -n "$RELEASE_TAG"
-          test -n "$GITEA_SERVER_URL"
-          test -n "$GITEA_REPOSITORY"
+          test -n "$FORGEJO_SERVER_URL"
+          test -n "$FORGEJO_REPOSITORY"
           release_json=$(curl --fail-with-body --silent --show-error \
             --request POST \
             --header "Authorization: token $AETHERY_RELEASE_TOKEN" \
             --header "Content-Type: application/json" \
             --data "{\"tag_name\":\"$RELEASE_TAG\",\"target_commitish\":\"master\",\"name\":\"Aethery $RELEASE_TAG\",\"draft\":true,\"prerelease\":false}" \
-            "$GITEA_SERVER_URL/api/v1/repos/$GITEA_REPOSITORY/releases")
+            "$FORGEJO_SERVER_URL/api/v1/repos/$FORGEJO_REPOSITORY/releases")
           release_id=$(printf '%s' "$release_json" | sed -n 's/.*\"id\":\([0-9][0-9]*\).*/\1/p' | head -n 1)
           test -n "$release_id"
           for apk in dist/Aethery-arm64-v8a.apk dist/Aethery-armeabi-v7a.apk; do
@@ -144,5 +144,5 @@ jobs:
               --request POST \
               --header "Authorization: token $AETHERY_RELEASE_TOKEN" \
               --form "attachment=@$apk;type=application/vnd.android.package-archive" \
-              "$GITEA_SERVER_URL/api/v1/repos/$GITEA_REPOSITORY/releases/$release_id/assets?name=$(basename "$apk")"
+              "$FORGEJO_SERVER_URL/api/v1/repos/$FORGEJO_REPOSITORY/releases/$release_id/assets?name=$(basename "$apk")"
           done
