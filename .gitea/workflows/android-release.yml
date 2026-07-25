@@ -10,8 +10,38 @@ on:
         default: "v0.3.0"
 
 jobs:
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+    steps:
+      - name: Create draft release
+        id: create
+        env:
+          AETHERY_RELEASE_TOKEN: ${{ secrets.AETHERY_RELEASE_TOKEN }}
+          RELEASE_TAG: ${{ forgejo.event_name == 'workflow_dispatch' && inputs.tag || forgejo.ref_name }}
+          FORGEJO_SERVER_URL: ${{ forgejo.server_url }}
+          FORGEJO_REPOSITORY: ${{ forgejo.repository }}
+        run: |
+          set -eu
+          test -n "$AETHERY_RELEASE_TOKEN"
+          test -n "$RELEASE_TAG"
+          test -n "$FORGEJO_SERVER_URL"
+          test -n "$FORGEJO_REPOSITORY"
+          release_json=$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Authorization: token $AETHERY_RELEASE_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data "{\"tag_name\":\"$RELEASE_TAG\",\"target_commitish\":\"master\",\"name\":\"Aethery $RELEASE_TAG\",\"draft\":true,\"prerelease\":false}" \
+            "$FORGEJO_SERVER_URL/api/v1/repos/$FORGEJO_REPOSITORY/releases")
+          release_id=$(printf '%s' "$release_json" | sed -n 's/.*\"id\":\([0-9][0-9]*\).*/\1/p' | head -n 1)
+          test -n "$release_id"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.abi }}
+    needs: create-release
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -102,48 +132,15 @@ jobs:
           test -n "$apk"
           cp "$apk" "dist/${{ matrix.asset }}"
 
-      - name: Upload APK for release job
-        uses: https://github.com/actions/upload-artifact@v3
-        with:
-          name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
-          if-no-files-found: error
-
-  draft-release:
-    name: Create draft release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download APKs
-        uses: https://github.com/actions/download-artifact@v3
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Create draft release and upload APKs
+      - name: Upload APK to release
         env:
           AETHERY_RELEASE_TOKEN: ${{ secrets.AETHERY_RELEASE_TOKEN }}
-          RELEASE_TAG: ${{ forgejo.event_name == 'workflow_dispatch' && inputs.tag || forgejo.ref_name }}
           FORGEJO_SERVER_URL: ${{ forgejo.server_url }}
           FORGEJO_REPOSITORY: ${{ forgejo.repository }}
         run: |
           set -eu
-          test -n "$AETHERY_RELEASE_TOKEN"
-          test -n "$RELEASE_TAG"
-          test -n "$FORGEJO_SERVER_URL"
-          test -n "$FORGEJO_REPOSITORY"
-          release_json=$(curl --fail-with-body --silent --show-error \
+          curl --fail-with-body --silent --show-error \
             --request POST \
             --header "Authorization: token $AETHERY_RELEASE_TOKEN" \
-            --header "Content-Type: application/json" \
-            --data "{\"tag_name\":\"$RELEASE_TAG\",\"target_commitish\":\"master\",\"name\":\"Aethery $RELEASE_TAG\",\"draft\":true,\"prerelease\":false}" \
-            "$FORGEJO_SERVER_URL/api/v1/repos/$FORGEJO_REPOSITORY/releases")
-          release_id=$(printf '%s' "$release_json" | sed -n 's/.*\"id\":\([0-9][0-9]*\).*/\1/p' | head -n 1)
-          test -n "$release_id"
-          for apk in dist/Aethery-arm64-v8a.apk dist/Aethery-armeabi-v7a.apk; do
-            curl --fail-with-body --silent --show-error \
-              --request POST \
-              --header "Authorization: token $AETHERY_RELEASE_TOKEN" \
-              --form "attachment=@$apk;type=application/vnd.android.package-archive" \
-              "$FORGEJO_SERVER_URL/api/v1/repos/$FORGEJO_REPOSITORY/releases/$release_id/assets?name=$(basename "$apk")"
-          done
+            --form "attachment=@dist/${{ matrix.asset }};type=application/vnd.android.package-archive" \
+            "$FORGEJO_SERVER_URL/api/v1/repos/$FORGEJO_REPOSITORY/releases/${{ needs.create-release.outputs.release_id }}/assets?name=${{ matrix.asset }}"
