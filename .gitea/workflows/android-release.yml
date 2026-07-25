@@ -6,7 +6,8 @@ on:
       tag:
         description: Release tag to draft
         required: true
-        default: v0.3.0
+        type: string
+        default: "v0.3.0"
 
 jobs:
   build:
