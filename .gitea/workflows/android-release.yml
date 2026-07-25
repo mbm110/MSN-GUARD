@@ -120,8 +120,11 @@ jobs:
           merge-multiple: true
 
       - name: Upload direct APK assets to draft release
-        uses: gitea/release-action@main
+        uses: https://gitea.com/gitea/gitea-release-action@v1
         with:
+          direction: upload
+          url: ${{ gitea.server_url }}
+          token: ${{ secrets.GITEA_RELEASE_TOKEN }}
           tag_name: ${{ gitea.event_name == 'workflow_dispatch' && inputs.tag || gitea.ref_name }}
           release_name: Aethery ${{ gitea.event_name == 'workflow_dispatch' && inputs.tag || gitea.ref_name }}
           draft: true
