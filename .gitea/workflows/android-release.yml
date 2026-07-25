@@ -25,16 +25,16 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: https://github.com/actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: https://github.com/actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: https://github.com/android-actions/setup-android@v3
 
       - name: Install Android NDK and CMake
         run: |
@@ -49,7 +49,7 @@ jobs:
           apt-get install -y libclang-dev
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
 
@@ -101,7 +101,7 @@ jobs:
           cp "$apk" "dist/${{ matrix.asset }}"
 
       - name: Upload APK for release job
-        uses: actions/upload-artifact@v4
+        uses: https://github.com/actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
@@ -113,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download APKs
-        uses: actions/download-artifact@v4
+        uses: https://github.com/actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
