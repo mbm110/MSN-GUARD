@@ -135,7 +135,7 @@ jobs:
             --request POST \
             --header "Authorization: token $AETHERY_RELEASE_TOKEN" \
             --header "Content-Type: application/json" \
-            --data "{\"tag_name\":\"$RELEASE_TAG\",\"target_commitish\":\"${GITEA_SHA}\",\"name\":\"Aethery $RELEASE_TAG\",\"draft\":true,\"prerelease\":false}" \
+            --data "{\"tag_name\":\"$RELEASE_TAG\",\"target_commitish\":\"master\",\"name\":\"Aethery $RELEASE_TAG\",\"draft\":true,\"prerelease\":false}" \
             "$GITEA_SERVER_URL/api/v1/repos/$GITEA_REPOSITORY/releases")
           release_id=$(printf '%s' "$release_json" | sed -n 's/.*\"id\":\([0-9][0-9]*\).*/\1/p' | head -n 1)
           test -n "$release_id"
