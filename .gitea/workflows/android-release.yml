@@ -124,7 +124,7 @@ jobs:
         with:
           direction: upload
           url: ${{ gitea.server_url }}
-          token: ${{ secrets.GITEA_RELEASE_TOKEN }}
+          token: ${{ secrets.AETHERY_RELEASE_TOKEN }}
           tag_name: ${{ gitea.event_name == 'workflow_dispatch' && inputs.tag || gitea.ref_name }}
           release_name: Aethery ${{ gitea.event_name == 'workflow_dispatch' && inputs.tag || gitea.ref_name }}
           draft: true
