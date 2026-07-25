@@ -109,7 +109,6 @@ jobs:
 
   draft-release:
     name: Create draft release
-    if: forgejo.event_name == 'workflow_dispatch' || startsWith(forgejo.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
     steps:
