@@ -11,7 +11,7 @@ on:
 jobs:
   build:
     name: Build ${{ matrix.abi }}
-    runs-on: host-runner
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -110,7 +110,7 @@ jobs:
   draft-release:
     name: Create draft release
     needs: build
-    runs-on: host-runner
+    runs-on: ubuntu-latest
     steps:
       - name: Download APKs
         uses: actions/download-artifact@v4
