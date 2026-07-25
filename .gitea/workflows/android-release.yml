@@ -120,7 +120,7 @@ jobs:
           merge-multiple: true
 
       - name: Upload direct APK assets to draft release
-        uses: https://gitea.com/gitea/gitea-release-action@v1
+        uses: https://github.com/gitea/gitea-release-action@v1
         with:
           direction: upload
           url: ${{ gitea.server_url }}
