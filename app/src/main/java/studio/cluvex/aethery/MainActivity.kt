@@ -56,6 +56,7 @@ class MainActivity : Activity() {
     private lateinit var modeValue: TextView
     private lateinit var connectionTypeValue: TextView
     private lateinit var logSelector: LinearLayout
+    private lateinit var perfSelector: LinearLayout
     private lateinit var scannerSelector: LinearLayout
     private lateinit var scanValue: TextView
     private lateinit var mainRoot: FrameLayout
@@ -344,9 +345,13 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(64),
         ).apply { topMargin = dp(12) })
-        addView(logSelector, LinearLayout.LayoutParams(
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(logSelector, LinearLayout.LayoutParams(0, dp(64), 1f).apply { rightMargin = dp(6) })
+            addView(perfSelector, LinearLayout.LayoutParams(0, dp(64), 1f).apply { leftMargin = dp(6) })
+        }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(64),
+            ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(12) })
     }
 
@@ -379,6 +384,25 @@ class MainActivity : Activity() {
 
         addView(label("LOG", 12f, MUTED).apply { letterSpacing = 0.1f })
         addView(label("Events", 16f, INK, TypefaceStyle.MEDIUM, singleLine = true), LinearLayout.LayoutParams(
+            0,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            1f,
+        ).apply { leftMargin = dp(16) })
+        addView(ChevronView(this@MainActivity, MUTED), LinearLayout.LayoutParams(dp(24), dp(24)))
+    }
+
+    private fun createPerfSelector(): LinearLayout = LinearLayout(this).apply {
+        gravity = Gravity.CENTER_VERTICAL
+        orientation = LinearLayout.HORIZONTAL
+        setPadding(dp(20), 0, dp(18), 0)
+        background = roundedBackground(SURFACE_VARIANT, 20, DIVIDER)
+        contentDescription = "Performance profile, ${perfProfile().label}"
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { choosePerfProfile() }
+
+        addView(label("PERF", 12f, MUTED).apply { letterSpacing = 0.1f })
+        addView(label(perfProfile().label, 16f, INK, TypefaceStyle.MEDIUM, singleLine = true), LinearLayout.LayoutParams(
             0,
             ViewGroup.LayoutParams.WRAP_CONTENT,
             1f,
@@ -431,6 +455,38 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(16) })
+        val logLevelRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val currentLogLevel = logLevel()
+        LogLevel.entries.forEach { level ->
+            val isActive = level == currentLogLevel
+            val chip = label(level.label, 12f, if (isActive) primaryContainer else INK, TypefaceStyle.MEDIUM).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(12), dp(6), dp(12), dp(6))
+                background = roundedBackground(if (isActive) primary else SURFACE_VARIANT, 12, if (isActive) primary else DIVIDER)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    preferences().edit().putString(LOG_LEVEL, level.coreName).apply()
+                    for (i in 0 until logLevelRow.childCount) {
+                        val child = logLevelRow.getChildAt(i) as TextView
+                        val childLevel = LogLevel.entries[i]
+                        val selected = childLevel == level
+                        child.setTextColor(if (selected) primaryContainer else INK)
+                        child.background = roundedBackground(if (selected) primary else SURFACE_VARIANT, 12, if (selected) primary else DIVIDER)
+                    }
+                }
+            }
+            logLevelRow.addView(chip, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+            ).apply { rightMargin = dp(6) })
+        }
+        content.addView(logLevelRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(48); rightMargin = dp(48); bottomMargin = dp(12) })
         val events = label(textSize = 13f, color = INK).apply {
             typeface = android.graphics.Typeface.MONOSPACE
             setTextIsSelectable(true)
@@ -1164,6 +1220,12 @@ class MainActivity : Activity() {
             preferences().edit().putBoolean(WIREGUARD_DATA_CHECK, !wireGuardDataCheck()).apply()
             updateTunnelControlButton(verificationButton, "WireGuard verification · ${if (wireGuardDataCheck()) "Strict" else "Fast"} ›")
         }
+        content.addView(label("ANTI-DPI", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(28) })
+        addControl("TLS fragmentation · ${if (h2Fragmentation() == H2Fragmentation.ON) "On" else "Off"} ›") {
+            chooseH2Fragmentation()
+        }
         scroll.addView(content)
         page.addView(scroll)
         page.setOnApplyWindowInsetsListener { _, insets ->
@@ -1277,6 +1339,40 @@ class MainActivity : Activity() {
         description = { it.description },
     ) { chosen ->
         preferences().edit().putString(TLS_CURVE_PRESET, chosen.coreName).apply()
+    }
+
+    private fun choosePerfProfile() = showChoiceSheet(
+        title = "Performance",
+        subtitle = "Scale scan concurrency and buffers to match your hardware",
+        options = PerfProfile.entries.toList(),
+        selected = perfProfile(),
+        label = { it.label },
+        description = { it.description },
+    ) { chosen ->
+        preferences().edit().putString(PERF_PROFILE, chosen.coreName).apply()
+        (perfSelector.getChildAt(1) as? TextView)?.text = chosen.label
+    }
+
+    private fun chooseH2Fragmentation() = showChoiceSheet(
+        title = "TLS fragmentation",
+        subtitle = "Fragment the TLS ClientHello to look like ordinary HTTPS traffic",
+        options = H2Fragmentation.entries.toList(),
+        selected = h2Fragmentation(),
+        label = { it.label },
+        description = { it.description },
+    ) { chosen ->
+        preferences().edit().putString(H2_FRAGMENTATION, chosen.coreName).apply()
+    }
+
+    private fun chooseLogLevel() = showChoiceSheet(
+        title = "Log level",
+        subtitle = "Control verbosity of Aether core logs",
+        options = LogLevel.entries.toList(),
+        selected = logLevel(),
+        label = { it.label },
+        description = { it.description },
+    ) { chosen ->
+        preferences().edit().putString(LOG_LEVEL, chosen.coreName).apply()
     }
 
     private fun manageGatewayCache() = showChoiceSheet(
@@ -1850,6 +1946,9 @@ class MainActivity : Activity() {
         put("retry_obfuscation_profiles", retryObfuscationProfiles())
         put("tls_curve_preset", tlsCurvePreset().coreName)
         put("wireguard_data_check", wireGuardDataCheck())
+        put("log_level", logLevel().coreName)
+        put("perf_profile", perfProfile().coreName)
+        if (h2Fragmentation() == H2Fragmentation.ON) put("h2_fragmentation", true)
     }.toString()
 
     private fun renderStatus() {
@@ -2056,6 +2155,21 @@ class MainActivity : Activity() {
 
     private fun wireGuardDataCheck(): Boolean = preferences().getBoolean(WIREGUARD_DATA_CHECK, true)
 
+    private fun logLevel(): LogLevel = preferences()
+        .getString(LOG_LEVEL, LogLevel.INFO.coreName)
+        ?.let { name -> LogLevel.entries.firstOrNull { it.coreName == name } }
+        ?: LogLevel.INFO
+
+    private fun perfProfile(): PerfProfile = preferences()
+        .getString(PERF_PROFILE, PerfProfile.AUTO.coreName)
+        ?.let { name -> PerfProfile.entries.firstOrNull { it.coreName == name } }
+        ?: PerfProfile.AUTO
+
+    private fun h2Fragmentation(): H2Fragmentation = preferences()
+        .getString(H2_FRAGMENTATION, H2Fragmentation.OFF.coreName)
+        ?.let { name -> H2Fragmentation.entries.firstOrNull { it.coreName == name } }
+        ?: H2Fragmentation.OFF
+
     private fun socksPort(): Int = getSharedPreferences(SETTINGS, MODE_PRIVATE)
         .getInt(DEFAULT_SOCKS_PORT, DEFAULT_SOCKS_PORT_VALUE)
 
@@ -2148,6 +2262,26 @@ class MainActivity : Activity() {
         COMPATIBILITY("Compatibility", "compatibility", "P-256 and X25519 only"),
     }
 
+    private enum class LogLevel(val label: String, val coreName: String, val description: String) {
+        ERROR("Error", "error", "Only errors"),
+        WARN("Warn", "warn", "Warnings and errors"),
+        INFO("Info", "info", "Default verbosity"),
+        DEBUG("Debug", "debug", "Tunnel internals"),
+        TRACE("Trace", "trace", "Full per-packet detail"),
+    }
+
+    private enum class PerfProfile(val label: String, val coreName: String, val description: String) {
+        AUTO("Auto", "auto", "Detect hardware and scale accordingly"),
+        LOW("Low", "low", "Routers and constrained devices"),
+        MEDIUM("Medium", "medium", "Moderate hardware"),
+        HIGH("High", "high", "Desktop and powerful devices"),
+    }
+
+    private enum class H2Fragmentation(val label: String, val coreName: String, val description: String) {
+        ON("On", "on", "Fragment TLS handshake to evade DPI"),
+        OFF("Off", "off", "Standard TLS handshake"),
+    }
+
     private data class SelectionOption(
         val row: LinearLayout,
         val title: TextView,
@@ -2177,6 +2311,9 @@ class MainActivity : Activity() {
         const val RETRY_OBFUSCATION = "retry_obfuscation_profiles"
         const val TLS_CURVE_PRESET = "tls_curve_preset"
         const val WIREGUARD_DATA_CHECK = "wireguard_data_check"
+        const val LOG_LEVEL = "log_level"
+        const val PERF_PROFILE = "perf_profile"
+        const val H2_FRAGMENTATION = "h2_fragmentation"
         const val DEFAULT_SOCKS_PORT = "default_socks_port"
         const val DEFAULT_SOCKS_PORT_VALUE = 1819
         const val FALLBACK_CANVAS = 0xFF101411.toInt()

@@ -28,6 +28,8 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
     private var lastTrafficSampleMs = 0L
     private var currentTx = 0L
     private var currentRx = 0L
+    private var storedConfig: String? = null
+    private var storedVpnMode = true
 
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
 
@@ -37,6 +39,17 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
                 startTunnel(config, intent.getBooleanExtra(EXTRA_VPN_MODE, true))
             }
             ACTION_DISCONNECT -> stopTunnel()
+            ACTION_RECONNECT -> {
+                val config = storedConfig
+                if (config != null && connected.get()) {
+                    ConnectionLog.record("Quick reconnect requested")
+                    stopTunnel(notify = false)
+                    worker.execute {
+                        try { Thread.sleep(500) } catch (_: InterruptedException) {}
+                        startTunnel(config, storedVpnMode)
+                    }
+                }
+            }
         }
         return Service.START_NOT_STICKY
     }
@@ -77,6 +90,8 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
 
     private fun startTunnel(config: String, vpnMode: Boolean) {
         if (!connected.compareAndSet(false, true)) return
+        storedConfig = config
+        storedVpnMode = vpnMode
         stopRequested.set(false)
         startAsForeground()
         worker.execute {
@@ -193,6 +208,12 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
             Intent(this, AetherVpnService::class.java).setAction(ACTION_DISCONNECT),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val reconnectIntent = PendingIntent.getService(
+            this,
+            2,
+            Intent(this, AetherVpnService::class.java).setAction(ACTION_RECONNECT),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         val contentText = if (tx > 0 || rx > 0) {
             "${getString(R.string.vpn_download)}: ${formatBytes(rx)}  ${getString(R.string.vpn_upload)}: ${formatBytes(tx)}"
         } else {
@@ -209,6 +230,11 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
                 android.R.drawable.ic_menu_close_clear_cancel,
                 getString(R.string.vpn_disconnect),
                 disconnectIntent,
+            )
+            .addAction(
+                android.R.drawable.ic_menu_revert,
+                "Quick Reconnect",
+                reconnectIntent,
             )
             .build()
     }
@@ -268,6 +294,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
     companion object {
         const val ACTION_CONNECT = "studio.cluvex.aethery.CONNECT"
         const val ACTION_DISCONNECT = "studio.cluvex.aethery.DISCONNECT"
+        const val ACTION_RECONNECT = "studio.cluvex.aethery.RECONNECT"
         const val ACTION_STATUS = "studio.cluvex.aethery.STATUS"
         const val EXTRA_CONFIG = "config"
         const val EXTRA_VPN_MODE = "vpn_mode"
