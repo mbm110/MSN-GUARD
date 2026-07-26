@@ -52,6 +52,7 @@ class MainActivity : Activity() {
     private lateinit var connectionTitle: TextView
     private lateinit var connectionDetail: TextView
     private lateinit var connectionLatency: TextView
+    private lateinit var latencyGraph: LatencyGraphView
     private lateinit var modeSelector: LinearLayout
     private lateinit var modeValue: TextView
     private lateinit var connectionTypeValue: TextView
@@ -66,6 +67,16 @@ class MainActivity : Activity() {
     private var pendingConfig: String? = null
     private var visualState = ConnectionControl.State.DISCONNECTED
     private var receiverRegistered = false
+    private var autoPingRunning = false
+    private val autoPingHandler = Handler(Looper.getMainLooper())
+    private val autoPingRunnable = object : Runnable {
+        override fun run() {
+            if (visualState == ConnectionControl.State.CONNECTED && autoPingRunning) {
+                pingConnection()
+                autoPingHandler.postDelayed(this, 5000L)
+            }
+        }
+    }
     private var showingSettings = false
     private var showingLogs = false
     private var showingScanner = false
@@ -132,6 +143,11 @@ class MainActivity : Activity() {
             isFocusable = true
             setOnClickListener { pingConnection() }
         }
+        latencyGraph = LatencyGraphView(this).apply {
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { pingConnection() }
+        }
         selectedProtocol = Protocol.MASQUE
         modeValue = label(selectedProtocol.label, 16f, INK, TypefaceStyle.MEDIUM)
         modeSelector = createModeSelector()
@@ -165,7 +181,7 @@ class MainActivity : Activity() {
         ).apply {
             leftMargin = dp(24)
             rightMargin = dp(24)
-            topMargin = -dp(12)
+            topMargin = dp(17)
         })
         mainRoot.addView(label("AETHER CORE", 12f, MUTED).apply {
             letterSpacing = 0.12f
@@ -264,10 +280,21 @@ class MainActivity : Activity() {
             .start()
     }
 
+    private fun startAutoPing() {
+        autoPingRunning = true
+        autoPingHandler.removeCallbacks(autoPingRunnable)
+        autoPingHandler.postDelayed(autoPingRunnable, 5000L)
+    }
+
+    private fun stopAutoPing() {
+        autoPingRunning = false
+        autoPingHandler.removeCallbacks(autoPingRunnable)
+    }
+
     private fun pingConnection() {
         if (visualState != ConnectionControl.State.CONNECTED) return
         val request = ++latencyRequest
-        connectionLatency.text = "Pinging…"
+        latencyGraph.setLabel("Pinging\u2026")
         Thread {
             val result = runCatching {
                 val startedAt = System.nanoTime()
@@ -278,14 +305,16 @@ class MainActivity : Activity() {
                     connection.requestMethod = "GET"
                     connection.instanceFollowRedirects = false
                     check(connection.responseCode in 200..399) { "HTTP ${connection.responseCode}" }
-                    "${(System.nanoTime() - startedAt) / 1_000_000} ms"
+                    val ms = (System.nanoTime() - startedAt) / 1_000_000
+                    "${ms} ms" to ms.toFloat()
                 } finally {
                     connection.disconnect()
                 }
-            }.getOrElse { "Ping unavailable" }
+            }.getOrElse { "Ping unavailable" to null }
             runOnUiThread {
                 if (request == latencyRequest && visualState == ConnectionControl.State.CONNECTED) {
-                    connectionLatency.text = result
+                    latencyGraph.setLabel(result.first)
+                    result.second?.let { latencyGraph.addPoint(it) }
                 }
             }
         }.start()
@@ -334,10 +363,10 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(6) })
-        addView(connectionLatency, LinearLayout.LayoutParams(
+        addView(latencyGraph, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
+            dp(56),
+        ).apply { topMargin = dp(4) })
         addView(modeSelector, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(64),
@@ -482,12 +511,12 @@ class MainActivity : Activity() {
             }
             logLevelRow.addView(chip, LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
-            ).apply { rightMargin = dp(6) })
+            ).apply { rightMargin = dp(4) })
         }
         content.addView(logLevelRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(10); rightMargin = dp(10); bottomMargin = dp(12) })
+        ).apply { leftMargin = dp(0); rightMargin = dp(0); bottomMargin = dp(12) })
         val events = label(textSize = 13f, color = INK).apply {
             typeface = android.graphics.Typeface.MONOSPACE
             setTextIsSelectable(true)
@@ -1083,6 +1112,19 @@ class MainActivity : Activity() {
             dp(56),
         ).apply { topMargin = dp(8) })
 
+        content.addView(label("KILL SWITCH", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(24) })
+        lateinit var killSwitchRow: LinearLayout
+        killSwitchRow = createToggleRow("Kill switch", "Block all traffic if the tunnel drops", killSwitchEnabled()) {
+            preferences().edit().putBoolean(KILL_SWITCH, it).apply()
+        }
+        content.addView(killSwitchRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(72),
+        ).apply { topMargin = dp(8) })
+
         content.addView(label("CORE SOCKS PORT", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1144,8 +1186,8 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
         ).apply { topMargin = dp(12) })
-        content.addView(createSettingsButton("Aethery on GitHub", R.drawable.ic_github) {
-            openLink("https://github.com/ZethRise/Aethery")
+        content.addView(createSettingsButton("Aethery on Zeth Git", R.drawable.ic_forgejo) {
+            openLink("https://git.diastom.xyz/ZethRise/Aethery")
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
@@ -1947,9 +1989,6 @@ class MainActivity : Activity() {
         put("retry_obfuscation_profiles", retryObfuscationProfiles())
         put("tls_curve_preset", tlsCurvePreset().coreName)
         put("wireguard_data_check", wireGuardDataCheck())
-        put("log_level", logLevel().coreName)
-        put("perf_profile", perfProfile().coreName)
-        if (h2Fragmentation() == H2Fragmentation.ON) put("h2_fragmentation", true)
     }.toString()
 
     private fun renderStatus() {
@@ -1985,9 +2024,10 @@ class MainActivity : Activity() {
         connectionTitle.setTextColor(connected)
         connectionTitle.text = "Connected"
         connectionDetail.text = "${selectedProtocol.label} tunnel is active"
-        connectionLatency.text = "Tap to measure latency"
+        latencyGraph.setLabel("Pinging\u2026")
         setModeEnabled(false)
         pingConnection()
+        startAutoPing()
     }
 
     private fun showFailure(detail: String? = null) {
@@ -2003,7 +2043,8 @@ class MainActivity : Activity() {
 
     private fun showDisconnected(detail: String = "Tap the circle to connect") {
         latencyRequest++
-        connectionLatency.text = "Latency unavailable"
+        stopAutoPing()
+        latencyGraph.reset()
         visualState = ConnectionControl.State.DISCONNECTED
         connectionControl.state = visualState
         connectionTitle.setTextColor(INK)
@@ -2155,6 +2196,55 @@ class MainActivity : Activity() {
         ?: TlsCurvePreset.CHROME
 
     private fun wireGuardDataCheck(): Boolean = preferences().getBoolean(WIREGUARD_DATA_CHECK, true)
+
+    private fun killSwitchEnabled(): Boolean = preferences().getBoolean(KILL_SWITCH, false)
+
+    private fun createToggleRow(title: String, subtitle: String, checked: Boolean, onToggle: (Boolean) -> Unit): LinearLayout {
+        val texts = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(label(title, 16f, INK, TypefaceStyle.MEDIUM))
+            addView(label(subtitle, 13f, MUTED), LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(2) })
+        }
+        var isOn = checked
+        val thumbInset = dp(3)
+        val track = LinearLayout(this).apply {
+            val trackWidth = dp(48)
+            val trackHeight = dp(28)
+            layoutParams = LinearLayout.LayoutParams(trackWidth, trackHeight)
+            background = roundedBackground(if (isOn) primary else SURFACE_VARIANT, 14, if (isOn) primary else DIVIDER)
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+            isFocusable = true
+            val thumbSize = dp(22)
+            val thumb = View(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(thumbSize, thumbSize)
+                background = roundedBackground(Color.WHITE, 11, Color.WHITE)
+                translationX = if (isOn) (trackWidth - thumbSize - thumbInset).toFloat() else thumbInset.toFloat()
+            }
+            addView(thumb)
+            setOnClickListener {
+                isOn = !isOn
+                onToggle(isOn)
+                val targetX = if (isOn) (trackWidth - thumbSize - thumbInset).toFloat() else thumbInset.toFloat()
+                thumb.animate()
+                    .translationX(targetX)
+                    .setDuration(160)
+                    .setInterpolator(PathInterpolator(0.2f, 0f, 0f, 1f))
+                    .start()
+                background = roundedBackground(if (isOn) primary else SURFACE_VARIANT, 14, if (isOn) primary else DIVIDER)
+            }
+        }
+        return LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(18), 0, dp(18), 0)
+            background = roundedBackground(SURFACE_VARIANT, 18, DIVIDER)
+            addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(track)
+        }
+    }
 
     private fun logLevel(): LogLevel = preferences()
         .getString(LOG_LEVEL, LogLevel.INFO.coreName)
@@ -2312,6 +2402,7 @@ class MainActivity : Activity() {
         const val RETRY_OBFUSCATION = "retry_obfuscation_profiles"
         const val TLS_CURVE_PRESET = "tls_curve_preset"
         const val WIREGUARD_DATA_CHECK = "wireguard_data_check"
+        const val KILL_SWITCH = "kill_switch"
         const val LOG_LEVEL = "log_level"
         const val PERF_PROFILE = "perf_profile"
         const val H2_FRAGMENTATION = "h2_fragmentation"
@@ -2387,7 +2478,7 @@ private class ConnectionControl(
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val desired = dp(196)
+        val desired = dp(216)
         setMeasuredDimension(resolveSize(desired, widthMeasureSpec), resolveSize(desired, heightMeasureSpec))
     }
 
@@ -2395,7 +2486,7 @@ private class ConnectionControl(
         super.onDraw(canvas)
         val centerX = width / 2f
         val centerY = height / 2f
-        val radius = dp(78).toFloat() + if (state == State.CONNECTING) dp(3) * pulse else 0f
+        val radius = dp(86).toFloat() + if (state == State.CONNECTING) dp(3) * pulse else 0f
         val palette = when (state) {
             State.DISCONNECTED, State.CONNECTING -> Palette(primaryContainer, primary)
             State.CONNECTED -> Palette(CONNECTED_BRIGHT_CONTAINER, CONNECTED_BRIGHT)
@@ -2415,12 +2506,12 @@ private class ConnectionControl(
         paint.color = palette.accent
         canvas.drawCircle(centerX, centerY, radius, paint)
 
-        val iconRadius = dp(25).toFloat()
+        val iconRadius = dp(28).toFloat()
         arcBounds.set(centerX - iconRadius, centerY - iconRadius, centerX + iconRadius, centerY + iconRadius)
         paint.strokeWidth = dp(3).toFloat()
         paint.strokeCap = Paint.Cap.ROUND
         canvas.drawArc(arcBounds, 330f, 240f, false, paint)
-        canvas.drawLine(centerX, centerY - dp(28), centerX, centerY - dp(6), paint)
+        canvas.drawLine(centerX, centerY - dp(31), centerX, centerY - dp(7), paint)
         paint.strokeCap = Paint.Cap.BUTT
 
         if (state == State.CONNECTING) {
@@ -2507,5 +2598,98 @@ private class ConnectionControl(
         const val ERROR_CONTAINER = 0xFF4A1E1C.toInt()
         const val CONNECTED_BRIGHT = 0xFF8FFFB5.toInt()
         const val CONNECTED_BRIGHT_CONTAINER = 0xFF176B3B.toInt()
+    }
+}
+
+private class LatencyGraphView(context: Context) : View(context) {
+    private val maxPoints = 20
+    private val points = mutableListOf<Float>()
+    private var currentLabel = "Latency unavailable"
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = resources.displayMetrics.density * 2f
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        color = 0xFFA4D8BB.toInt()
+    }
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = 0x30A4D8BB.toInt()
+    }
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFE8F1EA.toInt()
+        textSize = resources.displayMetrics.density * 13f
+        typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+    }
+    private val mutedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFB9C6BB.toInt()
+        textSize = resources.displayMetrics.density * 11f
+    }
+    private val density = resources.displayMetrics.density
+    private val path = android.graphics.Path()
+
+    fun addPoint(ms: Float) {
+        points.add(ms)
+        if (points.size > maxPoints) points.removeAt(0)
+        currentLabel = "${ms.toInt()} ms"
+        invalidate()
+    }
+
+    fun setLabel(text: String) {
+        currentLabel = text
+        invalidate()
+    }
+
+    fun reset() {
+        points.clear()
+        currentLabel = "Latency unavailable"
+        invalidate()
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val desiredW = resolveSize((180 * density).toInt(), widthMeasureSpec)
+        val desiredH = resolveSize((56 * density).toInt(), heightMeasureSpec)
+        setMeasuredDimension(desiredW, desiredH)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val padX = density * 4f
+        val padTop = density * 20f
+        val padBottom = density * 4f
+        val graphH = h - padTop - padBottom
+
+        textPaint.textAlign = Paint.Align.CENTER
+        canvas.drawText(currentLabel, w / 2f, padTop - density * 4f, textPaint)
+
+        if (points.isEmpty()) return
+
+        val maxVal = points.max().coerceAtLeast(10f)
+        val stepX = (w - padX * 2) / (maxPoints - 1).coerceAtLeast(1)
+
+        if (points.size == 1) {
+            val x = padX
+            val y = padTop + graphH * (1f - points[0] / maxVal)
+            canvas.drawCircle(x, y, density * 3f, linePaint.apply { style = Paint.Style.FILL })
+            linePaint.style = Paint.Style.STROKE
+            return
+        }
+
+        path.reset()
+        for (i in points.indices) {
+            val x = padX + i * stepX
+            val y = padTop + graphH * (1f - points[i] / maxVal)
+            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        canvas.drawPath(path, linePaint)
+
+        val fillPath = android.graphics.Path(path)
+        val lastX = padX + (points.size - 1) * stepX
+        fillPath.lineTo(lastX, padTop + graphH)
+        fillPath.lineTo(padX, padTop + graphH)
+        fillPath.close()
+        canvas.drawPath(fillPath, fillPaint)
     }
 }

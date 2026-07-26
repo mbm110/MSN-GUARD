@@ -47,6 +47,12 @@ pub struct StartOptions {
     pub tls_curve_preset: TlsCurvePreset,
     pub wireguard_data_check: bool,
     pub tun_fd: Option<i32>,
+    #[serde(default)]
+    pub log_level: Option<String>,
+    #[serde(default)]
+    pub perf_profile: Option<String>,
+    #[serde(default)]
+    pub h2_fragmentation: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +125,9 @@ impl StartOptions {
             tls_curve_preset: TlsCurvePreset::Chrome,
             wireguard_data_check: true,
             tun_fd: None,
+            log_level: None,
+            perf_profile: None,
+            h2_fragmentation: None,
         }
     }
 
@@ -179,6 +188,16 @@ pub async fn run_cli() -> Result<()> {
 
 pub async fn start(options: StartOptions) -> Result<()> {
     initialize();
+
+    if let Some(ref level) = options.log_level {
+        std::env::set_var("AETHER_LOG_LEVEL", level);
+    }
+    if let Some(ref profile) = options.perf_profile {
+        std::env::set_var("AETHER_PERF_PROFILE", profile);
+    }
+    if options.h2_fragmentation == Some(true) {
+        std::env::set_var("AETHER_MASQUE_H2_FRAGMENT", "1");
+    }
 
     match options.protocol {
         Protocol::Masque => {

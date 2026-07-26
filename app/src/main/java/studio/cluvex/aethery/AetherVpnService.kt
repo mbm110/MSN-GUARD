@@ -28,6 +28,11 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
     private var lastTrafficSampleMs = 0L
     private var currentTx = 0L
     private var currentRx = 0L
+    private var prevTx = 0L
+    private var prevRx = 0L
+    private var prevSpeedSampleMs = 0L
+    private var currentSpeedTx = 0L
+    private var currentSpeedRx = 0L
     private var storedConfig: String? = null
     private var storedVpnMode = true
 
@@ -135,11 +140,18 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
                 sendStatus(STATUS_FAILED, detail)
             } finally {
                 NativeCore.detach()
+                val killSwitch = getSharedPreferences("settings", MODE_PRIVATE).getBoolean("kill_switch", false)
                 tun?.close()
                 tun = null
                 connected.set(false)
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                if (killSwitch && !stopRequested.get()) {
+                    ConnectionLog.record("Kill switch active; blocking all traffic")
+                    sendStatus(STATUS_FAILED, "Kill switch active — tunnel dropped")
+                    rebuildKillSwitchVpn()
+                } else {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
             }
         }
     }
@@ -148,6 +160,25 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         stopRequested.set(true)
         NativeCore.stop()
         if (notify && !connected.get()) sendStatus(STATUS_DISCONNECTED)
+    }
+
+    private fun rebuildKillSwitchVpn() {
+        try {
+            tun?.close()
+            tun = Builder()
+                .setSession("Aethery — Kill Switch")
+                .setMtu(1280)
+                .addAddress("100.64.0.1", 32)
+                .addRoute("0.0.0.0", 0)
+                .addRoute("::", 0)
+                .addDnsServer("1.1.1.1")
+                .establish()
+            ConnectionLog.record("Kill switch VPN active; all traffic blocked")
+        } catch (e: Exception) {
+            Log.e(LOG_TAG, "Kill switch rebuild failed: ${e.message}")
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
     }
 
     private fun sendStatus(status: String, detail: String? = null) {
@@ -164,8 +195,17 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
 
     private fun updateTrafficNotification(tx: Long, rx: Long) {
         val now = SystemClock.elapsedRealtime()
-        if (now - lastTrafficSampleMs < 900) return // Throttle UI updates
-        
+        if (now - lastTrafficSampleMs < 900) return
+
+        val elapsed = now - prevSpeedSampleMs
+        if (elapsed > 0 && prevSpeedSampleMs > 0) {
+            currentSpeedTx = ((tx - prevTx) * 1000) / elapsed
+            currentSpeedRx = ((rx - prevRx) * 1000) / elapsed
+        }
+        prevTx = tx
+        prevRx = rx
+        prevSpeedSampleMs = now
+
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, notification(tx, rx))
         lastTrafficSampleMs = now
@@ -176,6 +216,12 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         bytes < 1_048_576 -> "${bytes / 1_024} KB"
         bytes < 1_073_741_824 -> "${bytes / 1_048_576} MB"
         else -> String.format(java.util.Locale.US, "%.2f GB", bytes / 1_073_741_824.toDouble())
+    }
+
+    private fun formatSpeed(bytesPerSec: Long): String = when {
+        bytesPerSec < 1_024 -> "$bytesPerSec B/s"
+        bytesPerSec < 1_048_576 -> "${bytesPerSec / 1_024} KB/s"
+        else -> String.format(java.util.Locale.US, "%.1f MB/s", bytesPerSec / 1_048_576.0)
     }
 
     private fun startAsForeground() {
@@ -215,7 +261,10 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val contentText = if (tx > 0 || rx > 0) {
-            "${getString(R.string.vpn_download)}: ${formatBytes(rx)}  ${getString(R.string.vpn_upload)}: ${formatBytes(tx)}"
+            val speedText = if (currentSpeedTx > 0 || currentSpeedRx > 0) {
+                "  \u2191${formatSpeed(currentSpeedTx)} \u2193${formatSpeed(currentSpeedRx)}"
+            } else ""
+            "${getString(R.string.vpn_download)}: ${formatBytes(rx)}  ${getString(R.string.vpn_upload)}: ${formatBytes(tx)}$speedText"
         } else {
             getString(R.string.vpn_notification)
         }

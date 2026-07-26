@@ -105,12 +105,12 @@ class AppUpdater(private val activity: Activity) {
         val connection = (URL(RELEASE_URL).openConnection() as HttpURLConnection).apply {
             connectTimeout = 10_000
             readTimeout = 20_000
-            setRequestProperty("Accept", "application/vnd.github+json")
+            setRequestProperty("Accept", "application/json")
             setRequestProperty("User-Agent", "Aethery-Android")
         }
         try {
             if (connection.responseCode == HttpURLConnection.HTTP_NOT_FOUND) return null
-            check(connection.responseCode == HttpURLConnection.HTTP_OK) { "GitHub returned ${connection.responseCode}" }
+            check(connection.responseCode == HttpURLConnection.HTTP_OK) { "Forgejo returned ${connection.responseCode}" }
             val json = JSONObject(connection.inputStream.bufferedReader().use { reader -> reader.readText() })
             val version = json.getString("tag_name").removePrefix("v")
             val assets = json.getJSONArray("assets")
@@ -215,7 +215,7 @@ class AppUpdater(private val activity: Activity) {
     private data class Release(val version: String, val assetName: String, val downloadUrl: String)
 
     private companion object {
-        const val RELEASE_URL = "https://api.github.com/repos/ZethRise/Aethery/releases/latest"
+        const val RELEASE_URL = "https://git.diastom.xyz/api/v1/repos/ZethRise/Aethery/releases/latest"
 
         fun isNewer(remote: String, local: String): Boolean {
             val remoteParts = remote.split('.', '-', '+').map { it.toIntOrNull() ?: 0 }
