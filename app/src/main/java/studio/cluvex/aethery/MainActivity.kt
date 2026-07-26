@@ -487,7 +487,7 @@ class MainActivity : Activity() {
         content.addView(logLevelRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); rightMargin = dp(48); bottomMargin = dp(12) })
+        ).apply { leftMargin = dp(10); rightMargin = dp(10); bottomMargin = dp(12) })
         val events = label(textSize = 13f, color = INK).apply {
             typeface = android.graphics.Typeface.MONOSPACE
             setTextIsSelectable(true)
