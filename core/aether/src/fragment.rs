@@ -77,7 +77,10 @@ impl FragmentConfig {
 }
 
 fn is_truthy(v: &str) -> bool {
-    matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    matches!(
+        v.trim().to_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 fn parse_range(spec: &str, default: (u64, u64)) -> (u64, u64) {
@@ -101,7 +104,6 @@ fn parse_range(spec: &str, default: (u64, u64)) -> (u64, u64) {
         }
     }
 }
-
 
 pub struct FragmentingStream<S> {
     inner: S,

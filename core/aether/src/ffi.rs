@@ -1,5 +1,5 @@
-use std::ffi::{c_char, CStr, CString};
 use std::collections::VecDeque;
+use std::ffi::{c_char, CStr, CString};
 use std::net::SocketAddr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,7 +8,10 @@ use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use crate::{platform, EndpointDiscovery, IpScan, MasqueTransport, Protocol, ScanMode, StartOptions, TlsCurvePreset, TunnelAddresses};
+use crate::{
+    platform, EndpointDiscovery, IpScan, MasqueTransport, Protocol, ScanMode, StartOptions,
+    TlsCurvePreset, TunnelAddresses,
+};
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -33,10 +36,8 @@ static LAST_ERROR: LazyLock<Mutex<CString>> =
     LazyLock::new(|| Mutex::new(CString::new("").unwrap()));
 static LAST_RESULT: LazyLock<Mutex<CString>> =
     LazyLock::new(|| Mutex::new(CString::new("").unwrap()));
-static LAST_LOG: LazyLock<Mutex<CString>> =
-    LazyLock::new(|| Mutex::new(CString::new("").unwrap()));
-static LOGS: LazyLock<Mutex<VecDeque<String>>> =
-    LazyLock::new(|| Mutex::new(VecDeque::new()));
+static LAST_LOG: LazyLock<Mutex<CString>> = LazyLock::new(|| Mutex::new(CString::new("").unwrap()));
+static LOGS: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -131,7 +132,9 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.ip_scan = IpScan::parse(&value.ip_scan);
         options.obfuscation_profile = value.obfuscation_profile;
         options.retry_obfuscation_profiles = value.retry_obfuscation_profiles;
-        options.endpoint_cache_path = value.endpoint_cache_path.filter(|path| !path.trim().is_empty());
+        options.endpoint_cache_path = value
+            .endpoint_cache_path
+            .filter(|path| !path.trim().is_empty());
         options.endpoint_discovery = EndpointDiscovery::parse(&value.endpoint_discovery);
         options.masque_transport = MasqueTransport::parse(&value.masque_transport);
         options.tls_curve_preset = TlsCurvePreset::parse(&value.tls_curve_preset);
@@ -158,7 +161,9 @@ fn clear_logs() {
 
 pub(crate) fn record_log(message: impl ToString) {
     let text = message.to_string().replace('\0', " ");
-    emit_event(Event::Log { message: text.clone() });
+    emit_event(Event::Log {
+        message: text.clone(),
+    });
     let snapshot = {
         let mut logs = LOGS.lock().unwrap();
         if logs.len() == 400 {
@@ -385,7 +390,6 @@ pub(crate) fn mark_ready() {
     READY.store(true, Ordering::Release);
     emit_status("connected", None);
 }
-
 
 #[cfg(test)]
 mod tests {

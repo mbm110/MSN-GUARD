@@ -315,28 +315,34 @@ pub async fn run(
 
     let frag_cfg = FragmentConfig::from_env();
     if frag_cfg.enabled {
-        log_or_debug(quiet, format!(
-            "[h2] fragmenting client hello: size={}..{} delay={}..{}ms",
-            frag_cfg.size_min, frag_cfg.size_max, frag_cfg.delay_min_ms, frag_cfg.delay_max_ms
-        ));
+        log_or_debug(
+            quiet,
+            format!(
+                "[h2] fragmenting client hello: size={}..{} delay={}..{}ms",
+                frag_cfg.size_min, frag_cfg.size_max, frag_cfg.delay_min_ms, frag_cfg.delay_max_ms
+            ),
+        );
     }
     let fragment = FragmentingStream::new(tcp, frag_cfg);
 
     let tls = tokio_boring::connect(tls_config, &cfg.sni, fragment)
         .await
         .map_err(|e| AetherError::Tls(format!("h2 tls handshake: {e}")))?;
-    log_or_debug(quiet, format!(
-        "[h2] tls established; alpn={}",
-        String::from_utf8_lossy(tls.ssl().selected_alpn_protocol().unwrap_or(b""))
-    ));
+    log_or_debug(
+        quiet,
+        format!(
+            "[h2] tls established; alpn={}",
+            String::from_utf8_lossy(tls.ssl().selected_alpn_protocol().unwrap_or(b""))
+        ),
+    );
 
     let (h2, mut connection) = h2::client::handshake(tls)
         .await
         .map_err(|e| AetherError::Masque(format!("h2 handshake: {e}")))?;
 
-    let mut ping_pong = connection.ping_pong().ok_or_else(|| {
-        AetherError::Masque("h2 connection does not support ping".into())
-    })?;
+    let mut ping_pong = connection
+        .ping_pong()
+        .ok_or_else(|| AetherError::Masque("h2 connection does not support ping".into()))?;
 
     let driver_handle = tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -355,13 +361,19 @@ pub async fn run(
     let (resp_fut, mut send_stream) = h2
         .send_request(req, false)
         .map_err(|e| AetherError::Masque(format!("send_request: {e}")))?;
-    log_or_debug(quiet, format!("[h2] connect-ip request sent to {}", cfg.authority));
+    log_or_debug(
+        quiet,
+        format!("[h2] connect-ip request sent to {}", cfg.authority),
+    );
 
     let response = resp_fut
         .await
         .map_err(|e| AetherError::Masque(format!("await response: {e}")))?;
     let status = response.status();
-    log_or_debug(quiet, format!("[h2] connect-ip status: {}", status.as_u16()));
+    log_or_debug(
+        quiet,
+        format!("[h2] connect-ip status: {}", status.as_u16()),
+    );
     if !status.is_success() {
         return Err(AetherError::Masque(format!(
             "h2 connect-ip status {}",
@@ -380,7 +392,10 @@ pub async fn run(
             log::debug!("[h2] initial data-plane probe: {e}");
         }
         validate_deadline = Some(Instant::now() + validation_timeout());
-        log_or_debug(quiet, "[h2] validating data-plane (end-to-end probe) before exposing socks5".to_string());
+        log_or_debug(
+            quiet,
+            "[h2] validating data-plane (end-to-end probe) before exposing socks5".to_string(),
+        );
     } else if !ready_fired {
         ready_fired = true;
         if let Some(tx) = ready_tx.take() {

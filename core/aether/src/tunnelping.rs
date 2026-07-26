@@ -113,9 +113,17 @@ pub async fn masque_http_ping(p: &MasquePingParams, timeout: Duration) -> Result
                 local_ipv4: p.local_ipv4,
                 quiet: true,
                 pin_endpoint: true,
-                expected_pins: crate::consts::MASQUE_PINS.iter().map(|p| p.to_vec()).collect(),
+                expected_pins: crate::consts::MASQUE_PINS
+                    .iter()
+                    .map(|p| p.to_vec())
+                    .collect(),
             };
-            AbortGuard(tokio::spawn(masque_h2::run(h2cfg, internals, None, Some(ready_tx))))
+            AbortGuard(tokio::spawn(masque_h2::run(
+                h2cfg,
+                internals,
+                None,
+                Some(ready_tx),
+            )))
         } else {
             let cfg = quic::TunnelConfig {
                 peer: p.peer,
@@ -126,10 +134,16 @@ pub async fn masque_http_ping(p: &MasquePingParams, timeout: Duration) -> Result
                 key_pem: p.key_pem.clone(),
                 ech_config_list: None,
                 noize: p.noize.clone(),
+                tls_curve_preset: crate::TlsCurvePreset::Chrome,
                 local_ipv4: p.local_ipv4,
                 quiet: true,
             };
-            AbortGuard(tokio::spawn(quic::run(cfg, internals, None, Some(ready_tx))))
+            AbortGuard(tokio::spawn(quic::run(
+                cfg,
+                internals,
+                None,
+                Some(ready_tx),
+            )))
         };
 
         if ready_rx.await.is_err() {
@@ -165,8 +179,10 @@ pub async fn wg_http_ping_established(
     timeout: Duration,
 ) -> Result<Duration> {
     let attempt = async {
-        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(crate::sysprofile::channel_capacity());
-        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(crate::sysprofile::channel_capacity());
+        let (outbound_tx, outbound_rx) =
+            tokio::sync::mpsc::channel(crate::sysprofile::channel_capacity());
+        let (inbound_tx, inbound_rx) =
+            tokio::sync::mpsc::channel(crate::sysprofile::channel_capacity());
 
         let tunnel = wireguard::WgTunnel::from_established(
             session,

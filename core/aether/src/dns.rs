@@ -21,7 +21,10 @@ pub async fn fetch_ech_config() -> Result<Vec<u8>> {
             };
             match query_ech(addr, host).await {
                 Ok(ech) if !ech.is_empty() => {
-                    log::info!("fetched ECHConfigList ({} bytes) for {host} via {server}", ech.len());
+                    log::info!(
+                        "fetched ECHConfigList ({} bytes) for {host} via {server}",
+                        ech.len()
+                    );
                     return Ok(ech);
                 }
                 Ok(_) => {}
@@ -33,7 +36,11 @@ pub async fn fetch_ech_config() -> Result<Vec<u8>> {
 }
 
 async fn query_ech(server: SocketAddr, host: &str) -> Result<Vec<u8>> {
-    let bind = if server.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+    let bind = if server.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
     let sock = UdpSocket::bind(bind).await?;
     sock.connect(server).await?;
 

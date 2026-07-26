@@ -165,7 +165,10 @@ fn http_client() -> Result<reqwest::Client> {
 fn base_headers() -> reqwest::header::HeaderMap {
     use reqwest::header::{HeaderMap, HeaderValue, CONNECTION, CONTENT_TYPE};
     let mut h = HeaderMap::new();
-    h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=UTF-8"));
+    h.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=UTF-8"),
+    );
     h.insert(CONNECTION, HeaderValue::from_static("Keep-Alive"));
     h.insert(
         "CF-Client-Version",
@@ -200,7 +203,11 @@ fn tos_timestamp() -> String {
         .to_string()
 }
 
-pub async fn register(model: &str, locale: &str, jwt: Option<&str>) -> Result<(AccountData, [u8; 32])> {
+pub async fn register(
+    model: &str,
+    locale: &str,
+    jwt: Option<&str>,
+) -> Result<(AccountData, [u8; 32])> {
     let (wg_private, wg_public) = generate_x25519_keypair();
 
     let body = Registration {
@@ -217,16 +224,16 @@ pub async fn register(model: &str, locale: &str, jwt: Option<&str>) -> Result<(A
     };
 
     let url = format!("{}/{}/reg", consts::API_URL, consts::API_VERSION);
-    let mut req = http_client()?
-        .post(url)
-        .headers(base_headers())
-        .json(&body);
+    let mut req = http_client()?.post(url).headers(base_headers()).json(&body);
 
     if let Some(jwt) = jwt {
         req = req.header("CF-Access-Jwt-Assertion", jwt);
     }
 
-    let resp = req.send().await.map_err(|e| AetherError::Api(e.to_string()))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| AetherError::Api(e.to_string()))?;
     let account = parse_account(resp).await?;
     Ok((account, wg_private))
 }
@@ -244,7 +251,12 @@ pub async fn enroll_key(
         name: name.map(|s| s.to_string()),
     };
 
-    let url = format!("{}/{}/reg/{}", consts::API_URL, consts::API_VERSION, device_id);
+    let url = format!(
+        "{}/{}/reg/{}",
+        consts::API_URL,
+        consts::API_VERSION,
+        device_id
+    );
     let resp = http_client()?
         .patch(url)
         .headers(base_headers())
@@ -259,7 +271,10 @@ pub async fn enroll_key(
 
 async fn parse_account(resp: reqwest::Response) -> Result<AccountData> {
     let status = resp.status();
-    let text = resp.text().await.map_err(|e| AetherError::Api(e.to_string()))?;
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| AetherError::Api(e.to_string()))?;
 
     if !status.is_success() {
         return Err(AetherError::Api(format!("status {status}: {text}")));
@@ -294,13 +309,22 @@ pub async fn provision_wg(model: &str, locale: &str, jwt: Option<&str>) -> Resul
 
     let mut client_id_arr = [0u8; 3];
     if !reg.config.client_id.is_empty() {
-        log::debug!("[account] received client_id from API: {:?}", reg.config.client_id);
-        if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &reg.config.client_id) {
+        log::debug!(
+            "[account] received client_id from API: {:?}",
+            reg.config.client_id
+        );
+        if let Ok(decoded) = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &reg.config.client_id,
+        ) {
             if decoded.len() == 3 {
                 client_id_arr.copy_from_slice(&decoded);
                 log::debug!("[account] decoded client_id: {:02x?}", client_id_arr);
             } else {
-                log::warn!("[account] client_id decoded but wrong length: {}", decoded.len());
+                log::warn!(
+                    "[account] client_id decoded but wrong length: {}",
+                    decoded.len()
+                );
             }
         } else {
             log::warn!("[account] failed to decode client_id base64");
@@ -329,7 +353,13 @@ pub async fn ensure_masque_enrolled(identity: &Identity) -> Result<(Vec<u8>, Vec
 
     log::info!("[+] enrolling MASQUE key for device {}", identity.device_id);
     let keypair = generate_masque_keypair()?;
-    enroll_key(&identity.device_id, &identity.access_token, &keypair.spki_der, None).await?;
+    enroll_key(
+        &identity.device_id,
+        &identity.access_token,
+        &keypair.spki_der,
+        None,
+    )
+    .await?;
     log::info!("[+] MASQUE key enrolled");
     Ok((keypair.cert_pem, keypair.key_pem))
 }

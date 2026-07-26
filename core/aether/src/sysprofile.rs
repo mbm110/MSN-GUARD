@@ -149,12 +149,23 @@ fn build_tuning() -> Tuning {
     let mem_mb = total_mem_mb();
     let tier = detect_tier(cpus, mem_mb);
 
-    let (scan_concurrency_cap, udp_socket_buf, netstack_tcp_buf, netstack_udp_buf, channel_capacity) =
-        match tier {
-            Tier::Low => (4usize, 256 * 1024, 128 * 1024, 32 * 1024, 128usize),
-            Tier::Medium => (10usize, 2 * 1024 * 1024, 256 * 1024, 64 * 1024, 512usize),
-            Tier::High => (usize::MAX, 7 * 1024 * 1024, 512 * 1024, 128 * 1024, 1024usize),
-        };
+    let (
+        scan_concurrency_cap,
+        udp_socket_buf,
+        netstack_tcp_buf,
+        netstack_udp_buf,
+        channel_capacity,
+    ) = match tier {
+        Tier::Low => (4usize, 256 * 1024, 128 * 1024, 32 * 1024, 128usize),
+        Tier::Medium => (10usize, 2 * 1024 * 1024, 256 * 1024, 64 * 1024, 512usize),
+        Tier::High => (
+            usize::MAX,
+            7 * 1024 * 1024,
+            512 * 1024,
+            128 * 1024,
+            1024usize,
+        ),
+    };
 
     Tuning {
         tier,

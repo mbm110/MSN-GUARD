@@ -280,7 +280,11 @@ async fn handle_connect(
     Ok(())
 }
 
-async fn handle_udp_associate(mut sock: TcpStream, stack: StackHandle, bind_ip: IpAddr) -> Result<()> {
+async fn handle_udp_associate(
+    mut sock: TcpStream,
+    stack: StackHandle,
+    bind_ip: IpAddr,
+) -> Result<()> {
     let relay = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await?;
     let relay_addr = relay.local_addr()?;
     reply_bound(&mut sock, relay_addr).await?;

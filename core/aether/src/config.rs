@@ -54,7 +54,7 @@ impl From<PersistedIdentity> for Identity {
         let mut client_id_arr = [0u8; 3];
         wg_private_key.copy_from_slice(&wg_priv);
         wg_peer_public_key.copy_from_slice(&wg_peer);
-        
+
         if !p.client_id.is_empty() {
             if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&p.client_id) {
                 if decoded.len() == 3 {

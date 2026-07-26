@@ -122,5 +122,7 @@ pub async fn bridge(
     _inbound_rx: mpsc::Receiver<Vec<u8>>,
     _outbound_tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
-    Err(AetherError::Other("TUN mode requires a Unix platform".into()))
+    Err(AetherError::Other(
+        "TUN mode requires a Unix platform".into(),
+    ))
 }

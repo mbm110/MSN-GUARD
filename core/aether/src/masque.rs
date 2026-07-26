@@ -153,7 +153,7 @@ impl CapsuleParser {
             CAPSULE_ADDRESS_REQUEST => Capsule::AddressRequest,
             CAPSULE_ROUTE_ADVERTISEMENT => {
                 Capsule::RouteAdvertisement(parse_route_advertisement(&value)?)
-            },
+            }
             CAPSULE_DATAGRAM => Capsule::Datagram(value),
             other => Capsule::Unknown {
                 kind: other,

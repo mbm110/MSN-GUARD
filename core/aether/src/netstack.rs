@@ -97,8 +97,13 @@ impl Device for StackDevice {
 }
 
 pub enum Cmd {
-    OpenTcp { dst: SocketAddr, resp: OpenTcpResp },
-    OpenUdp { resp: OpenUdpResp },
+    OpenTcp {
+        dst: SocketAddr,
+        resp: OpenTcpResp,
+    },
+    OpenUdp {
+        resp: OpenUdpResp,
+    },
     SetAddrs {
         v4: Option<(Ipv4Addr, u8)>,
         v6: Option<(Ipv6Addr, u8)>,
@@ -332,11 +337,7 @@ fn routable_prefix_v6(p: u8) -> u8 {
     }
 }
 
-fn apply_addrs(
-    iface: &mut Interface,
-    v4: Option<(Ipv4Addr, u8)>,
-    v6: Option<(Ipv6Addr, u8)>,
-) {
+fn apply_addrs(iface: &mut Interface, v4: Option<(Ipv4Addr, u8)>, v6: Option<(Ipv6Addr, u8)>) {
     iface.update_ip_addrs(|addrs| {
         addrs.clear();
         if let Some((ip, p)) = v4 {
@@ -556,7 +557,13 @@ fn handle_cmd(s: &mut NetStack, cmd: Cmd) {
             s.next_id += 1;
 
             let (to_app_tx, to_app_rx) = mpsc::channel(app_queue());
-            s.udp_conns.insert(id, UdpState { handle, to_app: to_app_tx });
+            s.udp_conns.insert(
+                id,
+                UdpState {
+                    handle,
+                    to_app: to_app_tx,
+                },
+            );
 
             let conn = UdpConn {
                 id,

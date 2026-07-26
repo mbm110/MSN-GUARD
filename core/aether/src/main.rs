@@ -6,9 +6,12 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{account, aethernoize, config, consts, dns, masque_h2, netstack, noize, prober, quic, socks, tls, tun, wg_prober, wireguard};
 use crate::error::{AetherError, Result};
 pub use crate::prober::{IpScan, ScanMode};
+use crate::{
+    account, aethernoize, config, consts, dns, masque_h2, netstack, noize, prober, quic, socks,
+    tls, tun, wg_prober, wireguard,
+};
 
 mod cli;
 mod fragment;
@@ -47,11 +50,8 @@ pub struct StartOptions {
     pub tls_curve_preset: TlsCurvePreset,
     pub wireguard_data_check: bool,
     pub tun_fd: Option<i32>,
-    #[serde(default)]
     pub log_level: Option<String>,
-    #[serde(default)]
     pub perf_profile: Option<String>,
-    #[serde(default)]
     pub h2_fragmentation: Option<bool>,
 }
 
@@ -148,14 +148,15 @@ pub async fn run_cli() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| "127.0.0.1:1819".parse().unwrap());
 
-    let protocol = if std::env::var("AETHER_PEER").is_ok() || std::env::var("AETHER_WG_PEER").is_ok() {
-        match std::env::var("AETHER_PROTOCOL") {
-            Ok(v) => Protocol::parse(&v),
-            Err(_) => Protocol::Masque,
-        }
-    } else {
-        select_protocol().await
-    };
+    let protocol =
+        if std::env::var("AETHER_PEER").is_ok() || std::env::var("AETHER_WG_PEER").is_ok() {
+            match std::env::var("AETHER_PROTOCOL") {
+                Ok(v) => Protocol::parse(&v),
+                Err(_) => Protocol::Masque,
+            }
+        } else {
+            select_protocol().await
+        };
 
     let forced_peer = match protocol {
         Protocol::Masque => std::env::var("AETHER_PEER").ok(),
@@ -233,7 +234,10 @@ pub async fn start(options: StartOptions) -> Result<()> {
             let secondary = load_or_provision_warp(&secondary_path).await?;
             log::info!(
                 "[+] outer device={} ipv4={} | inner device={} ipv4={}",
-                primary.device_id, primary.ipv4, secondary.device_id, secondary.ipv4
+                primary.device_id,
+                primary.ipv4,
+                secondary.device_id,
+                secondary.ipv4
             );
             run_gool(primary, secondary, options.listen, &options).await
         }
@@ -308,7 +312,10 @@ fn masque_config_path(options: &StartOptions) -> String {
 }
 
 fn derive_sibling_path(base: &str, suffix: &str) -> String {
-    let dir_end = base.rfind(|c| c == '/' || c == '\\').map(|i| i + 1).unwrap_or(0);
+    let dir_end = base
+        .rfind(|c| c == '/' || c == '\\')
+        .map(|i| i + 1)
+        .unwrap_or(0);
     match base[dir_end..].rfind('.') {
         Some(rel) => {
             let dot = dir_end + rel;
@@ -325,7 +332,8 @@ async fn load_or_provision_warp(config_path: &str) -> Result<account::Identity> 
     }
 
     log::info!("[+] no warp identity found; provisioning dedicated wireguard account");
-    let identity = account::provision_wg(consts::DEFAULT_MODEL, consts::DEFAULT_LOCALE, None).await?;
+    let identity =
+        account::provision_wg(consts::DEFAULT_MODEL, consts::DEFAULT_LOCALE, None).await?;
     config::save(config_path, &identity)?;
     log::info!("[+] provisioned and saved new warp identity to {config_path}");
     Ok(identity)
@@ -339,15 +347,24 @@ async fn load_or_provision_masque(config_path: &str) -> Result<account::Identity
         }
         log::info!("[+] masque identity missing credentials; enrolling masque key");
         let (cert_pem, key_pem) = account::ensure_masque_enrolled(&identity).await?;
-        let identity = account::Identity { cert_pem, key_pem, ..identity };
+        let identity = account::Identity {
+            cert_pem,
+            key_pem,
+            ..identity
+        };
         config::save(config_path, &identity)?;
         return Ok(identity);
     }
 
     log::info!("[+] no masque identity found; provisioning dedicated masque account");
-    let identity = account::provision_wg(consts::DEFAULT_MODEL, consts::DEFAULT_LOCALE, None).await?;
+    let identity =
+        account::provision_wg(consts::DEFAULT_MODEL, consts::DEFAULT_LOCALE, None).await?;
     let (cert_pem, key_pem) = account::ensure_masque_enrolled(&identity).await?;
-    let identity = account::Identity { cert_pem, key_pem, ..identity };
+    let identity = account::Identity {
+        cert_pem,
+        key_pem,
+        ..identity
+    };
     config::save(config_path, &identity)?;
     log::info!("[+] provisioned and saved new masque identity to {config_path}");
     Ok(identity)
@@ -386,21 +403,31 @@ async fn select_peer(
             if options.endpoint_discovery == EndpointDiscovery::Cache {
                 let cached = cached_masque_gateways(options);
                 if !cached.is_empty() {
-                    crate::ffi::record_log(format!("Checking {} cached MASQUE gateway(s)", cached.len()));
+                    crate::ffi::record_log(format!(
+                        "Checking {} cached MASQUE gateway(s)",
+                        cached.len()
+                    ));
                     if let Some(best) = prober::verify_cached_gateways(&probe, cached).await {
                         cache_masque_gateway(options, best);
-                        spawn_masque_cache_refresh(probe.clone(), options.endpoint_cache_path.clone());
+                        spawn_masque_cache_refresh(
+                            probe.clone(),
+                            options.endpoint_cache_path.clone(),
+                        );
                         log::info!("[+] using cached MASQUE gateway {}:{}", best.ip, best.port);
                         return Ok(SocketAddr::new(best.ip, best.port));
                     }
-                    crate::ffi::record_log("Cached gateways did not respond; starting a fresh scan");
+                    crate::ffi::record_log(
+                        "Cached gateways did not respond; starting a fresh scan",
+                    );
                 }
             }
 
             let best = match prober::hunt_best_gateway(&probe, options.scan_mode).await {
                 Ok(best) => best,
                 Err(error) if !masque_h2::enabled() => {
-                    log::warn!("[-] HTTP/3 found no MASQUE gateway ({error}); retrying HTTP/2 over TCP");
+                    log::warn!(
+                        "[-] HTTP/3 found no MASQUE gateway ({error}); retrying HTTP/2 over TCP"
+                    );
                     crate::ffi::record_log("HTTP/3 found no gateway; retrying HTTP/2 over TCP");
                     masque_h2::enable_fallback();
                     prober::hunt_best_gateway(&probe, ScanMode::Turbo).await?
@@ -411,20 +438,31 @@ async fn select_peer(
             if options.endpoint_discovery == EndpointDiscovery::Cache {
                 spawn_masque_cache_refresh(probe.clone(), options.endpoint_cache_path.clone());
             }
-            log::info!("[+] selected MASQUE gateway {}:{} (rtt {:?})", best.ip, best.port, best.rtt);
-            crate::ffi::record_log(format!("Selected {}:{} ({:?})", best.ip, best.port, best.rtt));
+            log::info!(
+                "[+] selected MASQUE gateway {}:{} (rtt {:?})",
+                best.ip,
+                best.port,
+                best.rtt
+            );
+            crate::ffi::record_log(format!(
+                "Selected {}:{} ({:?})",
+                best.ip, best.port, best.rtt
+            ));
             Ok(SocketAddr::new(best.ip, best.port))
         }
         Protocol::WireGuard | Protocol::WarpInWarp => {
             log::info!("[*] hunting for a working WireGuard endpoint (handshake + data-plane verification)");
             let private_key = identity.private_key_bytes()?;
             let peer_public = identity.peer_public_key_bytes()?;
-            
+
             let probe = wg_prober::WgProbe {
                 private_key: std::sync::Arc::new(private_key),
                 peer_public_key: std::sync::Arc::new(peer_public),
                 client_id: identity.client_id.clone(),
-                local_ipv4: identity.ipv4.parse().map_err(|_| AetherError::Other("invalid ipv4".into()))?,
+                local_ipv4: identity
+                    .ipv4
+                    .parse()
+                    .map_err(|_| AetherError::Other("invalid ipv4".into()))?,
                 aethernoize: aethernoize_config(options.wireguard_profile()),
                 data_check: options.wireguard_data_check,
                 ports: wireguard::WG_PORTS.to_vec(),
@@ -436,7 +474,12 @@ async fn select_peer(
                 wg_prober::WgScanMode::parse(options.scan_mode.label()),
             )
             .await?;
-            log::info!("[+] selected WireGuard endpoint {}:{} (rtt {:?})", best.ip, best.port, best.rtt);
+            log::info!(
+                "[+] selected WireGuard endpoint {}:{} (rtt {:?})",
+                best.ip,
+                best.port,
+                best.rtt
+            );
             Ok(SocketAddr::new(best.ip, best.port))
         }
     }
@@ -446,7 +489,10 @@ async fn resolve_ech() -> Option<Vec<u8>> {
     match std::env::var("AETHER_ECH") {
         Ok(v) if v.eq_ignore_ascii_case("auto") => match dns::fetch_ech_config().await {
             Ok(raw) => {
-                log::info!("[+] fetched ECHConfigList automatically ({} bytes)", raw.len());
+                log::info!(
+                    "[+] fetched ECHConfigList automatically ({} bytes)",
+                    raw.len()
+                );
                 Some(raw)
             }
             Err(e) => {
@@ -485,6 +531,7 @@ async fn quick_verify_masque_peer(identity: &account::Identity, peer: SocketAddr
         key_pem: identity.key_pem.clone(),
         ech_config_list: None,
         noize: noize_config("firewall"),
+        tls_curve_preset: TlsCurvePreset::Chrome,
         timeout: std::time::Duration::from_secs(5),
         local_ipv4: parse_local_v4(&identity.ipv4),
     };
@@ -540,7 +587,9 @@ async fn hunt_masque_peer(
     ip: prober::IpScan,
     options: &StartOptions,
 ) -> Result<SocketAddr> {
-    log::info!("[*] hunting for a working MASQUE gateway (deep connect-ip + data-plane verification)");
+    log::info!(
+        "[*] hunting for a working MASQUE gateway (deep connect-ip + data-plane verification)"
+    );
     let mode = prober::ScanMode::parse(mode_str);
     let probe = prober::MasqueProbe {
         sni: consts::CONNECT_SNI.to_string(),
@@ -612,7 +661,9 @@ async fn run_masque(
                     if quick_verify_masque_peer(&identity, p).await {
                         Some(p)
                     } else {
-                        log::warn!("[-] last known-good gateway {p} no longer responds; rescanning");
+                        log::warn!(
+                            "[-] last known-good gateway {p} no longer responds; rescanning"
+                        );
                         None
                     }
                 }
@@ -632,7 +683,9 @@ async fn run_masque(
                     None => match hunt_masque_peer(&identity, &mode_str, ip, options).await {
                         Ok(peer) => peer,
                         Err(e) => {
-                            log::warn!("[-] no usable MASQUE gateway found: {e}; rescanning shortly");
+                            log::warn!(
+                                "[-] no usable MASQUE gateway found: {e}; rescanning shortly"
+                            );
                             tokio::time::sleep(masque_reconnect_delay()).await;
                             continue;
                         }
@@ -737,7 +790,12 @@ async fn run_masque_tunnel(
             expected_pins: consts::MASQUE_PINS.iter().map(|p| p.to_vec()).collect(),
         };
         log::info!("[+] MASQUE transport: HTTP/2 (TCP) to {}", h2cfg.peer);
-        let tunnel_task = tokio::spawn(masque_h2::run(h2cfg, internals, Some(addr_tx), Some(ready_tx)));
+        let tunnel_task = tokio::spawn(masque_h2::run(
+            h2cfg,
+            internals,
+            Some(addr_tx),
+            Some(ready_tx),
+        ));
         match ready_rx.await {
             Ok(()) => {}
             Err(_) => {
@@ -856,7 +914,9 @@ async fn hunt_wg_peer(
         );
         match hunt_wg_peer_with_profile(identity, mode_str, ip, profile.clone(), data_check).await {
             Ok(peer) => {
-                log::info!("[+] selected WireGuard endpoint {peer} using aethernoize profile '{name}'");
+                log::info!(
+                    "[+] selected WireGuard endpoint {peer} using aethernoize profile '{name}'"
+                );
                 return Ok((peer, profile.clone(), name.clone()));
             }
             Err(e) => {
@@ -924,15 +984,21 @@ async fn run_wireguard(
                         &profile,
                         options.wireguard_data_check,
                         std::time::Duration::from_secs(6),
+                        None,
                     )
                     .await
                     {
                         Ok(rtt) => {
-                            log::info!("[+] cached endpoint {peer} still works (rtt {:?}); skipping scan", rtt);
+                            log::info!(
+                                "[+] cached endpoint {peer} still works (rtt {:?}); skipping scan",
+                                rtt
+                            );
                             quick = Some((peer, profile, cached.profile.clone()));
                         }
                         Err(e) => {
-                            log::warn!("[-] cached endpoint {peer} no longer works ({e}); scanning fresh");
+                            log::warn!(
+                                "[-] cached endpoint {peer} no longer works ({e}); scanning fresh"
+                            );
                         }
                     }
                 }
@@ -966,7 +1032,9 @@ async fn run_wireguard(
             } else {
                 match &last_good {
                     Some((p, profile, _)) => {
-                        log::info!("[*] retrying last known-good WireGuard endpoint {p} before rescanning");
+                        log::info!(
+                            "[*] retrying last known-good WireGuard endpoint {p} before rescanning"
+                        );
                         match wireguard::verify_endpoint(
                             *p,
                             private_key,
@@ -976,6 +1044,7 @@ async fn run_wireguard(
                             profile,
                             options.wireguard_data_check,
                             std::time::Duration::from_secs(6),
+                            None,
                         )
                         .await
                         {
@@ -1001,7 +1070,9 @@ async fn run_wireguard(
 
                         let mut chosen = None;
                         for (name, profile) in &candidates {
-                            log::info!("[*] testing forced peer {peer} with aethernoize profile '{name}'");
+                            log::info!(
+                                "[*] testing forced peer {peer} with aethernoize profile '{name}'"
+                            );
                             match wireguard::verify_endpoint(
                                 peer,
                                 private_key,
@@ -1011,11 +1082,16 @@ async fn run_wireguard(
                                 profile,
                                 options.wireguard_data_check,
                                 std::time::Duration::from_secs(10),
+                                None,
                             )
                             .await
                             {
                                 Ok(rtt) => {
-                                    log::info!("[+] profile '{}' passed handshake + data-plane (rtt {:?})", name, rtt);
+                                    log::info!(
+                                        "[+] profile '{}' passed handshake + data-plane (rtt {:?})",
+                                        name,
+                                        rtt
+                                    );
                                     chosen = Some((peer, profile.clone(), name.clone()));
                                     break;
                                 }
@@ -1029,7 +1105,15 @@ async fn run_wireguard(
                             None => return Err(AetherError::NoCleanEndpoint),
                         }
                     } else {
-                        match hunt_wg_peer(&identity, &candidates, &mode_str, ip, options.wireguard_data_check).await {
+                        match hunt_wg_peer(
+                            &identity,
+                            &candidates,
+                            &mode_str,
+                            ip,
+                            options.wireguard_data_check,
+                        )
+                        .await
+                        {
                             Ok(v) => v,
                             Err(e) => {
                                 log::warn!("[-] no usable WireGuard endpoint found: {e}; rescanning shortly");
@@ -1078,7 +1162,9 @@ async fn run_wireguard_tunnel(
 ) -> Result<()> {
     let private_key = identity.private_key_bytes()?;
     let peer_public = identity.peer_public_key_bytes()?;
-    let ipv4: std::net::Ipv4Addr = identity.ipv4.parse()
+    let ipv4: std::net::Ipv4Addr = identity
+        .ipv4
+        .parse()
         .map_err(|_| AetherError::Other("invalid ipv4".into()))?;
 
     log::info!("[*] validating WireGuard tunnel with {peer} (handshake + data-plane) before exposing socks5...");
@@ -1089,6 +1175,7 @@ async fn run_wireguard_tunnel(
         identity.client_id,
         ipv4,
         &aethernoize,
+        options.wireguard_data_check,
         wg_tunnel_validate_timeout(),
         Some(wg_keepalive_secs()),
     )
@@ -1100,7 +1187,12 @@ async fn run_wireguard_tunnel(
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
     let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
 
-    let tunnel = wireguard::WgTunnel::from_established(session, std::sync::Arc::new(aethernoize), inbound_tx, ipv4);
+    let tunnel = wireguard::WgTunnel::from_established(
+        session,
+        std::sync::Arc::new(aethernoize),
+        inbound_tx,
+        ipv4,
+    );
 
     let local_task = if let Some(fd) = options.tun_fd {
         log::info!("[+] Android TUN bridge active");
@@ -1135,6 +1227,7 @@ async fn establish_wg(
     obfuscate: bool,
     keepalive: u16,
     label: &'static str,
+    data_check: bool,
 ) -> Result<netstack::StackHandle> {
     let private_key = identity.private_key_bytes()?;
     let peer_public = identity.peer_public_key_bytes()?;
@@ -1158,6 +1251,7 @@ async fn establish_wg(
         identity.client_id,
         ipv4,
         &profile,
+        data_check,
         wg_tunnel_validate_timeout(),
         Some(keepalive),
     )
@@ -1168,7 +1262,12 @@ async fn establish_wg(
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
     let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
 
-    let tunnel = wireguard::WgTunnel::from_established(session, std::sync::Arc::new(profile), inbound_tx, ipv4);
+    let tunnel = wireguard::WgTunnel::from_established(
+        session,
+        std::sync::Arc::new(profile),
+        inbound_tx,
+        ipv4,
+    );
     let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;
 
     tokio::spawn(async move {
@@ -1256,7 +1355,9 @@ async fn run_gool(
                 let p = match select_peer(&primary, Protocol::WireGuard, options).await {
                     Ok(p) => p,
                     Err(e) => {
-                        log::warn!("[-] no usable outer WARP endpoint found: {e}; rescanning shortly");
+                        log::warn!(
+                            "[-] no usable outer WARP endpoint found: {e}; rescanning shortly"
+                        );
                         tokio::time::sleep(wg_reconnect_delay()).await;
                         continue;
                     }
@@ -1294,6 +1395,7 @@ async fn run_warp_in_warp(
         true,
         5,
         "outer",
+        options.wireguard_data_check,
     )
     .await?;
 
@@ -1307,11 +1409,15 @@ async fn run_warp_in_warp(
         log::info!("[+] Android TUN bridge active for inner WARP tunnel");
         let secondary_private_key = secondary.private_key_bytes()?;
         let secondary_peer_public = secondary.peer_public_key_bytes()?;
-        let secondary_ipv4: std::net::Ipv4Addr = secondary.ipv4.parse()
+        let secondary_ipv4: std::net::Ipv4Addr = secondary
+            .ipv4
+            .parse()
             .map_err(|_| AetherError::Other("invalid ipv4".into()))?;
 
         let profile = aethernoize::from_profile("off");
-        log::info!("[*] [inner] validating WireGuard tunnel with {forwarder} (handshake + data-plane)...");
+        log::info!(
+            "[*] [inner] validating WireGuard tunnel with {forwarder} (handshake + data-plane)..."
+        );
         let (_, session) = wireguard::verify_endpoint_keep_session(
             forwarder,
             secondary_private_key,
@@ -1319,6 +1425,7 @@ async fn run_warp_in_warp(
             secondary.client_id,
             secondary_ipv4,
             &profile,
+            options.wireguard_data_check,
             wg_tunnel_validate_timeout(),
             Some(20),
         )
@@ -1329,7 +1436,12 @@ async fn run_warp_in_warp(
         let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
 
-        let tunnel = wireguard::WgTunnel::from_established(session, std::sync::Arc::new(profile), inbound_tx, secondary_ipv4);
+        let tunnel = wireguard::WgTunnel::from_established(
+            session,
+            std::sync::Arc::new(profile),
+            inbound_tx,
+            secondary_ipv4,
+        );
 
         let local_task = tokio::spawn(tun::bridge(fd, inbound_rx, outbound_tx));
         let tunnel_result = tunnel.run(outbound_rx).await;
@@ -1348,6 +1460,7 @@ async fn run_warp_in_warp(
         false,
         20,
         "inner",
+        options.wireguard_data_check,
     )
     .await?;
 
@@ -1498,26 +1611,45 @@ struct MasqueGatewayCache {
 }
 
 fn cached_masque_gateways(options: &StartOptions) -> Vec<SocketAddr> {
-    let Some(path) = options.endpoint_cache_path.as_deref() else { return Vec::new() };
-    let Ok(contents) = fs::read_to_string(path) else { return Vec::new() };
-    let Ok(cache) = serde_json::from_str::<MasqueGatewayCache>(&contents) else { return Vec::new() };
+    let Some(path) = options.endpoint_cache_path.as_deref() else {
+        return Vec::new();
+    };
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(cache) = serde_json::from_str::<MasqueGatewayCache>(&contents) else {
+        return Vec::new();
+    };
     cache
         .gateways
         .into_iter()
-        .filter_map(|entry| entry.ip.parse::<IpAddr>().ok().map(|ip| (ip, entry.port, entry.rtt_ms)))
-        .filter(|(ip, _, _)| (ip.is_ipv4() && options.ip_scan.want_v4()) || (ip.is_ipv6() && options.ip_scan.want_v6()))
+        .filter_map(|entry| {
+            entry
+                .ip
+                .parse::<IpAddr>()
+                .ok()
+                .map(|ip| (ip, entry.port, entry.rtt_ms))
+        })
+        .filter(|(ip, _, _)| {
+            (ip.is_ipv4() && options.ip_scan.want_v4())
+                || (ip.is_ipv6() && options.ip_scan.want_v6())
+        })
         .take(MAX_CACHED_MASQUE_GATEWAYS)
         .map(|(ip, port, _)| SocketAddr::new(ip, port))
         .collect()
 }
 
 fn cache_masque_gateway(options: &StartOptions, gateway: prober::ProbeResult) {
-    let Some(path) = options.endpoint_cache_path.as_deref() else { return };
+    let Some(path) = options.endpoint_cache_path.as_deref() else {
+        return;
+    };
     let mut cache = fs::read_to_string(path)
         .ok()
         .and_then(|contents| serde_json::from_str::<MasqueGatewayCache>(&contents).ok())
         .unwrap_or_default();
-    cache.gateways.retain(|entry| !(entry.ip == gateway.ip.to_string() && entry.port == gateway.port));
+    cache
+        .gateways
+        .retain(|entry| !(entry.ip == gateway.ip.to_string() && entry.port == gateway.port));
     cache.gateways.push(CachedMasqueGateway {
         ip: gateway.ip.to_string(),
         port: gateway.port,
@@ -1525,8 +1657,12 @@ fn cache_masque_gateway(options: &StartOptions, gateway: prober::ProbeResult) {
     });
     cache.gateways.sort_by_key(|entry| entry.rtt_ms);
     cache.gateways.truncate(MAX_CACHED_MASQUE_GATEWAYS);
-    let Some(parent) = Path::new(path).parent() else { return };
-    if fs::create_dir_all(parent).is_err() { return }
+    let Some(parent) = Path::new(path).parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
     if let Ok(json) = serde_json::to_vec(&cache) {
         let temporary = format!("{path}.tmp");
         if fs::write(&temporary, json).is_ok() {
@@ -1575,18 +1711,27 @@ mod tests {
         let mut options = StartOptions::new(Protocol::Masque, "aether.toml");
         options.endpoint_cache_path = Some(path.to_string_lossy().into_owned());
 
-        cache_masque_gateway(&options, prober::ProbeResult {
-            ip: "162.159.198.1".parse().unwrap(),
-            port: 443,
-            rtt: Duration::from_millis(20),
-        });
-        cache_masque_gateway(&options, prober::ProbeResult {
-            ip: "2606:4700:d0::a29f:c602".parse().unwrap(),
-            port: 443,
-            rtt: Duration::from_millis(10),
-        });
+        cache_masque_gateway(
+            &options,
+            prober::ProbeResult {
+                ip: "162.159.198.1".parse().unwrap(),
+                port: 443,
+                rtt: Duration::from_millis(20),
+            },
+        );
+        cache_masque_gateway(
+            &options,
+            prober::ProbeResult {
+                ip: "2606:4700:d0::a29f:c602".parse().unwrap(),
+                port: 443,
+                rtt: Duration::from_millis(10),
+            },
+        );
 
-        assert_eq!(cached_masque_gateways(&options), vec!["162.159.198.1:443".parse().unwrap()]);
+        assert_eq!(
+            cached_masque_gateways(&options),
+            vec!["162.159.198.1:443".parse().unwrap()]
+        );
         options.ip_scan = IpScan::Both;
         assert_eq!(cached_masque_gateways(&options).len(), 2);
         let _ = fs::remove_file(path);

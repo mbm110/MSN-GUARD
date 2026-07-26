@@ -124,6 +124,7 @@ pub struct WgProbe {
     pub client_id: [u8; 3],
     pub local_ipv4: Ipv4Addr,
     pub aethernoize: AetherNoizeConfig,
+    pub data_check: bool,
     pub ports: Vec<u16>,
     pub ip: IpScan,
 }
@@ -233,7 +234,12 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
 
     match best {
         Some(pr) => {
-            log::info!("[+] best wg endpoint {}:{} rtt={:?}", pr.ip, pr.port, pr.rtt);
+            log::info!(
+                "[+] best wg endpoint {}:{} rtt={:?}",
+                pr.ip,
+                pr.port,
+                pr.rtt
+            );
             Ok(pr)
         }
         None => Err(AetherError::NoCleanEndpoint),
@@ -256,6 +262,7 @@ async fn verify_one_wg(
         probe.client_id,
         probe.local_ipv4,
         &probe.aethernoize,
+        probe.data_check,
         timeout,
         None,
     )
@@ -277,13 +284,19 @@ async fn verify_one_wg(
         local_ipv6: "::1".parse().unwrap(),
         aethernoize: probe.aethernoize.clone(),
     };
-    match crate::tunnelping::wg_http_ping_established(session, &params, WG_IRONCLAD_TCPING_TIMEOUT).await {
+    match crate::tunnelping::wg_http_ping_established(session, &params, WG_IRONCLAD_TCPING_TIMEOUT)
+        .await
+    {
         Ok(http_rtt) => {
             log::info!(
                 "[+] ironclad verified wg {ip}:{port} real http round trip rtt={:?}",
                 http_rtt
             );
-            Some(WgProbeResult { ip, port, rtt: http_rtt })
+            Some(WgProbeResult {
+                ip,
+                port,
+                rtt: http_rtt,
+            })
         }
         Err(e) => {
             log::trace!("[-] ironclad wg {ip}:{port} failed real http check: {e}");
@@ -295,7 +308,11 @@ async fn verify_one_wg(
 fn build_wg_candidates(st: &WgStrategy, ports: &[u16], ip: IpScan) -> Vec<(IpAddr, u16)> {
     let ports: Vec<u16> = {
         let mut seen_port: HashSet<u16> = HashSet::new();
-        let deduped: Vec<u16> = ports.iter().copied().filter(|p| seen_port.insert(*p)).collect();
+        let deduped: Vec<u16> = ports
+            .iter()
+            .copied()
+            .filter(|p| seen_port.insert(*p))
+            .collect();
         if deduped.is_empty() {
             vec![2408]
         } else {
@@ -338,7 +355,11 @@ fn build_wg_candidates(st: &WgStrategy, ports: &[u16], ip: IpScan) -> Vec<(IpAdd
                 anchors.push(IpAddr::V6(a));
             }
         }
-        let per = if st.sample_per_cidr == 0 { 80 } else { st.sample_per_cidr };
+        let per = if st.sample_per_cidr == 0 {
+            80
+        } else {
+            st.sample_per_cidr
+        };
         let cidr6: Vec<Vec<Ipv6Addr>> = wireguard::WG_PREFIXES_V6
             .iter()
             .map(|c| sample_cidr_v6(c, per, wireguard::WG_PREFIXES_V4))
@@ -373,7 +394,10 @@ fn build_wg_candidates(st: &WgStrategy, ports: &[u16], ip: IpScan) -> Vec<(IpAdd
 
 fn parse_cidr_v4(cidr: &str) -> Option<(u32, u8)> {
     let (ip, prefix) = cidr.split_once('/')?;
-    Some((u32::from(ip.parse::<Ipv4Addr>().ok()?), prefix.parse().ok()?))
+    Some((
+        u32::from(ip.parse::<Ipv4Addr>().ok()?),
+        prefix.parse().ok()?,
+    ))
 }
 
 fn enumerate_cidr_v4(cidr: &str) -> Vec<Ipv4Addr> {
@@ -400,7 +424,11 @@ fn sample_cidr_v4(cidr: &str, n: usize) -> Vec<Ipv4Addr> {
         None => return Vec::new(),
     };
     let host_bits = 32u32.saturating_sub(prefix as u32);
-    let size = if host_bits >= 32 { u32::MAX } else { 1u32 << host_bits };
+    let size = if host_bits >= 32 {
+        u32::MAX
+    } else {
+        1u32 << host_bits
+    };
     if size <= 2 {
         return vec![Ipv4Addr::from(base)];
     }
@@ -423,7 +451,10 @@ fn sample_cidr_v4(cidr: &str, n: usize) -> Vec<Ipv4Addr> {
 
 fn parse_cidr_v6(cidr: &str) -> Option<(u128, u8)> {
     let (ip, prefix) = cidr.split_once('/')?;
-    Some((u128::from(ip.parse::<Ipv6Addr>().ok()?), prefix.parse().ok()?))
+    Some((
+        u128::from(ip.parse::<Ipv6Addr>().ok()?),
+        prefix.parse().ok()?,
+    ))
 }
 
 fn sample_cidr_v6(cidr: &str, n: usize, v4_cidrs: &[&str]) -> Vec<Ipv6Addr> {
