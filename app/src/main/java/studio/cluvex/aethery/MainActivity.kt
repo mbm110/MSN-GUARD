@@ -137,6 +137,7 @@ class MainActivity : Activity() {
         modeSelector = createModeSelector()
         connectionTypeValue = label(connectionType().label, 16f, INK, TypefaceStyle.MEDIUM)
         logSelector = createLogSelector()
+        perfSelector = createPerfSelector()
         scanValue = label(scanSummary(), 14f, INK, TypefaceStyle.MEDIUM)
         scannerSelector = createScannerSelector()
 
