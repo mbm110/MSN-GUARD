@@ -1,7 +1,7 @@
 # Aethery
 
 <p align="center">
-  <img src="app/src/main/res/drawable-nodpi/aethery_launcher.png" width="112" alt="Aethery icon">
+  <img src="docs/Untitled-1.png" width="140" alt="Aethery icon">
 </p>
 
 <p align="center">
