@@ -16,7 +16,10 @@ jobs:
     outputs:
       release_id: ${{ steps.create.outputs.release_id }}
     steps:
-      - name: Create draft release
+      - name: Install jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+
+      - name: Create or find draft release
         id: create
         env:
           AETHERY_RELEASE_TOKEN: ${{ secrets.AETHERY_RELEASE_TOKEN }}
@@ -29,15 +32,28 @@ jobs:
           test -n "$RELEASE_TAG"
           test -n "$FORGEJO_SERVER_URL"
           test -n "$FORGEJO_REPOSITORY"
-          release_json=$(curl --fail-with-body --silent --show-error \
-            --request POST \
+
+          # Check if a release for this tag already exists
+          existing=$(curl --silent --show-error \
             --header "Authorization: token $AETHERY_RELEASE_TOKEN" \
-            --header "Content-Type: application/json" \
-            --data "{\"tag_name\":\"$RELEASE_TAG\",\"target_commitish\":\"master\",\"name\":\"Aethery $RELEASE_TAG\",\"draft\":true,\"prerelease\":false}" \
-            "$FORGEJO_SERVER_URL/api/v1/repos/$FORGEJO_REPOSITORY/releases")
-          release_id=$(printf '%s' "$release_json" | sed -n 's/.*\"id\":\([0-9][0-9]*\).*/\1/p' | head -n 1)
-          test -n "$release_id"
+            "$FORGEJO_SERVER_URL/api/v1/repos/$FORGEJO_REPOSITORY/releases/tags/$RELEASE_TAG" \
+            2>/dev/null || true)
+
+          release_id=$(printf '%s' "$existing" | jq -r '.id // empty' 2>/dev/null || true)
+
+          if [ -z "$release_id" ]; then
+            release_json=$(curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Authorization: token $AETHERY_RELEASE_TOKEN" \
+              --header "Content-Type: application/json" \
+              --data "{\"tag_name\":\"$RELEASE_TAG\",\"target_commitish\":\"master\",\"name\":\"Aethery $RELEASE_TAG\",\"draft\":true,\"prerelease\":false}" \
+              "$FORGEJO_SERVER_URL/api/v1/repos/$FORGEJO_REPOSITORY/releases")
+            release_id=$(printf '%s' "$release_json" | jq -r '.id')
+          fi
+
+          test -n "$release_id" && test "$release_id" != "null"
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "Created/found release $release_id for tag $RELEASE_TAG"
 
   build:
     name: Build ${{ matrix.abi }}
