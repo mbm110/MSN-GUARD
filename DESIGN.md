@@ -43,6 +43,8 @@ its code, wording, logo, or branding.
   strong ease-out. State changes redraw the ring and icon rather than moving the layout.
 - Use Android's standard context-click haptic on an intentional connection tap.
 - Keep motion under 300ms and restricted to transform, alpha, and the control's own drawing.
+- Latency keeps its normal graph while probing. After each returned `N ms`, lift and settle the
+  graph over 280ms without moving surrounding content.
 - Respect Android accessibility: every interactive element has a clear content description;
   colour never carries state alone.
 

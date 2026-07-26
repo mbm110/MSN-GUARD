@@ -1125,6 +1125,22 @@ class MainActivity : Activity() {
             dp(72),
         ).apply { topMargin = dp(8) })
 
+        content.addView(label("LOCAL NETWORK", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(24) })
+        val lanShareRow = createToggleRow(
+            "Internet LAN connection",
+            "Share the Proxy connection on this Wi-Fi network",
+            lanSharingEnabled(),
+        ) {
+            preferences().edit().putBoolean(LAN_SHARING, it).apply()
+        }
+        content.addView(lanShareRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(72),
+        ).apply { topMargin = dp(8) })
+
         content.addView(label("CORE SOCKS PORT", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1978,7 +1994,7 @@ class MainActivity : Activity() {
     private fun configJson(): String = org.json.JSONObject().apply {
         put("config_path", File(filesDir, "aether.toml").absolutePath)
         put("protocol", selectedProtocol.coreName)
-        put("listen", "127.0.0.1:${socksPort()}")
+        put("listen", "${if (lanSharingEnabled()) "0.0.0.0" else "127.0.0.1"}:${socksPort()}")
         put("scan_mode", defaultScanMode().coreName)
         put("ip_scan", defaultScan().coreName)
         put("endpoint_cache_path", File(filesDir, "masque-gateway-cache.json").absolutePath)
@@ -2199,6 +2215,8 @@ class MainActivity : Activity() {
 
     private fun killSwitchEnabled(): Boolean = preferences().getBoolean(KILL_SWITCH, false)
 
+    private fun lanSharingEnabled(): Boolean = preferences().getBoolean(LAN_SHARING, false)
+
     private fun createToggleRow(title: String, subtitle: String, checked: Boolean, onToggle: (Boolean) -> Unit): LinearLayout {
         val texts = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2403,6 +2421,7 @@ class MainActivity : Activity() {
         const val TLS_CURVE_PRESET = "tls_curve_preset"
         const val WIREGUARD_DATA_CHECK = "wireguard_data_check"
         const val KILL_SWITCH = "kill_switch"
+        const val LAN_SHARING = "lan_sharing"
         const val LOG_LEVEL = "log_level"
         const val PERF_PROFILE = "perf_profile"
         const val H2_FRAGMENTATION = "h2_fragmentation"
@@ -2478,7 +2497,7 @@ private class ConnectionControl(
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val desired = dp(216)
+        val desired = dp(238)
         setMeasuredDimension(resolveSize(desired, widthMeasureSpec), resolveSize(desired, heightMeasureSpec))
     }
 
@@ -2486,7 +2505,7 @@ private class ConnectionControl(
         super.onDraw(canvas)
         val centerX = width / 2f
         val centerY = height / 2f
-        val radius = dp(86).toFloat() + if (state == State.CONNECTING) dp(3) * pulse else 0f
+        val radius = dp(95).toFloat() + if (state == State.CONNECTING) dp(3) * pulse else 0f
         val palette = when (state) {
             State.DISCONNECTED, State.CONNECTING -> Palette(primaryContainer, primary)
             State.CONNECTED -> Palette(CONNECTED_BRIGHT_CONTAINER, CONNECTED_BRIGHT)
@@ -2506,12 +2525,12 @@ private class ConnectionControl(
         paint.color = palette.accent
         canvas.drawCircle(centerX, centerY, radius, paint)
 
-        val iconRadius = dp(28).toFloat()
+        val iconRadius = dp(31).toFloat()
         arcBounds.set(centerX - iconRadius, centerY - iconRadius, centerX + iconRadius, centerY + iconRadius)
         paint.strokeWidth = dp(3).toFloat()
         paint.strokeCap = Paint.Cap.ROUND
         canvas.drawArc(arcBounds, 330f, 240f, false, paint)
-        canvas.drawLine(centerX, centerY - dp(31), centerX, centerY - dp(7), paint)
+        canvas.drawLine(centerX, centerY - dp(34), centerX, centerY - dp(8), paint)
         paint.strokeCap = Paint.Cap.BUTT
 
         if (state == State.CONNECTING) {
@@ -2627,12 +2646,14 @@ private class LatencyGraphView(context: Context) : View(context) {
     }
     private val density = resources.displayMetrics.density
     private val path = android.graphics.Path()
+    private var graphOffset = 0f
+    private var graphAnimator: ValueAnimator? = null
 
     fun addPoint(ms: Float) {
         points.add(ms)
         if (points.size > maxPoints) points.removeAt(0)
         currentLabel = "${ms.toInt()} ms"
-        invalidate()
+        animateGraph()
     }
 
     fun setLabel(text: String) {
@@ -2640,9 +2661,25 @@ private class LatencyGraphView(context: Context) : View(context) {
         invalidate()
     }
 
+    private fun animateGraph() {
+        graphAnimator?.cancel()
+        graphAnimator = ValueAnimator.ofFloat(0f, -density * 3f, 0f).apply {
+            duration = 280
+            interpolator = DecelerateInterpolator()
+            addUpdateListener {
+                graphOffset = it.animatedValue as Float
+                invalidate()
+            }
+            start()
+        }
+    }
+
     fun reset() {
         points.clear()
         currentLabel = "Latency unavailable"
+        graphAnimator?.cancel()
+        graphAnimator = null
+        graphOffset = 0f
         invalidate()
     }
 
@@ -2666,6 +2703,9 @@ private class LatencyGraphView(context: Context) : View(context) {
 
         if (points.isEmpty()) return
 
+        canvas.save()
+        canvas.translate(0f, graphOffset)
+
         val maxVal = points.max().coerceAtLeast(10f)
         val stepX = (w - padX * 2) / (maxPoints - 1).coerceAtLeast(1)
 
@@ -2674,6 +2714,7 @@ private class LatencyGraphView(context: Context) : View(context) {
             val y = padTop + graphH * (1f - points[0] / maxVal)
             canvas.drawCircle(x, y, density * 3f, linePaint.apply { style = Paint.Style.FILL })
             linePaint.style = Paint.Style.STROKE
+            canvas.restore()
             return
         }
 
@@ -2691,5 +2732,11 @@ private class LatencyGraphView(context: Context) : View(context) {
         fillPath.lineTo(padX, padTop + graphH)
         fillPath.close()
         canvas.drawPath(fillPath, fillPaint)
+        canvas.restore()
+    }
+
+    override fun onDetachedFromWindow() {
+        graphAnimator?.cancel()
+        super.onDetachedFromWindow()
     }
 }
