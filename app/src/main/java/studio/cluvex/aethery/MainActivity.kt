@@ -463,10 +463,10 @@ class MainActivity : Activity() {
         val currentLogLevel = logLevel()
         LogLevel.entries.forEach { level ->
             val isActive = level == currentLogLevel
-            val chip = label(level.label, 12f, if (isActive) primaryContainer else INK, TypefaceStyle.MEDIUM).apply {
+            val chip = label(level.label, 14f, if (isActive) primaryContainer else INK, TypefaceStyle.MEDIUM).apply {
                 gravity = Gravity.CENTER
-                setPadding(dp(12), dp(6), dp(12), dp(6))
-                background = roundedBackground(if (isActive) primary else SURFACE_VARIANT, 12, if (isActive) primary else DIVIDER)
+                setPadding(dp(15), dp(8), dp(15), dp(8))
+                background = roundedBackground(if (isActive) primary else SURFACE_VARIANT, 14, if (isActive) primary else DIVIDER)
                 isClickable = true
                 isFocusable = true
                 setOnClickListener {
