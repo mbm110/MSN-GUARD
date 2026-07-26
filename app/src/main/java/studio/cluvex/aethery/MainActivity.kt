@@ -2662,7 +2662,7 @@ private class LatencyGraphView(context: Context) : View(context) {
         val graphH = h - padTop - padBottom
 
         textPaint.textAlign = Paint.Align.CENTER
-        canvas.drawText(currentLabel, w / 2f, padTop - density * 4f, textPaint)
+        canvas.drawText(currentLabel, w / 2f, padTop - density * 2f, textPaint)
 
         if (points.isEmpty()) return
 

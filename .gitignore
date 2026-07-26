@@ -38,3 +38,4 @@ Thumbs.db
 key.properties
 *.jks
 *.keystore
+.zethcode/
