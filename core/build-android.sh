@@ -79,6 +79,14 @@ export CMAKE="$CMAKE"
 export CMAKE_GENERATOR="Ninja"
 export CARGO_TARGET_DIR="$TARGET"
 export PATH="$(dirname "$CMAKE"):$PATH"
+# bindgen needs libclang's C API; the NDK's libclang-cpp shim does not export it.
+if [[ -z "${LIBCLANG_PATH:-}" ]]; then
+  if compgen -G "/usr/lib/libclang.so*" >/dev/null; then
+    export LIBCLANG_PATH="/usr/lib"
+  else
+    export LIBCLANG_PATH="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/musl/lib"
+  fi
+fi
 
 # boring-sys builds BoringSSL before its known second-configure failure.
 set +e
@@ -99,7 +107,6 @@ export BORING_BSSL_PATH="$BSSL_OUT/build"
 export BORING_BSSL_INCLUDE_PATH="$BSSL_OUT/boringssl/src/include"
 export BORING_BSSL_ASSUME_PATCHED="1"
 export CLANG_PATH="$BIN/clang"
-export LIBCLANG_PATH="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/lib"
 
 RUST_ENV_SUFFIX="${TARGET_TRIPLE^^}"
 RUST_ENV_SUFFIX="${RUST_ENV_SUFFIX//-/_}"

@@ -31,6 +31,7 @@ import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
+import android.view.animation.LinearInterpolator
 import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import android.widget.EditText
@@ -43,6 +44,8 @@ import android.widget.TextView
 import com.google.android.material.color.DynamicColors
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.net.URL
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -53,6 +56,10 @@ class MainActivity : Activity() {
     private lateinit var connectionDetail: TextView
     private lateinit var connectionLatency: TextView
     private lateinit var latencyGraph: LatencyGraphView
+    private lateinit var ipAddressLabel: TextView
+    private lateinit var ipAddressValue: TextView
+    private lateinit var ipAddressCard: LinearLayout
+    private lateinit var ipRefreshIcon: RetryView
     private lateinit var modeSelector: LinearLayout
     private lateinit var modeValue: TextView
     private lateinit var connectionTypeValue: TextView
@@ -71,7 +78,7 @@ class MainActivity : Activity() {
     private val autoPingHandler = Handler(Looper.getMainLooper())
     private val autoPingRunnable = object : Runnable {
         override fun run() {
-            if (visualState == ConnectionControl.State.CONNECTED && autoPingRunning) {
+            if (isTunnelActive() && autoPingRunning) {
                 pingConnection()
                 autoPingHandler.postDelayed(this, 5000L)
             }
@@ -88,8 +95,23 @@ class MainActivity : Activity() {
     private var modePage: View? = null
     private var splitTunnelPage: View? = null
     private var splitTunnelAppsPage: View? = null
+    private var trafficMonitorPage: View? = null
+    private var trafficSpeedValue: TextView? = null
+    private var trafficSessionValue: TextView? = null
+    private var trafficMonthValue: TextView? = null
+    private var trafficTx = 0L
+    private var trafficRx = 0L
+    private var trafficSpeedTx = 0L
+    private var trafficSpeedRx = 0L
+    private var trafficMonthTx = 0L
+    private var trafficMonthRx = 0L
     @Volatile private var cachedUserApps: List<ApplicationInfo>? = null
     private var latencyRequest = 0
+    @Volatile private var pingInFlight = false
+    private var ipRequest = 0
+    @Volatile private var ipRefreshInFlight = false
+    @Volatile private var ipRefreshPending = false
+    private var ipRefreshAnimator: ValueAnimator? = null
     private val statusHandler = Handler(Looper.getMainLooper())
     private val statusPoll = object : Runnable {
         override fun run() {
@@ -111,8 +133,18 @@ class MainActivity : Activity() {
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            if (intent.hasExtra(AetherVpnService.EXTRA_TRAFFIC_TX)) {
+                trafficTx = intent.getLongExtra(AetherVpnService.EXTRA_TRAFFIC_TX, 0)
+                trafficRx = intent.getLongExtra(AetherVpnService.EXTRA_TRAFFIC_RX, 0)
+                trafficSpeedTx = intent.getLongExtra(AetherVpnService.EXTRA_TRAFFIC_SPEED_TX, 0)
+                trafficSpeedRx = intent.getLongExtra(AetherVpnService.EXTRA_TRAFFIC_SPEED_RX, 0)
+                trafficMonthTx = intent.getLongExtra(AetherVpnService.EXTRA_TRAFFIC_MONTH_TX, 0)
+                trafficMonthRx = intent.getLongExtra(AetherVpnService.EXTRA_TRAFFIC_MONTH_RX, 0)
+                renderTrafficMonitor()
+                return
+            }
             when (intent.getStringExtra(AetherVpnService.EXTRA_STATUS)) {
-                AetherVpnService.STATUS_CONNECTING -> showConnecting()
+                AetherVpnService.STATUS_CONNECTING -> showConnecting(intent.getStringExtra(AetherVpnService.EXTRA_DETAIL))
                 AetherVpnService.STATUS_STARTING -> showStarting()
                 AetherVpnService.STATUS_SCANNING -> showScanning()
                 AetherVpnService.STATUS_CONNECTED -> showConnected()
@@ -148,6 +180,11 @@ class MainActivity : Activity() {
             isFocusable = true
             setOnClickListener { pingConnection() }
         }
+        ipAddressLabel = label("PUBLIC IP", 12f, MUTED, TypefaceStyle.MEDIUM).apply {
+            letterSpacing = 0.1f
+        }
+        ipAddressValue = label("Checking…", 16f, INK, TypefaceStyle.MEDIUM, singleLine = true)
+        ipAddressCard = createIpAddressCard()
         selectedProtocol = Protocol.MASQUE
         modeValue = label(selectedProtocol.label, 16f, INK, TypefaceStyle.MEDIUM)
         modeSelector = createModeSelector()
@@ -200,6 +237,7 @@ class MainActivity : Activity() {
         }
         setContentView(pageHost)
         showOpeningOverlay()
+        refreshPublicIp()
     }
 
     override fun onStart() {
@@ -292,13 +330,14 @@ class MainActivity : Activity() {
     }
 
     private fun pingConnection() {
-        if (visualState != ConnectionControl.State.CONNECTED) return
+        if (!isTunnelActive() || pingInFlight) return
+        pingInFlight = true
         val request = ++latencyRequest
         latencyGraph.setLabel("Pinging\u2026")
         Thread {
             val result = runCatching {
                 val startedAt = System.nanoTime()
-                val connection = URL(PING_URL).openConnection() as HttpURLConnection
+                val connection = openTunnelConnection(PING_URL)
                 try {
                     connection.connectTimeout = PING_TIMEOUT_MS
                     connection.readTimeout = PING_TIMEOUT_MS
@@ -312,9 +351,14 @@ class MainActivity : Activity() {
                 }
             }.getOrElse { "Ping unavailable" to null }
             runOnUiThread {
-                if (request == latencyRequest && visualState == ConnectionControl.State.CONNECTED) {
+                pingInFlight = false
+                if (request == latencyRequest && isTunnelActive()) {
                     latencyGraph.setLabel(result.first)
-                    result.second?.let { latencyGraph.addPoint(it) }
+                    result.second?.let {
+                        latencyGraph.addPoint(it)
+                        if (visualState == ConnectionControl.State.DEGRADED) showConnected(restored = true)
+                    } ?: showDegraded()
+                    updateNotificationHealth(ping = result.first)
                 }
             }
         }.start()
@@ -354,23 +398,30 @@ class MainActivity : Activity() {
     private fun createConnectionConsole(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_HORIZONTAL
-        addView(connectionControl)
         addView(connectionTitle, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(24) })
+        ))
         addView(connectionDetail, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(6) })
+        addView(connectionControl, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(16) })
         addView(latencyGraph, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(56),
-        ).apply { topMargin = dp(4) })
+            dp(64),
+        ).apply { topMargin = dp(6) })
+        addView(ipAddressCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(64),
+        ).apply { topMargin = dp(16) })
         addView(modeSelector, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(64),
-        ).apply { topMargin = dp(32) })
+        ).apply { topMargin = dp(16) })
         addView(scannerSelector, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(64),
@@ -383,6 +434,150 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(12) })
+    }
+
+    private fun createIpAddressCard(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(20), 0, dp(18), 0)
+        background = roundedBackground(SURFACE_VARIANT, 20, DIVIDER)
+        contentDescription = "Public IP address"
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { refreshPublicIp() }
+        val labels = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(ipAddressLabel)
+            addView(ipAddressValue, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(2) })
+        }
+        addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        ipRefreshIcon = RetryView(this@MainActivity, INK)
+        addView(ipRefreshIcon, LinearLayout.LayoutParams(dp(24), dp(24)))
+    }
+
+    private fun refreshPublicIp() {
+        if (ipRefreshInFlight) {
+            ipRefreshPending = true
+            return
+        }
+        ipRefreshInFlight = true
+        val request = ++ipRequest
+        startIpRefreshAnimation()
+        ipAddressLabel.text = if (isTunnelActive()) "VPN IP" else "PUBLIC IP"
+        ipAddressValue.text = "Checking…"
+        Thread {
+            val result = runCatching {
+                repeat(IP_FETCH_ATTEMPTS) { attempt ->
+                    runCatching { fetchPublicIp() }.getOrNull()?.let { return@runCatching it }
+                    if (attempt + 1 < IP_FETCH_ATTEMPTS) Thread.sleep(IP_RETRY_DELAY_MS)
+                }
+                error("IP unavailable")
+            }
+            runOnUiThread {
+                ipRefreshInFlight = false
+                if (ipRefreshPending) {
+                    ipRefreshPending = false
+                    refreshPublicIp()
+                    return@runOnUiThread
+                }
+                if (request != ipRequest) return@runOnUiThread
+                finishIpRefreshAnimation()
+                val (ip, country) = result.getOrElse { "IP unavailable" to "" }
+                ipAddressLabel.text = when {
+                    ip == "IP unavailable" -> "PUBLIC IP"
+                    isTunnelActive() -> "VPN IP"
+                    else -> "PUBLIC IP"
+                }
+                val flag = countryFlag(country)
+                ipAddressValue.text = listOf(flag, ip).filter(String::isNotBlank).joinToString(" ")
+                ipAddressCard.contentDescription = "${ipAddressLabel.text}: ${ipAddressValue.text}"
+                if (isTunnelActive() && ip != "IP unavailable") updateNotificationHealth(ip = ip)
+                ipAddressValue.alpha = 0f
+                ipAddressValue.translationY = dp(4).toFloat()
+                ipAddressValue.animate().alpha(1f).translationY(0f)
+                    .setDuration(220).setInterpolator(motionInterpolator).start()
+            }
+        }.start()
+    }
+
+    private fun fetchPublicIp(): Pair<String, String> {
+        var failure: Throwable? = null
+        for (url in IP_INFO_URLS) {
+            try {
+                val connection = openTunnelConnection(url)
+                try {
+                    connection.connectTimeout = IP_TIMEOUT_MS
+                    connection.readTimeout = IP_TIMEOUT_MS
+                    connection.requestMethod = "GET"
+                    check(connection.responseCode in 200..399) { "HTTP ${connection.responseCode}" }
+                    val body = connection.inputStream.bufferedReader().use { it.readText().trim() }
+                    val values = body.lineSequence().mapNotNull { line -> line.split('=', limit = 2).let { pair ->
+                        pair.takeIf { it.size == 2 }?.let { it[0] to it[1] }
+                    } }.toMap()
+                    val ip = values["ip"] ?: body.takeIf { it.matches(IP_ADDRESS) }.orEmpty()
+                    check(ip.isNotBlank()) { "IP unavailable" }
+                    return ip to values["loc"].orEmpty()
+                } finally {
+                    connection.disconnect()
+                }
+            } catch (error: Throwable) {
+                failure = error
+            }
+        }
+        throw failure ?: IllegalStateException("IP unavailable")
+    }
+
+    private fun startIpRefreshAnimation() {
+        ipRefreshAnimator?.cancel()
+        ipAddressCard.animate().cancel()
+        ipAddressValue.animate().cancel()
+        ipAddressValue.alpha = 0.6f
+        ipRefreshIcon.rotation = 0f
+        ipRefreshAnimator = ValueAnimator.ofFloat(0f, 360f).apply {
+            duration = 900L
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = LinearInterpolator()
+            addUpdateListener { animation ->
+                ipRefreshIcon.rotation = animation.animatedValue as Float
+                val pulse = if (animation.animatedFraction < 0.5f) animation.animatedFraction else 1f - animation.animatedFraction
+                ipAddressCard.alpha = 0.9f + pulse * 0.1f
+            }
+            start()
+        }
+    }
+
+    private fun finishIpRefreshAnimation() {
+        ipRefreshAnimator?.cancel()
+        ipRefreshAnimator = null
+        ipRefreshIcon.rotation = 0f
+        ipAddressCard.alpha = 1f
+        ipAddressCard.scaleX = 1f
+        ipAddressCard.scaleY = 1f
+    }
+
+    private fun countryFlag(country: String): String {
+        if (country.length != 2 || country.any { !it.isLetter() }) return ""
+        return country.uppercase().map { char -> String(Character.toChars(0x1F1E6 + char.code - 'A'.code)) }.joinToString("")
+    }
+
+    private fun openTunnelConnection(url: String): HttpURLConnection =
+        if (connectionType() == ConnectionType.PROXY && NativeCore.isRunning()) {
+            URL(url).openConnection(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort())))
+        } else {
+            URL(url).openConnection()
+        } as HttpURLConnection
+
+    private fun updateNotificationHealth(ip: String? = null, ping: String? = null) {
+        if (!NativeCore.isRunning()) return
+        startService(Intent(this, AetherVpnService::class.java)
+            .setAction(AetherVpnService.ACTION_NOTIFICATION_HEALTH)
+            .apply {
+                ip?.let { putExtra(AetherVpnService.EXTRA_NOTIFICATION_IP, it) }
+                ping?.let { putExtra(AetherVpnService.EXTRA_NOTIFICATION_PING, it) }
+            })
     }
 
     private fun createModeSelector(): LinearLayout = LinearLayout(this).apply {
@@ -399,7 +594,7 @@ class MainActivity : Activity() {
         addView(modeValue, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
             leftMargin = dp(16)
         })
-        addView(ChevronView(this@MainActivity, MUTED), LinearLayout.LayoutParams(dp(24), dp(24)))
+        addView(ChevronView(this@MainActivity, INK), LinearLayout.LayoutParams(dp(24), dp(24)))
     }
 
     private fun createLogSelector(): LinearLayout = LinearLayout(this).apply {
@@ -418,7 +613,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
             1f,
         ).apply { leftMargin = dp(16) })
-        addView(ChevronView(this@MainActivity, MUTED), LinearLayout.LayoutParams(dp(24), dp(24)))
+        addView(ChevronView(this@MainActivity, INK), LinearLayout.LayoutParams(dp(24), dp(24)))
     }
 
     private fun createPerfSelector(): LinearLayout = LinearLayout(this).apply {
@@ -437,7 +632,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
             1f,
         ).apply { leftMargin = dp(16) })
-        addView(ChevronView(this@MainActivity, MUTED), LinearLayout.LayoutParams(dp(24), dp(24)))
+        addView(ChevronView(this@MainActivity, INK), LinearLayout.LayoutParams(dp(24), dp(24)))
     }
 
     private fun createScannerSelector(): LinearLayout = LinearLayout(this).apply {
@@ -464,7 +659,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
             1f,
         ).apply { leftMargin = dp(16) })
-        addView(ChevronView(this@MainActivity, MUTED), LinearLayout.LayoutParams(dp(24), dp(24)))
+        addView(ChevronView(this@MainActivity, INK), LinearLayout.LayoutParams(dp(24), dp(24)))
     }
 
     private fun openLogsScreen() {
@@ -517,6 +712,41 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(0); rightMargin = dp(0); bottomMargin = dp(12) })
+        val logTabs = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        var selectedLogTab = LogTab.ALL
+        val tabViews = mutableMapOf<LogTab, TextView>()
+        LogTab.entries.forEach { tab ->
+            val tabView = label(tab.label, 13f, INK, TypefaceStyle.MEDIUM).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    selectedLogTab = tab
+                    tabViews.forEach { (item, view) ->
+                        val active = item == tab
+                        view.setTextColor(if (active) primaryContainer else INK)
+                        view.background = roundedBackground(if (active) primary else SURFACE_VARIANT, 14, if (active) primary else DIVIDER)
+                    }
+                }
+            }
+            tabViews[tab] = tabView
+            logTabs.addView(tabView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                rightMargin = dp(4)
+            })
+        }
+        tabViews.forEach { (tab, view) ->
+            val active = tab == selectedLogTab
+            view.setTextColor(if (active) primaryContainer else INK)
+            view.background = roundedBackground(if (active) primary else SURFACE_VARIANT, 14, if (active) primary else DIVIDER)
+        }
+        content.addView(logTabs, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { bottomMargin = dp(12) })
         val events = label(textSize = 13f, color = INK).apply {
             typeface = android.graphics.Typeface.MONOSPACE
             setTextIsSelectable(true)
@@ -555,7 +785,7 @@ class MainActivity : Activity() {
         var renderedLogs: String? = null
         val refresh = object : Runnable {
             override fun run() {
-                val updatedLogs = connectionLogText()
+                val updatedLogs = connectionLogText(selectedLogTab)
                 if (updatedLogs != renderedLogs) {
                     val keepAtBottom = followLatest || renderedLogs == null
                     events.text = updatedLogs
@@ -648,8 +878,14 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun connectionLogText(): String {
-        val events = ConnectionLog.snapshot() + NativeCore.lastLog().lineSequence().filter(String::isNotBlank)
+    private fun connectionLogText(tab: LogTab = LogTab.ALL): String {
+        val appEvents = ConnectionLog.snapshot()
+        val coreEvents = NativeCore.lastLog().lineSequence().filter(String::isNotBlank).toList()
+        val events = when (tab) {
+            LogTab.ALL -> appEvents + coreEvents
+            LogTab.APP -> appEvents
+            LogTab.CORE -> coreEvents
+        }
         return events.joinToString("\n").ifBlank { "No connection events yet" }
     }
 
@@ -698,7 +934,7 @@ class MainActivity : Activity() {
         val modeOptions = mutableMapOf<ScanMode, SelectionOption>()
         val targetOptions = mutableMapOf<ScanTarget, SelectionOption>()
 
-        options.addView(label("MASQUE GATEWAY DISCOVERY", 12f, MUTED).apply { letterSpacing = 0.1f })
+        options.addView(label(if (selectedProtocol == Protocol.MASQUE) "MASQUE GATEWAY DISCOVERY" else "WIREGUARD ENDPOINT DISCOVERY", 12f, MUTED).apply { letterSpacing = 0.1f })
         EndpointDiscovery.entries.forEachIndexed { index, discovery ->
             val option = createEndpointDiscoveryOption(discovery) { chosen ->
                 getSharedPreferences(SETTINGS, MODE_PRIVATE).edit()
@@ -713,22 +949,24 @@ class MainActivity : Activity() {
             ).apply { topMargin = if (index == 0) dp(10) else dp(8) })
         }
 
-        options.addView(label("MASQUE TRANSPORT", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(20) })
-        MasqueTransport.entries.forEachIndexed { index, transport ->
-            val option = createMasqueTransportOption(transport) { chosen ->
-                getSharedPreferences(SETTINGS, MODE_PRIVATE).edit().putString(DEFAULT_MASQUE_TRANSPORT, chosen.coreName).apply()
-                scanValue.text = scanSummary()
-                scannerSelector.contentDescription = "Scanner options, ${scanSummary()}"
-                transportOptions.forEach { (item, view) -> setSelectionState(view, item == chosen, animate = true) }
-            }
-            transportOptions[transport] = option
-            options.addView(option.row, LinearLayout.LayoutParams(
+        if (selectedProtocol == Protocol.MASQUE) {
+            options.addView(label("MASQUE TRANSPORT", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(68),
-            ).apply { topMargin = if (index == 0) dp(10) else dp(8) })
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(20) })
+            MasqueTransport.entries.forEachIndexed { index, transport ->
+                val option = createMasqueTransportOption(transport) { chosen ->
+                    getSharedPreferences(SETTINGS, MODE_PRIVATE).edit().putString(DEFAULT_MASQUE_TRANSPORT, chosen.coreName).apply()
+                    scanValue.text = scanSummary()
+                    scannerSelector.contentDescription = "Scanner options, ${scanSummary()}"
+                    transportOptions.forEach { (item, view) -> setSelectionState(view, item == chosen, animate = true) }
+                }
+                transportOptions[transport] = option
+                options.addView(option.row, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    dp(68),
+                ).apply { topMargin = if (index == 0) dp(10) else dp(8) })
+            }
         }
 
         options.addView(label("SCAN MODE", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
@@ -1131,7 +1369,7 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(24) })
         val lanShareRow = createToggleRow(
             "Internet LAN connection",
-            "Share the Proxy connection on this Wi-Fi network",
+            "Expose SOCKS5 to devices on this Wi-Fi network in Proxy mode",
             lanSharingEnabled(),
         ) {
             preferences().edit().putBoolean(LAN_SHARING, it).apply()
@@ -1140,6 +1378,15 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(72),
         ).apply { topMargin = dp(8) })
+
+        content.addView(label("TRAFFIC", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(24) })
+        content.addView(createSettingsButton("Traffic monitor ›") { openTrafficMonitorScreen() }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(52),
+        ).apply { topMargin = dp(10) })
 
         content.addView(label("CORE SOCKS PORT", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1233,7 +1480,6 @@ class MainActivity : Activity() {
     }
 
     private fun openTunnelControlsScreen() {
-        if (visualState == ConnectionControl.State.CONNECTING || NativeCore.isRunning()) return
         tunnelControlsPage?.let(pageHost::removeView)
 
         val page = FrameLayout(this).apply {
@@ -1582,6 +1828,83 @@ class MainActivity : Activity() {
     private fun closeSettingsScreen() {
         showingSettings = false
         settingsPage?.let { animatePageClose(it) { settingsPage = null } }
+    }
+
+    private fun openTrafficMonitorScreen() {
+        trafficMonitorPage?.let(pageHost::removeView)
+        val page = FrameLayout(this).apply {
+            setBackgroundColor(CANVAS)
+            isClickable = true
+        }
+        val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(16), dp(24), dp(24))
+        }
+        content.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { closeTrafficMonitorScreen() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label("Traffic monitor", 22f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) })
+        })
+        content.addView(label("Traffic carried by Aethery. Per-app attribution is not available from encrypted tunnel counters.", 14f, MUTED), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
+        trafficSpeedValue = addTrafficMetric(content, "LIVE SPEED")
+        trafficSessionValue = addTrafficMetric(content, "THIS SESSION")
+        trafficMonthValue = addTrafficMetric(content, "THIS MONTH")
+        scroll.addView(content)
+        page.addView(scroll, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+        page.setOnApplyWindowInsetsListener { _, insets ->
+            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24))
+            insets
+        }
+        trafficMonitorPage = page
+        pageHost.addView(page)
+        page.requestApplyInsets()
+        renderTrafficMonitor()
+        animatePageOpen(page)
+    }
+
+    private fun addTrafficMetric(parent: LinearLayout, title: String): TextView {
+        val value = label("Waiting for tunnel traffic", 18f, INK, TypefaceStyle.MEDIUM)
+        parent.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+            background = roundedBackground(SURFACE_VARIANT, 20, DIVIDER)
+            addView(label(title, 12f, MUTED, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.1f })
+            addView(value, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(6) })
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(84),
+        ).apply { bottomMargin = dp(12) })
+        return value
+    }
+
+    private fun closeTrafficMonitorScreen() {
+        trafficMonitorPage?.let { animatePageClose(it) { trafficMonitorPage = null } }
+        trafficSpeedValue = null
+        trafficSessionValue = null
+        trafficMonthValue = null
+    }
+
+    private fun renderTrafficMonitor() {
+        trafficSpeedValue?.text = "↓ ${formatTraffic(trafficSpeedRx)}/s   ↑ ${formatTraffic(trafficSpeedTx)}/s"
+        trafficSessionValue?.text = "↓ ${formatTraffic(trafficRx)}   ↑ ${formatTraffic(trafficTx)}"
+        trafficMonthValue?.text = "↓ ${formatTraffic(trafficMonthRx)}   ↑ ${formatTraffic(trafficMonthTx)}"
+    }
+
+    private fun formatTraffic(bytes: Long): String = when {
+        bytes < 1_024 -> "$bytes B"
+        bytes < 1_048_576 -> "${bytes / 1_024} KB"
+        bytes < 1_073_741_824 -> "${bytes / 1_048_576} MB"
+        else -> String.format(java.util.Locale.US, "%.2f GB", bytes / 1_073_741_824.0)
     }
 
     private fun openSplitTunnelScreen() {
@@ -1937,6 +2260,7 @@ class MainActivity : Activity() {
         when {
             splitTunnelAppsPage != null -> closeSplitTunnelAppsScreen()
             splitTunnelPage != null -> closeSplitTunnelScreen()
+            trafficMonitorPage != null -> closeTrafficMonitorScreen()
             tunnelControlsPage != null -> closeTunnelControlsScreen()
             showingLogs -> closeLogsScreen()
             showingScanner -> closeScannerScreen()
@@ -1950,6 +2274,8 @@ class MainActivity : Activity() {
         if (selectedProtocol == protocol) return
         selectedProtocol = protocol
         modeSelector.contentDescription = "Connection mode, ${protocol.label}"
+        scanValue.text = scanSummary()
+        scannerSelector.contentDescription = "Scanner options, ${scanSummary()}"
         modeValue.animate().cancel()
         modeValue.animate().alpha(0f).scaleX(0.96f).scaleY(0.96f)
             .setDuration(80)
@@ -1994,7 +2320,7 @@ class MainActivity : Activity() {
     private fun configJson(): String = org.json.JSONObject().apply {
         put("config_path", File(filesDir, "aether.toml").absolutePath)
         put("protocol", selectedProtocol.coreName)
-        put("listen", "${if (lanSharingEnabled()) "0.0.0.0" else "127.0.0.1"}:${socksPort()}")
+        put("listen", "${if (connectionType() == ConnectionType.PROXY && lanSharingEnabled()) "0.0.0.0" else "127.0.0.1"}:${socksPort()}")
         put("scan_mode", defaultScanMode().coreName)
         put("ip_scan", defaultScan().coreName)
         put("endpoint_cache_path", File(filesDir, "masque-gateway-cache.json").absolutePath)
@@ -2005,14 +2331,19 @@ class MainActivity : Activity() {
         put("retry_obfuscation_profiles", retryObfuscationProfiles())
         put("tls_curve_preset", tlsCurvePreset().coreName)
         put("wireguard_data_check", wireGuardDataCheck())
+        put("log_level", logLevel().coreName)
+        put("perf_profile", perfProfile().coreName)
+        put("h2_fragmentation", h2Fragmentation() == H2Fragmentation.ON)
     }.toString()
 
     private fun renderStatus() {
-        if (!NativeCore.isRunning() && visualState == ConnectionControl.State.CONNECTED) showDisconnected()
+        if (!NativeCore.isRunning() && isTunnelActive()) {
+            NativeCore.lastError().takeIf(String::isNotBlank)?.let(::showFailure) ?: showDisconnected("Tunnel stopped unexpectedly")
+        }
     }
 
-    private fun showConnecting() {
-        showConnectionProgress("Connecting", "Starting ${selectedProtocol.label} tunnel")
+    private fun showConnecting(detail: String? = null) {
+        showConnectionProgress("Connecting", detail ?: "Starting ${selectedProtocol.label} tunnel")
     }
 
     private fun showStarting() {
@@ -2034,16 +2365,29 @@ class MainActivity : Activity() {
         setModeEnabled(false)
     }
 
-    private fun showConnected() {
+    private fun showConnected(restored: Boolean = false) {
         visualState = ConnectionControl.State.CONNECTED
         connectionControl.state = visualState
         connectionTitle.setTextColor(connected)
         connectionTitle.text = "Connected"
-        connectionDetail.text = "${selectedProtocol.label} tunnel is active"
+        connectionDetail.text = if (restored) "${selectedProtocol.label} tunnel recovered" else "${selectedProtocol.label} tunnel is active"
         latencyGraph.setLabel("Pinging\u2026")
         setModeEnabled(false)
-        pingConnection()
-        startAutoPing()
+        if (!restored) {
+            pingConnection()
+            startAutoPing()
+            refreshPublicIp()
+        }
+    }
+
+    private fun showDegraded() {
+        if (!isTunnelActive()) return
+        visualState = ConnectionControl.State.DEGRADED
+        connectionControl.state = visualState
+        connectionTitle.setTextColor(0xFFFFD180.toInt())
+        connectionTitle.text = "Connection degraded"
+        connectionDetail.text = "Tunnel is active; HTTP health check failed"
+        latencyGraph.setLabel("Ping unavailable")
     }
 
     private fun showFailure(detail: String? = null) {
@@ -2067,6 +2411,7 @@ class MainActivity : Activity() {
         connectionTitle.text = "Not connected"
         connectionDetail.text = detail
         setModeEnabled(true)
+        refreshPublicIp()
     }
 
     private fun setModeEnabled(enabled: Boolean) {
@@ -2075,6 +2420,9 @@ class MainActivity : Activity() {
         scannerSelector.isEnabled = enabled
         scannerSelector.alpha = if (enabled) 1f else DISABLED_ALPHA
     }
+
+    private fun isTunnelActive(): Boolean = visualState == ConnectionControl.State.CONNECTED ||
+        visualState == ConnectionControl.State.DEGRADED
 
     private fun configureSystemBars() {
         window.statusBarColor = CANVAS
@@ -2193,7 +2541,11 @@ class MainActivity : Activity() {
         return MasqueTransport.entries.firstOrNull { it.coreName == name } ?: MasqueTransport.H3
     }
 
-    private fun scanSummary(): String = "${defaultScan().label} · ${defaultScanMode().label} · ${defaultMasqueTransport().label}"
+    private fun scanSummary(): String = listOfNotNull(
+        defaultScan().label,
+        defaultScanMode().label,
+        defaultMasqueTransport().label.takeIf { selectedProtocol == Protocol.MASQUE },
+    ).joinToString(" · ")
 
     private fun preferences() = getSharedPreferences(SETTINGS, MODE_PRIVATE)
 
@@ -2391,6 +2743,12 @@ class MainActivity : Activity() {
         OFF("Off", "off", "Standard TLS handshake"),
     }
 
+    private enum class LogTab(val label: String) {
+        ALL("All"),
+        APP("App"),
+        CORE("Core"),
+    }
+
     private data class SelectionOption(
         val row: LinearLayout,
         val title: TextView,
@@ -2409,6 +2767,15 @@ class MainActivity : Activity() {
         const val LOG_CLOSE_ANIMATION_MS = 160L
         const val PING_URL = "https://www.google.com/generate_204"
         const val PING_TIMEOUT_MS = 5_000
+        val IP_INFO_URLS = arrayOf(
+            "https://www.cloudflare.com/cdn-cgi/trace",
+            "https://api64.ipify.org",
+            "https://api.ipify.org",
+        )
+        val IP_ADDRESS = Regex("^[0-9A-Fa-f:.]+$")
+        const val IP_TIMEOUT_MS = 5_000
+        const val IP_FETCH_ATTEMPTS = 3
+        const val IP_RETRY_DELAY_MS = 300L
         const val SETTINGS = "settings"
         const val CONNECTION_TYPE = "connection_type"
         const val DEFAULT_SCAN = "default_scan"
@@ -2445,7 +2812,7 @@ private class ChevronView(context: Context, private val color: Int) : View(conte
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeWidth = resources.displayMetrics.density * 1.8f
-        this.color = color
+        this.color = this@ChevronView.color
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -2457,6 +2824,25 @@ private class ChevronView(context: Context, private val color: Int) : View(conte
     }
 }
 
+private class RetryView(context: Context, color: Int) : View(context) {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        strokeWidth = resources.displayMetrics.density * 1.8f
+        this.color = color
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val d = resources.displayMetrics.density
+        val center = width / 2f
+        val radius = d * 6f
+        canvas.drawArc(center - radius, center - radius, center + radius, center + radius, -50f, 285f, false, paint)
+        canvas.drawLine(center + radius - d, center - radius, center + radius, center - radius, paint)
+        canvas.drawLine(center + radius, center - radius, center + radius, center - radius + d * 4f, paint)
+    }
+}
+
 private class ConnectionControl(
     context: Context,
     private val primary: Int,
@@ -2464,7 +2850,7 @@ private class ConnectionControl(
     private val connected: Int,
     private val connectedContainer: Int,
 ) : View(context) {
-    enum class State { DISCONNECTED, CONNECTING, CONNECTED, FAILED }
+    enum class State { DISCONNECTED, CONNECTING, CONNECTED, DEGRADED, FAILED }
 
     var state: State = State.DISCONNECTED
         set(value) {
@@ -2472,9 +2858,9 @@ private class ConnectionControl(
             contentDescription = when (value) {
                 State.DISCONNECTED, State.FAILED -> "Connect"
                 State.CONNECTING -> "Connecting"
-                State.CONNECTED -> "Disconnect"
+                State.CONNECTED, State.DEGRADED -> "Disconnect"
             }
-            if (value == State.CONNECTING || value == State.CONNECTED) startConnectingAnimation() else stopConnectingAnimation()
+            if (value == State.CONNECTING || value == State.CONNECTED || value == State.DEGRADED) startConnectingAnimation() else stopConnectingAnimation()
             animate().cancel()
             animate().scaleX(0.9f).scaleY(0.9f).setDuration(90).withEndAction {
                 animate().scaleX(1f).scaleY(1f).setDuration(180).start()
@@ -2509,14 +2895,16 @@ private class ConnectionControl(
         val palette = when (state) {
             State.DISCONNECTED, State.CONNECTING -> Palette(primaryContainer, primary)
             State.CONNECTED -> Palette(CONNECTED_BRIGHT_CONTAINER, CONNECTED_BRIGHT)
+            State.DEGRADED -> Palette(DEGRADED_CONTAINER, DEGRADED)
             State.FAILED -> Palette(ERROR_CONTAINER, ERROR)
         }
 
         paint.style = Paint.Style.FILL
         paint.color = palette.container
-        val shadowAlpha = if (state == State.CONNECTED) 0x88 else 0x44
-        val shadowColor = (shadowAlpha shl 24) or (if (state == State.CONNECTED) palette.accent and 0xFFFFFF else 0x000000)
-        paint.setShadowLayer(dp(if (state == State.CONNECTED) 18 else 12).toFloat(), 0f, 0f, shadowColor)
+        val active = state == State.CONNECTED || state == State.DEGRADED
+        val shadowAlpha = if (active) 0x88 else 0x44
+        val shadowColor = (shadowAlpha shl 24) or (if (active) palette.accent and 0xFFFFFF else 0x000000)
+        paint.setShadowLayer(dp(if (active) 18 else 12).toFloat(), 0f, 0f, shadowColor)
         canvas.drawCircle(centerX, centerY, radius, paint)
         paint.clearShadowLayer()
 
@@ -2548,7 +2936,7 @@ private class ConnectionControl(
                 false,
                 paint,
             )
-        } else if (state == State.CONNECTED) {
+        } else if (state == State.CONNECTED || state == State.DEGRADED) {
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = dp(2 + (pulse * 2f).roundToInt()).toFloat()
             canvas.drawCircle(centerX, centerY, radius + dp(5) + pulse * dp(5), paint)
@@ -2588,7 +2976,7 @@ private class ConnectionControl(
     private fun startConnectingAnimation() {
         if (connectingAnimator != null) return
         connectingAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = if (state == State.CONNECTED) 1_600 else 1_050
+            duration = if (state == State.CONNECTED || state == State.DEGRADED) 1_600 else 1_050
             repeatCount = ValueAnimator.INFINITE
             addUpdateListener {
                 progress = it.animatedFraction
@@ -2617,6 +3005,8 @@ private class ConnectionControl(
         const val ERROR_CONTAINER = 0xFF4A1E1C.toInt()
         const val CONNECTED_BRIGHT = 0xFF8FFFB5.toInt()
         const val CONNECTED_BRIGHT_CONTAINER = 0xFF176B3B.toInt()
+        const val DEGRADED = 0xFFFFD180.toInt()
+        const val DEGRADED_CONTAINER = 0xFF5A4300.toInt()
     }
 }
 

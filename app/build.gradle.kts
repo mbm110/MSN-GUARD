@@ -26,8 +26,8 @@ android {
         applicationId = "studio.cluvex.aethery"
         minSdk = 26
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.6.0"
+        versionCode = 8
+        versionName = "0.7.0"
 
     }
 
@@ -101,7 +101,6 @@ targetAbis.forEach { abi ->
         inputs.file(buildScript)
         val output = file("src/main/jniLibs/$abi/libaether.so")
         outputs.file(output)
-        onlyIf { !output.exists() }
     }
     tasks.named("preBuild").configure { dependsOn(taskName) }
 }

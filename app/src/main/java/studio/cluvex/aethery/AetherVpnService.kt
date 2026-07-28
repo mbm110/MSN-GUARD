@@ -9,6 +9,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.service.quicksettings.TileService
+import android.net.IpPrefix
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -16,6 +17,7 @@ import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
 import org.json.JSONObject
+import java.net.InetAddress
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -24,6 +26,9 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
     private val connected = AtomicBoolean(false)
     private val stopRequested = AtomicBoolean(false)
+    // Native transport sockets need VpnService.protect only while a TUN exists.
+    // Proxy mode has no VPN interface, so protecting there would always fail.
+    private val vpnModeActive = AtomicBoolean(false)
     private var tun: ParcelFileDescriptor? = null
     private var lastTrafficSampleMs = 0L
     private var currentTx = 0L
@@ -33,8 +38,13 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
     private var prevSpeedSampleMs = 0L
     private var currentSpeedTx = 0L
     private var currentSpeedRx = 0L
+    private var accountedTx = 0L
+    private var accountedRx = 0L
     private var storedConfig: String? = null
     private var storedVpnMode = true
+    private var currentProtocol = "Tunnel"
+    private var currentVpnIp = ""
+    private var currentPing = ""
 
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
 
@@ -55,8 +65,14 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
                     }
                 }
             }
+            ACTION_NOTIFICATION_HEALTH -> {
+                intent.getStringExtra(EXTRA_NOTIFICATION_IP)?.let { currentVpnIp = it }
+                intent.getStringExtra(EXTRA_NOTIFICATION_PING)?.let { currentPing = it }
+                getSystemService(NotificationManager::class.java)
+                    .notify(NOTIFICATION_ID, notification(currentTx, currentRx))
+            }
         }
-        return Service.START_NOT_STICKY
+        return Service.START_REDELIVER_INTENT
     }
 
     override fun onDestroy() {
@@ -65,7 +81,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         super.onDestroy()
     }
 
-    fun protectSocket(fd: Int): Boolean = protect(fd)
+    fun protectSocket(fd: Int): Boolean = !vpnModeActive.get() || protect(fd)
 
     override fun onEvent(json: String) {
         try {
@@ -97,12 +113,15 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         if (!connected.compareAndSet(false, true)) return
         storedConfig = config
         storedVpnMode = vpnMode
+        currentProtocol = config.substringAfter("\"protocol\":\"").substringBefore('\"').uppercase()
+        currentVpnIp = ""
+        currentPing = ""
         stopRequested.set(false)
+        vpnModeActive.set(vpnMode)
         startAsForeground()
         worker.execute {
             try {
-                val protocol = config.substringAfter("\"protocol\":\"").substringBefore('\"').uppercase()
-                ConnectionLog.record("Preparing $protocol identity")
+                ConnectionLog.record("Preparing $currentProtocol identity")
                 NativeCore.attach(this)
                 val result = if (vpnMode) {
                     val addresses = NativeCore.prepare(config)
@@ -115,6 +134,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
                         .addRoute("0.0.0.0", 0)
                         .addRoute("::", 0)
                         .addDnsServer("1.1.1.1")
+                        .applyLanAccess()
                         .applySplitTunneling()
                         .establish() ?: error("Android could not establish the VPN interface")
                     ConnectionLog.record("Scanning gateways for VPN")
@@ -131,8 +151,8 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
                 } else if (stopRequested.get()) {
                     sendStatus(STATUS_DISCONNECTED)
                 } else {
-                    ConnectionLog.record("Native tunnel exited normally")
-                    sendStatus(STATUS_DISCONNECTED)
+                    ConnectionLog.record("Native tunnel stopped unexpectedly")
+                    sendStatus(STATUS_FAILED, "Tunnel stopped unexpectedly")
                 }
             } catch (error: Exception) {
                 val detail = NativeCore.lastError().ifBlank { error.message ?: "Tunnel setup failed" }
@@ -140,6 +160,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
                 sendStatus(STATUS_FAILED, detail)
             } finally {
                 NativeCore.detach()
+                vpnModeActive.set(false)
                 val killSwitch = getSharedPreferences("settings", MODE_PRIVATE).getBoolean("kill_switch", false)
                 tun?.close()
                 tun = null
@@ -206,9 +227,42 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         prevRx = rx
         prevSpeedSampleMs = now
 
+        val (monthTx, monthRx) = recordMonthlyTraffic(
+            (tx - accountedTx).coerceAtLeast(0),
+            (rx - accountedRx).coerceAtLeast(0),
+        )
+        accountedTx = tx
+        accountedRx = rx
+        sendTraffic(tx, rx, monthTx, monthRx)
+
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, notification(tx, rx))
         lastTrafficSampleMs = now
+    }
+
+    private fun recordMonthlyTraffic(tx: Long, rx: Long): Pair<Long, Long> {
+        val month = java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.US).format(java.util.Date())
+        val prefs = getSharedPreferences(TRAFFIC_PREFS, MODE_PRIVATE)
+        val sameMonth = prefs.getString(TRAFFIC_MONTH, null) == month
+        val monthTx = (if (sameMonth) prefs.getLong(TRAFFIC_TX, 0) else 0) + tx
+        val monthRx = (if (sameMonth) prefs.getLong(TRAFFIC_RX, 0) else 0) + rx
+        prefs.edit()
+            .putString(TRAFFIC_MONTH, month)
+            .putLong(TRAFFIC_TX, monthTx)
+            .putLong(TRAFFIC_RX, monthRx)
+            .apply()
+        return monthTx to monthRx
+    }
+
+    private fun sendTraffic(tx: Long, rx: Long, monthTx: Long, monthRx: Long) {
+        sendBroadcast(Intent(ACTION_STATUS)
+            .setPackage(packageName)
+            .putExtra(EXTRA_TRAFFIC_TX, tx)
+            .putExtra(EXTRA_TRAFFIC_RX, rx)
+            .putExtra(EXTRA_TRAFFIC_SPEED_TX, currentSpeedTx)
+            .putExtra(EXTRA_TRAFFIC_SPEED_RX, currentSpeedRx)
+            .putExtra(EXTRA_TRAFFIC_MONTH_TX, monthTx)
+            .putExtra(EXTRA_TRAFFIC_MONTH_RX, monthRx))
     }
 
     private fun formatBytes(bytes: Long): String = when {
@@ -260,7 +314,11 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
             Intent(this, AetherVpnService::class.java).setAction(ACTION_RECONNECT),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val contentText = if (tx > 0 || rx > 0) {
+        val health = listOfNotNull(
+            currentVpnIp.takeIf(String::isNotBlank)?.let { "VPN $it" },
+            currentPing.takeIf(String::isNotBlank),
+        ).joinToString(" · ")
+        val traffic = if (tx > 0 || rx > 0) {
             val speedText = if (currentSpeedTx > 0 || currentSpeedRx > 0) {
                 "  \u2191${formatSpeed(currentSpeedTx)} \u2193${formatSpeed(currentSpeedRx)}"
             } else ""
@@ -268,10 +326,11 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         } else {
             getString(R.string.vpn_notification)
         }
+        val contentText = listOf(health, traffic).filter(String::isNotBlank).joinToString(" · ")
 
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.aethery_notification)
-            .setContentTitle(getString(R.string.app_name))
+            .setContentTitle("${getString(R.string.app_name)} · $currentProtocol")
             .setContentText(contentText)
             .setContentIntent(openAppIntent)
             .setOnlyAlertOnce(true)
@@ -293,16 +352,12 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         val mode = settings.mode()
         val packages = settings.packages()
 
-        // Always exclude Aethery in Exclude or All mode to prevent routing loops.
-        if (mode == SplitTunnelSettings.Mode.EXCLUDE || mode == SplitTunnelSettings.Mode.ALL) {
-            try {
-                addDisallowedApplication(packageName)
-            } catch (_: Exception) {
-                // Should not happen for own package
-            }
-        }
-
         if (mode == SplitTunnelSettings.Mode.ALL) return this
+        if (mode == SplitTunnelSettings.Mode.INCLUDE) {
+            // Keep Aethery's UI requests (including the public-IP card) in the VPN.
+            // The native transport protects its own sockets before connecting.
+            addAllowedApplication(packageName)
+        }
         if (packages.isEmpty()) {
             check(mode != SplitTunnelSettings.Mode.INCLUDE) {
                 "No apps selected for tunnel. Connection aborted for safety."
@@ -340,15 +395,44 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         return this
     }
 
+    private fun Builder.applyLanAccess(): Builder {
+        if (!getSharedPreferences("settings", MODE_PRIVATE).getBoolean("lan_sharing", false)) return this
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            ConnectionLog.record("LAN access uses system local routes on Android 12 and older")
+            return this
+        }
+        listOf(
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "fc00::/7",
+            "fe80::/10",
+        ).forEach { cidr ->
+            val (address, prefix) = cidr.split('/')
+            excludeRoute(IpPrefix(InetAddress.getByName(address), prefix.toInt()))
+        }
+        ConnectionLog.record("LAN routes bypass the VPN")
+        return this
+    }
+
     companion object {
         const val ACTION_CONNECT = "studio.cluvex.aethery.CONNECT"
         const val ACTION_DISCONNECT = "studio.cluvex.aethery.DISCONNECT"
         const val ACTION_RECONNECT = "studio.cluvex.aethery.RECONNECT"
+        const val ACTION_NOTIFICATION_HEALTH = "studio.cluvex.aethery.NOTIFICATION_HEALTH"
         const val ACTION_STATUS = "studio.cluvex.aethery.STATUS"
         const val EXTRA_CONFIG = "config"
         const val EXTRA_VPN_MODE = "vpn_mode"
         const val EXTRA_STATUS = "status"
         const val EXTRA_DETAIL = "detail"
+        const val EXTRA_TRAFFIC_TX = "traffic_tx"
+        const val EXTRA_TRAFFIC_RX = "traffic_rx"
+        const val EXTRA_TRAFFIC_SPEED_TX = "traffic_speed_tx"
+        const val EXTRA_TRAFFIC_SPEED_RX = "traffic_speed_rx"
+        const val EXTRA_TRAFFIC_MONTH_TX = "traffic_month_tx"
+        const val EXTRA_TRAFFIC_MONTH_RX = "traffic_month_rx"
+        const val EXTRA_NOTIFICATION_IP = "notification_ip"
+        const val EXTRA_NOTIFICATION_PING = "notification_ping"
         const val STATUS_CONNECTING = "connecting"
         const val STATUS_STARTING = "starting"
         const val STATUS_SCANNING = "scanning"
@@ -357,6 +441,10 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         const val STATUS_DISCONNECTED = "disconnected"
         private const val CHANNEL_ID = "aethery_vpn"
         private const val NOTIFICATION_ID = 1
+        private const val TRAFFIC_PREFS = "traffic_monitor"
+        private const val TRAFFIC_MONTH = "month"
+        private const val TRAFFIC_TX = "tx"
+        private const val TRAFFIC_RX = "rx"
         private const val LOG_TAG = "AetheryVpn"
     }
 }

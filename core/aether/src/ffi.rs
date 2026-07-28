@@ -88,6 +88,9 @@ struct NativeStartOptions {
     masque_transport: String,
     tls_curve_preset: String,
     wireguard_data_check: bool,
+    log_level: Option<String>,
+    perf_profile: Option<String>,
+    h2_fragmentation: Option<bool>,
 }
 
 impl Default for NativeStartOptions {
@@ -108,6 +111,9 @@ impl Default for NativeStartOptions {
             masque_transport: "h3".into(),
             tls_curve_preset: "chrome".into(),
             wireguard_data_check: true,
+            log_level: None,
+            perf_profile: None,
+            h2_fragmentation: None,
         }
     }
 }
@@ -139,6 +145,11 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.masque_transport = MasqueTransport::parse(&value.masque_transport);
         options.tls_curve_preset = TlsCurvePreset::parse(&value.tls_curve_preset);
         options.wireguard_data_check = value.wireguard_data_check;
+        options.log_level = value.log_level.filter(|level| !level.trim().is_empty());
+        options.perf_profile = value
+            .perf_profile
+            .filter(|profile| !profile.trim().is_empty());
+        options.h2_fragmentation = value.h2_fragmentation;
         Ok(options)
     }
 }
@@ -257,6 +268,7 @@ unsafe fn aether_start_json_inner(json: *const c_char, tun_fd: Option<i32>) -> i
         let _running = RunningGuard;
         STOP_REQUESTED.store(false, Ordering::Release);
         READY.store(false, Ordering::Release);
+        set_last_error("");
         clear_logs();
         emit_status("starting", None);
         record_log("Native tunnel started");
@@ -414,13 +426,16 @@ mod tests {
     #[test]
     fn parses_advanced_android_start_options() {
         let native: NativeStartOptions = serde_json::from_str(
-            r#"{"config_path":"aether.toml","tls_curve_preset":"compatibility","wireguard_data_check":false}"#,
+            r#"{"config_path":"aether.toml","tls_curve_preset":"compatibility","wireguard_data_check":false,"log_level":"debug","perf_profile":"high","h2_fragmentation":true}"#,
         )
         .unwrap();
         let options = StartOptions::try_from(native).unwrap();
 
         assert_eq!(options.tls_curve_preset, TlsCurvePreset::Compatibility);
         assert!(!options.wireguard_data_check);
+        assert_eq!(options.log_level.as_deref(), Some("debug"));
+        assert_eq!(options.perf_profile.as_deref(), Some("high"));
+        assert_eq!(options.h2_fragmentation, Some(true));
     }
 
     #[test]

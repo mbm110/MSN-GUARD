@@ -113,8 +113,12 @@ fn log_or_debug(quiet: bool, msg: String) {
     }
 }
 
+fn data_check_enabled_for(no_data_check: Option<&str>) -> bool {
+    no_data_check.is_none()
+}
+
 fn data_check_enabled() -> bool {
-    std::env::var("AETHER_MASQUE_NO_DATA_CHECK").is_err()
+    data_check_enabled_for(std::env::var("AETHER_MASQUE_NO_DATA_CHECK").ok().as_deref())
 }
 
 fn validation_timeout() -> Duration {
@@ -380,8 +384,6 @@ pub async fn run(
             status.as_u16()
         )));
     }
-    crate::ffi::mark_ready();
-
     let mut recv_body = response.into_body();
     let mut capsules = CapsuleParser::new();
 
@@ -398,6 +400,7 @@ pub async fn run(
         );
     } else if !ready_fired {
         ready_fired = true;
+        crate::ffi::mark_ready();
         if let Some(tx) = ready_tx.take() {
             let _ = tx.send(());
         }
@@ -430,12 +433,16 @@ pub async fn run(
 
         if let Some(dl) = pong_deadline {
             if Instant::now() >= dl {
-                log::warn!(
-                    "[h2] no PING response from edge within {:?}; connection is stalled",
+                let message = format!(
+                    "HTTP/2 keepalive PONG missed after {:?}; retaining active tunnel",
                     keepalive_timeout
                 );
-                let _ = send_stream.send_data(Bytes::new(), true);
-                return Err(AetherError::Masque("h2 keepalive timeout".into()));
+                log::warn!("[h2] {message}");
+                crate::ffi::record_log(message);
+                // Cloudflare edges can carry CONNECT-IP datagrams while silently dropping
+                // HTTP/2 PING frames.  Traffic and the app health check are authoritative.
+                awaiting_pong = false;
+                pong_deadline = None;
             }
         }
 
@@ -461,9 +468,11 @@ pub async fn run(
                         log::debug!("[h2] keepalive pong received");
                     }
                     Err(e) => {
-                        log::warn!("[h2] keepalive ping failed: {e}");
-                        let _ = send_stream.send_data(Bytes::new(), true);
-                        return Err(AetherError::Masque(format!("h2 keepalive: {e}")));
+                        let message = format!("HTTP/2 keepalive PONG failed: {e}; retaining active tunnel");
+                        log::warn!("[h2] {message}");
+                        crate::ffi::record_log(message);
+                        awaiting_pong = false;
+                        pong_deadline = None;
                     }
                 }
             }
@@ -517,6 +526,7 @@ pub async fn run(
                             if validate_successes >= DATA_PROBE_REQUIRED_SUCCESSES {
                                 ready_fired = true;
                                 validate_deadline = None;
+                                crate::ffi::mark_ready();
                                 if let Some(tx) = ready_tx.take() {
                                     let _ = tx.send(());
                                 }
@@ -619,5 +629,16 @@ fn bytes_to_ip(version: u8, bytes: &[u8]) -> Option<IpAddr> {
             Some(IpAddr::V6(b.into()))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::data_check_enabled_for;
+
+    #[test]
+    fn h2_data_validation_is_on_by_default() {
+        assert!(data_check_enabled_for(None));
+        assert!(!data_check_enabled_for(Some("1")));
     }
 }

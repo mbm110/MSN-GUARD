@@ -74,8 +74,12 @@ fn validation_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
+fn data_check_enabled_for(value: Option<&str>) -> bool {
+    matches!(value, Some("1") | Some("true") | Some("yes") | Some("on"))
+}
+
 fn data_check_enabled() -> bool {
-    std::env::var("AETHER_MASQUE_NO_DATA_CHECK").is_err()
+    data_check_enabled_for(std::env::var("AETHER_MASQUE_DATA_CHECK").ok().as_deref())
 }
 
 const DATA_PROBE_REQUIRED_SUCCESSES: u32 = 2;
@@ -212,8 +216,8 @@ pub async fn run(
         cert_pem: &cfg.cert_pem,
         key_pem: &cfg.key_pem,
         curve_preset: cfg.tls_curve_preset,
-        pin_endpoint: true,
-        expected_pins: consts::MASQUE_PINS,
+        pin_endpoint: false,
+        expected_pins: &[],
     })?;
 
     let mut current_ech = cfg.ech_config_list.clone();
@@ -360,16 +364,19 @@ pub async fn run(
                     quiet,
                     "[*] validating masque data-plane before exposing socks5".to_string(),
                 );
-            } else if !ready_fired {
-                ready_fired = true;
-                if let Some(tx) = ready_tx.take() {
-                    let _ = tx.send(());
-                }
             }
         }
 
+        let mut connect_ip_ok = false;
         if let (Some(h3c), Some(sid)) = (h3_conn.as_mut(), req_stream) {
-            poll_h3(&mut conn, h3c, sid, &mut capsules, &addr_tx, quiet)?;
+            connect_ip_ok = poll_h3(&mut conn, h3c, sid, &mut capsules, &addr_tx, quiet)?;
+        }
+        if connect_ip_ok && !data_check && !ready_fired {
+            ready_fired = true;
+            crate::ffi::mark_ready();
+            if let Some(tx) = ready_tx.take() {
+                let _ = tx.send(());
+            }
         }
 
         let got_data =
@@ -385,6 +392,7 @@ pub async fn run(
             if validate_successes >= DATA_PROBE_REQUIRED_SUCCESSES {
                 ready_fired = true;
                 validate_deadline = None;
+                crate::ffi::mark_ready();
                 if let Some(tx) = ready_tx.take() {
                     let _ = tx.send(());
                 }
@@ -473,18 +481,30 @@ fn poll_h3(
     capsules: &mut CapsuleParser,
     addr_tx: &Option<mpsc::Sender<AssignedAddr>>,
     quiet: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let mut body = vec![0u8; 65535];
+    let mut connect_ip_ok = false;
 
     loop {
         match h3c.poll(conn) {
-            Ok((_stream_id, h3::Event::Headers { list, .. })) => {
+            Ok((stream_id, h3::Event::Headers { list, .. })) => {
+                if stream_id != req_stream {
+                    continue;
+                }
                 for h in &list {
                     if h.name() == b":status" {
                         log_or_debug(
                             quiet,
                             format!("connect-ip status: {}", String::from_utf8_lossy(h.value())),
                         );
+                        if h.value() == b"200" {
+                            connect_ip_ok = true;
+                        } else {
+                            return Err(AetherError::Other(format!(
+                                "connect-ip status {}",
+                                String::from_utf8_lossy(h.value())
+                            )));
+                        }
                     }
                 }
             }
@@ -511,7 +531,7 @@ fn poll_h3(
         }
     }
 
-    Ok(())
+    Ok(connect_ip_ok)
 }
 
 fn drain_capsules(capsules: &mut CapsuleParser, addr_tx: &Option<mpsc::Sender<AssignedAddr>>) {
@@ -678,8 +698,8 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
         cert_pem: &p.cert_pem,
         key_pem: &p.key_pem,
         curve_preset: p.tls_curve_preset,
-        pin_endpoint: true,
-        expected_pins: consts::MASQUE_PINS,
+        pin_endpoint: false,
+        expected_pins: &[],
     })?;
 
     let scid_bytes = random_scid();
@@ -847,4 +867,15 @@ async fn flush_connected(conn: &mut quiche::Connection, sock: &UdpSocket) -> Res
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::data_check_enabled_for;
+
+    #[test]
+    fn h3_data_validation_is_opt_in() {
+        assert!(!data_check_enabled_for(None));
+        assert!(data_check_enabled_for(Some("true")));
+    }
 }

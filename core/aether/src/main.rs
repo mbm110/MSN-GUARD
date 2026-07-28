@@ -192,12 +192,18 @@ pub async fn start(options: StartOptions) -> Result<()> {
 
     if let Some(ref level) = options.log_level {
         std::env::set_var("AETHER_LOG_LEVEL", level);
+    } else {
+        std::env::remove_var("AETHER_LOG_LEVEL");
     }
     if let Some(ref profile) = options.perf_profile {
         std::env::set_var("AETHER_PERF_PROFILE", profile);
+    } else {
+        std::env::remove_var("AETHER_PERF_PROFILE");
     }
     if options.h2_fragmentation == Some(true) {
         std::env::set_var("AETHER_MASQUE_H2_FRAGMENT", "1");
+    } else {
+        std::env::remove_var("AETHER_MASQUE_H2_FRAGMENT");
     }
 
     match options.protocol {
@@ -521,7 +527,11 @@ fn lastconn_path(config_path: &str) -> String {
     derive_sibling_path(config_path, "lastconn")
 }
 
-async fn quick_verify_masque_peer(identity: &account::Identity, peer: SocketAddr) -> bool {
+async fn quick_verify_masque_peer(
+    identity: &account::Identity,
+    peer: SocketAddr,
+    options: &StartOptions,
+) -> bool {
     let vp = quic::VerifyParams {
         peer,
         sni: consts::CONNECT_SNI.to_string(),
@@ -530,8 +540,8 @@ async fn quick_verify_masque_peer(identity: &account::Identity, peer: SocketAddr
         cert_pem: identity.cert_pem.clone(),
         key_pem: identity.key_pem.clone(),
         ech_config_list: None,
-        noize: noize_config("firewall"),
-        tls_curve_preset: TlsCurvePreset::Chrome,
+        noize: noize_config(options.masque_profile()),
+        tls_curve_preset: options.tls_curve_preset,
         timeout: std::time::Duration::from_secs(5),
         local_ipv4: parse_local_v4(&identity.ipv4),
     };
@@ -583,14 +593,11 @@ fn masque_reconnect_delay() -> std::time::Duration {
 
 async fn hunt_masque_peer(
     identity: &account::Identity,
-    mode_str: &str,
+    mode: prober::ScanMode,
     ip: prober::IpScan,
     options: &StartOptions,
 ) -> Result<SocketAddr> {
-    log::info!(
-        "[*] hunting for a working MASQUE gateway (deep connect-ip + data-plane verification)"
-    );
-    let mode = prober::ScanMode::parse(mode_str);
+    log::info!("[*] hunting for a working MASQUE gateway (CONNECT-IP verification)");
     let probe = prober::MasqueProbe {
         sni: consts::CONNECT_SNI.to_string(),
         authority: quic::default_authority().to_string(),
@@ -625,12 +632,12 @@ async fn run_masque(
     let forced = options.forced_peer.map(|p| p.to_string());
 
     let mut quick_peer: Option<SocketAddr> = None;
-    if forced.is_none() {
+    if forced.is_none() && options.endpoint_discovery == EndpointDiscovery::Cache {
         if let Some(cached) = lastconn::load(&lastconn_path) {
             if let Ok(peer) = cached.peer.parse::<SocketAddr>() {
                 if want_quick_reconnect(&cached).await {
                     log::info!("[*] verifying cached gateway {peer} before reuse");
-                    if quick_verify_masque_peer(&identity, peer).await {
+                    if quick_verify_masque_peer(&identity, peer, options).await {
                         log::info!("[+] cached gateway {peer} still works; skipping scan");
                         quick_peer = Some(peer);
                     } else {
@@ -641,14 +648,6 @@ async fn run_masque(
         }
     }
 
-    let (mode_str, ip) = if forced.is_some() || quick_peer.is_some() {
-        (String::new(), prober::IpScan::V4)
-    } else {
-        let mode_str = select_scan_mode_str().await;
-        let ip = select_ip_version().await;
-        (mode_str, ip)
-    };
-
     let mut last_good_peer: Option<SocketAddr> = None;
 
     loop {
@@ -658,7 +657,7 @@ async fn run_masque(
             let retried = match last_good_peer {
                 Some(p) => {
                     log::info!("[*] retrying last known-good gateway {p} before rescanning");
-                    if quick_verify_masque_peer(&identity, p).await {
+                    if quick_verify_masque_peer(&identity, p, options).await {
                         Some(p)
                     } else {
                         log::warn!(
@@ -680,7 +679,14 @@ async fn run_masque(
                         }
                         Err(_) => return Err(AetherError::Other(format!("bad peer address {p}"))),
                     },
-                    None => match hunt_masque_peer(&identity, &mode_str, ip, options).await {
+                    None => match hunt_masque_peer(
+                        &identity,
+                        options.scan_mode,
+                        options.ip_scan,
+                        options,
+                    )
+                    .await
+                    {
                         Ok(peer) => peer,
                         Err(e) => {
                             log::warn!(
@@ -703,10 +709,15 @@ async fn run_masque(
 
         last_good_peer = Some(peer);
 
-        match run_masque_tunnel(&identity, peer, ech.clone(), listen, options).await {
-            Ok(()) => log::warn!("[-] MASQUE tunnel closed; reconnecting"),
-            Err(e) => log::warn!("[-] MASQUE tunnel ended: {e}; reconnecting"),
-        }
+        let reconnect_detail =
+            match run_masque_tunnel(&identity, peer, ech.clone(), listen, options).await {
+                Ok(()) => "MASQUE tunnel closed; reconnecting".to_string(),
+                Err(e) => format!("MASQUE tunnel ended: {e}; reconnecting"),
+            };
+        log::warn!("[-] {reconnect_detail}");
+        crate::ffi::record_log(&reconnect_detail);
+
+        crate::ffi::emit_status("connecting", Some(reconnect_detail));
 
         tokio::time::sleep(masque_reconnect_delay()).await;
     }
@@ -1168,7 +1179,7 @@ async fn run_wireguard_tunnel(
         .map_err(|_| AetherError::Other("invalid ipv4".into()))?;
 
     log::info!("[*] validating WireGuard tunnel with {peer} (handshake + data-plane) before exposing socks5...");
-    let (_, session) = wireguard::verify_endpoint_keep_session(
+    let validation_rtt = wireguard::verify_endpoint(
         peer,
         private_key,
         peer_public,
@@ -1181,18 +1192,34 @@ async fn run_wireguard_tunnel(
     )
     .await
     .map_err(|e| AetherError::Other(format!("tunnel failed validation: {e}")))?;
-    log::info!("[+] wireguard tunnel validated (end-to-end data confirmed); exposing socks5");
-    crate::ffi::mark_ready();
+
+    let ipv6: std::net::Ipv6Addr = identity
+        .ipv6
+        .parse()
+        .map_err(|_| AetherError::Other("invalid ipv6".into()))?;
 
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
     let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
 
-    let tunnel = wireguard::WgTunnel::from_established(
-        session,
-        std::sync::Arc::new(aethernoize),
+    // Keep validation separate from the live transport. Reusing the verifier's
+    // socket reported ready before the Android TUN had a working data path.
+    let tunnel = wireguard::WgTunnel::new(
+        wireguard::WgConfig {
+            local_private_key: private_key,
+            peer_public_key: peer_public,
+            peer_endpoint: peer,
+            local_ipv4: ipv4,
+            local_ipv6: ipv6,
+            client_id: identity.client_id,
+            preshared_key: None,
+            persistent_keepalive: Some(wg_keepalive_secs()),
+            aethernoize: std::sync::Arc::new(aethernoize),
+        },
         inbound_tx,
-        ipv4,
-    );
+    )
+    .await?;
+    log::info!("[+] WireGuard endpoint validated in {validation_rtt:?}; live transport ready");
+    crate::ffi::mark_ready();
 
     let local_task = if let Some(fd) = options.tun_fd {
         log::info!("[+] Android TUN bridge active");

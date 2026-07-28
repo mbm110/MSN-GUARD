@@ -105,7 +105,7 @@ class AetherTileService : TileService() {
     private fun configJson(): String = org.json.JSONObject().apply {
         put("config_path", java.io.File(filesDir, "aether.toml").absolutePath)
         put("protocol", selectedProtocolcoreName)
-        put("listen", "127.0.0.1:${socksPort()}")
+        put("listen", "${if (connectionType() == ConnectionType.PROXY && lanSharingEnabled()) "0.0.0.0" else "127.0.0.1"}:${socksPort()}")
         put("scan_mode", defaultScanMode().coreName)
         put("ip_scan", defaultScan().coreName)
         put("endpoint_cache_path", java.io.File(filesDir, "masque-gateway-cache.json").absolutePath)
@@ -116,6 +116,9 @@ class AetherTileService : TileService() {
         put("retry_obfuscation_profiles", retryObfuscationProfiles())
         put("tls_curve_preset", tlsCurvePreset().coreName)
         put("wireguard_data_check", wireGuardDataCheck())
+        put("log_level", logLevel())
+        put("perf_profile", perfProfile())
+        put("h2_fragmentation", h2Fragmentation())
     }.toString()
 
     private fun connectionType(): ConnectionType {
@@ -174,6 +177,18 @@ class AetherTileService : TileService() {
     private fun wireGuardDataCheck(): Boolean = getSharedPreferences(SETTINGS, MODE_PRIVATE)
         .getBoolean(WIREGUARD_DATA_CHECK, true)
 
+    private fun lanSharingEnabled(): Boolean = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+        .getBoolean(LAN_SHARING, false)
+
+    private fun logLevel(): String = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+        .getString(LOG_LEVEL, "info") ?: "info"
+
+    private fun perfProfile(): String = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+        .getString(PERF_PROFILE, "auto") ?: "auto"
+
+    private fun h2Fragmentation(): Boolean = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+        .getString(H2_FRAGMENTATION, "off") == "on"
+
     companion object {
         private const val LOG_TAG = "AetherTile"
 
@@ -189,6 +204,10 @@ class AetherTileService : TileService() {
         const val RETRY_OBFUSCATION = "retry_obfuscation_profiles"
         const val TLS_CURVE_PRESET = "tls_curve_preset"
         const val WIREGUARD_DATA_CHECK = "wireguard_data_check"
+        const val LAN_SHARING = "lan_sharing"
+        const val LOG_LEVEL = "log_level"
+        const val PERF_PROFILE = "perf_profile"
+        const val H2_FRAGMENTATION = "h2_fragmentation"
         const val DEFAULT_SOCKS_PORT = "default_socks_port"
         const val DEFAULT_SOCKS_PORT_VALUE = 1819
         const val DEFAULT_PROTOCOL = "default_protocol"

@@ -215,7 +215,8 @@ class AppUpdater(private val activity: Activity) {
     private data class Release(val version: String, val assetName: String, val downloadUrl: String)
 
     private companion object {
-        const val RELEASE_URL = "https://git.diastom.xyz/api/v1/repos/ZethRise/Aethery/releases/latest"
+        const val RELEASE_HOST = "git.diastom.xyz"
+        const val RELEASE_URL = "https://$RELEASE_HOST/api/v1/repos/ZethRise/Aethery/releases/latest"
 
         fun isNewer(remote: String, local: String): Boolean {
             val remoteParts = remote.split('.', '-', '+').map { it.toIntOrNull() ?: 0 }

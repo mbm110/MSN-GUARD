@@ -77,6 +77,7 @@ impl WgTunnel {
         };
 
         let sock = UdpSocket::bind(bind_addr).await?;
+        crate::platform::protect_socket(&sock)?;
         sock.connect(cfg.peer_endpoint).await?;
 
         let local_secret = StaticSecret::from(cfg.local_private_key);
@@ -535,6 +536,7 @@ pub async fn verify_endpoint_keep_session(
         "[::]:0"
     };
     let sock = UdpSocket::bind(bind).await?;
+    crate::platform::protect_socket(&sock)?;
     sock.connect(peer).await?;
 
     let start = Instant::now();
