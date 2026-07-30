@@ -39,3 +39,4 @@ key.properties
 *.jks
 *.keystore
 .zethcode/
+.mimocode/

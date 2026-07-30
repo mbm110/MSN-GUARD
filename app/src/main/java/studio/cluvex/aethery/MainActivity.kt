@@ -30,6 +30,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import android.view.animation.PathInterpolator
@@ -44,6 +46,7 @@ import android.widget.TextView
 import com.google.android.material.color.DynamicColors
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.URL
@@ -70,6 +73,7 @@ class MainActivity : Activity() {
     private lateinit var mainRoot: FrameLayout
     private lateinit var pageHost: FrameLayout
     private lateinit var appUpdater: AppUpdater
+    private var predictiveBackCallback: Any? = null
     private var selectedProtocol = Protocol.MASQUE
     private var pendingConfig: String? = null
     private var visualState = ConnectionControl.State.DISCONNECTED
@@ -90,6 +94,8 @@ class MainActivity : Activity() {
     private var showingMode = false
     private var settingsPage: View? = null
     private var tunnelControlsPage: View? = null
+    private var zeroTrustPage: View? = null
+    private var zeroTrustControlButton: TextView? = null
     private var logsPage: View? = null
     private var scannerPage: View? = null
     private var modePage: View? = null
@@ -158,6 +164,15 @@ class MainActivity : Activity() {
         DynamicColors.applyToActivityIfAvailable(this)
         super.onCreate(savedInstanceState)
         configureSystemBars()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            OnBackInvokedCallback { handleBack() }.also { callback ->
+                predictiveBackCallback = callback
+                onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    callback,
+                )
+            }
+        }
         requestNotificationPermission()
         appUpdater = AppUpdater(this)
 
@@ -260,6 +275,15 @@ class MainActivity : Activity() {
             receiverRegistered = false
         }
         super.onStop()
+    }
+
+    override fun onDestroy() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            (predictiveBackCallback as? OnBackInvokedCallback)?.let {
+                onBackInvokedDispatcher.unregisterOnBackInvokedCallback(it)
+            }
+        }
+        super.onDestroy()
     }
 
     override fun onResume() {
@@ -366,20 +390,15 @@ class MainActivity : Activity() {
 
     private fun createHeader(): LinearLayout = LinearLayout(this).apply {
         gravity = Gravity.CENTER_VERTICAL
-        val titles = LinearLayout(this@MainActivity).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(ImageView(this@MainActivity).apply {
-                setImageResource(R.drawable.aethery_logo)
-                contentDescription = getString(R.string.app_name)
-                scaleType = ScaleType.CENTER_INSIDE
-                adjustViewBounds = true
-            }, LinearLayout.LayoutParams(dp(36), dp(40)))
-            addView(label("Private connection", 14f, MUTED), LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(2) })
-        }
-        addView(titles, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        addView(ImageView(this@MainActivity).apply {
+            setImageResource(R.drawable.aethery_logo)
+            contentDescription = getString(R.string.app_name)
+            scaleType = ScaleType.CENTER_INSIDE
+            adjustViewBounds = true
+            scaleX = 1.20f
+            scaleY = 1.20f
+        }, LinearLayout.LayoutParams(dp(36), dp(40)))
+        addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
         addView(ImageView(this@MainActivity).apply {
             setImageResource(R.drawable.ic_settings)
             contentDescription = "Settings"
@@ -913,16 +932,12 @@ class MainActivity : Activity() {
 
         val header = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(CANVAS)
             addView(createHeaderBackButton { closeScannerScreen() }, LinearLayout.LayoutParams(dp(48), dp(48)))
             addView(label("Scanner options", 22f, INK, TypefaceStyle.MEDIUM).apply {
                 setPadding(dp(4), 0, 0, 0)
             })
         }
-        content.addView(header, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { bottomMargin = dp(8) })
-
         content.addView(label("Choose Aether's endpoint-discovery budget and address families", 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1011,9 +1026,18 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         ))
+        page.addView(header, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(48),
+            Gravity.TOP,
+        ).apply { leftMargin = dp(24); rightMargin = dp(24); topMargin = dp(8) })
 
         page.setOnApplyWindowInsetsListener { _, insets ->
-            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24))
+            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(72), dp(24), insets.systemWindowInsetBottom + dp(24))
+            (header.layoutParams as FrameLayout.LayoutParams).apply {
+                topMargin = insets.systemWindowInsetTop + dp(8)
+                header.layoutParams = this
+            }
             insets
         }
 
@@ -1334,16 +1358,12 @@ class MainActivity : Activity() {
 
         val header = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(CANVAS)
             addView(createHeaderBackButton { closeSettingsScreen() }, LinearLayout.LayoutParams(dp(48), dp(48)))
             addView(label("Settings", 22f, INK, TypefaceStyle.MEDIUM).apply {
                 setPadding(dp(4), 0, 0, 0)
             })
         }
-        content.addView(header, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { bottomMargin = dp(16) })
-
         content.addView(label("CONNECTION TYPE", 12f, MUTED).apply { letterSpacing = 0.1f })
         content.addView(createSettingsButton("${connectionType().label} ›") { showConnectionTypeSheet() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1461,9 +1481,18 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         ))
+        page.addView(header, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(48),
+            Gravity.TOP,
+        ).apply { leftMargin = dp(24); rightMargin = dp(24); topMargin = dp(8) })
 
         page.setOnApplyWindowInsetsListener { _, insets ->
-            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24))
+            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(72), dp(24), insets.systemWindowInsetBottom + dp(24))
+            (header.layoutParams as FrameLayout.LayoutParams).apply {
+                topMargin = insets.systemWindowInsetTop + dp(8)
+                header.layoutParams = this
+            }
             insets
         }
 
@@ -1506,6 +1535,7 @@ class MainActivity : Activity() {
         }
         content.addView(label("CONNECTION SHAPING", 12f, MUTED).apply { letterSpacing = 0.1f })
         addControl("Obfuscation · ${obfuscationProfile().label} ›") { chooseObfuscation() }
+        addControl("Advanced obfuscation · ${advancedObfuscationSummary()} ›") { editAdvancedObfuscation() }
         lateinit var retryButton: TextView
         retryButton = addControl("WireGuard retries · ${if (retryObfuscationProfiles()) "On" else "Off"}") {
             preferences().edit().putBoolean(RETRY_OBFUSCATION, !retryObfuscationProfiles()).apply()
@@ -1525,6 +1555,12 @@ class MainActivity : Activity() {
             preferences().edit().putBoolean(WIREGUARD_DATA_CHECK, !wireGuardDataCheck()).apply()
             updateTunnelControlButton(verificationButton, "WireGuard verification · ${if (wireGuardDataCheck()) "Strict" else "Fast"} ›")
         }
+        content.addView(label("AETHER 1.5", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(28) })
+        addControl("DNS resolvers · ${dnsSummary()} ›") { editDnsServers() }
+        addControl("Destination routing · ${routingSummary()} ›") { editRoutingRules() }
+        zeroTrustControlButton = addControl("Zero Trust · ${zeroTrustSummary()} ›") { openZeroTrustScreen() }
         content.addView(label("ANTI-DPI", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(28) })
@@ -1567,6 +1603,7 @@ class MainActivity : Activity() {
     private fun closeTunnelControlsScreen(animate: Boolean = true) {
         val page = tunnelControlsPage ?: return
         tunnelControlsPage = null
+        zeroTrustControlButton = null
         if (!animate) {
             pageHost.removeView(page)
             return
@@ -1758,6 +1795,309 @@ class MainActivity : Activity() {
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
             setGravity(Gravity.BOTTOM)
         }
+    }
+
+    private fun settingsField(
+        value: String,
+        hintText: String,
+        secure: Boolean = false,
+        multiline: Boolean = false,
+    ) = EditText(this).apply {
+        setText(value)
+        hint = hintText
+        setTextColor(INK)
+        setHintTextColor(MUTED)
+        textSize = 15f
+        inputType = when {
+            secure -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            multiline -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            else -> InputType.TYPE_CLASS_TEXT
+        }
+        setSingleLine(!multiline)
+        gravity = if (multiline) Gravity.TOP else Gravity.CENTER_VERTICAL
+        setPadding(dp(18), if (multiline) dp(14) else 0, dp(18), if (multiline) dp(14) else 0)
+        background = roundedBackground(SURFACE_VARIANT, 16, SURFACE_VARIANT)
+    }
+
+    private fun showTextSettingsSheet(
+        title: String,
+        subtitle: String,
+        fields: List<Pair<String, EditText>>,
+        validator: ((List<String>) -> Pair<Int, String>?)? = null,
+        onSave: (List<String>) -> Unit,
+    ) {
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            background = roundedBackground(SURFACE, 28, SURFACE)
+        }
+        sheet.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label(title, 22f, INK, TypefaceStyle.MEDIUM))
+        })
+        sheet.addView(label(subtitle, 14f, MUTED), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(16) })
+        fields.forEach { (name, field) ->
+            sheet.addView(label(name, 11f, MUTED).apply { letterSpacing = 0.08f }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10); bottomMargin = dp(6) })
+            sheet.addView(field, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                if (field.maxLines > 1) dp(104) else dp(56),
+            ))
+        }
+        sheet.addView(createSettingsButton("Save", backgroundOverride = primary, textColorOverride = primaryContainer) {
+            val values = fields.map { it.second.text.toString().trim() }
+            validator?.invoke(values)?.let { (index, message) ->
+                fields[index].second.error = message
+                return@createSettingsButton
+            }
+            onSave(values)
+            dialog.dismiss()
+            closeTunnelControlsScreen(false)
+            openTunnelControlsScreen()
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(18) })
+        dialog.setContentView(ScrollView(this).apply {
+            setPadding(dp(16), 0, dp(16), dp(16))
+            addView(sheet)
+        })
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.62f)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+        }
+    }
+
+    private fun editDnsServers() {
+        val field = settingsField(
+            preferences().getString(DNS_SERVERS, "").orEmpty(),
+            "1.1.1.1, 9.9.9.9",
+        )
+        showTextSettingsSheet(
+            "DNS resolvers",
+            "IP addresses, optionally with ports. Blank uses Cloudflare defaults.",
+            listOf("RESOLVERS" to field),
+        ) { values ->
+            preferences().edit().putString(DNS_SERVERS, values[0]).apply()
+        }
+    }
+
+    private fun editRoutingRules() {
+        val block = settingsField(
+            preferences().getString(ROUTE_BLOCK, "").orEmpty(),
+            "ads.example\nkeyword:tracker\nport:25",
+            multiline = true,
+        ).apply { maxLines = 5 }
+        val direct = settingsField(
+            preferences().getString(ROUTE_DIRECT, "").orEmpty(),
+            "private\nexample.com\n8.6.112.0/24",
+            multiline = true,
+        ).apply { maxLines = 5 }
+        showTextSettingsSheet(
+            "Destination routing",
+            "Proxy mode only. Add a CIDR directly, such as 8.6.112.0/24.",
+            listOf("BLOCK" to block, "BYPASS TUNNEL / CIDR" to direct),
+            validator = { values ->
+                values.mapIndexedNotNull { index, rules -> invalidCidrRule(rules)?.let { index to it } }.firstOrNull()
+            },
+        ) { values ->
+            preferences().edit()
+                .putString(ROUTE_BLOCK, values[0])
+                .putString(ROUTE_DIRECT, values[1])
+                .apply()
+        }
+    }
+
+    private fun editAdvancedObfuscation() {
+        val jc = settingsField(preferences().getString(OBFUSCATION_JC, "").orEmpty(), "0–10").apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        val jmin = settingsField(preferences().getString(OBFUSCATION_JMIN, "").orEmpty(), "0–1024 bytes").apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        val jmax = settingsField(preferences().getString(OBFUSCATION_JMAX, "").orEmpty(), "0–1024 bytes").apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        val i1 = settingsField(preferences().getString(OBFUSCATION_I1, "").orEmpty(), "<r 64>")
+        val i2 = settingsField(preferences().getString(OBFUSCATION_I2, "").orEmpty(), "<r 32>")
+        showTextSettingsSheet(
+            "Advanced obfuscation",
+            "WireGuard only. Jc/Jmin/Jmax tune junk packets; I1/I2 use Aether CPS packet patterns.",
+            listOf("JUNK COUNT (JC)" to jc, "JUNK MIN (JMIN)" to jmin, "JUNK MAX (JMAX)" to jmax, "INIT PACKET I1" to i1, "INIT PACKET I2" to i2),
+            validator = { values ->
+                val numbers = values.take(3).map { it.toIntOrNull() }
+                when {
+                    values.take(3).withIndex().any { (index, value) -> value.isNotBlank() && numbers[index] == null } -> 0 to "Use whole numbers"
+                    numbers[0]?.let { it !in 0..10 } == true -> 0 to "Jc must be 0–10"
+                    numbers[1]?.let { it !in 0..1024 } == true -> 1 to "Jmin must be 0–1024"
+                    numbers[2]?.let { it !in 0..1024 } == true -> 2 to "Jmax must be 0–1024"
+                    numbers[1] != null && numbers[2] != null && numbers[2]!! < numbers[1]!! -> 2 to "Jmax must be at least Jmin"
+                    values.drop(3).any { it.length > 2048 } -> 3 to "Packet pattern is too long"
+                    else -> null
+                }
+            },
+        ) { values ->
+            preferences().edit().apply {
+                listOf(OBFUSCATION_JC, OBFUSCATION_JMIN, OBFUSCATION_JMAX, OBFUSCATION_I1, OBFUSCATION_I2)
+                    .zip(values)
+                    .forEach { (key, value) -> if (value.isBlank()) remove(key) else putString(key, value) }
+            }.apply()
+        }
+    }
+
+    private fun invalidCidrRule(rules: String): String? = rules.lineSequence()
+        .map(String::trim)
+        .firstOrNull { rule ->
+            val value = when {
+                rule.startsWith("cidr:", ignoreCase = true) -> rule.substringAfter(':').trim()
+                rule.startsWith("ip:", ignoreCase = true) -> rule.substringAfter(':').trim()
+                rule.startsWith("regex:", ignoreCase = true) || rule.startsWith("regexp:", ignoreCase = true) -> return@firstOrNull false
+                else -> rule
+            }
+            if ('/' !in value) return@firstOrNull false
+            val (address, prefix) = value.split('/', limit = 2)
+            if (!address.matches(Regex("[0-9A-Fa-f:.]+"))) return@firstOrNull true
+            val bytes = runCatching { InetAddress.getByName(address).address.size }.getOrNull() ?: return@firstOrNull true
+            prefix.toIntOrNull()?.let { it !in 0..if (bytes == 4) 32 else 128 } ?: true
+        }
+        ?.let { "Invalid CIDR: $it" }
+
+    private fun openZeroTrustScreen() {
+        zeroTrustPage?.let(pageHost::removeView)
+        val team = settingsField(preferences().getString(ZERO_TRUST_TEAM, "").orEmpty(), "team name")
+        val email = settingsField(preferences().getString(ZERO_TRUST_EMAIL, "").orEmpty(), "you@example.com")
+        val code = settingsField("", "email code")
+        val clientId = settingsField(preferences().getString(ZERO_TRUST_CLIENT_ID, "").orEmpty(), "service token client ID")
+        val clientSecret = settingsField(preferences().getString(ZERO_TRUST_CLIENT_SECRET, "").orEmpty(), "service token secret", secure = true)
+        val token = settingsField(preferences().getString(ZERO_TRUST_TOKEN, "").orEmpty(), "Access JWT", secure = true)
+        val status = label("", 13f, MUTED)
+        val page = FrameLayout(this).apply {
+            setBackgroundColor(CANVAS)
+            isClickable = true
+        }
+        val scroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(16), dp(24), dp(24))
+        }
+        content.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { closeZeroTrustScreen() }, LinearLayout.LayoutParams(dp(48), dp(56)))
+            addView(label("Zero Trust", 22f, INK, TypefaceStyle.MEDIUM))
+        })
+        content.addView(label("Use email OTP, a service token, or an existing Access JWT.", 14f, MUTED), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(12) })
+        listOf(
+            "TEAM" to team,
+            "EMAIL" to email,
+            "ONE-TIME CODE" to code,
+            "SERVICE CLIENT ID" to clientId,
+            "SERVICE SECRET" to clientSecret,
+            "ACCESS JWT" to token,
+        ).forEach { (name, field) ->
+            content.addView(label(name, 11f, MUTED).apply { letterSpacing = 0.08f }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10); bottomMargin = dp(6) })
+            content.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)))
+        }
+        content.addView(createToggleRow(
+            "Gateway filtering",
+            "Route HTTP/S through the organization gateway in Proxy mode",
+            preferences().getBoolean(ZERO_TRUST_GATEWAY, false),
+        ) { preferences().edit().putBoolean(ZERO_TRUST_GATEWAY, it).apply() }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(72),
+        ).apply { topMargin = dp(14) })
+        content.addView(status, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(12) })
+        val authButtons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        authButtons.addView(createSettingsButton("Send code") {
+            preferences().edit()
+                .putString(ZERO_TRUST_TEAM, team.text.toString().trim())
+                .putString(ZERO_TRUST_EMAIL, email.text.toString().trim())
+                .apply()
+            status.text = "Requesting code\u2026"
+            Thread {
+                val result = runCatching { NativeCore.requestEmailCode(team.text.toString(), email.text.toString()) }
+                runOnUiThread {
+                    status.setTextColor(if (result.isSuccess) connected else ERROR)
+                    status.text = result.fold({ "Code sent. Check your email." }, { it.message ?: "Could not send code" })
+                }
+            }.start()
+        }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        authButtons.addView(createSettingsButton("Verify") {
+            status.text = "Verifying\u2026"
+            Thread {
+                val result = runCatching { NativeCore.confirmEmailCode(code.text.toString()) }
+                runOnUiThread {
+                    result.onSuccess {
+                        token.setText(it)
+                        preferences().edit().putString(ZERO_TRUST_TOKEN, it).apply()
+                    }
+                    status.setTextColor(if (result.isSuccess) connected else ERROR)
+                    status.text = result.fold({ "Verified. Access token saved." }, { it.message ?: "Code rejected" })
+                }
+            }.start()
+        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+        content.addView(authButtons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(12) })
+        val saveButtons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        saveButtons.addView(createSettingsButton("Clear") {
+            preferences().edit()
+                .remove(ZERO_TRUST_TEAM)
+                .remove(ZERO_TRUST_EMAIL)
+                .remove(ZERO_TRUST_CLIENT_ID)
+                .remove(ZERO_TRUST_CLIENT_SECRET)
+                .remove(ZERO_TRUST_TOKEN)
+                .remove(ZERO_TRUST_GATEWAY)
+                .apply()
+            zeroTrustControlButton?.text = "Zero Trust · ${zeroTrustSummary()} ›"
+            closeZeroTrustScreen()
+        }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        saveButtons.addView(createSettingsButton("Save", backgroundOverride = primary, textColorOverride = primaryContainer) {
+            if (team.text.toString().isBlank()) {
+                team.error = "Team is required"
+                return@createSettingsButton
+            }
+            preferences().edit()
+                .putString(ZERO_TRUST_TEAM, team.text.toString().trim())
+                .putString(ZERO_TRUST_EMAIL, email.text.toString().trim())
+                .putString(ZERO_TRUST_CLIENT_ID, clientId.text.toString().trim())
+                .putString(ZERO_TRUST_CLIENT_SECRET, clientSecret.text.toString().trim())
+                .putString(ZERO_TRUST_TOKEN, token.text.toString().trim())
+                .apply()
+            zeroTrustControlButton?.text = "Zero Trust · ${zeroTrustSummary()} ›"
+            closeZeroTrustScreen()
+        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+        content.addView(saveButtons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply {
+            topMargin = dp(10)
+            bottomMargin = dp(8)
+        })
+        scroll.addView(content)
+        page.addView(scroll, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+        page.setOnApplyWindowInsetsListener { _, insets ->
+            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24))
+            insets
+        }
+        zeroTrustPage = page
+        pageHost.addView(page)
+        page.requestApplyInsets()
+        animatePageOpen(page)
+    }
+
+    private fun closeZeroTrustScreen() {
+        zeroTrustPage?.let { animatePageClose(it) { zeroTrustPage = null } }
     }
 
     private fun <T> showChoiceSheet(
@@ -2257,17 +2597,23 @@ class MainActivity : Activity() {
         .toList()
 
     override fun onBackPressed() {
+        if (!handleBack()) super.onBackPressed()
+    }
+
+    private fun handleBack(): Boolean {
         when {
             splitTunnelAppsPage != null -> closeSplitTunnelAppsScreen()
             splitTunnelPage != null -> closeSplitTunnelScreen()
             trafficMonitorPage != null -> closeTrafficMonitorScreen()
+            zeroTrustPage != null -> closeZeroTrustScreen()
             tunnelControlsPage != null -> closeTunnelControlsScreen()
             showingLogs -> closeLogsScreen()
             showingScanner -> closeScannerScreen()
             showingMode -> closeModeScreen()
             showingSettings -> closeSettingsScreen()
-            else -> super.onBackPressed()
+            else -> return false
         }
+        return true
     }
 
     private fun updateConnectionMode(protocol: Protocol) {
@@ -2317,24 +2663,7 @@ class MainActivity : Activity() {
             .putExtra(AetherVpnService.EXTRA_VPN_MODE, connectionType() == ConnectionType.VPN))
     }
 
-    private fun configJson(): String = org.json.JSONObject().apply {
-        put("config_path", File(filesDir, "aether.toml").absolutePath)
-        put("protocol", selectedProtocol.coreName)
-        put("listen", "${if (connectionType() == ConnectionType.PROXY && lanSharingEnabled()) "0.0.0.0" else "127.0.0.1"}:${socksPort()}")
-        put("scan_mode", defaultScanMode().coreName)
-        put("ip_scan", defaultScan().coreName)
-        put("endpoint_cache_path", File(filesDir, "masque-gateway-cache.json").absolutePath)
-        put("endpoint_discovery", defaultEndpointDiscovery().coreName)
-        put("masque_transport", defaultMasqueTransport().coreName)
-        putOpt("forced_peer", manualEndpoint())
-        put("obfuscation_profile", obfuscationProfile().coreName)
-        put("retry_obfuscation_profiles", retryObfuscationProfiles())
-        put("tls_curve_preset", tlsCurvePreset().coreName)
-        put("wireguard_data_check", wireGuardDataCheck())
-        put("log_level", logLevel().coreName)
-        put("perf_profile", perfProfile().coreName)
-        put("h2_fragmentation", h2Fragmentation() == H2Fragmentation.ON)
-    }.toString()
+    private fun configJson(): String = CoreConfig.json(this, selectedProtocol.coreName)
 
     private fun renderStatus() {
         if (!NativeCore.isRunning() && isTunnelActive()) {
@@ -2558,6 +2887,11 @@ class MainActivity : Activity() {
 
     private fun retryObfuscationProfiles(): Boolean = preferences().getBoolean(RETRY_OBFUSCATION, true)
 
+    private fun advancedObfuscationSummary(): String =
+        listOf(OBFUSCATION_JC, OBFUSCATION_JMIN, OBFUSCATION_JMAX, OBFUSCATION_I1, OBFUSCATION_I2)
+            .any { preferences().getString(it, "").orEmpty().isNotBlank() }
+            .let { if (it) "Custom" else "Preset" }
+
     private fun tlsCurvePreset(): TlsCurvePreset = preferences()
         .getString(TLS_CURVE_PRESET, TlsCurvePreset.CHROME.coreName)
         ?.let { name -> TlsCurvePreset.entries.firstOrNull { it.coreName == name } }
@@ -2630,6 +2964,18 @@ class MainActivity : Activity() {
         .getString(H2_FRAGMENTATION, H2Fragmentation.OFF.coreName)
         ?.let { name -> H2Fragmentation.entries.firstOrNull { it.coreName == name } }
         ?: H2Fragmentation.OFF
+
+    private fun dnsSummary(): String =
+        preferences().getString(DNS_SERVERS, "")?.takeIf { it.isNotBlank() } ?: "Automatic"
+
+    private fun routingSummary(): String =
+        if (
+            preferences().getString(ROUTE_BLOCK, "").isNullOrBlank() &&
+            preferences().getString(ROUTE_DIRECT, "").isNullOrBlank()
+        ) "Off" else "Custom"
+
+    private fun zeroTrustSummary(): String =
+        preferences().getString(ZERO_TRUST_TEAM, "")?.takeIf { it.isNotBlank() } ?: "Off"
 
     private fun socksPort(): Int = getSharedPreferences(SETTINGS, MODE_PRIVATE)
         .getInt(DEFAULT_SOCKS_PORT, DEFAULT_SOCKS_PORT_VALUE)
@@ -2769,6 +3115,8 @@ class MainActivity : Activity() {
         const val PING_TIMEOUT_MS = 5_000
         val IP_INFO_URLS = arrayOf(
             "https://www.cloudflare.com/cdn-cgi/trace",
+            "https://one.one.one.one/cdn-cgi/trace",
+            "https://1.1.1.1/cdn-cgi/trace",
             "https://api64.ipify.org",
             "https://api.ipify.org",
         )
@@ -2783,6 +3131,11 @@ class MainActivity : Activity() {
         const val ENDPOINT_DISCOVERY = "endpoint_discovery"
         const val DEFAULT_MASQUE_TRANSPORT = "default_masque_transport"
         const val OBFUSCATION_PROFILE = "obfuscation_profile"
+        const val OBFUSCATION_JC = "obfuscation_jc"
+        const val OBFUSCATION_JMIN = "obfuscation_jmin"
+        const val OBFUSCATION_JMAX = "obfuscation_jmax"
+        const val OBFUSCATION_I1 = "obfuscation_i1"
+        const val OBFUSCATION_I2 = "obfuscation_i2"
         const val MANUAL_ENDPOINT = "manual_endpoint"
         const val RETRY_OBFUSCATION = "retry_obfuscation_profiles"
         const val TLS_CURVE_PRESET = "tls_curve_preset"
@@ -2792,6 +3145,15 @@ class MainActivity : Activity() {
         const val LOG_LEVEL = "log_level"
         const val PERF_PROFILE = "perf_profile"
         const val H2_FRAGMENTATION = "h2_fragmentation"
+        const val DNS_SERVERS = "dns_servers"
+        const val ROUTE_BLOCK = "route_block"
+        const val ROUTE_DIRECT = "route_direct"
+        const val ZERO_TRUST_TEAM = "zero_trust_team"
+        const val ZERO_TRUST_EMAIL = "zero_trust_email"
+        const val ZERO_TRUST_CLIENT_ID = "zero_trust_client_id"
+        const val ZERO_TRUST_CLIENT_SECRET = "zero_trust_client_secret"
+        const val ZERO_TRUST_TOKEN = "zero_trust_token"
+        const val ZERO_TRUST_GATEWAY = "zero_trust_gateway"
         const val DEFAULT_SOCKS_PORT = "default_socks_port"
         const val DEFAULT_SOCKS_PORT_VALUE = 1819
         const val FALLBACK_CANVAS = 0xFF101411.toInt()

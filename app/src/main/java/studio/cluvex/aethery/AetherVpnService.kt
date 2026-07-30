@@ -133,7 +133,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
                         .addAddress(addresses.ipv6, 128)
                         .addRoute("0.0.0.0", 0)
                         .addRoute("::", 0)
-                        .addDnsServer("1.1.1.1")
+                        .applyDns(config)
                         .applyLanAccess()
                         .applySplitTunneling()
                         .establish() ?: error("Android could not establish the VPN interface")
@@ -412,6 +412,24 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
             excludeRoute(IpPrefix(InetAddress.getByName(address), prefix.toInt()))
         }
         ConnectionLog.record("LAN routes bypass the VPN")
+        return this
+    }
+
+    private fun Builder.applyDns(config: String): Builder {
+        val configured = JSONObject(config).optString("dns_servers")
+        val servers = configured.split(',', ';', ' ', '\n')
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .mapNotNull { entry ->
+                val address = when {
+                    entry.startsWith('[') -> entry.substringAfter('[').substringBefore(']')
+                    entry.count { it == ':' } == 1 -> entry.substringBefore(':')
+                    else -> entry
+                }
+                runCatching { InetAddress.getByName(address) }.getOrNull()
+            }
+            .distinct()
+        (servers.ifEmpty { listOf(InetAddress.getByName("1.1.1.1")) }).forEach { addDnsServer(it) }
         return this
     }
 

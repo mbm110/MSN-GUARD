@@ -3,7 +3,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand::{Rng, RngCore};
 use regex::Regex;
+use serde::Deserialize;
 use tokio::net::UdpSocket;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ManualParameters {
+    pub jc: Option<usize>,
+    pub jmin: Option<usize>,
+    pub jmax: Option<usize>,
+    pub i1: Option<String>,
+    pub i2: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct AetherNoizeConfig {
@@ -112,6 +122,47 @@ pub fn from_profile(name: &str) -> AetherNoizeConfig {
         "aggressive" | "heavy" => AetherNoizeConfig::aggressive(),
         _ => AetherNoizeConfig::balanced(),
     }
+}
+
+pub fn with_manual(profile: &str, raw: &str) -> Result<AetherNoizeConfig, String> {
+    let manual: ManualParameters = serde_json::from_str(raw)
+        .map_err(|error| format!("advanced obfuscation parameters: {error}"))?;
+    if manual.jc.is_some_and(|value| value > 10) {
+        return Err("advanced obfuscation Jc must be 0–10".into());
+    }
+    if manual.jmin.is_some_and(|value| value > 1024) || manual.jmax.is_some_and(|value| value > 1024) {
+        return Err("advanced obfuscation Jmin/Jmax must be 0–1024".into());
+    }
+    if let (Some(min), Some(max)) = (manual.jmin, manual.jmax) {
+        if max < min {
+            return Err("advanced obfuscation Jmax must be at least Jmin".into());
+        }
+    }
+    if manual.i1.as_ref().is_some_and(|value| value.len() > 2048)
+        || manual.i2.as_ref().is_some_and(|value| value.len() > 2048)
+    {
+        return Err("advanced obfuscation packet patterns are limited to 2048 characters".into());
+    }
+
+    let mut config = from_profile(profile);
+    if let Some(value) = manual.jc {
+        config.jc = value;
+        config.jc_before_hs = value / 2;
+        config.jc_after_i1 = value.saturating_sub(config.jc_before_hs + config.jc_after_hs);
+    }
+    if let Some(value) = manual.jmin {
+        config.jmin = value;
+    }
+    if let Some(value) = manual.jmax {
+        config.jmax = value;
+    }
+    if let Some(value) = manual.i1 {
+        config.i1 = (!value.trim().is_empty()).then_some(value);
+    }
+    if let Some(value) = manual.i2 {
+        config.i2 = (!value.trim().is_empty()).then_some(value);
+    }
+    Ok(config)
 }
 
 fn parse_range(data: &str) -> usize {
@@ -354,5 +405,30 @@ pub async fn send_keepalive_junk(sock: &UdpSocket, cfg: &AetherNoizeConfig) {
         if !gap.is_zero() {
             tokio::time::sleep(gap).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_parameters_override_the_profile() {
+        let config = with_manual(
+            "balanced",
+            r#"{"jc":4,"jmin":12,"jmax":32,"i1":"<byte 01>","i2":"<byte 02>"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.jc, 4);
+        assert_eq!(config.jmin, 12);
+        assert_eq!(config.jmax, 32);
+        assert_eq!(config.i1.as_deref(), Some("<byte 01>"));
+        assert_eq!(config.i2.as_deref(), Some("<byte 02>"));
+    }
+
+    #[test]
+    fn manual_parameters_reject_an_inverted_junk_range() {
+        assert!(with_manual("balanced", r#"{"jmin":32,"jmax":12}"#).is_err());
     }
 }

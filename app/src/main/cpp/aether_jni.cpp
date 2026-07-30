@@ -5,6 +5,8 @@
 
 extern "C" {
 int aether_prepare_json(const char* json);
+int aether_zt_request_email_code(const char* team, const char* email);
+int aether_zt_confirm_email_code(const char* code);
 const char* aether_last_result();
 int aether_start_json(const char* json);
 int aether_start_json_with_tun(const char* json, int tun_fd);
@@ -95,6 +97,21 @@ Java_studio_cluvex_aethery_NativeCore_nativePrepare(JNIEnv* env, jobject, jstrin
 extern "C" JNIEXPORT jstring JNICALL
 Java_studio_cluvex_aethery_NativeCore_nativeLastResult(JNIEnv* env, jobject) {
     return last_string(env, aether_last_result());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_studio_cluvex_aethery_NativeCore_nativeRequestEmailCode(
+    JNIEnv* env, jobject, jstring team, jstring email) {
+    const auto team_text = copy_jstring(env, team);
+    const auto email_text = copy_jstring(env, email);
+    return aether_zt_request_email_code(team_text.c_str(), email_text.c_str());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_studio_cluvex_aethery_NativeCore_nativeConfirmEmailCode(
+    JNIEnv* env, jobject, jstring code) {
+    const auto code_text = copy_jstring(env, code);
+    return aether_zt_confirm_email_code(code_text.c_str());
 }
 
 extern "C" JNIEXPORT jint JNICALL

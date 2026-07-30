@@ -7,7 +7,7 @@ val targetAbis = (project.findProperty("targetAbi") as String?)
     ?.split(',')
     ?.map(String::trim)
     ?.filter(String::isNotEmpty)
-    ?: listOf("arm64-v8a", "armeabi-v7a")
+    ?: listOf("arm64-v8a", "armeabi-v7a", "x86_64")
 val releaseKeystore = project.findProperty("aetheryKeystore") as String?
 
 kotlin {
@@ -26,8 +26,8 @@ android {
         applicationId = "studio.cluvex.aethery"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "0.7.0"
+        versionCode = 9
+        versionName = "0.7.1"
 
     }
 

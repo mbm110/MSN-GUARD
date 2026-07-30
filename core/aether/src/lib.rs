@@ -1,5 +1,6 @@
 mod account;
 mod aethernoize;
+mod apifront;
 mod cli;
 mod config;
 mod consts;
@@ -15,6 +16,7 @@ mod noize;
 pub mod platform;
 mod prober;
 mod quic;
+mod routing;
 mod socks;
 mod sysprofile;
 mod tls;
@@ -22,6 +24,7 @@ mod tun;
 mod tunnelping;
 mod wg_prober;
 mod wireguard;
+mod zerotrust;
 
 #[path = "main.rs"]
 mod app;

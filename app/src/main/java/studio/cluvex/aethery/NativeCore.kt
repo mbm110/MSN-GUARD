@@ -19,6 +19,15 @@ object NativeCore {
         )
     }
 
+    fun requestEmailCode(team: String, email: String) {
+        check(nativeRequestEmailCode(team, email) == 0) { nativeLastError() }
+    }
+
+    fun confirmEmailCode(code: String): String {
+        check(nativeConfirmEmailCode(code) == 0) { nativeLastError() }
+        return JSONObject(nativeLastResult()).getString("token")
+    }
+
     fun start(config: String, tunFd: Int): Int = nativeStart(config, tunFd)
     fun startProxy(config: String): Int = nativeStartProxy(config)
     fun stop(): Int = nativeStop()
@@ -35,6 +44,8 @@ object NativeCore {
 
     @JvmStatic private external fun nativePrepare(config: String): Int
     @JvmStatic private external fun nativeLastResult(): String
+    @JvmStatic private external fun nativeRequestEmailCode(team: String, email: String): Int
+    @JvmStatic private external fun nativeConfirmEmailCode(code: String): Int
     @JvmStatic private external fun nativeStart(config: String, tunFd: Int): Int
     @JvmStatic private external fun nativeStartProxy(config: String): Int
     @JvmStatic private external fun nativeStop(): Int

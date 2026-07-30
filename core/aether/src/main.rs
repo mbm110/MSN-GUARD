@@ -9,15 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AetherError, Result};
 pub use crate::prober::{IpScan, ScanMode};
 use crate::{
-    account, aethernoize, config, consts, dns, masque_h2, netstack, noize, prober, quic, socks,
-    tls, tun, wg_prober, wireguard,
+    account, aethernoize, config, consts, dns, lastconn, masque_h2, netstack, noize, prober, quic,
+    socks, sysprofile, tls, tun, wg_prober, wireguard, zerotrust,
 };
-
-mod cli;
-mod fragment;
-mod lastconn;
-mod sysprofile;
-mod tunnelping;
 
 const TUNNEL_MTU: usize = 1280;
 const INNER_MTU: usize = 1200;
@@ -43,6 +37,7 @@ pub struct StartOptions {
     pub scan_mode: ScanMode,
     pub ip_scan: IpScan,
     pub obfuscation_profile: Option<String>,
+    pub obfuscation_parameters: Option<String>,
     pub retry_obfuscation_profiles: bool,
     pub endpoint_cache_path: Option<String>,
     pub endpoint_discovery: EndpointDiscovery,
@@ -53,6 +48,16 @@ pub struct StartOptions {
     pub log_level: Option<String>,
     pub perf_profile: Option<String>,
     pub h2_fragmentation: Option<bool>,
+    pub dns_servers: Option<String>,
+    pub route_block: Option<String>,
+    pub route_direct: Option<String>,
+    pub routes_file: Option<String>,
+    pub team: Option<String>,
+    pub access_client_id: Option<String>,
+    pub access_client_secret: Option<String>,
+    pub access_token: Option<String>,
+    pub access_email: Option<String>,
+    pub gateway: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +123,7 @@ impl StartOptions {
             scan_mode: ScanMode::Balanced,
             ip_scan: IpScan::V4,
             obfuscation_profile: None,
+            obfuscation_parameters: None,
             retry_obfuscation_profiles: true,
             endpoint_cache_path: None,
             endpoint_discovery: EndpointDiscovery::Cache,
@@ -128,6 +134,16 @@ impl StartOptions {
             log_level: None,
             perf_profile: None,
             h2_fragmentation: None,
+            dns_servers: None,
+            route_block: None,
+            route_direct: None,
+            routes_file: None,
+            team: None,
+            access_client_id: None,
+            access_client_secret: None,
+            access_token: None,
+            access_email: None,
+            gateway: false,
         }
     }
 
@@ -141,8 +157,10 @@ impl StartOptions {
 }
 
 pub async fn run_cli() -> Result<()> {
+    crate::cli::parse_and_apply()?;
     initialize();
 
+    let base_config = std::env::var("AETHER_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
     let listen: SocketAddr = std::env::var("AETHER_SOCKS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -155,7 +173,7 @@ pub async fn run_cli() -> Result<()> {
                 Err(_) => Protocol::Masque,
             }
         } else {
-            select_protocol().await
+            select_protocol(&base_config).await
         };
 
     let forced_peer = match protocol {
@@ -170,10 +188,7 @@ pub async fn run_cli() -> Result<()> {
     })
     .transpose()?;
 
-    let mut options = StartOptions::new(
-        protocol,
-        std::env::var("AETHER_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.to_string()),
-    );
+    let mut options = StartOptions::new(protocol, base_config);
     options.listen = listen;
     options.wireguard_config_path = std::env::var("AETHER_WG_CONFIG").ok();
     options.masque_config_path = std::env::var("AETHER_MASQUE_CONFIG").ok();
@@ -181,30 +196,35 @@ pub async fn run_cli() -> Result<()> {
     options.scan_mode = select_scan_mode().await;
     options.ip_scan = select_ip_version().await;
     options.obfuscation_profile = std::env::var("AETHER_NOIZE").ok();
+    options.obfuscation_parameters = std::env::var("AETHER_NOIZE_PARAMETERS").ok();
     options.retry_obfuscation_profiles = std::env::var("AETHER_WG_NO_PROFILE_RETRY").is_err();
+    options.wireguard_data_check = std::env::var("AETHER_WG_NO_DATA_CHECK").is_err();
+    options.log_level = std::env::var("AETHER_LOG_LEVEL").ok();
+    options.perf_profile = std::env::var("AETHER_PERF_PROFILE").ok();
+    options.h2_fragmentation = Some(std::env::var("AETHER_MASQUE_H2_FRAGMENT").is_ok());
+    options.dns_servers = std::env::var("AETHER_DNS").ok();
+    options.route_block = std::env::var("AETHER_ROUTE_BLOCK").ok();
+    options.route_direct = std::env::var("AETHER_ROUTE_DIRECT").ok();
+    options.routes_file = std::env::var("AETHER_ROUTES_FILE").ok();
+    options.team = std::env::var("AETHER_TEAM").ok();
+    options.access_client_id = std::env::var("AETHER_ACCESS_CLIENT_ID").ok();
+    options.access_client_secret = std::env::var("AETHER_ACCESS_CLIENT_SECRET").ok();
+    options.access_token = std::env::var("AETHER_ACCESS_TOKEN").ok();
+    options.access_email = std::env::var("AETHER_ACCESS_EMAIL").ok();
+    options.gateway = std::env::var("AETHER_GATEWAY").is_ok();
 
     select_masque_transport().await;
+    options.masque_transport = if std::env::var("AETHER_MASQUE_HTTP2").is_ok() {
+        MasqueTransport::H2
+    } else {
+        MasqueTransport::H3
+    };
     start(options).await
 }
 
 pub async fn start(options: StartOptions) -> Result<()> {
+    apply_runtime_options(&options);
     initialize();
-
-    if let Some(ref level) = options.log_level {
-        std::env::set_var("AETHER_LOG_LEVEL", level);
-    } else {
-        std::env::remove_var("AETHER_LOG_LEVEL");
-    }
-    if let Some(ref profile) = options.perf_profile {
-        std::env::set_var("AETHER_PERF_PROFILE", profile);
-    } else {
-        std::env::remove_var("AETHER_PERF_PROFILE");
-    }
-    if options.h2_fragmentation == Some(true) {
-        std::env::set_var("AETHER_MASQUE_H2_FRAGMENT", "1");
-    } else {
-        std::env::remove_var("AETHER_MASQUE_H2_FRAGMENT");
-    }
 
     match options.protocol {
         Protocol::Masque => {
@@ -250,7 +270,57 @@ pub async fn start(options: StartOptions) -> Result<()> {
     }
 }
 
+fn apply_runtime_options(options: &StartOptions) {
+    fn set_optional(key: &str, value: &Option<String>) {
+        match value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    if let Some(ref level) = options.log_level {
+        std::env::set_var("AETHER_LOG_LEVEL", level);
+    } else {
+        std::env::remove_var("AETHER_LOG_LEVEL");
+    }
+    if let Some(ref profile) = options.perf_profile {
+        std::env::set_var("AETHER_PERF_PROFILE", profile);
+    } else {
+        std::env::remove_var("AETHER_PERF_PROFILE");
+    }
+    if options.h2_fragmentation == Some(true) {
+        std::env::set_var("AETHER_MASQUE_H2_FRAGMENT", "1");
+    } else {
+        std::env::remove_var("AETHER_MASQUE_H2_FRAGMENT");
+    }
+
+    set_optional("AETHER_NOIZE_PARAMETERS", &options.obfuscation_parameters);
+
+    set_optional("AETHER_DNS", &options.dns_servers);
+    set_optional("AETHER_ROUTE_BLOCK", &options.route_block);
+    set_optional("AETHER_ROUTE_DIRECT", &options.route_direct);
+    set_optional("AETHER_ROUTES_FILE", &options.routes_file);
+    set_optional("AETHER_TEAM", &options.team);
+    set_optional("AETHER_ACCESS_CLIENT_ID", &options.access_client_id);
+    set_optional("AETHER_ACCESS_CLIENT_SECRET", &options.access_client_secret);
+    set_optional("AETHER_ACCESS_TOKEN", &options.access_token);
+    set_optional("AETHER_ACCESS_EMAIL", &options.access_email);
+    std::env::remove_var("AETHER_TEAM_ENDPOINT");
+    if options.gateway {
+        std::env::set_var("AETHER_GATEWAY", "1");
+    } else {
+        std::env::remove_var("AETHER_GATEWAY");
+    }
+    socks::clear_gateway_proxy();
+    socks::reload_routes();
+}
+
 pub async fn prepare(options: &StartOptions) -> Result<TunnelAddresses> {
+    apply_runtime_options(options);
     initialize();
 
     let identity = match options.protocol {
@@ -271,7 +341,18 @@ pub async fn prepare(options: &StartOptions) -> Result<TunnelAddresses> {
 
 pub fn initialize() {
     INITIALIZED.call_once(|| {
-        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        let level = std::env::var("AETHER_LOG_LEVEL")
+            .ok()
+            .map(|value| value.trim().to_lowercase())
+            .filter(|value| {
+                matches!(
+                    value.as_str(),
+                    "error" | "warn" | "info" | "debug" | "trace"
+                )
+            })
+            .unwrap_or_else(|| "info".to_string());
+        let filter = format!("info,aether={level}");
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(filter))
             .format_timestamp_millis()
             .try_init();
         install_netstack_panic_guard();
@@ -303,18 +384,206 @@ fn aethernoize_config(profile: &str) -> aethernoize::AetherNoizeConfig {
     aethernoize::from_profile(profile)
 }
 
+fn team_scope() -> Option<String> {
+    zerotrust::TeamSettings::from_env().map(|settings| settings.team)
+}
+
+fn enrolled_teams(base: &str) -> Vec<String> {
+    let dir_end = base
+        .rfind(|c| c == '/' || c == '\\')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let dir = if dir_end == 0 { "." } else { &base[..dir_end] };
+    let stem = match base[dir_end..].rfind('.') {
+        Some(rel) => &base[dir_end..dir_end + rel],
+        None => &base[dir_end..],
+    };
+    let prefix = format!("{stem}-team-");
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut teams: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(rest) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some(team) = rest.strip_suffix(".toml") else {
+            continue;
+        };
+        if team.is_empty() || team.ends_with("-secondary") || team.ends_with("-lastconn") {
+            continue;
+        }
+        if !teams.iter().any(|known| known == team) {
+            teams.push(team.to_string());
+        }
+    }
+    teams.sort();
+    teams
+}
+
+async fn enrol_zero_trust(base: &str) {
+    let known = enrolled_teams(base);
+
+    let prompt = match known.first() {
+        Some(team) => format!(
+            "\nZero Trust organization.\n  already enrolled: {}\nTeam name from \
+             <team>.cloudflareaccess.com, or blank to reuse '{}': ",
+            known.join(", "),
+            team
+        ),
+        None => "\nZero Trust organization.\nTeam name from <team>.cloudflareaccess.com \
+                 (blank to cancel): "
+            .to_string(),
+    };
+
+    let answer = prompt_line(&prompt).await.unwrap_or_default();
+    let answer = answer.trim().to_string();
+
+    let team = if answer.is_empty() {
+        match known.first() {
+            Some(team) => team.clone(),
+            None => {
+                log::info!("[*] Zero Trust skipped; staying on personal WARP");
+                return;
+            }
+        }
+    } else {
+        match zerotrust::normalize_team(&answer) {
+            Some(team) => team,
+            None => {
+                log::warn!("[-] '{answer}' is not a usable team name");
+                return;
+            }
+        }
+    };
+
+    std::env::set_var("AETHER_TEAM", &team);
+
+    if known.iter().any(|enrolled| *enrolled == team) {
+        log::info!("[+] reusing the saved enrolment for team {team}; no sign-in needed");
+        return;
+    }
+
+    let needs_method = match zerotrust::TeamSettings::from_env() {
+        Some(settings) => {
+            !(settings.token.is_some() || settings.has_service_token() || settings.email.is_some())
+        }
+        None => {
+            std::env::remove_var("AETHER_TEAM");
+            return;
+        }
+    };
+
+    if needs_method {
+        let email = prompt_line("Email address for the one-time login code (blank to cancel): ")
+            .await
+            .unwrap_or_default();
+        let email = email.trim().to_string();
+
+        if email.is_empty() {
+            log::warn!("[-] no email given; staying on personal WARP");
+            std::env::remove_var("AETHER_TEAM");
+            return;
+        }
+
+        std::env::set_var("AETHER_ACCESS_EMAIL", &email);
+    }
+
+    let settings = match zerotrust::TeamSettings::from_env() {
+        Some(settings) => settings,
+        None => {
+            std::env::remove_var("AETHER_TEAM");
+            return;
+        }
+    };
+
+    match zerotrust::resolve_token(&settings).await {
+        Ok(_) => log::info!("[+] signed in to team {team}; now pick the transport to use"),
+        Err(error) => {
+            log::error!("[-] Zero Trust sign-in failed: {error}");
+            log::warn!("[-] staying on personal WARP");
+            std::env::remove_var("AETHER_TEAM");
+            std::env::remove_var("AETHER_ACCESS_EMAIL");
+        }
+    }
+}
+
+async fn provision_account() -> Result<account::Identity> {
+    match zerotrust::TeamSettings::from_env() {
+        Some(settings) => {
+            log::info!(
+                "[*] enrolling this device into the Zero Trust organization {} ({})",
+                settings.team,
+                settings.team_domain()
+            );
+            let identity =
+                account::provision_team(consts::DEFAULT_MODEL, consts::DEFAULT_LOCALE, &settings)
+                    .await?;
+            Ok(account::refresh_profile(identity).await)
+        }
+        None => account::provision_wg(consts::DEFAULT_MODEL, consts::DEFAULT_LOCALE, None).await,
+    }
+}
+
+async fn adopt_team_profile(identity: account::Identity) -> account::Identity {
+    if team_scope().is_none() {
+        return identity;
+    }
+
+    let identity = account::refresh_profile(identity).await;
+
+    if !identity.gateway_proxy.is_empty() {
+        if std::env::var("AETHER_GATEWAY").is_ok() {
+            socks::set_gateway_proxy(&identity.gateway_proxy);
+        } else {
+            log::debug!(
+                "[zerotrust] the organization offers a gateway proxy at {}; pass --gateway to route http through it",
+                identity.gateway_proxy
+            );
+        }
+    }
+
+    if !identity.assigned_endpoint.is_empty() && std::env::var("AETHER_PEER").is_err() {
+        let port = if std::env::var("AETHER_PROTOCOL")
+            .map(|value| value == "wg" || value == "gool")
+            .unwrap_or(false)
+        {
+            2408
+        } else {
+            443
+        };
+        let peer = format!("{}:{port}", identity.assigned_endpoint);
+        if peer.parse::<SocketAddr>().is_ok() {
+            log::info!("[+] the organization assigned endpoint {peer}; trying it before scanning");
+            std::env::set_var("AETHER_TEAM_ENDPOINT", &peer);
+        }
+    }
+
+    identity
+}
+
 fn warp_config_path(options: &StartOptions) -> String {
-    options
-        .wireguard_config_path
-        .clone()
-        .unwrap_or_else(|| options.config_path.clone())
+    if let Some(p) = options.wireguard_config_path.clone() {
+        return p;
+    }
+    match team_scope() {
+        Some(team) => derive_sibling_path(&options.config_path, &format!("team-{team}")),
+        None => options.config_path.clone(),
+    }
 }
 
 fn masque_config_path(options: &StartOptions) -> String {
-    options
-        .masque_config_path
-        .clone()
-        .unwrap_or_else(|| derive_sibling_path(&options.config_path, "masque"))
+    if let Some(p) = options.masque_config_path.clone() {
+        return p;
+    }
+    match team_scope() {
+        Some(team) => derive_sibling_path(&options.config_path, &format!("team-{team}")),
+        None => derive_sibling_path(&options.config_path, "masque"),
+    }
 }
 
 fn derive_sibling_path(base: &str, suffix: &str) -> String {
@@ -334,12 +603,14 @@ fn derive_sibling_path(base: &str, suffix: &str) -> String {
 async fn load_or_provision_warp(config_path: &str) -> Result<account::Identity> {
     if let Some(identity) = config::load(config_path)? {
         log::info!("[+] loaded existing warp identity from {config_path}");
+        let identity = adopt_team_profile(identity).await;
+        config::save(config_path, &identity)?;
         return Ok(identity);
     }
 
     log::info!("[+] no warp identity found; provisioning dedicated wireguard account");
-    let identity =
-        account::provision_wg(consts::DEFAULT_MODEL, consts::DEFAULT_LOCALE, None).await?;
+    let identity = provision_account().await?;
+    let identity = adopt_team_profile(identity).await;
     config::save(config_path, &identity)?;
     log::info!("[+] provisioned and saved new warp identity to {config_path}");
     Ok(identity)
@@ -349,13 +620,16 @@ async fn load_or_provision_masque(config_path: &str) -> Result<account::Identity
     if let Some(identity) = config::load(config_path)? {
         log::info!("[+] loaded existing masque identity from {config_path}");
         if identity.has_masque_credentials() {
+            let identity = adopt_team_profile(identity).await;
+            config::save(config_path, &identity)?;
             return Ok(identity);
         }
-        log::info!("[+] masque identity missing credentials; enrolling masque key");
-        let (cert_pem, key_pem) = account::ensure_masque_enrolled(&identity).await?;
+        log::info!("[+] masque identity needs a certificate; enrolling masque key");
+        let enrollment = account::ensure_masque_enrolled(&identity).await?;
         let identity = account::Identity {
-            cert_pem,
-            key_pem,
+            cert_pem: enrollment.cert_pem,
+            key_pem: enrollment.key_pem,
+            cert_issued_at: enrollment.issued_at,
             ..identity
         };
         config::save(config_path, &identity)?;
@@ -363,14 +637,15 @@ async fn load_or_provision_masque(config_path: &str) -> Result<account::Identity
     }
 
     log::info!("[+] no masque identity found; provisioning dedicated masque account");
-    let identity =
-        account::provision_wg(consts::DEFAULT_MODEL, consts::DEFAULT_LOCALE, None).await?;
-    let (cert_pem, key_pem) = account::ensure_masque_enrolled(&identity).await?;
+    let identity = provision_account().await?;
+    let enrollment = account::ensure_masque_enrolled(&identity).await?;
     let identity = account::Identity {
-        cert_pem,
-        key_pem,
+        cert_pem: enrollment.cert_pem,
+        key_pem: enrollment.key_pem,
+        cert_issued_at: enrollment.issued_at,
         ..identity
     };
+    let identity = adopt_team_profile(identity).await;
     config::save(config_path, &identity)?;
     log::info!("[+] provisioned and saved new masque identity to {config_path}");
     Ok(identity)
@@ -632,7 +907,27 @@ async fn run_masque(
     let forced = options.forced_peer.map(|p| p.to_string());
 
     let mut quick_peer: Option<SocketAddr> = None;
-    if forced.is_none() && options.endpoint_discovery == EndpointDiscovery::Cache {
+    if forced.is_none() {
+        if let Some(assigned) = std::env::var("AETHER_TEAM_ENDPOINT")
+            .ok()
+            .and_then(|value| value.parse::<SocketAddr>().ok())
+        {
+            log::info!("[*] verifying the endpoint the organization assigned: {assigned}");
+            if quick_verify_masque_peer(&identity, assigned, options).await {
+                log::info!("[+] the assigned endpoint {assigned} works; skipping the scan");
+                quick_peer = Some(assigned);
+            } else {
+                log::warn!(
+                    "[-] the assigned endpoint {assigned} did not answer; falling back to scanning"
+                );
+            }
+        }
+    }
+
+    if forced.is_none()
+        && quick_peer.is_none()
+        && options.endpoint_discovery == EndpointDiscovery::Cache
+    {
         if let Some(cached) = lastconn::load(&lastconn_path) {
             if let Ok(peer) = cached.peer.parse::<SocketAddr>() {
                 if want_quick_reconnect(&cached).await {
@@ -859,8 +1154,13 @@ fn wg_keepalive_secs() -> u16 {
 
 fn wg_profile_candidates(
     primary: &str,
+    manual: Option<&str>,
     retry_fallbacks: bool,
-) -> Vec<(String, aethernoize::AetherNoizeConfig)> {
+) -> Result<Vec<(String, aethernoize::AetherNoizeConfig)>> {
+    if let Some(raw) = manual {
+        let config = aethernoize::with_manual(primary, raw).map_err(AetherError::Other)?;
+        return Ok(vec![("manual".to_string(), config)]);
+    }
     let primary = primary.to_string();
     log::info!("[+] aethernoize primary profile: {primary}");
 
@@ -873,13 +1173,13 @@ fn wg_profile_candidates(
         }
     }
 
-    names
+    Ok(names
         .into_iter()
         .map(|n| {
             let cfg = aethernoize::from_profile(&n);
             (n, cfg)
         })
-        .collect()
+        .collect())
 }
 
 async fn hunt_wg_peer_with_profile(
@@ -967,8 +1267,9 @@ async fn run_wireguard(
 ) -> Result<()> {
     let candidates = wg_profile_candidates(
         options.wireguard_profile(),
+        options.obfuscation_parameters.as_deref(),
         options.retry_obfuscation_profiles,
-    );
+    )?;
 
     let forced = options.forced_peer.map(|p| p.to_string());
 
@@ -980,7 +1281,50 @@ async fn run_wireguard(
         .map_err(|_| AetherError::Other("invalid ipv4".into()))?;
 
     let mut quick: Option<(SocketAddr, aethernoize::AetherNoizeConfig, String)> = None;
+
     if forced.is_none() {
+        if let Some(assigned) = std::env::var("AETHER_TEAM_ENDPOINT")
+            .ok()
+            .and_then(|value| value.parse::<SocketAddr>().ok())
+        {
+            log::info!("[*] verifying the endpoint the organization assigned: {assigned}");
+            for (name, profile) in &candidates {
+                match wireguard::verify_endpoint(
+                    assigned,
+                    private_key,
+                    peer_public,
+                    identity.client_id,
+                    ipv4,
+                    profile,
+                    options.wireguard_data_check,
+                    std::time::Duration::from_secs(8),
+                    None,
+                )
+                .await
+                {
+                    Ok(rtt) => {
+                        log::info!(
+                            "[+] the assigned endpoint {assigned} works with profile '{name}' (rtt {rtt:?}); skipping the scan"
+                        );
+                        quick = Some((assigned, profile.clone(), name.clone()));
+                        break;
+                    }
+                    Err(e) => {
+                        log::debug!(
+                            "[-] assigned endpoint {assigned} failed profile '{name}': {e}"
+                        );
+                    }
+                }
+            }
+            if quick.is_none() {
+                log::warn!(
+                    "[-] the assigned endpoint {assigned} did not pass validation; falling back to scanning"
+                );
+            }
+        }
+    }
+
+    if forced.is_none() && quick.is_none() && options.obfuscation_parameters.is_none() {
         if let Some(cached) = lastconn::load(&lastconn_path) {
             if let Ok(peer) = cached.peer.parse::<SocketAddr>() {
                 if want_quick_reconnect(&cached).await {
@@ -1240,12 +1584,15 @@ async fn run_wireguard_tunnel(
 
     let tunnel_result = tunnel.run(outbound_rx).await;
     local_task.abort();
+    let _ = local_task.await;
 
     match tunnel_result {
         Ok(()) => Ok(()),
         Err(e) => Err(AetherError::Other(format!("wireguard tunnel exited: {e}"))),
     }
 }
+
+type TunnelExit = tokio::task::JoinHandle<Result<()>>;
 
 async fn establish_wg(
     identity: &account::Identity,
@@ -1255,7 +1602,7 @@ async fn establish_wg(
     keepalive: u16,
     label: &'static str,
     data_check: bool,
-) -> Result<netstack::StackHandle> {
+) -> Result<(netstack::StackHandle, TunnelExit)> {
     let private_key = identity.private_key_bytes()?;
     let peer_public = identity.peer_public_key_bytes()?;
 
@@ -1297,19 +1644,36 @@ async fn establish_wg(
     );
     let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;
 
-    tokio::spawn(async move {
-        if let Err(e) = tunnel.run(outbound_rx).await {
-            log::error!("[{label}] wireguard tunnel exited: {e}");
+    let exit = tokio::spawn(async move {
+        match tunnel.run(outbound_rx).await {
+            Ok(()) => {
+                log::warn!("[-] [{label}] wireguard tunnel closed");
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("[-] [{label}] wireguard tunnel exited: {e}");
+                Err(AetherError::Other(format!("[{label}] {e}")))
+            }
         }
     });
 
-    Ok(stack)
+    Ok((stack, exit))
+}
+
+struct ForwarderGuard(Vec<tokio::task::AbortHandle>);
+
+impl Drop for ForwarderGuard {
+    fn drop(&mut self) {
+        for handle in self.0.drain(..) {
+            handle.abort();
+        }
+    }
 }
 
 async fn spawn_udp_forwarder(
     outer: &netstack::StackHandle,
     remote: SocketAddr,
-) -> Result<SocketAddr> {
+) -> Result<(SocketAddr, ForwarderGuard)> {
     let sock = std::sync::Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await?);
     let local = sock.local_addr()?;
 
@@ -1321,7 +1685,7 @@ async fn spawn_udp_forwarder(
 
     let up_sock = sock.clone();
     let up_peer = inner_peer.clone();
-    tokio::spawn(async move {
+    let up_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
         loop {
             match up_sock.recv_from(&mut buf).await {
@@ -1338,7 +1702,7 @@ async fn spawn_udp_forwarder(
 
     let down_sock = sock.clone();
     let down_peer = inner_peer.clone();
-    tokio::spawn(async move {
+    let down_task = tokio::spawn(async move {
         while let Some((_src, data)) = udp_rx.recv().await {
             let dst = *down_peer.lock().await;
             if let Some(dst) = dst {
@@ -1347,7 +1711,9 @@ async fn spawn_udp_forwarder(
         }
     });
 
-    Ok(local)
+    let guard = ForwarderGuard(vec![up_task.abort_handle(), down_task.abort_handle()]);
+
+    Ok((local, guard))
 }
 
 async fn run_gool(
@@ -1415,7 +1781,7 @@ async fn run_warp_in_warp(
     options: &StartOptions,
 ) -> Result<()> {
     log::info!("[*] establishing outer WARP tunnel to {peer}...");
-    let outer_stack = establish_wg(
+    let (outer_stack, mut outer_exit) = establish_wg(
         &primary,
         peer,
         TUNNEL_MTU,
@@ -1428,11 +1794,13 @@ async fn run_warp_in_warp(
 
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
-    let forwarder = spawn_udp_forwarder(&outer_stack, peer).await?;
+    let (forwarder, _forwarder_guard) = spawn_udp_forwarder(&outer_stack, peer).await?;
     log::info!("[+] inner endpoint tunneled through outer warp via {forwarder}");
 
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
-    if let Some(fd) = options.tun_fd {
+    let (mut inner_exit, mut local_task): (TunnelExit, TunnelExit) = if let Some(fd) =
+        options.tun_fd
+    {
         log::info!("[+] Android TUN bridge active for inner WARP tunnel");
         let secondary_private_key = secondary.private_key_bytes()?;
         let secondary_peer_public = secondary.peer_public_key_bytes()?;
@@ -1470,29 +1838,61 @@ async fn run_warp_in_warp(
             secondary_ipv4,
         );
 
+        let inner_exit = tokio::spawn(async move {
+            tunnel
+                .run(outbound_rx)
+                .await
+                .map_err(|e| AetherError::Other(format!("[inner] {e}")))
+        });
         let local_task = tokio::spawn(tun::bridge(fd, inbound_rx, outbound_tx));
-        let tunnel_result = tunnel.run(outbound_rx).await;
-        local_task.abort();
+        (inner_exit, local_task)
+    } else {
+        let (inner_stack, inner_exit) = establish_wg(
+            &secondary,
+            forwarder,
+            INNER_MTU,
+            false,
+            20,
+            "inner",
+            options.wireguard_data_check,
+        )
+        .await?;
+        log::info!("[+] socks5 server listening on {listen}");
+        let local_task = tokio::spawn(async move { socks::serve(listen, inner_stack).await });
+        (inner_exit, local_task)
+    };
 
-        return match tunnel_result {
-            Ok(()) => Ok(()),
-            Err(e) => Err(AetherError::Other(format!("wireguard tunnel exited: {e}"))),
-        };
+    crate::ffi::mark_ready();
+
+    let outcome = tokio::select! {
+        result = &mut outer_exit => join_outcome("outer wireguard tunnel", result),
+        result = &mut inner_exit => join_outcome("inner wireguard tunnel", result),
+        result = &mut local_task => join_outcome("local tunnel bridge", result),
+    };
+
+    outer_exit.abort();
+    inner_exit.abort();
+    local_task.abort();
+
+    let _ = outer_exit.await;
+    let _ = inner_exit.await;
+    let _ = local_task.await;
+
+    drop(outer_stack);
+
+    outcome
+}
+
+fn join_outcome(
+    what: &str,
+    result: std::result::Result<Result<()>, tokio::task::JoinError>,
+) -> Result<()> {
+    match result {
+        Ok(Ok(())) => Err(AetherError::Other(format!("{what} stopped"))),
+        Ok(Err(e)) => Err(e),
+        Err(e) if e.is_cancelled() => Err(AetherError::Other(format!("{what} was cancelled"))),
+        Err(e) => Err(AetherError::Other(format!("{what} panicked: {e}"))),
     }
-
-    let inner_stack = establish_wg(
-        &secondary,
-        forwarder,
-        INNER_MTU,
-        false,
-        20,
-        "inner",
-        options.wireguard_data_check,
-    )
-    .await?;
-
-    log::info!("[+] socks5 server listening on {listen}");
-    socks::serve(listen, inner_stack).await
 }
 
 async fn prompt_line(prompt: &str) -> Option<String> {
@@ -1549,20 +1949,33 @@ async fn select_scan_mode_str() -> String {
     }
 }
 
-async fn select_protocol() -> Protocol {
+async fn select_protocol(base: &str) -> Protocol {
     if let Ok(v) = std::env::var("AETHER_PROTOCOL") {
         return Protocol::parse(&v);
     }
 
-    let answer = prompt_line(
-        "\nProtocol:\n  [1] MASQUE (modern, QUIC/H3, default)\n  [2] WireGuard (classic, faster)\n  [3] WARP-in-WARP / gool\nChoose [1-3] (default 1): ",
-    )
-    .await;
+    loop {
+        let zero_trust = match team_scope() {
+            Some(team) => format!("  [4] Zero Trust: signed in to {team}, pick another team\n"),
+            None => "  [4] Zero Trust: sign in to an organization (WARP for teams)\n".to_string(),
+        };
 
-    match answer.as_deref() {
-        Some("2") => Protocol::WireGuard,
-        Some("3") => Protocol::WarpInWarp,
-        _ => Protocol::Masque,
+        let answer = prompt_line(&format!(
+            "\nProtocol:\n  [1] MASQUE (modern, QUIC/H3, default)\n  \
+             [2] WireGuard (classic, faster)\n  [3] WARP-in-WARP / gool\n{zero_trust}\
+             Choose [1-4] (default 1): "
+        ))
+        .await;
+
+        match answer.as_deref() {
+            Some("2") => return Protocol::WireGuard,
+            Some("3") => return Protocol::WarpInWarp,
+            Some("4") => {
+                enrol_zero_trust(base).await;
+                continue;
+            }
+            _ => return Protocol::Masque,
+        }
     }
 }
 

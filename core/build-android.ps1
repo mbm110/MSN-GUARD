@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('arm64-v8a', 'armeabi-v7a')]
+    [ValidateSet('arm64-v8a', 'armeabi-v7a', 'x86_64')]
     [string]$Abi = 'arm64-v8a',
     [int]$Api = 24
 )
@@ -11,16 +11,19 @@ $ErrorActionPreference = 'Stop'
 $targetTriple = switch ($Abi) {
     "arm64-v8a" { "aarch64-linux-android" }
     "armeabi-v7a" { "armv7-linux-androideabi" }
+    "x86_64" { "x86_64-linux-android" }
 }
 
 # Map Android ABI to Clang target prefix
 $clangPrefix = switch ($Abi) {
     "arm64-v8a" { "aarch64-linux-android" }
     "armeabi-v7a" { "armv7a-linux-androideabi" }
+    "x86_64" { "x86_64-linux-android" }
 }
 $includeArch = switch ($Abi) {
     'arm64-v8a' { 'aarch64-linux-android' }
     'armeabi-v7a' { 'arm-linux-androideabi' }
+    'x86_64' { 'x86_64-linux-android' }
 }
 
 # Ensure Rust target is installed

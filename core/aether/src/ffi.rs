@@ -82,6 +82,7 @@ struct NativeStartOptions {
     scan_mode: String,
     ip_scan: String,
     obfuscation_profile: Option<String>,
+    obfuscation_parameters: Option<String>,
     retry_obfuscation_profiles: bool,
     endpoint_cache_path: Option<String>,
     endpoint_discovery: String,
@@ -91,6 +92,16 @@ struct NativeStartOptions {
     log_level: Option<String>,
     perf_profile: Option<String>,
     h2_fragmentation: Option<bool>,
+    dns_servers: Option<String>,
+    route_block: Option<String>,
+    route_direct: Option<String>,
+    routes_file: Option<String>,
+    team: Option<String>,
+    access_client_id: Option<String>,
+    access_client_secret: Option<String>,
+    access_token: Option<String>,
+    access_email: Option<String>,
+    gateway: bool,
 }
 
 impl Default for NativeStartOptions {
@@ -105,6 +116,7 @@ impl Default for NativeStartOptions {
             scan_mode: "balanced".into(),
             ip_scan: "v4".into(),
             obfuscation_profile: None,
+            obfuscation_parameters: None,
             retry_obfuscation_profiles: true,
             endpoint_cache_path: None,
             endpoint_discovery: "cache".into(),
@@ -114,6 +126,16 @@ impl Default for NativeStartOptions {
             log_level: None,
             perf_profile: None,
             h2_fragmentation: None,
+            dns_servers: None,
+            route_block: None,
+            route_direct: None,
+            routes_file: None,
+            team: None,
+            access_client_id: None,
+            access_client_secret: None,
+            access_token: None,
+            access_email: None,
+            gateway: false,
         }
     }
 }
@@ -137,6 +159,9 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.scan_mode = ScanMode::parse(&value.scan_mode);
         options.ip_scan = IpScan::parse(&value.ip_scan);
         options.obfuscation_profile = value.obfuscation_profile;
+        options.obfuscation_parameters = value
+            .obfuscation_parameters
+            .filter(|parameters| !parameters.trim().is_empty());
         options.retry_obfuscation_profiles = value.retry_obfuscation_profiles;
         options.endpoint_cache_path = value
             .endpoint_cache_path
@@ -150,6 +175,20 @@ impl TryFrom<NativeStartOptions> for StartOptions {
             .perf_profile
             .filter(|profile| !profile.trim().is_empty());
         options.h2_fragmentation = value.h2_fragmentation;
+        options.dns_servers = value.dns_servers.filter(|value| !value.trim().is_empty());
+        options.route_block = value.route_block.filter(|value| !value.trim().is_empty());
+        options.route_direct = value.route_direct.filter(|value| !value.trim().is_empty());
+        options.routes_file = value.routes_file.filter(|value| !value.trim().is_empty());
+        options.team = value.team.filter(|value| !value.trim().is_empty());
+        options.access_client_id = value
+            .access_client_id
+            .filter(|value| !value.trim().is_empty());
+        options.access_client_secret = value
+            .access_client_secret
+            .filter(|value| !value.trim().is_empty());
+        options.access_token = value.access_token.filter(|value| !value.trim().is_empty());
+        options.access_email = value.access_email.filter(|value| !value.trim().is_empty());
+        options.gateway = value.gateway;
         Ok(options)
     }
 }
@@ -350,6 +389,107 @@ pub unsafe extern "C" fn aether_prepare_json(json: *const c_char) -> i32 {
     }
 }
 
+unsafe fn required_text(value: *const c_char, name: &str) -> Result<String, String> {
+    if value.is_null() {
+        return Err(format!("{name} is required"));
+    }
+    let value = unsafe { CStr::from_ptr(value) }
+        .to_str()
+        .map_err(|error| format!("{name} is not UTF-8: {error}"))?
+        .trim()
+        .to_string();
+    if value.is_empty() {
+        Err(format!("{name} is required"))
+    } else {
+        Ok(value)
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aether_zt_request_email_code(
+    team: *const c_char,
+    email: *const c_char,
+) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let team = match unsafe { required_text(team, "team") } {
+            Ok(value) => value,
+            Err(error) => {
+                set_last_error(error);
+                return -1;
+            }
+        };
+        let email = match unsafe { required_text(email, "email") } {
+            Ok(value) => value,
+            Err(error) => {
+                set_last_error(error);
+                return -1;
+            }
+        };
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                set_last_error(error);
+                return -2;
+            }
+        };
+        match runtime.block_on(crate::zerotrust::request_email_code(&team, &email)) {
+            Ok(()) => {
+                set_last_error("");
+                0
+            }
+            Err(error) => {
+                set_last_error(error);
+                -2
+            }
+        }
+    }));
+    result.unwrap_or_else(|_| {
+        set_last_error("panic while requesting the Zero Trust email code");
+        -3
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aether_zt_confirm_email_code(code: *const c_char) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let code = match unsafe { required_text(code, "code") } {
+            Ok(value) => value,
+            Err(error) => {
+                set_last_error(error);
+                return -1;
+            }
+        };
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                set_last_error(error);
+                return -2;
+            }
+        };
+        match runtime.block_on(crate::zerotrust::confirm_email_code(&code)) {
+            Ok(token) => {
+                set_last_result(serde_json::json!({ "token": token }));
+                set_last_error("");
+                0
+            }
+            Err(error) => {
+                set_last_error(error);
+                -2
+            }
+        }
+    }));
+    result.unwrap_or_else(|_| {
+        set_last_error("panic while confirming the Zero Trust email code");
+        -3
+    })
+}
+
 /// Returns the most recent native error. Copy it before another native call.
 #[no_mangle]
 pub extern "C" fn aether_last_error() -> *const c_char {
@@ -426,7 +566,7 @@ mod tests {
     #[test]
     fn parses_advanced_android_start_options() {
         let native: NativeStartOptions = serde_json::from_str(
-            r#"{"config_path":"aether.toml","tls_curve_preset":"compatibility","wireguard_data_check":false,"log_level":"debug","perf_profile":"high","h2_fragmentation":true}"#,
+            r#"{"config_path":"aether.toml","tls_curve_preset":"compatibility","wireguard_data_check":false,"log_level":"debug","perf_profile":"high","h2_fragmentation":true,"dns_servers":"9.9.9.9","route_block":"ads.example","team":"acme","gateway":true}"#,
         )
         .unwrap();
         let options = StartOptions::try_from(native).unwrap();
@@ -436,6 +576,10 @@ mod tests {
         assert_eq!(options.log_level.as_deref(), Some("debug"));
         assert_eq!(options.perf_profile.as_deref(), Some("high"));
         assert_eq!(options.h2_fragmentation, Some(true));
+        assert_eq!(options.dns_servers.as_deref(), Some("9.9.9.9"));
+        assert_eq!(options.route_block.as_deref(), Some("ads.example"));
+        assert_eq!(options.team.as_deref(), Some("acme"));
+        assert!(options.gateway);
     }
 
     #[test]

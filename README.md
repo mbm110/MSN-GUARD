@@ -41,7 +41,9 @@ Android UI + Android VPN/TUN
 - **WireGuard** for networks where it is reachable.
 - **WARP-on-WARP** (`gool`) support through the Aether core.
 - Automatic endpoint scanning with IP-level diagnostics, cached-gateway reconnect, and Ironclad verification.
-- Retained Aether v1.3.0 Android FFI core builds into `libaether.so`; it is excluded from repository language statistics.
+- Aether v1.5.0 Zero Trust enrolment through email OTP, service tokens, or an Access JWT.
+- Custom DNS plus destination block/direct rules in Proxy mode and optional Zero Trust gateway filtering.
+- Retained Aether v1.5.0 Android FFI core builds into `libaether.so`; it is excluded from repository language statistics.
 - App-level default protocol setting and direct links to releases/source.
 
 ## Protocol notes
