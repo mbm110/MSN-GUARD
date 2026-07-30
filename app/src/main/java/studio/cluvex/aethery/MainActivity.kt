@@ -1025,7 +1025,7 @@ class MainActivity : Activity() {
         page.addView(scroll, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
-        ))
+        ).apply { topMargin = dp(56) })
         page.addView(header, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(48),
@@ -1033,7 +1033,11 @@ class MainActivity : Activity() {
         ).apply { leftMargin = dp(24); rightMargin = dp(24); topMargin = dp(8) })
 
         page.setOnApplyWindowInsetsListener { _, insets ->
-            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(72), dp(24), insets.systemWindowInsetBottom + dp(24))
+            (scroll.layoutParams as FrameLayout.LayoutParams).apply {
+                topMargin = insets.systemWindowInsetTop + dp(56)
+                bottomMargin = insets.systemWindowInsetBottom
+                scroll.layoutParams = this
+            }
             (header.layoutParams as FrameLayout.LayoutParams).apply {
                 topMargin = insets.systemWindowInsetTop + dp(8)
                 header.layoutParams = this
@@ -1480,7 +1484,7 @@ class MainActivity : Activity() {
         page.addView(scroll, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
-        ))
+        ).apply { topMargin = dp(56) })
         page.addView(header, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(48),
@@ -1488,7 +1492,11 @@ class MainActivity : Activity() {
         ).apply { leftMargin = dp(24); rightMargin = dp(24); topMargin = dp(8) })
 
         page.setOnApplyWindowInsetsListener { _, insets ->
-            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(72), dp(24), insets.systemWindowInsetBottom + dp(24))
+            (scroll.layoutParams as FrameLayout.LayoutParams).apply {
+                topMargin = insets.systemWindowInsetTop + dp(56)
+                bottomMargin = insets.systemWindowInsetBottom
+                scroll.layoutParams = this
+            }
             (header.layoutParams as FrameLayout.LayoutParams).apply {
                 topMargin = insets.systemWindowInsetTop + dp(8)
                 header.layoutParams = this
