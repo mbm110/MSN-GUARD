@@ -183,6 +183,7 @@ pub async fn run_cli() -> Result<()> {
         Protocol::WireGuard | Protocol::WarpInWarp => std::env::var("AETHER_WG_PEER")
             .ok()
             .or_else(|| std::env::var("AETHER_PEER").ok()),
+        Protocol::Psiphon => None,
     }
     .map(|peer| {
         peer.parse()
@@ -337,6 +338,12 @@ pub async fn prepare(options: &StartOptions) -> Result<TunnelAddresses> {
             let primary_path = warp_config_path(options);
             let secondary_path = derive_sibling_path(&primary_path, "secondary");
             load_or_provision_warp(&secondary_path).await?
+        }
+        Protocol::Psiphon => {
+            return Ok(TunnelAddresses {
+                ipv4: "198.18.0.1".into(),
+                ipv6: "fc00::1".into(),
+            });
         }
     };
 
@@ -769,6 +776,9 @@ async fn select_peer(
                 best.rtt
             );
             Ok(SocketAddr::new(best.ip, best.port))
+        }
+        Protocol::Psiphon => {
+            Err(AetherError::Other("psiphon gateway discovery is not applicable".into()))
         }
     }
 }

@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::Arc;
 
-use tokio::fs::File;
+use std::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -42,7 +42,7 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
         let length = read_packet(&tun, &mut buf).await?;
         if length == 0 { continue; }
         let packet = &buf[..length];
-        *rx_total += length as u64;
+        rx_total += length as u64;
 
         if packet.len() < 20 { continue; }
         let version = (packet[0] >> 4) & 0xF;
