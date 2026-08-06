@@ -49,7 +49,6 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
 
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
 
-    @Throws(PsiphonTunnel.Exception::class)
     override fun bindToDevice(fd: Long) {
         if (!protect(fd.toInt())) {
             throw PsiphonTunnel.Exception("protect(fd=$fd) failed")
@@ -586,10 +585,6 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
 
     override fun getPsiphonConfig(): String = psiphonConfigJson
 
-    @Throws(PsiphonTunnel.Exception::class)
-    override fun newPsiphonTunnel(): PsiphonTunnel {
-        return PsiphonTunnel.newPsiphonTunnel(this)
-    }
 
     companion object {
         const val ACTION_CONNECT = "studio.cluvex.aethery.CONNECT"
