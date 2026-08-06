@@ -208,6 +208,7 @@ class AetherTileService : TileService() {
             MASQUE("MASQUE", "masque", "HTTP/3 tunnel"),
             WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel"),
             WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel"),
+            PSIPHON("Psiphon", "psiphon", "SOCKS5 proxy tunnel"),
         }
 
         enum class ScanTarget(
