@@ -140,7 +140,7 @@ async fn handle_tcp(
 
     // DATA -> forward through SOCKS5
     if !payload.is_empty() {
-        if let Some(mut s) = conns.lock().await.get(&src_port) {
+        if let Some(s) = conns.lock().await.get_mut(&src_port) {
             let _ = s.write_all(payload).await;
             let _ = send_tcp(
                 tun, dst_ip, src_ip, dst_port, src_port,
