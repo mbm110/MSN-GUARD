@@ -58,6 +58,7 @@ pub struct StartOptions {
     pub access_token: Option<String>,
     pub access_email: Option<String>,
     pub gateway: bool,
+    pub upstream_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +145,7 @@ impl StartOptions {
             access_token: None,
             access_email: None,
             gateway: false,
+            upstream_proxy: None,
         }
     }
 
@@ -266,6 +268,11 @@ pub async fn start(options: StartOptions) -> Result<()> {
                 secondary.ipv4
             );
             run_gool(primary, secondary, options.listen, &options).await
+        }
+        Protocol::Psiphon => {
+            let upstream = options.upstream_proxy.as_deref().unwrap_or("127.0.0.1:1080");
+            log::info!("[+] Psiphon upstream SOCKS proxy: {upstream}");
+            run_psiphon(upstream, options.listen, &options).await
         }
     }
 }
@@ -1895,6 +1902,25 @@ fn join_outcome(
     }
 }
 
+/// PSIPHON mode: bridge Android TUN → upstream SOCKS5 proxy (tun2socks).
+async fn run_psiphon(
+    upstream: &str,
+    _listen: SocketAddr,
+    options: &StartOptions,
+) -> Result<()> {
+    let upstream_addr: SocketAddr = upstream
+        .parse()
+        .map_err(|e| AetherError::Other(format!("invalid upstream proxy {upstream}: {e}")))?;
+
+    let tun_fd = options.tun_fd
+        .ok_or_else(|| AetherError::Other("psiphon mode requires a TUN fd".into()))?;
+
+    log::info!("[+] PSIPHON tun2socks: TUN fd={tun_fd} → upstream SOCKS5 {upstream_addr}");
+    ffi::emit_status("connected".into(), None);
+
+    socks_upstream::serve(upstream_addr, tun_fd).await
+}
+
 async fn prompt_line(prompt: &str) -> Option<String> {
     use std::io::IsTerminal;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1984,6 +2010,7 @@ pub enum Protocol {
     Masque,
     WireGuard,
     WarpInWarp,
+    Psiphon,
 }
 
 impl Protocol {
@@ -1991,6 +2018,7 @@ impl Protocol {
         match s.trim().to_lowercase().as_str() {
             "wg" | "wireguard" => Protocol::WireGuard,
             "gool" | "wiw" | "warp-in-warp" | "warpinwarp" => Protocol::WarpInWarp,
+            "psiphon" => Protocol::Psiphon,
             _ => Protocol::Masque,
         }
     }
@@ -2000,6 +2028,7 @@ impl Protocol {
             Protocol::Masque => "MASQUE",
             Protocol::WireGuard => "WireGuard",
             Protocol::WarpInWarp => "WARP-in-WARP (gool)",
+            Protocol::Psiphon => "Psiphon",
         }
     }
 }

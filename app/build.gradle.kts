@@ -71,6 +71,7 @@ android {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("com.google.android.material:material:1.12.0")
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
 }
 
 targetAbis.forEach { abi ->

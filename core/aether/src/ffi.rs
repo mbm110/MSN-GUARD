@@ -102,6 +102,7 @@ struct NativeStartOptions {
     access_token: Option<String>,
     access_email: Option<String>,
     gateway: bool,
+    upstream_proxy: Option<String>,
 }
 
 impl Default for NativeStartOptions {
@@ -136,6 +137,7 @@ impl Default for NativeStartOptions {
             access_token: None,
             access_email: None,
             gateway: false,
+            upstream_proxy: None,
         }
     }
 }
@@ -189,6 +191,7 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.access_token = value.access_token.filter(|value| !value.trim().is_empty());
         options.access_email = value.access_email.filter(|value| !value.trim().is_empty());
         options.gateway = value.gateway;
+        options.upstream_proxy = value.upstream_proxy.filter(|v| !v.trim().is_empty());
         Ok(options)
     }
 }

@@ -18,6 +18,7 @@ mod prober;
 mod quic;
 mod routing;
 mod socks;
+mod socks_upstream;
 mod sysprofile;
 mod tls;
 mod tun;
