@@ -23,6 +23,9 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
 
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
