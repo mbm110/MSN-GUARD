@@ -21,7 +21,7 @@ import java.net.InetAddress
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
-import ca.psiphon.psiphontunnel.PsiphonTunnel
+import ca.psiphon.PsiphonTunnel
 
 class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.HostService {
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
@@ -314,8 +314,8 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         } catch (e: Exception) {
             // Fallback: manual JSON replacement
             baseConfig.replace(
-                ""protocol":"psiphon"",
-                ""protocol":"psiphon","upstream_proxy":"$socksProxy""
+                "\"protocol\":\"psiphon\"",
+                "\"protocol\":\"psiphon\",\"upstream_proxy\":\"$socksProxy\""
             )
         }
     }
