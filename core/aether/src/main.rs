@@ -1926,7 +1926,7 @@ async fn run_psiphon(
         .ok_or_else(|| AetherError::Other("psiphon mode requires a TUN fd".into()))?;
 
     log::info!("[+] PSIPHON tun2socks: TUN fd={tun_fd} → upstream SOCKS5 {upstream_addr}");
-    crate::ffi::emit_status("connected".into(), None);
+    crate::ffi::emit_status("connected", None);
 
     crate::socks_upstream::serve(upstream_addr, tun_fd).await
 }
