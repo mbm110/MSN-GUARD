@@ -27,8 +27,6 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
     private val connected = AtomicBoolean(false)
     private val stopRequested = AtomicBoolean(false)
-    // Native transport sockets need VpnService.protect only while a TUN exists.
-    // Proxy mode has no VPN interface, so protecting there would always fail.
     private val vpnModeActive = AtomicBoolean(false)
     private var tun: ParcelFileDescriptor? = null
     private var lastTrafficSampleMs = 0L
@@ -46,6 +44,42 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
     private var currentProtocol = "Tunnel"
     private var currentVpnIp = ""
     private var currentPing = ""
+    private var psiphonTunnel: PsiphonTunnel? = null
+    private var psiphonConfigJson: String = ""
+    private var psiphonVpnMode = false
+    private var psiphonVpnActivated = false
+    private var activeSocksPort = 0
+
+    companion object {
+        const val LOG_TAG = "AetherVpnService"
+        const val ACTION_CONNECT = "studio.cluvex.aethery.CONNECT"
+        const val ACTION_DISCONNECT = "studio.cluvex.aethery.DISCONNECT"
+        const val ACTION_RECONNECT = "studio.cluvex.aethery.RECONNECT"
+        const val ACTION_NOTIFICATION_HEALTH = "studio.cluvex.aethery.NOTIFICATION_HEALTH"
+        const val ACTION_STATUS = "studio.cluvex.aethery.STATUS"
+        const val EXTRA_CONFIG = "config"
+        const val EXTRA_VPN_MODE = "vpn_mode"
+        const val EXTRA_STATUS = "status"
+        const val EXTRA_DETAIL = "detail"
+        const val EXTRA_TRAFFIC_TX = "traffic_tx"
+        const val EXTRA_TRAFFIC_RX = "traffic_rx"
+        const val EXTRA_TRAFFIC_SPEED_TX = "traffic_speed_tx"
+        const val EXTRA_TRAFFIC_SPEED_RX = "traffic_speed_rx"
+        const val EXTRA_TRAFFIC_MONTH_TX = "traffic_month_tx"
+        const val EXTRA_TRAFFIC_MONTH_RX = "traffic_month_rx"
+        const val EXTRA_NOTIFICATION_IP = "notification_ip"
+        const val EXTRA_NOTIFICATION_PING = "notification_ping"
+        const val STATUS_CONNECTING = "connecting"
+        const val STATUS_CONNECTED = "connected"
+        const val STATUS_DISCONNECTED = "disconnected"
+        const val STATUS_FAILED = "failed"
+        const val CHANNEL_ID = "vpn_channel"
+        const val NOTIFICATION_ID = 1
+        const val TRAFFIC_PREFS = "traffic_stats"
+        const val TRAFFIC_MONTH = "month"
+        const val TRAFFIC_TX = "tx"
+        const val TRAFFIC_RX = "rx"
+    }
 
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
 
@@ -115,6 +149,10 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
                 vpnModeActive.set(true)
                 ConnectionLog.record("Starting Rust core → Psiphon SOCKS $socksProxy")
                 sendStatus(STATUS_CONNECTED)
+
+                // Psiphon sockets are protected via bindToDevice() callback
+                ConnectionLog.record("Psiphon VPN interface established, sockets protected via bindToDevice()")
+
                 val result = NativeCore.start(bridgeConfig, tun!!.fd)
                 if (result != 0 && !stopRequested.get()) {
                     val detail = NativeCore.lastError().ifBlank { "Tunnel exited with code $result" }
@@ -173,7 +211,6 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
     }
 
     private fun buildPsiphonBridgeConfig(baseConfig: String, socksProxy: String): String {
-        // Inject upstream_proxy into config JSON for Rust core
         return try {
             val json = org.json.JSONObject(baseConfig)
             json.put("upstream_proxy", socksProxy)
@@ -188,8 +225,6 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
     }
 
     private fun buildPsiphonConfig(vpnMode: Boolean = true): String {
-        // In Proxy mode, use the user-configured SOCKS port.
-        // In VPN mode, let Psiphon auto-select (0) since the port is internal.
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         val socksPort = if (vpnMode) 0 else prefs.getInt("default_socks_port", 1819)
         return org.json.JSONObject().apply {
@@ -304,7 +339,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         if (!connected.compareAndSet(false, true)) return
         storedConfig = config
         storedVpnMode = vpnMode
-        currentProtocol = config.substringAfter("\"protocol\":\"").substringBefore('\"').uppercase()
+        currentProtocol = config.substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
         currentVpnIp = ""
         currentPing = ""
         stopRequested.set(false)
@@ -357,7 +392,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
                     ConnectionLog.record("Starting local SOCKS5 proxy")
                     NativeCore.startProxy(config)
                 }
-                
+
                 if (result != 0 && !stopRequested.get()) {
                     val detail = NativeCore.lastError().ifBlank { "Tunnel exited with code $result" }
                     ConnectionLog.record("Native tunnel exited: $detail")
@@ -498,68 +533,52 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(
             CHANNEL_ID,
-            getString(R.string.vpn_channel_name),
-            NotificationManager.IMPORTANCE_LOW,
+            "VPN Service",
+            NotificationManager.IMPORTANCE_LOW
         ))
-        val notification = notification(0, 0)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
+        val notification = Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("MSN-GUARD")
+            .setContentText("Connecting...")
+            .setSmallIcon(R.drawable.ic_vpn_key)
+            .setOngoing(true)
+            .setCategory(Notification.CATEGORY_SERVICE)
+            .build()
+        startForeground(NOTIFICATION_ID, notification)
     }
 
     private fun notification(tx: Long, rx: Long): Notification {
-        val openAppIntent = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java).addFlags(
-                Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP,
-            ),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val disconnectIntent = PendingIntent.getService(
-            this,
-            1,
-            Intent(this, AetherVpnService::class.java).setAction(ACTION_DISCONNECT),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val reconnectIntent = PendingIntent.getService(
-            this,
-            2,
-            Intent(this, AetherVpnService::class.java).setAction(ACTION_RECONNECT),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val health = listOfNotNull(
-            currentVpnIp.takeIf(String::isNotBlank)?.let { "VPN $it" },
-            currentPing.takeIf(String::isNotBlank),
-        ).joinToString(" · ")
-        val traffic = if (tx > 0 || rx > 0) {
-            val speedText = if (currentSpeedTx > 0 || currentSpeedRx > 0) {
-                "  \u2191${formatSpeed(currentSpeedTx)} \u2193${formatSpeed(currentSpeedRx)}"
-            } else ""
-            "${getString(R.string.vpn_download)}: ${formatBytes(rx)}  ${getString(R.string.vpn_upload)}: ${formatBytes(tx)}$speedText"
-        } else {
-            getString(R.string.vpn_notification)
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        val contentText = listOf(health, traffic).filter(String::isNotBlank).joinToString(" · ")
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val disconnectIntent = Intent(this, AetherVpnService::class.java).apply {
+            action = ACTION_DISCONNECT
+            putExtra(EXTRA_CONFIG, storedConfig ?: "")
+            putExtra(EXTRA_VPN_MODE, storedVpnMode)
+        }
+        val disconnectPendingIntent = PendingIntent.getService(
+            this, 1, disconnectIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val reconnectIntent = Intent(this, AetherVpnService::class.java).apply {
+            action = ACTION_RECONNECT
+        }
+        val reconnectPendingIntent = PendingIntent.getService(
+            this, 2, reconnectIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
 
         return Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.aethery_notification)
-            .setContentTitle("${getString(R.string.app_name)} · $currentProtocol")
-            .setContentText(contentText)
-            .setContentIntent(openAppIntent)
-            .setOnlyAlertOnce(true)
-            .addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
-                getString(R.string.vpn_disconnect),
-                disconnectIntent,
-            )
-            .addAction(
-                android.R.drawable.ic_menu_revert,
-                "Quick Reconnect",
-                reconnectIntent,
-            )
+            .setContentTitle("MSN-GUARD")
+            .setContentText("VPN: $currentProtocol • ${formatBytes(tx)}↑ ${formatBytes(rx)}↓ • ${formatSpeed(currentSpeedTx)}↑ ${formatSpeed(currentSpeedRx)}↓")
+            .setSmallIcon(R.drawable.ic_vpn_key)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setCategory(Notification.CATEGORY_SERVICE)
+            .addAction(R.drawable.ic_disconnect, "Disconnect", disconnectPendingIntent)
+            .addAction(R.drawable.ic_reconnect, "Reconnect", reconnectPendingIntent)
             .build()
     }
 
@@ -657,66 +676,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
             }
             .distinct()
         (servers.ifEmpty { listOf(InetAddress.getByName("1.1.1.1")) }).forEach { addDnsServer(it) }
+        ConnectionLog.record("DNS servers: ${servers.joinToString(", ") { it.hostAddress }}")
         return this
     }
-
-    // ── PsiphonTunnel.HostService implementation ──
-
-    private var psiphonTunnel: PsiphonTunnel? = null
-    private var psiphonConfigJson: String = ""
-    @Volatile private var activeSocksPort: Int = 0
-    @Volatile private var psiphonVpnMode: Boolean = true
-    @Volatile private var psiphonVpnActivated = false
-
-    override fun getContext(): android.content.Context = this
-
-    override fun getPsiphonConfig(): String = psiphonConfigJson
-
-
-    companion object {
-        const val ACTION_CONNECT = "studio.cluvex.aethery.CONNECT"
-        const val ACTION_DISCONNECT = "studio.cluvex.aethery.DISCONNECT"
-        const val ACTION_RECONNECT = "studio.cluvex.aethery.RECONNECT"
-        const val ACTION_NOTIFICATION_HEALTH = "studio.cluvex.aethery.NOTIFICATION_HEALTH"
-        const val ACTION_STATUS = "studio.cluvex.aethery.STATUS"
-        const val EXTRA_CONFIG = "config"
-        const val EXTRA_VPN_MODE = "vpn_mode"
-        const val EXTRA_STATUS = "status"
-        const val EXTRA_DETAIL = "detail"
-        const val EXTRA_TRAFFIC_TX = "traffic_tx"
-        const val EXTRA_TRAFFIC_RX = "traffic_rx"
-        const val EXTRA_TRAFFIC_SPEED_TX = "traffic_speed_tx"
-        const val EXTRA_TRAFFIC_SPEED_RX = "traffic_speed_rx"
-        const val EXTRA_TRAFFIC_MONTH_TX = "traffic_month_tx"
-        const val EXTRA_TRAFFIC_MONTH_RX = "traffic_month_rx"
-        const val EXTRA_NOTIFICATION_IP = "notification_ip"
-        const val EXTRA_NOTIFICATION_PING = "notification_ping"
-        const val STATUS_CONNECTING = "connecting"
-        const val STATUS_STARTING = "starting"
-        const val STATUS_SCANNING = "scanning"
-        const val STATUS_CONNECTED = "connected"
-        const val STATUS_FAILED = "failed"
-        const val STATUS_DISCONNECTED = "disconnected"
-        private const val CHANNEL_ID = "aethery_vpn"
-        private const val NOTIFICATION_ID = 1
-        private const val TRAFFIC_PREFS = "traffic_monitor"
-        private const val TRAFFIC_MONTH = "month"
-        private const val TRAFFIC_TX = "tx"
-        private const val TRAFFIC_RX = "rx"
-        private const val LOG_TAG = "AetheryVpn"
-    }
-}
-
-object ConnectionLog {
-    private const val MAX_ENTRIES = 100
-    private val entries = ArrayDeque<String>()
-
-    @Synchronized
-    fun record(message: String) {
-        if (entries.size == MAX_ENTRIES) entries.removeFirst()
-        entries.addLast("${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())}  $message")
-    }
-
-    @Synchronized
-    fun snapshot(): List<String> = entries.toList()
 }

@@ -230,22 +230,25 @@ async fn tun_response_reader(
     sport: u16, dport: u16,
     mut seq_to_tun: u32,
 ) {
+    ffi::record_log(format!("[tun2socks] reader task running for sport={}", sport));
     let mut buf = vec![0u8; 65535];
     loop {
         match read_half.read(&mut buf).await {
             Ok(0) => {
+                ffi::record_log(format!("[tun2socks] reader EOF sport={}", sport));
                 // Connection closed — send FIN
                 let _ = send_tcp(&tun, dst_ip, src_ip, sport, dport,
                     seq_to_tun, 0, 0x11, &[]).await; // FIN+ACK
                 break;
             }
             Ok(n) => {
+                ffi::record_log(format!("[tun2socks] reader GOT {} bytes sport={}", n, sport));
                 let _ = send_tcp(&tun, dst_ip, src_ip, sport, dport,
                     seq_to_tun, 0, 0x18, &buf[..n]).await; // PSH+ACK
                 seq_to_tun = seq_to_tun.wrapping_add(n as u32);
             }
             Err(e) => {
-                ffi::record_log(format!("[tun2socks] SOCKS read error: {e}"));
+                ffi::record_log(format!("[tun2socks] reader ERROR sport={}: {}", sport, e));
                 let _ = send_tcp(&tun, dst_ip, src_ip, sport, dport,
                     seq_to_tun, 0, 0x04, &[]).await; // RST
                 break;
@@ -297,7 +300,15 @@ async fn handle_tcp(
                 if tun_clone_fd >= 0 {
                     let tun_clone_file = unsafe { std::fs::File::from_raw_fd(tun_clone_fd) };
                     let tun_clone = tokio::io::unix::AsyncFd::new(tun_clone_file).unwrap();
-                    tokio::spawn(tun_response_reader(read_half, tun_clone, src_ip, dst_ip, sport, dport, seq_to_tun.wrapping_add(1)));
+                    let sport_clone = sport;
+                    let dport_clone = dport;
+                    tokio::spawn(async move {
+                        ffi::record_log(format!("[tun2socks] reader task STARTED for sport={}", sport_clone));
+                        tun_response_reader(read_half, tun_clone, src_ip, dst_ip, sport_clone, dport_clone, seq_to_tun.wrapping_add(1)).await;
+                        ffi::record_log(format!("[tun2socks] reader task ENDED for sport={}", sport_clone));
+                    });
+                } else {
+                    ffi::record_log(format!("[tun2socks] ERROR: dup(tun_fd) failed for reader task"));
                 }
                 
                 // Store write_half for sending data
@@ -331,8 +342,16 @@ async fn handle_tcp(
     // Established connection with data → forward to SOCKS
     else if is_ack && payload_len > 0 {
         if let Some(conn) = conns.lock().await.get_mut(&sport) {
+            ffi::record_log(format!("[tun2socks] DATA forward sport={} payload_len={} ack_from_tun={}", sport, payload_len, conn.ack_from_tun));
             conn.ack_from_tun = seq_num.wrapping_add(payload_len as u32);
-            let _ = conn.write_half.write_all(payload).await;
+            match conn.write_half.write_all(payload).await {
+                Ok(_) => {
+                    ffi::record_log(format!("[tun2socks] DATA written to SOCKS sport={} ok", sport));
+                }
+                Err(e) => {
+                    ffi::record_log(format!("[tun2socks] DATA write error sport={}: {}", sport, e));
+                }
+            }
             // Send ACK to app
             let _ = send_tcp(
                 tun, dst_ip, src_ip, dport, sport,
@@ -341,6 +360,7 @@ async fn handle_tcp(
             ).await;
             payload_len as u64
         } else {
+            ffi::record_log(format!("[tun2socks] DATA but no conn for sport={}", sport));
             0
         }
     } else {
