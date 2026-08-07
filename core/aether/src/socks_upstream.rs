@@ -21,6 +21,7 @@ use crate::ffi;
 
 /// Start the tun2socks bridge.
 pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
+    ffi::record_log(format!("[tun2socks] serve() called, upstream={upstream}, tun_fd={tun_fd}"));
     let fd = unsafe { libc::dup(tun_fd) };
     if fd < 0 {
         return Err(AetherError::Other(format!("dup(tun_fd={tun_fd}) failed")));
@@ -69,7 +70,11 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
                 ).await;
                 tx_total += delta;
             }
-            _ => {}
+            other => {
+                if rx_total < 1000 {
+                    ffi::record_log(format!("[tun2socks] ignored proto={other} from {src_ip} to {dst_ip}"));
+                }
+            }
         }
 
         if last_report.elapsed() >= std::time::Duration::from_secs(1) {
@@ -109,9 +114,10 @@ async fn handle_tcp(
 
     // SYN -> connect through upstream SOCKS5
     if is_syn {
-        log::info!("[tun2socks] TCP SYN {src} -> {dst}");
+        ffi::record_log(format!("[tun2socks] TCP SYN {src} -> {dst}"));
         match connect_through_socks(upstream, dst).await {
             Ok(stream) => {
+                ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT OK {dst}"));
                 conns.lock().await.insert(src_port, stream);
                 let _ = send_tcp(
                     tun, dst_ip, src_ip, dst_port, src_port,
@@ -121,7 +127,7 @@ async fn handle_tcp(
                 ).await;
             }
             Err(e) => {
-                log::warn!("[tun2socks] SOCKS5 CONNECT to {dst} failed: {e}");
+                ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT FAILED {dst}: {e}"));
                 let _ = send_tcp(
                     tun, dst_ip, src_ip, dst_port, src_port,
                     ack_num, seq_num.wrapping_add(1),
@@ -180,17 +186,17 @@ async fn handle_udp(
     // Only handle DNS queries (port 53)
     if dst_port != 53 || payload.is_empty() { return 0; }
 
-    log::info!("[tun2socks] DNS query from {src_ip}:{src_port} -> {dst_ip}:53 ({} bytes)", payload.len());
+    ffi::record_log(format!("[tun2socks] DNS query {src_ip}:{src_port} -> {dst_ip}:53 ({}B)", payload.len()));
 
     // Forward DNS as TCP through SOCKS5
     match forward_dns_tcp(upstream, dst_ip, payload).await {
         Ok(response) => {
-            log::info!("[tun2socks] DNS response: {} bytes", response.len());
+            ffi::record_log(format!("[tun2socks] DNS response OK ({}B)", response.len()));
             let _ = send_udp(tun, dst_ip, src_ip, 53, src_port, &response).await;
             response.len() as u64
         }
         Err(e) => {
-            log::warn!("[tun2socks] DNS TCP forward failed: {e}");
+            ffi::record_log(format!("[tun2socks] DNS FAILED: {e}"));
             0
         }
     }
