@@ -55,12 +55,20 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         }
     }
 
+    override fun onListeningSocksProxyPort(port: Int) {
+        activeSocksPort = port
+        ConnectionLog.record("Psiphon SOCKS proxy listening on port $port")
+    }
+
     override fun onConnecting() {
         ConnectionLog.record("Psiphon connecting")
     }
 
     override fun onConnected() {
-        ConnectionLog.record("Psiphon connected")
+        ConnectionLog.record("Psiphon connected — upstream tunnel ready")
+        // Psiphon's upstream tunnel is now fully established.
+        // Safe to create TUN and start Aethery's Rust core.
+        launchPsiphonTunnel()
     }
 
     override fun onExiting() {
@@ -92,6 +100,66 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         ConnectionLog.record("Psiphon: $message")
     }
 
+    private fun launchPsiphonTunnel() {
+        // Called from onConnected() — Psiphon upstream is ready.
+        // NOW we create the TUN and start Aethery's Rust core.
+        val port = activeSocksPort
+        if (port <= 0) {
+            ConnectionLog.record("Psiphon connected but SOCKS port not set")
+            sendStatus(STATUS_FAILED, "Psiphon SOCKS port unavailable")
+            return
+        }
+        val socksProxy = "127.0.0.1:$port"
+        ConnectionLog.record("Psiphon connected — launching TUN → SOCKS $socksProxy")
+
+        worker.execute {
+            try {
+                val config = storedConfig ?: error("No stored config")
+                val psiphonConfig = buildPsiphonBridgeConfig(config, socksProxy)
+                NativeCore.attach(this@AetherVpnService)
+                val addresses = NativeCore.prepare(psiphonConfig)
+                ConnectionLog.record("Creating Android VPN interface for Psiphon")
+                tun = Builder()
+                    .setSession("MSN-VPN")
+                    .setMtu(1280)
+                    .addAddress(addresses.ipv4, 32)
+                    .addAddress(addresses.ipv6, 128)
+                    .addRoute("0.0.0.0", 0)
+                    .addRoute("::", 0)
+                    .addDisallowedApplication(packageName) // Prevent Psiphon routing loop
+                    .applyDns(psiphonConfig)
+                    .applyLanAccess()
+                    .applySplitTunneling()
+                    .establish() ?: error("Android could not establish the VPN interface")
+                ConnectionLog.record("Starting Rust core → Psiphon SOCKS $socksProxy")
+                sendStatus(STATUS_CONNECTED)
+                val result = NativeCore.start(psiphonConfig, tun!!.fd)
+                if (result != 0 && !stopRequested.get()) {
+                    val detail = NativeCore.lastError().ifBlank { "Tunnel exited with code $result" }
+                    ConnectionLog.record("Native tunnel exited: $detail")
+                    sendStatus(STATUS_FAILED, detail)
+                } else if (stopRequested.get()) {
+                    sendStatus(STATUS_DISCONNECTED)
+                } else {
+                    ConnectionLog.record("Native tunnel stopped unexpectedly")
+                    sendStatus(STATUS_FAILED, "Tunnel stopped unexpectedly")
+                }
+            } catch (error: Exception) {
+                val detail = NativeCore.lastError().ifBlank { error.message ?: "Tunnel setup failed" }
+                Log.e(LOG_TAG, "Psiphon tunnel failed: $detail", error)
+                sendStatus(STATUS_FAILED, detail)
+            } finally {
+                NativeCore.detach()
+                vpnModeActive.set(false)
+                tun?.close()
+                tun = null
+                connected.set(false)
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+        }
+    }
+
     private fun buildPsiphonConfig(): String {
         return org.json.JSONObject().apply {
             put("PropagationChannelId", "FFFFFFFFFFFFFFFF")
@@ -109,7 +177,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         }.toString()
     }
 
-    private fun startPsiphonTunnel(): String? {
+    private fun startPsiphonTunnel() {
         try {
             val tunnel = PsiphonTunnel.newPsiphonTunnel(this)
             tunnel.setVpnMode(false) // SOCKS mode — we manage the TUN.
@@ -123,24 +191,14 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
                 ConnectionLog.record("No server_entries.txt in assets: ${e.message}")
                 ""
             }
+            // Fire-and-forget: Psiphon connects asynchronously.
+            // onListeningSocksProxyPort() saves the port.
+            // onConnected() triggers the actual TUN + Rust core start.
             tunnel.startTunneling(serverEntries)
-
-            // Poll for SOCKS port — ready in <1s
-            var port = 0
-            for (i in 1..40) { // 40 × 250ms = 10s max
-                port = tunnel.localSocksProxyPort
-                if (port > 0) break
-                Thread.sleep(250)
-            }
-            if (port > 0) {
-                ConnectionLog.record("Psiphon SOCKS proxy on 127.0.0.1:$port")
-                return "127.0.0.1:$port"
-            }
-            ConnectionLog.record("Psiphon SOCKS proxy did not start within 10s")
-            return null
+            ConnectionLog.record("Psiphon tunnel starting...")
         } catch (e: Exception) {
             ConnectionLog.record("Psiphon start failed: ${e.message}")
-            return null
+            activeSocksPort = 0
         }
     }
 
@@ -226,29 +284,11 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
                 NativeCore.attach(this)
                 val isPsiphon = currentProtocol.contains("PSIPHON")
                 val result = if (isPsiphon) {
-                    // PSIPHON: SOCKS-only mode — start Psiphon first, get port, then start Rust core
-                    val socksProxy = startPsiphonTunnel()
-                    if (socksProxy == null) {
-                        error("Psiphon failed to start SOCKS proxy")
-                    }
-                    // Build a config that tells Rust to use upstream SOCKS proxy
-                    val psiphonConfig = buildPsiphonBridgeConfig(config, socksProxy)
-                    val addresses = NativeCore.prepare(psiphonConfig)
-                    ConnectionLog.record("Creating Android VPN interface for Psiphon")
-                    tun = Builder()
-                        .setSession("MSN-VPN")
-                        .setMtu(1280)
-                        .addAddress(addresses.ipv4, 32)
-                        .addAddress(addresses.ipv6, 128)
-                        .addRoute("0.0.0.0", 0)
-                        .addRoute("::", 0)
-                        .applyDns(psiphonConfig)
-                        .applyLanAccess()
-                        .applySplitTunneling()
-                        .establish() ?: error("Android could not establish the VPN interface")
-                    ConnectionLog.record("Starting Rust core → Psiphon SOCKS $socksProxy")
-                    sendStatus(STATUS_CONNECTED)  // Mark connected immediately
-                    NativeCore.start(psiphonConfig, tun!!.fd)
+                    // PSIPHON: start async — onConnected() will create TUN + Rust core.
+                    // Return early so finally block does NOT tear down the service.
+                    startPsiphonTunnel()
+                    sendStatus(STATUS_CONNECTING, "Psiphon starting...")
+                    return@execute // Exit worker thread; lifecycle managed by callbacks
                 } else if (vpnMode) {
                     val addresses = NativeCore.prepare(config)
                     ConnectionLog.record("Creating Android VPN interface")
@@ -259,6 +299,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
                         .addAddress(addresses.ipv6, 128)
                         .addRoute("0.0.0.0", 0)
                         .addRoute("::", 0)
+                        .addDisallowedApplication(packageName)
                         .applyDns(config)
                         .applyLanAccess()
                         .applySplitTunneling()
@@ -580,6 +621,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
 
     private var psiphonTunnel: PsiphonTunnel? = null
     private var psiphonConfigJson: String = ""
+    @Volatile private var activeSocksPort: Int = 0
 
     override fun getContext(): android.content.Context = this
 
