@@ -18,6 +18,7 @@ import android.os.SystemClock
 import android.util.Log
 import org.json.JSONObject
 import java.net.InetAddress
+import java.util.ArrayDeque
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -539,7 +540,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("MSN-GUARD")
             .setContentText("Connecting...")
-            .setSmallIcon(R.drawable.ic_vpn_key)
+            .setSmallIcon(android.R.drawable.ic_menu_rotate)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)
             .build()
@@ -573,12 +574,12 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("MSN-GUARD")
             .setContentText("VPN: $currentProtocol • ${formatBytes(tx)}↑ ${formatBytes(rx)}↓ • ${formatSpeed(currentSpeedTx)}↑ ${formatSpeed(currentSpeedRx)}↓")
-            .setSmallIcon(R.drawable.ic_vpn_key)
+            .setSmallIcon(android.R.drawable.ic_menu_rotate)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)
-            .addAction(R.drawable.ic_disconnect, "Disconnect", disconnectPendingIntent)
-            .addAction(R.drawable.ic_reconnect, "Reconnect", reconnectPendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Disconnect", disconnectPendingIntent)
+            .addAction(android.R.drawable.ic_menu_revert, "Reconnect", reconnectPendingIntent)
             .build()
     }
 
@@ -679,4 +680,20 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         ConnectionLog.record("DNS servers: ${servers.joinToString(", ") { it.hostAddress }}")
         return this
     }
+}
+
+// ── ConnectionLog ──
+
+object ConnectionLog {
+    private const val MAX_ENTRIES = 100
+    private val entries = ArrayDeque<String>()
+
+    @Synchronized
+    fun record(message: String) {
+        if (entries.size == MAX_ENTRIES) entries.removeFirst()
+        entries.addLast("${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())}  $message")
+    }
+
+    @Synchronized
+    fun snapshot(): List<String> = entries.toList()
 }
