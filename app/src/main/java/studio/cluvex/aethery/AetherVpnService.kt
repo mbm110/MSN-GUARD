@@ -104,10 +104,12 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
                     .addAddress(addresses.ipv6, 128)
                     .addRoute("0.0.0.0", 0)
                     .addRoute("::", 0)
-                    .addDisallowedApplication(packageName) // Prevent Psiphon routing loop
                     .applyDns(bridgeConfig)
                     .applyLanAccess()
                     .applySplitTunneling()
+                    // MUST be last — applySplitTunneling may call addAllowedApplication
+                    // which would override the exclusion and cause a routing loop.
+                    .addDisallowedApplication(packageName)
                     .establish() ?: error("Android could not establish the VPN interface")
                 vpnModeActive.set(true)
                 ConnectionLog.record("Starting Rust core → Psiphon SOCKS $socksProxy")
