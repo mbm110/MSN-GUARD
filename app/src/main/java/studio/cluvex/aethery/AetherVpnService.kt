@@ -278,18 +278,31 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         stopRequested.set(false)
         vpnModeActive.set(vpnMode)
         startAsForeground()
+
+        // PSIPHON: callback-driven lifecycle — MUST NOT enter try/finally.
+        // The finally block calls stopSelf() which destroys the service and kills Psiphon.
+        if (currentProtocol.contains("PSIPHON")) {
+            worker.execute {
+                try {
+                    ConnectionLog.record("Preparing PSIPHON identity")
+                    startPsiphonTunnel()
+                    sendStatus(STATUS_CONNECTING, "Psiphon starting...")
+                } catch (e: Exception) {
+                    ConnectionLog.record("Psiphon start failed: ${e.message}")
+                    sendStatus(STATUS_FAILED, e.message)
+                    connected.set(false)
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
+            }
+            return
+        }
+
         worker.execute {
             try {
                 ConnectionLog.record("Preparing $currentProtocol identity")
                 NativeCore.attach(this)
-                val isPsiphon = currentProtocol.contains("PSIPHON")
-                val result = if (isPsiphon) {
-                    // PSIPHON: start async — onConnected() will create TUN + Rust core.
-                    // Return early so finally block does NOT tear down the service.
-                    startPsiphonTunnel()
-                    sendStatus(STATUS_CONNECTING, "Psiphon starting...")
-                    return@execute // Exit worker thread; lifecycle managed by callbacks
-                } else if (vpnMode) {
+                val result = if (vpnMode) {
                     val addresses = NativeCore.prepare(config)
                     ConnectionLog.record("Creating Android VPN interface")
                     tun = Builder()
