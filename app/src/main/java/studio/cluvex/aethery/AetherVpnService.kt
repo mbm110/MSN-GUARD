@@ -213,6 +213,10 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         ConnectionLog.record("Psiphon: $message")
     }
 
+    override fun getContext(): android.content.Context = this
+
+    override fun getPsiphonConfig(): String = psiphonConfigJson
+
     private fun buildPsiphonBridgeConfig(baseConfig: String, socksProxy: String): String {
         return try {
             val json = org.json.JSONObject(baseConfig)
