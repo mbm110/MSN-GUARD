@@ -1,5 +1,9 @@
 //! tun2socks bridge: reads raw IPv4 packets from a TUN fd,
 //! parses TCP/UDP, and forwards through an upstream SOCKS5 proxy.
+//!
+//! UDP handling: DNS queries (port 53) are forwarded as TCP DNS through
+//! the SOCKS5 proxy. Other UDP traffic is dropped (SOCKS5 UDP ASSOCIATE
+//! is not widely supported by Psiphon).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -60,7 +64,10 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
                 tx_total += delta;
             }
             17 => {
-                handle_udp(packet, ihl, src_ip, dst_ip).await;
+                let delta = handle_udp(
+                    packet, ihl, src_ip, dst_ip, &tun, upstream,
+                ).await;
+                tx_total += delta;
             }
             _ => {}
         }
@@ -154,10 +161,69 @@ async fn handle_tcp(
     0
 }
 
-// -- UDP handler (log only for now) --
+// -- UDP handler: DNS forwarding via TCP through SOCKS5 --
 
-async fn handle_udp(_packet: &[u8], _ihl: usize, _src_ip: Ipv4Addr, _dst_ip: Ipv4Addr) {
-    // TODO: DNS forwarding via SOCKS5 UDP ASSOCIATE
+async fn handle_udp(
+    packet: &[u8],
+    ihl: usize,
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    tun: &AsyncFd<File>,
+    upstream: SocketAddr,
+) -> u64 {
+    if packet.len() < ihl + 8 { return 0; }
+    let udp = &packet[ihl..];
+    let src_port = u16::from_be_bytes([udp[0], udp[1]]);
+    let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+    let payload = if udp.len() > 8 { &udp[8..] } else { &[] };
+
+    // Only handle DNS queries (port 53)
+    if dst_port != 53 || payload.is_empty() { return 0; }
+
+    log::info!("[tun2socks] DNS query from {src_ip}:{src_port} -> {dst_ip}:53 ({} bytes)", payload.len());
+
+    // Forward DNS as TCP through SOCKS5
+    match forward_dns_tcp(upstream, dst_ip, payload).await {
+        Ok(response) => {
+            log::info!("[tun2socks] DNS response: {} bytes", response.len());
+            let _ = send_udp(tun, dst_ip, src_ip, 53, src_port, &response).await;
+            response.len() as u64
+        }
+        Err(e) => {
+            log::warn!("[tun2socks] DNS TCP forward failed: {e}");
+            0
+        }
+    }
+}
+
+/// Forward a DNS query as TCP DNS through the SOCKS5 proxy.
+async fn forward_dns_tcp(upstream: SocketAddr, dns_server: Ipv4Addr, query: &[u8]) -> Result<Vec<u8>> {
+    let target = SocketAddr::new(IpAddr::V4(dns_server), 53);
+    let mut stream = connect_through_socks(upstream, target).await?;
+
+    // TCP DNS: 2-byte length prefix + DNS message
+    let len = query.len() as u16;
+    stream.write_all(&len.to_be_bytes()).await
+        .map_err(|e| AetherError::Other(format!("DNS TCP write length: {e}")))?;
+    stream.write_all(query).await
+        .map_err(|e| AetherError::Other(format!("DNS TCP write data: {e}")))?;
+
+    // Read 2-byte length prefix
+    let mut len_buf = [0u8; 2];
+    stream.read_exact(&mut len_buf).await
+        .map_err(|e| AetherError::Other(format!("DNS TCP read length: {e}")))?;
+    let resp_len = u16::from_be_bytes(len_buf) as usize;
+
+    if resp_len > 4096 {
+        return Err(AetherError::Other(format!("DNS TCP response too large: {resp_len}")));
+    }
+
+    // Read DNS response
+    let mut resp = vec![0u8; resp_len];
+    stream.read_exact(&mut resp).await
+        .map_err(|e| AetherError::Other(format!("DNS TCP read data: {e}")))?;
+
+    Ok(resp)
 }
 
 // -- SOCKS5 CONNECT --
@@ -199,7 +265,7 @@ async fn connect_through_socks(upstream: SocketAddr, target: SocketAddr) -> Resu
     Ok(stream)
 }
 
-// -- Raw IP/TCP packet builder --
+// -- Raw IP/TCP/UDP packet builder --
 
 async fn send_tcp(
     tun: &AsyncFd<File>,
@@ -234,6 +300,39 @@ async fn send_tcp(
     pkt[36..38].copy_from_slice(&65535u16.to_be_bytes());
     if !payload.is_empty() {
         pkt[40..].copy_from_slice(payload);
+    }
+
+    write_packet(tun, &pkt).await
+}
+
+/// Build and send a UDP/IP packet through the TUN.
+async fn send_udp(
+    tun: &AsyncFd<File>,
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) -> Result<()> {
+    let udp_len = 8 + payload.len();
+    let ip_len = 20 + udp_len;
+    let mut pkt = vec![0u8; ip_len];
+
+    // IP header
+    pkt[0] = 0x45;
+    pkt[2..4].copy_from_slice(&(ip_len as u16).to_be_bytes());
+    pkt[8] = 64;
+    pkt[9] = 17; // UDP
+    pkt[12..16].copy_from_slice(&src_ip.octets());
+    pkt[16..20].copy_from_slice(&dst_ip.octets());
+
+    // UDP header
+    pkt[20..22].copy_from_slice(&src_port.to_be_bytes());
+    pkt[22..24].copy_from_slice(&dst_port.to_be_bytes());
+    pkt[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    // checksum = 0 (optional for UDP over IPv4)
+    if !payload.is_empty() {
+        pkt[28..].copy_from_slice(payload);
     }
 
     write_packet(tun, &pkt).await
