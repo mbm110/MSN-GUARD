@@ -2,7 +2,7 @@
 //! parses TCP/UDP, and forwards through an upstream SOCKS5 proxy.
 //! Includes bidirectional TCP data forwarding and DNS-over-TCP.
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream as StdTcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,7 +20,6 @@ fn ip_to_bytes(ip: Ipv4Addr) -> [u8; 4] { ip.octets() }
 fn ip_from_bytes(b: &[u8]) -> Ipv4Addr { Ipv4Addr::new(b[0], b[1], b[2], b[3]) }
 
 struct TcpConn {
-    read_half: ReadHalf<TcpStream>,
     write_half: WriteHalf<TcpStream>,
     seq_to_tun: u32,
     ack_from_tun: u32,
@@ -128,8 +127,16 @@ async fn send_tcp<'a>(
     }
 
     let written = pkt.len();
-    match tun.write(&pkt).await {
-        Ok(_) => written as u64,
+    match tun.ready_mut().await {
+        Ok(mut guard) => {
+            match guard.try_io(|inner| {
+                let fd = inner.as_raw_fd();
+                unsafe { libc::write(fd, pkt.as_ptr() as *const libc::c_void, pkt.len()) }
+            }) {
+                Ok(Ok(_)) => written as u64,
+                _ => 0,
+            }
+        }
         Err(_) => 0,
     }
 }
@@ -157,8 +164,16 @@ async fn send_udp(
     pkt[o+6..o+8].fill(0);
     pkt[o+8..].copy_from_slice(payload);
 
-    match tun.write(&pkt).await {
-        Ok(_) => ip_len as u64,
+    match tun.ready_mut().await {
+        Ok(mut guard) => {
+            match guard.try_io(|inner| {
+                let fd = inner.as_raw_fd();
+                unsafe { libc::write(fd, pkt.as_ptr() as *const libc::c_void, pkt.len()) }
+            }) {
+                Ok(Ok(_)) => ip_len as u64,
+                _ => 0,
+            }
+        }
         Err(_) => 0,
     }
 }
@@ -210,7 +225,7 @@ async fn handle_udp(
 
 async fn tun_response_reader(
     mut read_half: ReadHalf<TcpStream>,
-    tun_write: tokio::io::unix::AsyncFd<std::fs::File>,
+    tun: tokio::io::unix::AsyncFd<std::fs::File>,
     src_ip: Ipv4Addr, dst_ip: Ipv4Addr,
     sport: u16, dport: u16,
     mut seq_to_tun: u32,
@@ -220,18 +235,18 @@ async fn tun_response_reader(
         match read_half.read(&mut buf).await {
             Ok(0) => {
                 // Connection closed — send FIN
-                let _ = send_tcp(&tun_write, dst_ip, src_ip, sport, dport,
+                let _ = send_tcp(&tun, dst_ip, src_ip, sport, dport,
                     seq_to_tun, 0, 0x11, &[]).await; // FIN+ACK
                 break;
             }
             Ok(n) => {
-                let _ = send_tcp(&tun_write, dst_ip, src_ip, sport, dport,
+                let _ = send_tcp(&tun, dst_ip, src_ip, sport, dport,
                     seq_to_tun, 0, 0x18, &buf[..n]).await; // PSH+ACK
                 seq_to_tun = seq_to_tun.wrapping_add(n as u32);
             }
             Err(e) => {
                 ffi::record_log(format!("[tun2socks] SOCKS read error: {e}"));
-                let _ = send_tcp(&tun_write, dst_ip, src_ip, sport, dport,
+                let _ = send_tcp(&tun, dst_ip, src_ip, sport, dport,
                     seq_to_tun, 0, 0x04, &[]).await; // RST
                 break;
             }
@@ -264,9 +279,7 @@ async fn handle_tcp(
 
     // FIN / RST → cleanup
     if is_fin || is_rst_flag(tcp) {
-        if let Some(conn) = conns.lock().await.remove(&sport) {
-            drop(conn);
-        }
+        conns.lock().await.remove(&sport);
         return 0;
     }
 
@@ -278,37 +291,37 @@ async fn handle_tcp(
                 ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT OK {dst}"));
                 let seq_to_tun: u32 = rand_u32();
                 let (read_half, write_half) = tokio::io::split(stream);
+                
+                // Spawn response reader FIRST (needs read_half)
+                let tun_clone_fd = unsafe { libc::dup(tun.as_raw_fd()) };
+                if tun_clone_fd >= 0 {
+                    let tun_clone_file = unsafe { std::fs::File::from_raw_fd(tun_clone_fd) };
+                    let tun_clone = tokio::io::unix::AsyncFd::new(tun_clone_file).unwrap();
+                    tokio::spawn(tun_response_reader(read_half, tun_clone, src_ip, dst_ip, sport, dport, seq_to_tun.wrapping_add(1)));
+                }
+                
+                // Store write_half for sending data
                 conns.lock().await.insert(sport, TcpConn {
-                    read_half,
                     write_half,
                     seq_to_tun,
                     ack_from_tun: seq_num.wrapping_add(1),
                 });
+                
                 let _ = send_tcp(
-                    tun, dst_ip, src_ip, dst_port, sport,
+                    tun, dst_ip, src_ip, dport, sport,
                     seq_to_tun, seq_num.wrapping_add(1),
                     0x12, &[], // SYN+ACK
                 ).await;
-                // Spawn response reader
-                let tun_clone_fd = unsafe { libc::dup(tun.as_raw_fd()) };
-                if tun_clone_fd >= 0 {
-                    let tun_clone_file = unsafe { std::fs::File::from_raw_fd(tun_clone_fd) };
-                    let tun_clone = tokio::io::unix::AsyncFd::new(tun_clone_file).await.unwrap();
-                    let conn_opt = conns.lock().await.get(&sport).map(|c| (c.seq_to_tun, c.read_half.try_clone()));
-                    if let Some((seq, Some(read_half_clone))) = conn_opt {
-                        tokio::spawn(tun_response_reader(read_half_clone, tun_clone, src_ip, dst_ip, sport, dport, seq.wrapping_add(1)));
-                    }
-                }
                 64
             }
             Err(e) => {
                 ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT FAILED {dst}: {e}"));
                 let _ = send_tcp(
-                    tun, dst_ip, src_ip, dst_port, sport,
+                    tun, dst_ip, src_ip, dport, sport,
                     0, seq_num.wrapping_add(1), 0x14, &[], // ACK
                 ).await;
                 let _ = send_tcp(
-                    tun, dst_ip, src_ip, dst_port, sport,
+                    tun, dst_ip, src_ip, dport, sport,
                     0, seq_num.wrapping_add(1), 0x04, &[], // RST
                 ).await;
                 0
@@ -322,7 +335,7 @@ async fn handle_tcp(
             let _ = conn.write_half.write_all(payload).await;
             // Send ACK to app
             let _ = send_tcp(
-                tun, dst_ip, src_ip, dst_port, sport,
+                tun, dst_ip, src_ip, dport, sport,
                 conn.seq_to_tun, conn.ack_from_tun,
                 0x10, &[], // ACK
             ).await;
@@ -360,7 +373,7 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
     }
 
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let mut tun = tokio::io::unix::AsyncFd::new(file).await?;
+    let mut tun = tokio::io::unix::AsyncFd::new(file)?;
 
     let conns: Arc<Mutex<HashMap<u16, TcpConn>>> = Arc::new(Mutex::new(HashMap::new()));
 
@@ -371,56 +384,54 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
     let mut pkt = vec![0u8; 65535];
 
     loop {
-        {
-            let mut guard = tokio::time::timeout(Duration::from_secs(1), tun.readable_mut()).await;
-            if guard.is_err() {
-                if last_report.elapsed() >= Duration::from_secs(1) {
-                    if rx_total > 0 || tx_total > 0 {
-                        ffi::emit_traffic(rx_total, tx_total);
-                    }
-                    last_report = Instant::now();
+        let mut guard = tokio::time::timeout(Duration::from_secs(1), tun.ready_mut()).await;
+        if guard.is_err() {
+            if last_report.elapsed() >= Duration::from_secs(1) {
+                if rx_total > 0 || tx_total > 0 {
+                    ffi::emit_traffic(rx_total, tx_total);
                 }
-                continue;
+                last_report = Instant::now();
             }
-            if let Ok(ref mut rg) = guard {
-                match rg.try_io(|inner| {
-                    let fd = inner.as_raw_fd();
-                    let n = unsafe { libc::read(fd, pkt.as_mut_ptr() as *mut libc::c_void, pkt.len()) };
-                    if n > 0 { Ok(n as usize) } else { Err(std::io::ErrorKind::WouldBlock.into()) }
-                }) {
-                    Ok(Ok(n)) => {
-                        if n < 20 { continue; }
-                        let version = pkt[0] >> 4;
-                        if version != 4 { continue; }
-                        rx_total += n as u64;
-                        let ihl = ((pkt[0] & 0x0f) as usize) * 4;
-                        let proto = pkt[9];
-                        let src_ip = ip_from_bytes(&pkt[12..16]);
-                        let dst_ip = ip_from_bytes(&pkt[16..20]);
-                        let packet = &pkt[..n];
+            continue;
+        }
+        if let Ok(mut rg) = guard {
+            match rg.try_io(|inner| {
+                let fd = inner.as_raw_fd();
+                let n = unsafe { libc::read(fd, pkt.as_mut_ptr() as *mut libc::c_void, pkt.len()) };
+                if n > 0 { Ok(n as usize) } else { Err(std::io::ErrorKind::WouldBlock.into()) }
+            }) {
+                Ok(Ok(n)) => {
+                    if n < 20 { continue; }
+                    let version = pkt[0] >> 4;
+                    if version != 4 { continue; }
+                    rx_total += n as u64;
+                    let ihl = ((pkt[0] & 0x0f) as usize) * 4;
+                    let proto = pkt[9];
+                    let src_ip = ip_from_bytes(&pkt[12..16]);
+                    let dst_ip = ip_from_bytes(&pkt[16..20]);
+                    let packet = &pkt[..n];
 
-                        match proto {
-                            6 => {
-                                let delta = handle_tcp(
-                                    packet, ihl, src_ip, dst_ip, &tun, &conns, upstream,
-                                ).await;
-                                tx_total += delta;
-                            }
-                            17 => {
-                                let delta = handle_udp(
-                                    packet, ihl, src_ip, dst_ip, &tun, upstream,
-                                ).await;
-                                tx_total += delta;
-                            }
-                            other => {
-                                if rx_total < 1000 {
-                                    ffi::record_log(format!("[tun2socks] ignored proto={other} from {src_ip} to {dst_ip}"));
-                                }
+                    match proto {
+                        6 => {
+                            let delta = handle_tcp(
+                                packet, ihl, src_ip, dst_ip, &tun, &conns, upstream,
+                            ).await;
+                            tx_total += delta;
+                        }
+                        17 => {
+                            let delta = handle_udp(
+                                packet, ihl, src_ip, dst_ip, &tun, upstream,
+                            ).await;
+                            tx_total += delta;
+                        }
+                        other => {
+                            if rx_total < 1000 {
+                                ffi::record_log(format!("[tun2socks] ignored proto={other} from {src_ip} to {dst_ip}"));
                             }
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
 
