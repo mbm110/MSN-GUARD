@@ -66,16 +66,28 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
 
     override fun onConnected() {
         ConnectionLog.record("Psiphon connected — upstream tunnel ready")
-        // Guard: if TUN already exists, this is a Psiphon reconnect after network change.
-        // Do NOT create a second TUN — the existing one is still active.
-        if (tun != null) {
-            ConnectionLog.record("Psiphon reconnected (TUN already active, skipping)")
+        // Guard: if Psiphon already reported connected, this is a reconnect.
+        if (connected.get() && psiphonVpnMode) {
+            ConnectionLog.record("Psiphon reconnected (VPN already active, skipping)")
             return
         }
-        // Psiphon's upstream tunnel is now fully established.
-        // Safe to create TUN and start Aethery's Rust core (VPN mode)
-        // or just expose the SOCKS port (Proxy mode).
-        launchPsiphonTunnel()
+
+        if (!psiphonVpnMode) {
+            // PROXY MODE: just expose the SOCKS port — no TUN needed.
+            val port = activeSocksPort
+            if (port <= 0) {
+                sendStatus(STATUS_FAILED, "Psiphon SOCKS port unavailable")
+                return
+            }
+            ConnectionLog.record("Psiphon SOCKS proxy ready at 127.0.0.1:$port")
+            sendStatus(STATUS_CONNECTED)
+            return
+        }
+
+        // VPN MODE: Psiphon created its own TUN + routes + DNS — everything is handled.
+        vpnModeActive.set(true)
+        ConnectionLog.record("Psiphon VPN active — all device traffic routed")
+        sendStatus(STATUS_CONNECTED)
     }
 
     override fun onExiting() {
@@ -107,110 +119,13 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         ConnectionLog.record("Psiphon: $message")
     }
 
-    @Volatile private var psiphonTunnelLaunched = false
-
-    private fun launchPsiphonTunnel() {
-        // Guard: onConnected() can fire multiple times; only launch TUN once.
-        if (psiphonTunnelLaunched) {
-            ConnectionLog.record("Psiphon reconnected — skipping duplicate launch")
-            return
-        }
-        psiphonTunnelLaunched = true
-
-        // Called from onConnected() — Psiphon upstream is ready.
-        val port = activeSocksPort
-        if (port <= 0) {
-            ConnectionLog.record("Psiphon connected but SOCKS port not set")
-            sendStatus(STATUS_FAILED, "Psiphon SOCKS port unavailable")
-            return
-        }
-        val socksProxy = "127.0.0.1:$port"
-
-        if (!psiphonVpnMode) {
-            // PROXY MODE: just expose the SOCKS port — no TUN, no Rust core.
-            ConnectionLog.record("Psiphon SOCKS proxy ready at $socksProxy")
-            sendStatus(STATUS_CONNECTED)
-            vpnModeActive.set(false)
-            return
-        }
-
-        // VPN MODE: create TUN + Rust core with upstream SOCKS proxy.
-        ConnectionLog.record("Psiphon connected — launching VPN via SOCKS $socksProxy")
-
-        worker.execute {
-            try {
-                val config = storedConfig ?: error("No stored config")
-                val psiphonConfig = buildPsiphonBridgeConfig(config, socksProxy)
-                NativeCore.attach(this@AetherVpnService)
-                val addresses = NativeCore.prepare(psiphonConfig)
-                ConnectionLog.record("Creating Android VPN interface for Psiphon")
-                tun = Builder()
-                    .setSession("MSN-VPN")
-                    .setMtu(1280)
-                    .addAddress(addresses.ipv4, 32)
-                    .addAddress(addresses.ipv6, 128)
-                    .addRoute("0.0.0.0", 0)
-                    .addRoute("::", 0)
-                    .addDisallowedApplication(packageName) // Prevent Psiphon routing loop
-                    .applyDns(psiphonConfig)
-                    .applyLanAccess()
-                    .applySplitTunneling()
-                    .establish() ?: error("Android could not establish the VPN interface")
-                vpnModeActive.set(true)
-                ConnectionLog.record("Starting Rust core via Psiphon SOCKS $socksProxy")
-                sendStatus(STATUS_CONNECTED)
-                val result = NativeCore.start(psiphonConfig, tun!!.fd)
-                if (result != 0 && !stopRequested.get()) {
-                    val detail = NativeCore.lastError().ifBlank { "Tunnel exited with code $result" }
-                    ConnectionLog.record("Native tunnel exited: $detail")
-                    sendStatus(STATUS_FAILED, detail)
-                } else if (stopRequested.get()) {
-                    sendStatus(STATUS_DISCONNECTED)
-                } else {
-                    ConnectionLog.record("Native tunnel stopped unexpectedly")
-                    sendStatus(STATUS_FAILED, "Tunnel stopped unexpectedly")
-                }
-            } catch (error: Exception) {
-                val detail = NativeCore.lastError().ifBlank { error.message ?: "Tunnel setup failed" }
-                Log.e(LOG_TAG, "Psiphon tunnel failed: $detail", error)
-                sendStatus(STATUS_FAILED, detail)
-            } finally {
-                NativeCore.detach()
-                vpnModeActive.set(false)
-                tun?.close()
-                tun = null
-                connected.set(false)
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-            }
-        }
-    }
-
-    private fun buildPsiphonConfig(vpnMode: Boolean = true): String {
-        // In Proxy mode, use the user-configured SOCKS port.
-        // In VPN mode, let Psiphon auto-select (0) since the port is internal.
-        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-        val socksPort = if (vpnMode) 0 else prefs.getInt("default_socks_port", 1819)
-        return org.json.JSONObject().apply {
-            put("PropagationChannelId", "FFFFFFFFFFFFFFFF")
-            put("SponsorId", "1111111111111111")
-            put("EgressRegion", "")
-            put("EstablishTunnelTimeoutSeconds", 0)
-            put("DataDirectory", filesDir.absolutePath)
-            put("ClientVersion", "1")
-            put("TunnelProtocol", "")
-            put("RemoteServerListURL", "")
-            put("LocalSocksProxyPort", socksPort)
-            put("RemoteServerListSignaturePublicKey", "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42KcotLFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7GstZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1OgeF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xalKxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=")
-            put("ServerEntrySignaturePublicKey", "sHuUVTWaRyh5pZwy4UguSgkwmBe0EHtJJkoF5WrxmvA=")
-            put("ExchangeObfuscationKey", "DpXzloJk1Hw6aSzmKKky0xcahsEHubch81Mi6K0XMlU=")
-        }.toString()
-    }
 
     private fun startPsiphonTunnel(vpnMode: Boolean = true) {
         try {
             val tunnel = PsiphonTunnel.newPsiphonTunnel(this)
-            tunnel.setVpnMode(false) // SOCKS mode — we manage the TUN ourselves.
+            // VPN mode: Psiphon manages its own TUN + routing + DNS (handles everything).
+            // Proxy mode: Psiphon only exposes SOCKS — we don't need a TUN.
+            tunnel.setVpnMode(vpnMode)
             psiphonTunnel = tunnel
             psiphonConfigJson = buildPsiphonConfig(vpnMode)
 
@@ -388,21 +303,6 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         }
     }
 
-    private fun buildPsiphonBridgeConfig(baseConfig: String, socksProxy: String): String {
-        // Inject upstream_proxy into config JSON for Rust core
-        return try {
-            val json = org.json.JSONObject(baseConfig)
-            json.put("upstream_proxy", socksProxy)
-            json.put("protocol", "psiphon")
-            json.toString()
-        } catch (e: Exception) {
-            // Fallback: manual JSON replacement
-            baseConfig.replace(
-                "\"protocol\":\"psiphon\"",
-                "\"protocol\":\"psiphon\",\"upstream_proxy\":\"$socksProxy\""
-            )
-        }
-    }
 
     private fun stopTunnel(notify: Boolean = true) {
         stopPsiphonTunnel()
