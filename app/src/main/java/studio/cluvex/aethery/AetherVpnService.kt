@@ -66,8 +66,15 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
 
     override fun onConnected() {
         ConnectionLog.record("Psiphon connected — upstream tunnel ready")
+        // Guard: if TUN already exists, this is a Psiphon reconnect after network change.
+        // Do NOT create a second TUN — the existing one is still active.
+        if (tun != null) {
+            ConnectionLog.record("Psiphon reconnected (TUN already active, skipping)")
+            return
+        }
         // Psiphon's upstream tunnel is now fully established.
-        // Safe to create TUN and start Aethery's Rust core.
+        // Safe to create TUN and start Aethery's Rust core (VPN mode)
+        // or just expose the SOCKS port (Proxy mode).
         launchPsiphonTunnel()
     }
 
@@ -170,7 +177,11 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         }
     }
 
-    private fun buildPsiphonConfig(): String {
+    private fun buildPsiphonConfig(vpnMode: Boolean = true): String {
+        // In Proxy mode, use the user-configured SOCKS port.
+        // In VPN mode, let Psiphon auto-select (0) since the port is internal.
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val socksPort = if (vpnMode) 0 else prefs.getInt("default_socks_port", 1819)
         return org.json.JSONObject().apply {
             put("PropagationChannelId", "FFFFFFFFFFFFFFFF")
             put("SponsorId", "1111111111111111")
@@ -180,19 +191,19 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
             put("ClientVersion", "1")
             put("TunnelProtocol", "")
             put("RemoteServerListURL", "")
-            put("LocalSocksProxyPort", 0)
+            put("LocalSocksProxyPort", socksPort)
             put("RemoteServerListSignaturePublicKey", "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42KcotLFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7GstZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1OgeF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xalKxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=")
             put("ServerEntrySignaturePublicKey", "sHuUVTWaRyh5pZwy4UguSgkwmBe0EHtJJkoF5WrxmvA=")
             put("ExchangeObfuscationKey", "DpXzloJk1Hw6aSzmKKky0xcahsEHubch81Mi6K0XMlU=")
         }.toString()
     }
 
-    private fun startPsiphonTunnel() {
+    private fun startPsiphonTunnel(vpnMode: Boolean = true) {
         try {
             val tunnel = PsiphonTunnel.newPsiphonTunnel(this)
-            tunnel.setVpnMode(false) // SOCKS mode — we manage the TUN.
+            tunnel.setVpnMode(false) // SOCKS mode — we manage the TUN ourselves.
             psiphonTunnel = tunnel
-            psiphonConfigJson = buildPsiphonConfig()
+            psiphonConfigJson = buildPsiphonConfig(vpnMode)
 
             // Load hex-encoded server entries from assets
             val serverEntries = try {
@@ -295,8 +306,8 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
             psiphonVpnMode = vpnMode  // Save for onConnected() callback
             worker.execute {
                 try {
-                    ConnectionLog.record("Preparing PSIPHON identity")
-                    startPsiphonTunnel()
+                    ConnectionLog.record("Preparing PSIPHON identity (${if (vpnMode) "VPN" else "Proxy"} mode)")
+                    startPsiphonTunnel(vpnMode)
                     sendStatus(STATUS_CONNECTING, "Psiphon starting...")
                 } catch (e: Exception) {
                     ConnectionLog.record("Psiphon start failed: ${e.message}")
