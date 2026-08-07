@@ -260,9 +260,9 @@ async fn handle_tcp(
     let dst = SocketAddr::new(IpAddr::V4(dst_ip), dport);
 
     // FIN / RST → cleanup
-    if is_fin || is_rst(tcp) {
+    if is_fin || is_rst_flag(tcp) {
         if let Some(conn) = conns.lock().await.remove(&sport) {
-            let _ = conn.stream.into_std(); // drop
+            drop(conn.stream);
         }
         return 0;
     }
@@ -274,8 +274,9 @@ async fn handle_tcp(
             Ok(stream) => {
                 ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT OK {dst}"));
                 let seq_to_tun: u32 = rand_u32();
+                let stream_clone = stream.try_clone().unwrap();
                 conns.lock().await.insert(sport, TcpConn {
-                    stream: stream.try_clone().await.unwrap(),
+                    stream: stream_clone,
                     seq_to_tun,
                     ack_from_tun: seq_num.wrapping_add(1),
                 });
@@ -325,7 +326,7 @@ async fn handle_tcp(
     }
 }
 
-fn is_rst(tcp: &[u8]) -> bool {
+fn is_rst_flag(tcp: &[u8]) -> bool {
     tcp.len() > 13 && (tcp[13] & 0x04 != 0)
 }
 
