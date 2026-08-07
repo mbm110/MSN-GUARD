@@ -71,6 +71,8 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         const val EXTRA_NOTIFICATION_IP = "notification_ip"
         const val EXTRA_NOTIFICATION_PING = "notification_ping"
         const val STATUS_CONNECTING = "connecting"
+        const val STATUS_STARTING = "starting"
+        const val STATUS_SCANNING = "scanning"
         const val STATUS_CONNECTED = "connected"
         const val STATUS_DISCONNECTED = "disconnected"
         const val STATUS_FAILED = "failed"
