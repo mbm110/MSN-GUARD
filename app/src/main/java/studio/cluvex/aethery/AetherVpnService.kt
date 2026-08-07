@@ -66,8 +66,8 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
 
     override fun onConnected() {
         ConnectionLog.record("Psiphon connected — upstream tunnel ready")
-        // Guard: if Psiphon already reported connected, this is a reconnect.
-        if (connected.get() && psiphonVpnMode) {
+        // Guard: if Psiphon's VPN was already activated, this is a reconnect after network change.
+        if (psiphonVpnActivated) {
             ConnectionLog.record("Psiphon reconnected (VPN already active, skipping)")
             return
         }
@@ -85,6 +85,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         }
 
         // VPN MODE: Psiphon created its own TUN + routes + DNS — everything is handled.
+        psiphonVpnActivated = true
         vpnModeActive.set(true)
         ConnectionLog.record("Psiphon VPN active — all device traffic routed")
         sendStatus(STATUS_CONNECTED)
@@ -248,6 +249,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         // The finally block calls stopSelf() which destroys the service and kills Psiphon.
         if (currentProtocol.contains("PSIPHON")) {
             psiphonVpnMode = vpnMode  // Save for onConnected() callback
+            psiphonVpnActivated = false
             worker.execute {
                 try {
                     ConnectionLog.record("Preparing PSIPHON identity (${if (vpnMode) "VPN" else "Proxy"} mode)")
@@ -587,6 +589,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
     private var psiphonConfigJson: String = ""
     @Volatile private var activeSocksPort: Int = 0
     @Volatile private var psiphonVpnMode: Boolean = true
+    @Volatile private var psiphonVpnActivated = false
 
     override fun getContext(): android.content.Context = this
 
