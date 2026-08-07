@@ -107,9 +107,10 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
                     .applyDns(bridgeConfig)
                     .applyLanAccess()
                     .applySplitTunneling()
-                    // MUST be last — applySplitTunneling may call addAllowedApplication
-                    // which would override the exclusion and cause a routing loop.
-                    .addDisallowedApplication(packageName)
+                    // applySplitTunneling() handles addDisallowedApplication(packageName)
+                    // for GLOBAL and EXCLUDE modes. INCLUDE mode excludes our app by default.
+                    // NEVER call addDisallowedApplication here — mixing with
+                    // addAllowedApplication (in INCLUDE mode) throws IllegalArgumentException.
                     .establish() ?: error("Android could not establish the VPN interface")
                 vpnModeActive.set(true)
                 ConnectionLog.record("Starting Rust core → Psiphon SOCKS $socksProxy")
@@ -345,10 +346,10 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
                         .addAddress(addresses.ipv6, 128)
                         .addRoute("0.0.0.0", 0)
                         .addRoute("::", 0)
-                        .addDisallowedApplication(packageName)
                         .applyDns(config)
                         .applyLanAccess()
                         .applySplitTunneling()
+                        // applySplitTunneling() handles app exclusion per mode.
                         .establish() ?: error("Android could not establish the VPN interface")
                     ConnectionLog.record("Scanning gateways for VPN")
                     NativeCore.start(config, tun!!.fd)
@@ -567,16 +568,22 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         val mode = settings.mode()
         val packages = settings.packages()
 
-        if (mode == SplitTunnelSettings.Mode.ALL) return this
+        if (mode == SplitTunnelSettings.Mode.ALL) {
+            // GLOBAL: all apps through VPN, but MUST exclude ourselves to prevent routing loop.
+            addDisallowedApplication(packageName)
+            return this
+        }
         if (mode == SplitTunnelSettings.Mode.INCLUDE) {
-            // Keep Aethery's UI requests (including the public-IP card) in the VPN.
-            // The native transport protects its own sockets before connecting.
-            addAllowedApplication(packageName)
+            // INCLUDE (whitelist): only listed apps go through VPN.
+            // Do NOT add our own packageName — it's excluded by default.
+            // Do NOT use addDisallowedApplication here (mixing with addAllowedApplication crashes).
         }
         if (packages.isEmpty()) {
             check(mode != SplitTunnelSettings.Mode.INCLUDE) {
                 "No apps selected for tunnel. Connection aborted for safety."
             }
+            // EXCLUDE with empty list: nothing to exclude beyond ourselves.
+            addDisallowedApplication(packageName)
             return this
         }
 
@@ -604,6 +611,11 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
 
         if (mode == SplitTunnelSettings.Mode.INCLUDE && addedCount == 0) {
             error("Selected apps are no longer installed. Connection aborted.")
+        }
+
+        // EXCLUDE mode: also disallow our own app to prevent routing loop.
+        if (mode == SplitTunnelSettings.Mode.EXCLUDE) {
+            addDisallowedApplication(packageName)
         }
 
         ConnectionLog.record("Split tunnel ${mode.label.lowercase()}: $addedCount app(s)")
