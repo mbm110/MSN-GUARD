@@ -102,7 +102,6 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
 
     private fun launchPsiphonTunnel() {
         // Called from onConnected() — Psiphon upstream is ready.
-        // NOW we create the TUN and start Aethery's Rust core.
         val port = activeSocksPort
         if (port <= 0) {
             ConnectionLog.record("Psiphon connected but SOCKS port not set")
@@ -110,7 +109,17 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
             return
         }
         val socksProxy = "127.0.0.1:$port"
-        ConnectionLog.record("Psiphon connected — launching TUN → SOCKS $socksProxy")
+
+        if (!psiphonVpnMode) {
+            // PROXY MODE: just expose the SOCKS port — no TUN, no Rust core.
+            ConnectionLog.record("Psiphon SOCKS proxy ready at $socksProxy")
+            sendStatus(STATUS_CONNECTED)
+            vpnModeActive.set(false)
+            return
+        }
+
+        // VPN MODE: create TUN + Rust core with upstream SOCKS proxy.
+        ConnectionLog.record("Psiphon connected — launching VPN via SOCKS $socksProxy")
 
         worker.execute {
             try {
@@ -131,7 +140,8 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
                     .applyLanAccess()
                     .applySplitTunneling()
                     .establish() ?: error("Android could not establish the VPN interface")
-                ConnectionLog.record("Starting Rust core → Psiphon SOCKS $socksProxy")
+                vpnModeActive.set(true)
+                ConnectionLog.record("Starting Rust core via Psiphon SOCKS $socksProxy")
                 sendStatus(STATUS_CONNECTED)
                 val result = NativeCore.start(psiphonConfig, tun!!.fd)
                 if (result != 0 && !stopRequested.get()) {
@@ -282,6 +292,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         // PSIPHON: callback-driven lifecycle — MUST NOT enter try/finally.
         // The finally block calls stopSelf() which destroys the service and kills Psiphon.
         if (currentProtocol.contains("PSIPHON")) {
+            psiphonVpnMode = vpnMode  // Save for onConnected() callback
             worker.execute {
                 try {
                     ConnectionLog.record("Preparing PSIPHON identity")
@@ -635,6 +646,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
     private var psiphonTunnel: PsiphonTunnel? = null
     private var psiphonConfigJson: String = ""
     @Volatile private var activeSocksPort: Int = 0
+    @Volatile private var psiphonVpnMode: Boolean = true
 
     override fun getContext(): android.content.Context = this
 
