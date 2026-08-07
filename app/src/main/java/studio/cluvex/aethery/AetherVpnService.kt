@@ -107,7 +107,16 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         ConnectionLog.record("Psiphon: $message")
     }
 
+    @Volatile private var psiphonTunnelLaunched = false
+
     private fun launchPsiphonTunnel() {
+        // Guard: onConnected() can fire multiple times; only launch TUN once.
+        if (psiphonTunnelLaunched) {
+            ConnectionLog.record("Psiphon reconnected — skipping duplicate launch")
+            return
+        }
+        psiphonTunnelLaunched = true
+
         // Called from onConnected() — Psiphon upstream is ready.
         val port = activeSocksPort
         if (port <= 0) {
