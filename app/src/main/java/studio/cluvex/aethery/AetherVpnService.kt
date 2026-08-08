@@ -141,13 +141,15 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
                     .addAddress(addresses.ipv6, 128)
                     .addRoute("0.0.0.0", 0)
                     .addRoute("::", 0)
+                    .apply {
+                        // CRITICAL: exclude our own app to prevent routing loop.
+                        // Psiphon's outbound sockets must NOT go through tun0.
+                        try { addDisallowedApplication(packageName) } catch (_: Exception) {}
+                    }
+                    .excludePrivateNetworks()
                     .applyDns(bridgeConfig)
                     .applyLanAccess()
                     .applySplitTunneling()
-                    // applySplitTunneling() handles addDisallowedApplication(packageName)
-                    // for GLOBAL and EXCLUDE modes. INCLUDE mode excludes our app by default.
-                    // NEVER call addDisallowedApplication here — mixing with
-                    // addAllowedApplication (in INCLUDE mode) throws IllegalArgumentException.
                     .establish() ?: error("Android could not establish the VPN interface")
                 vpnModeActive.set(true)
                 ConnectionLog.record("Starting Rust core → Psiphon SOCKS $socksProxy")
@@ -668,9 +670,37 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         return this
     }
 
+    /**
+     * Always exclude carrier-internal and private IP ranges from the VPN tunnel.
+     * Without this, carrier DNS (e.g. 10.10.85.118) and private LAN traffic
+     * leaks into Psiphon SOCKS5, which rejects them with reply 5 (connection refused).
+     */
+    private fun Builder.excludePrivateNetworks(): Builder {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return this
+        listOf(
+            "10.0.0.0/8",       // Carrier internals, RFC1918
+            "172.16.0.0/12",    // RFC1918
+            "192.168.0.0/16",   // RFC1918
+            "100.64.0.0/10",    // Carrier-grade NAT
+            "fc00::/7",         // IPv6 ULA
+            "fe80::/10",        // IPv6 link-local
+        ).forEach { cidr ->
+            val (address, prefix) = cidr.split('/')
+            excludeRoute(IpPrefix(InetAddress.getByName(address), prefix.toInt()))
+        }
+        ConnectionLog.record("Excluded private/carrier networks from VPN tunnel")
+        return this
+    }
+
     private fun Builder.applyDns(config: String): Builder {
+        // Always force known-good public DNS to prevent carrier DNS leaks.
+        // Carrier DNS (10.x.x.x) is rejected by Psiphon SOCKS5 (reply 5).
+        val forcedDns = listOf("1.1.1.1", "8.8.8.8")
+        forcedDns.forEach { addDnsServer(InetAddress.getByName(it)) }
+
+        // Also add any DNS servers from config (for non-Psiphon protocols).
         val configured = JSONObject(config).optString("dns_servers")
-        val servers = configured.split(',', ';', ' ', '\n')
+        configured.split(',', ';', ' ', '\n')
             .map(String::trim)
             .filter(String::isNotEmpty)
             .mapNotNull { entry ->
@@ -682,8 +712,10 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
                 runCatching { InetAddress.getByName(address) }.getOrNull()
             }
             .distinct()
-        (servers.ifEmpty { listOf(InetAddress.getByName("1.1.1.1")) }).forEach { addDnsServer(it) }
-        ConnectionLog.record("DNS servers: ${servers.joinToString(", ") { it.hostAddress }}")
+            .filter { it.hostAddress !in forcedDns }
+            .forEach { addDnsServer(it) }
+
+        ConnectionLog.record("DNS forced to public resolvers, carrier DNS excluded")
         return this
     }
 }
