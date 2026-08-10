@@ -513,6 +513,7 @@ async fn handle_tcp(
 
                     // Spawn response reader
                     let tun_reader_fd = unsafe { libc::dup(tun_async.as_raw_fd()) };
+                    let ack_for_reader = Arc::clone(&ack_shared);
                     if tun_reader_fd >= 0 {
                         let tun_reader_file = unsafe { std::fs::File::from_raw_fd(tun_reader_fd) };
                         let tun_reader = tokio::io::unix::AsyncFd::new(tun_reader_file).unwrap();
@@ -523,7 +524,7 @@ async fn handle_tcp(
                                 src_ip, dst_ip,
                                 sport, dport,
                                 seq_to_tun.wrapping_add(1),
-                                ack_shared.clone(),
+                                ack_for_reader,
                                 conns_reader,
                             ).await;
                         });
