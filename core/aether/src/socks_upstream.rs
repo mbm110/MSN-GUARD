@@ -137,7 +137,7 @@ async fn connect_through_socks(upstream: SocketAddr, target: SocketAddr) -> Resu
                 let mut stream = TcpStream::connect(upstream).await?;
                 socks5_handshake(&mut stream).await?;
                 socks5_connect(&mut stream, target).await?;
-                Ok(stream)
+                Ok::<TcpStream, AetherError>(stream)
             },
         )
         .await
