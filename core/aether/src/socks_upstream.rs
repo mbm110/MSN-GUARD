@@ -462,30 +462,44 @@ async fn handle_tcp(
 
     // SYN → connect through upstream SOCKS5 (ASYNC — don't block main loop!)
     if is_syn {
+        // Skip private IPs — they can't be routed through SOCKS5
+        if dst_ip.is_private() {
+            let _ = send_tcp(
+                tun, dst_ip, src_ip,
+                dport, sport,
+                0, seq_num.wrapping_add(1),
+                0x14, &[], // RST+ACK
+            ).await;
+            return 64;
+        }
+
         let dst = SocketAddr::new(IpAddr::V4(dst_ip), dport);
 
-        // SYN retransmission check: if connection already exists, resend SYN-ACK
+        // SYN retransmission check
         {
             let conns_guard = conns.lock().await;
-            if conns_guard.contains_key(&sport) {
-                if let Some(conn) = conns_guard.get(&sport) {
+            if let Some(conn) = conns_guard.get(&sport) {
+                // Only resend SYN-ACK if already connected (not during connecting phase)
+                if !conn.connecting {
                     let _ = send_tcp_ex(
                         tun, dst_ip, src_ip,
                         dport, sport,
-                        conn.seq_to_tun, seq_num.wrapping_add(1),
-                        0x12, &[], true, // SYN+ACK with MSS
+                        conn.seq_to_tun, conn.ack_shared.load(Ordering::Relaxed),
+                        0x12, &[], true,
                     ).await;
                 }
+                // During connecting: silently drop retransmitted SYN
                 return 64;
             }
         }
 
-        // Mark as connecting immediately
+        // Pre-generate ISN before creating connecting entry (fixes seq mismatch)
+        let isn = rand_u32();
         let ack_shared = Arc::new(AtomicU32::new(seq_num.wrapping_add(1)));
         conns.lock().await.insert(sport, TcpConn {
             data_tx: None,
             ack_shared: Arc::clone(&ack_shared),
-            seq_to_tun: 0,
+            seq_to_tun: isn,
             connecting: true,
         });
 
@@ -505,7 +519,8 @@ async fn handle_tcp(
             match connect_through_socks(upstream, dst).await {
                 Ok(stream) => {
                     ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT OK {dst}"));
-                    let seq_to_tun: u32 = rand_u32();
+                    // Use the pre-generated ISN (already stored in conn)
+                    let seq_to_tun: u32 = isn;
                     let (read_half, write_half) = tokio::io::split(stream);
 
                     // Create channel for app→SOCKS5 data
