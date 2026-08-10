@@ -511,6 +511,14 @@ async fn handle_tcp(
                     // Create channel for app→SOCKS5 data
                     let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(128);
 
+                    // Store connection state BEFORE sending SYN-ACK (fixes race condition)
+                    conns_clone.lock().await.insert(sport, TcpConn {
+                        data_tx: Some(data_tx),
+                        ack_shared: Arc::clone(&ack_shared),
+                        seq_to_tun,
+                        connecting: false,
+                    });
+
                     // Spawn response reader
                     let tun_reader_fd = unsafe { libc::dup(tun_async.as_raw_fd()) };
                     let ack_for_reader = Arc::clone(&ack_shared);
@@ -533,7 +541,7 @@ async fn handle_tcp(
                     // Spawn SOCKS writer task
                     tokio::spawn(socks_writer_task(write_half, data_rx));
 
-                    // Send SYN-ACK with MSS
+                    // Send SYN-ACK with MSS (connection already stored above)
                     let ack_val = ack_shared.load(Ordering::Relaxed);
                     let _ = send_tcp_ex(
                         &tun_async, dst_ip, src_ip,
@@ -541,14 +549,6 @@ async fn handle_tcp(
                         seq_to_tun, ack_val,
                         0x12, &[], true,
                     ).await;
-
-                    // Store connection state
-                    conns_clone.lock().await.insert(sport, TcpConn {
-                        data_tx: Some(data_tx),
-                        ack_shared: Arc::clone(&ack_shared),
-                        seq_to_tun,
-                        connecting: false,
-                    });
                 }
                 Err(e) => {
                     ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT FAILED {dst}: {e}"));
@@ -588,18 +588,23 @@ async fn handle_tcp(
         if let Some(tx) = data_tx_clone {
             let _ = tx.try_send(payload.to_vec());
             // Send ACK to app
-            let conns_guard = conns.lock().await;
-            if let Some(conn) = conns_guard.get(&sport) {
-                let seq_ack = conn.seq_to_tun;
-                let ack_val = conn.ack_shared.load(Ordering::Relaxed);
-                drop(conns_guard);
-                let _ = send_tcp(
-                    tun, dst_ip, src_ip,
-                    dport, sport,
-                    seq_ack, ack_val,
-                    0x10, &[], // ACK
-                ).await;
+            let seq_ack;
+            let ack_val;
+            {
+                let conns_guard = conns.lock().await;
+                let conn = match conns_guard.get(&sport) {
+                    Some(c) => c,
+                    None => return payload_len as u64,
+                };
+                seq_ack = conn.seq_to_tun;
+                ack_val = conn.ack_shared.load(Ordering::Relaxed);
             }
+            let _ = send_tcp(
+                tun, dst_ip, src_ip,
+                dport, sport,
+                seq_ack, ack_val,
+                0x10, &[], // ACK
+            ).await;
             return payload_len as u64;
         }
     }
