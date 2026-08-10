@@ -71,9 +71,10 @@ fn ip_to_bytes(ip: Ipv4Addr) -> [u8; 4] { ip.octets() }
 fn ip_from_bytes(b: &[u8]) -> Ipv4Addr { Ipv4Addr::new(b[0], b[1], b[2], b[3]) }
 
 struct TcpConn {
-    write_half: WriteHalf<TcpStream>,
+    write_half: Option<WriteHalf<TcpStream>>,
     seq_to_tun: u32,
     ack_from_tun: u32,
+    connecting: bool,
 }
 
 // ─── SOCKS5 handshake ──────────────────────────────────────────────
@@ -443,103 +444,133 @@ async fn handle_tcp(
         return 0;
     }
 
-    // SYN → connect through upstream SOCKS5
+    // SYN → connect through upstream SOCKS5 (ASYNC — don't block main loop!)
     if is_syn {
         let dst = SocketAddr::new(IpAddr::V4(dst_ip), dport);
 
         // SYN retransmission check: if connection already exists, resend SYN-ACK
-        if conns.lock().await.contains_key(&sport) {
-            if let Some(conn) = conns.lock().await.get(&sport) {
-                let _ = send_tcp_ex(
-                    tun, dst_ip, src_ip,
-                    dport, sport,
-                    conn.seq_to_tun, seq_num.wrapping_add(1),
-                    0x12, &[], true, // SYN+ACK with MSS
-                ).await;
+        {
+            let conns_guard = conns.lock().await;
+            if conns_guard.contains_key(&sport) {
+                if let Some(conn) = conns_guard.get(&sport) {
+                    let _ = send_tcp_ex(
+                        tun, dst_ip, src_ip,
+                        dport, sport,
+                        conn.seq_to_tun, seq_num.wrapping_add(1),
+                        0x12, &[], true, // SYN+ACK with MSS
+                    ).await;
+                }
+                return 64;
             }
-            return 64;
         }
 
-        ffi::record_log(format!("[tun2socks] TCP SYN {src_ip}:{sport} -> {dst}"));
-        match connect_through_socks(upstream, dst).await {
-            Ok(stream) => {
-                ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT OK {dst}"));
-                let seq_to_tun: u32 = rand_u32();
-                let ack_to_send = seq_num.wrapping_add(1);
-                let (read_half, write_half) = tokio::io::split(stream);
+        // Mark as connecting immediately
+        conns.lock().await.insert(sport, TcpConn {
+            write_half: None,
+            seq_to_tun: 0,
+            ack_from_tun: 0,
+            connecting: true,
+        });
 
-                // Spawn response reader FIRST
-                let tun_clone_fd = unsafe { libc::dup(tun.as_raw_fd()) };
-                if tun_clone_fd >= 0 {
-                    let tun_clone_file = unsafe { std::fs::File::from_raw_fd(tun_clone_fd) };
-                    let tun_clone = tokio::io::unix::AsyncFd::new(tun_clone_file).unwrap();
-                    let conns_clone = Arc::clone(&conns);
-                    tokio::spawn(async move {
-                        tun_response_reader(
-                            read_half, tun_clone,
-                            src_ip, dst_ip,
-                            sport, dport,
-                            seq_to_tun.wrapping_add(1),
-                            ack_to_send,
-                            conns_clone,
-                        ).await;
+        ffi::record_log(format!("[tun2socks] TCP SYN {src_ip}:{sport} -> {dst}"));
+
+        // Spawn async connect — main loop continues immediately
+        let tun_fd_clone = unsafe { libc::dup(tun.as_raw_fd()) };
+        let conns_clone = Arc::clone(&conns);
+        tokio::spawn(async move {
+            if tun_fd_clone < 0 { return; }
+            let tun_file = unsafe { std::fs::File::from_raw_fd(tun_fd_clone) };
+            let tun_async = match tokio::io::unix::AsyncFd::new(tun_file) {
+                Ok(a) => a,
+                Err(_) => return,
+            };
+
+            match connect_through_socks(upstream, dst).await {
+                Ok(stream) => {
+                    ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT OK {dst}"));
+                    let seq_to_tun: u32 = rand_u32();
+                    let ack_to_send = seq_num.wrapping_add(1);
+                    let (read_half, write_half) = tokio::io::split(stream);
+
+                    // Spawn response reader
+                    let tun_reader_fd = unsafe { libc::dup(tun_async.as_raw_fd()) };
+                    if tun_reader_fd >= 0 {
+                        let tun_reader_file = unsafe { std::fs::File::from_raw_fd(tun_reader_fd) };
+                        let tun_reader = tokio::io::unix::AsyncFd::new(tun_reader_file).unwrap();
+                        let conns_reader = Arc::clone(&conns_clone);
+                        tokio::spawn(async move {
+                            tun_response_reader(
+                                read_half, tun_reader,
+                                src_ip, dst_ip,
+                                sport, dport,
+                                seq_to_tun.wrapping_add(1),
+                                ack_to_send,
+                                conns_reader,
+                            ).await;
+                        });
+                    }
+
+                    // Send SYN-ACK with MSS
+                    let _ = send_tcp_ex(
+                        &tun_async, dst_ip, src_ip,
+                        dport, sport,
+                        seq_to_tun, ack_to_send,
+                        0x12, &[], true,
+                    ).await;
+
+                    // Store connection state
+                    conns_clone.lock().await.insert(sport, TcpConn {
+                        write_half: Some(write_half),
+                        seq_to_tun,
+                        ack_from_tun: ack_to_send,
+                        connecting: false,
                     });
                 }
-
-                // Store connection state
-                conns.lock().await.insert(sport, TcpConn {
-                    write_half,
-                    seq_to_tun,
-                    ack_from_tun: ack_to_send,
-                });
-
-                // Send SYN-ACK with MSS: src=dst_ip:dport (remote), dst=src_ip:sport (app)
-                let _ = send_tcp_ex(
-                    tun, dst_ip, src_ip,
-                    dport, sport,
-                    seq_to_tun, ack_to_send,
-                    0x12, &[], true, // SYN+ACK with MSS=1240
-                ).await;
-                64
+                Err(e) => {
+                    ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT FAILED {dst}: {e}"));
+                    let _ = send_tcp(
+                        &tun_async, dst_ip, src_ip,
+                        dport, sport,
+                        0, seq_num.wrapping_add(1),
+                        0x04, &[], // RST
+                    ).await;
+                    conns_clone.lock().await.remove(&sport);
+                }
             }
-            Err(e) => {
-                ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT FAILED {dst}: {e}"));
+        });
+        return 64;
+    }
+
+    // Established connection with data → forward to SOCKS
+    if is_ack && payload_len > 0 {
+        let mut conn_opt = conns.lock().await;
+        if let Some(conn) = conn_opt.get_mut(&sport) {
+            if conn.connecting {
+                // Still connecting — buffer? For now drop, app will retransmit
+                return 0;
+            }
+            if let Some(wh) = &mut conn.write_half {
+                conn.ack_from_tun = seq_num.wrapping_add(payload_len as u32);
+                let _ = wh.write_all(payload).await;
+
+                // Send ACK back to app
+                let seq_ack = conn.seq_to_tun;
+                let ack_val = conn.ack_from_tun;
+                drop(conn_opt);
+
                 let _ = send_tcp(
                     tun, dst_ip, src_ip,
                     dport, sport,
-                    0, seq_num.wrapping_add(1),
-                    0x04, &[], // RST
+                    seq_ack, ack_val,
+                    0x10, &[], // ACK
                 ).await;
-                0
+                return payload_len as u64;
             }
         }
     }
-    // Established connection with data → forward to SOCKS
-    else if is_ack && payload_len > 0 {
-        let mut conn_opt = conns.lock().await;
-        if let Some(conn) = conn_opt.get_mut(&sport) {
-            conn.ack_from_tun = seq_num.wrapping_add(payload_len as u32);
-            let _ = conn.write_half.write_all(payload).await;
 
-            // Send ACK back to app
-            let seq_ack = conn.seq_to_tun;
-            let ack_val = conn.ack_from_tun;
-            drop(conn_opt);
-
-            let _ = send_tcp(
-                tun, dst_ip, src_ip,
-                dport, sport,
-                seq_ack, ack_val,
-                0x10, &[], // ACK
-            ).await;
-            payload_len as u64
-        } else {
-            0
-        }
-    } else {
-        // Pure ACK with no data — ignore
-        0
-    }
+    // Pure ACK with no data — ignore
+    0
 }
 
 fn rand_u32() -> u32 {
