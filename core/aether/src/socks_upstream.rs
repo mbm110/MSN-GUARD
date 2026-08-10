@@ -123,10 +123,42 @@ async fn socks5_connect(stream: &mut TcpStream, target: SocketAddr) -> Result<()
 }
 
 async fn connect_through_socks(upstream: SocketAddr, target: SocketAddr) -> Result<TcpStream> {
-    let mut stream = TcpStream::connect(upstream).await?;
-    socks5_handshake(&mut stream).await?;
-    socks5_connect(&mut stream, target).await?;
-    Ok(stream)
+    let mut last_err = None;
+    for attempt in 0..3u8 {
+        if attempt > 0 {
+            ffi::record_log(format!(
+                "[tun2socks] retry {attempt} for {target} after SOCKS5 failure"
+            ));
+            tokio::time::sleep(Duration::from_millis(300 * (1 << attempt))).await;
+        }
+        match tokio::time::timeout(
+            Duration::from_secs(8),
+            async {
+                let mut stream = TcpStream::connect(upstream).await?;
+                socks5_handshake(&mut stream).await?;
+                socks5_connect(&mut stream, target).await?;
+                Ok(stream)
+            },
+        )
+        .await
+        {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(e)) => {
+                last_err = Some(e.to_string());
+                // reply:5 = general failure — retry makes sense
+                if !e.to_string().contains("reply: 5") {
+                    return Err(e);
+                }
+            }
+            Err(_) => {
+                last_err = Some("timeout".into());
+            }
+        }
+    }
+    Err(AetherError::Other(format!(
+        "SOCKS5 connect failed after 3 attempts: {}",
+        last_err.unwrap_or_default()
+    )))
 }
 
 // ─── TCP flags ──────────────────────────────────────────────────────
@@ -150,20 +182,33 @@ async fn send_tcp(
     seq: u32, ack: u32,
     flags: u8, payload: &[u8],
 ) -> u64 {
-    let tcp_hdr_len: usize = 20;
+    send_tcp_ex(tun, src_ip, dst_ip, src_port, dst_port, seq, ack, flags, payload, false).await
+}
+
+/// Extended send_tcp with MSS option support (needed for SYN-ACK).
+async fn send_tcp_ex(
+    tun: &tokio::io::unix::AsyncFd<std::fs::File>,
+    src_ip: Ipv4Addr, dst_ip: Ipv4Addr,
+    src_port: u16, dst_port: u16,
+    seq: u32, ack: u32,
+    flags: u8, payload: &[u8],
+    with_mss: bool,
+) -> u64 {
+    // TCP options: MSS (4 bytes) if requested
+    let mss_opt_len = if with_mss { 4 } else { 0 };
+    let tcp_hdr_len: usize = 20 + mss_opt_len;
     let tcp_len = tcp_hdr_len + payload.len();
     let ip_len = 20 + tcp_len;
     let mut pkt = vec![0u8; ip_len];
 
     // ── IP header ──
-    pkt[0] = 0x45; // version=4, IHL=5
-    pkt[1] = 0x00; // DSCP/ECN
+    pkt[0] = 0x45;
+    pkt[1] = 0x00;
     pkt[2..4].copy_from_slice(&(ip_len as u16).to_be_bytes());
-    pkt[4..6].copy_from_slice(&[0, 0]); // ID
+    pkt[4..6].copy_from_slice(&[0, 0]);
     pkt[6..8].copy_from_slice(&[0x40, 0x00]); // DF
     pkt[8] = 64; // TTL
-    pkt[9] = 6;  // protocol = TCP
-    // checksum filled below
+    pkt[9] = 6;  // TCP
     pkt[12..16].copy_from_slice(&ip_to_bytes(src_ip));
     pkt[16..20].copy_from_slice(&ip_to_bytes(dst_ip));
     let ip_cksum = ip_checksum(&pkt);
@@ -171,17 +216,28 @@ async fn send_tcp(
 
     // ── TCP header ──
     let o = 20;
-    pkt[o..o+2].copy_from_slice(&src_port.to_be_bytes());   // CORRECT: src = remote server port
-    pkt[o+2..o+4].copy_from_slice(&dst_port.to_be_bytes()); // CORRECT: dst = app source port
+    pkt[o..o+2].copy_from_slice(&src_port.to_be_bytes());
+    pkt[o+2..o+4].copy_from_slice(&dst_port.to_be_bytes());
     pkt[o+4..o+8].copy_from_slice(&seq.to_be_bytes());
     pkt[o+8..o+12].copy_from_slice(&ack.to_be_bytes());
-    pkt[o+12] = 0x50; // data offset = 5 (20 bytes)
+    // Data offset = (20 + mss_opt_len) / 4
+    pkt[o+12] = ((tcp_hdr_len / 4) as u8) << 4;
     pkt[o+13] = flags;
     pkt[o+14..o+16].copy_from_slice(&65535u16.to_be_bytes()); // window
     // checksum filled below
     pkt[o+18..o+20].copy_from_slice(&0u16.to_be_bytes()); // urgent ptr
+
+    // ── TCP options (MSS) ──
+    if with_mss {
+        let opt_off = o + 20;
+        pkt[opt_off] = 0x02;     // Kind = MSS
+        pkt[opt_off + 1] = 0x04; // Length = 4
+        // MSS = 1280 - 20 (IP) - 20 (TCP) = 1240
+        pkt[opt_off + 2..opt_off + 4].copy_from_slice(&1240u16.to_be_bytes());
+    }
+
     if !payload.is_empty() {
-        pkt[o+20..].copy_from_slice(payload);
+        pkt[o + tcp_hdr_len..].copy_from_slice(payload);
     }
     let tcp_cksum = tcp_checksum(src_ip, dst_ip, &pkt[20..]);
     pkt[o+16..o+18].copy_from_slice(&tcp_cksum.to_be_bytes());
@@ -300,17 +356,32 @@ async fn handle_udp(
 async fn tun_response_reader(
     mut read_half: ReadHalf<TcpStream>,
     tun: tokio::io::unix::AsyncFd<std::fs::File>,
-    tun_ip: Ipv4Addr,   // the TUN interface IP (10.0.0.2) — appears as dst_ip in responses
-    remote_ip: Ipv4Addr, // the remote server IP — appears as src_ip in responses
-    tun_port: u16,       // the app's source port
-    remote_port: u16,    // the remote server's port
+    tun_ip: Ipv4Addr,
+    remote_ip: Ipv4Addr,
+    tun_port: u16,
+    remote_port: u16,
     mut seq_to_tun: u32,
     mut ack_from_tun: u32,
+    conns: Arc<Mutex<HashMap<u16, TcpConn>>>,
 ) {
     let mut buf = vec![0u8; 65535];
     loop {
-        match read_half.read(&mut buf).await {
-            Ok(0) => {
+        // 30s idle timeout — if no data arrives, close the connection
+        match tokio::time::timeout(Duration::from_secs(30), read_half.read(&mut buf)).await {
+            Err(_) => {
+                // Idle timeout — send FIN+ACK and cleanup
+                ffi::record_log(format!(
+                    "[tun2socks] idle timeout {remote_ip}:{remote_port} -> {tun_ip}:{tun_port}"
+                ));
+                let _ = send_tcp(
+                    &tun, remote_ip, tun_ip,
+                    remote_port, tun_port,
+                    seq_to_tun, ack_from_tun,
+                    0x11, &[], // FIN+ACK
+                ).await;
+                break;
+            }
+            Ok(Ok(0)) => {
                 // Connection closed — send FIN+ACK
                 let _ = send_tcp(
                     &tun, remote_ip, tun_ip,
@@ -320,9 +391,8 @@ async fn tun_response_reader(
                 ).await;
                 break;
             }
-            Ok(n) => {
+            Ok(Ok(n)) => {
                 // Data from remote → send PSH+ACK to TUN
-                // Response packet: src=remote_ip:remote_port, dst=tun_ip:tun_port
                 let _ = send_tcp(
                     &tun, remote_ip, tun_ip,
                     remote_port, tun_port,
@@ -331,7 +401,7 @@ async fn tun_response_reader(
                 ).await;
                 seq_to_tun = seq_to_tun.wrapping_add(n as u32);
             }
-            Err(_) => {
+            Ok(Err(_)) => {
                 // Error — send RST
                 let _ = send_tcp(
                     &tun, remote_ip, tun_ip,
@@ -343,6 +413,8 @@ async fn tun_response_reader(
             }
         }
     }
+    // Cleanup: remove from connection table
+    conns.lock().await.remove(&tun_port);
 }
 
 // ─── TCP handler ────────────────────────────────────────────────────
@@ -377,13 +449,12 @@ async fn handle_tcp(
 
         // SYN retransmission check: if connection already exists, resend SYN-ACK
         if conns.lock().await.contains_key(&sport) {
-            // Already connecting/connected — resend SYN-ACK
             if let Some(conn) = conns.lock().await.get(&sport) {
-                let _ = send_tcp(
+                let _ = send_tcp_ex(
                     tun, dst_ip, src_ip,
                     dport, sport,
                     conn.seq_to_tun, seq_num.wrapping_add(1),
-                    0x12, &[], // SYN+ACK
+                    0x12, &[], true, // SYN+ACK with MSS
                 ).await;
             }
             return 64;
@@ -402,13 +473,15 @@ async fn handle_tcp(
                 if tun_clone_fd >= 0 {
                     let tun_clone_file = unsafe { std::fs::File::from_raw_fd(tun_clone_fd) };
                     let tun_clone = tokio::io::unix::AsyncFd::new(tun_clone_file).unwrap();
+                    let conns_clone = Arc::clone(&conns);
                     tokio::spawn(async move {
                         tun_response_reader(
                             read_half, tun_clone,
                             src_ip, dst_ip,
                             sport, dport,
-                            seq_to_tun.wrapping_add(1), // server's first data starts at seq+1
+                            seq_to_tun.wrapping_add(1),
                             ack_to_send,
+                            conns_clone,
                         ).await;
                     });
                 }
@@ -420,12 +493,12 @@ async fn handle_tcp(
                     ack_from_tun: ack_to_send,
                 });
 
-                // Send SYN-ACK: src=dst_ip:dport (remote), dst=src_ip:sport (app)
-                let _ = send_tcp(
+                // Send SYN-ACK with MSS: src=dst_ip:dport (remote), dst=src_ip:sport (app)
+                let _ = send_tcp_ex(
                     tun, dst_ip, src_ip,
                     dport, sport,
                     seq_to_tun, ack_to_send,
-                    0x12, &[], // SYN+ACK
+                    0x12, &[], true, // SYN+ACK with MSS=1240
                 ).await;
                 64
             }
