@@ -399,6 +399,7 @@ async fn tun_response_reader(
             Ok(Ok(n)) => {
                 // Read the LATEST ack from app (may have been updated by handle_tcp)
                 let ack = ack_shared.load(Ordering::Relaxed);
+                ffi::record_log(format!("[tun2socks] RECV {n}B from {remote_ip}:{remote_port} → {tun_ip}:{tun_port}"));
                 let _ = send_tcp(
                     &tun, remote_ip, tun_ip,
                     remote_port, tun_port,
@@ -590,6 +591,7 @@ async fn handle_tcp(
                 None => return 0,
             };
             if conn.connecting {
+                ffi::record_log(format!("[tun2socks] DATA while connecting {src_ip}:{sport} -> {dst_ip}:{dport} ({payload_len}B) — dropped"));
                 return 0;
             }
             // Update ACK atomically (response reader will see it)
@@ -601,7 +603,10 @@ async fn handle_tcp(
         };
 
         if let Some(tx) = data_tx_clone {
-            let _ = tx.try_send(payload.to_vec());
+            ffi::record_log(format!("[tun2socks] DATA {src_ip}:{sport} -> {dst_ip}:{dport} ({payload_len}B) → SOCKS5"));
+            if tx.try_send(payload.to_vec()).is_err() {
+                ffi::record_log(format!("[tun2socks] DATA channel full for {sport}"));
+            }
             // Send ACK to app
             let seq_ack;
             let ack_val;
