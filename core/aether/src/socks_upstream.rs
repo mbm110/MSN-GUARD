@@ -1,6 +1,6 @@
 //! tun2socks bridge: reads raw IPv4 packets from a TUN fd,
 //! parses TCP/UDP, and forwards through an upstream SOCKS5 proxy.
-//! Includes bidirectional TCP data forwarding and DNS-over-TCP.
+//! Includes proper TCP/UDP/IP checksums, bidirectional forwarding, DNS-over-TCP.
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -13,6 +13,57 @@ use tokio::sync::Mutex;
 
 use crate::error::{AetherError, Result};
 use crate::ffi;
+
+// ─── checksum helpers ───────────────────────────────────────────────
+
+/// One's complement sum over a byte buffer (for IP/TCP/UDP checksums).
+fn ones_complement_sum(data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i = 0;
+    while i + 1 < data.len() {
+        sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < data.len() {
+        sum += (data[i] as u32) << 8;
+    }
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !sum as u16
+}
+
+/// IPv4 header checksum (over the 20-byte basic header).
+fn ip_checksum(pkt: &[u8]) -> u16 {
+    ones_complement_sum(&pkt[..20])
+}
+
+/// TCP checksum over IPv4 pseudo-header + TCP segment.
+fn tcp_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, tcp_segment: &[u8]) -> u16 {
+    let tcp_len = tcp_segment.len() as u16;
+    let mut pseudo = Vec::with_capacity(12 + tcp_segment.len());
+    pseudo.extend_from_slice(&src_ip.octets());
+    pseudo.extend_from_slice(&dst_ip.octets());
+    pseudo.push(0); // reserved
+    pseudo.push(6); // protocol = TCP
+    pseudo.extend_from_slice(&tcp_len.to_be_bytes());
+    pseudo.extend_from_slice(tcp_segment);
+    ones_complement_sum(&pseudo)
+}
+
+/// UDP checksum over IPv4 pseudo-header + UDP segment.
+fn udp_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, udp_segment: &[u8]) -> u16 {
+    let udp_len = udp_segment.len() as u16;
+    let mut pseudo = Vec::with_capacity(12 + udp_segment.len());
+    pseudo.extend_from_slice(&src_ip.octets());
+    pseudo.extend_from_slice(&dst_ip.octets());
+    pseudo.push(0); // reserved
+    pseudo.push(17); // protocol = UDP
+    pseudo.extend_from_slice(&udp_len.to_be_bytes());
+    pseudo.extend_from_slice(udp_segment);
+    let cksum = ones_complement_sum(&pseudo);
+    if cksum == 0 { 0xFFFF } else { cksum }
+}
 
 // ─── helpers ────────────────────────────────────────────────────────
 
@@ -78,7 +129,7 @@ async fn connect_through_socks(upstream: SocketAddr, target: SocketAddr) -> Resu
     Ok(stream)
 }
 
-// ─── TCP helpers ────────────────────────────────────────────────────
+// ─── TCP flags ──────────────────────────────────────────────────────
 
 fn tcp_flags(buf: &[u8], ihl: usize) -> (bool, bool, bool) {
     if buf.len() < ihl + 14 { return (false, false, false); }
@@ -90,43 +141,52 @@ fn is_rst_flag(tcp: &[u8]) -> bool {
     tcp.len() > 13 && (tcp[13] & 0x04 != 0)
 }
 
+// ─── build & write TCP packet to TUN ────────────────────────────────
+
 async fn send_tcp(
     tun: &tokio::io::unix::AsyncFd<std::fs::File>,
     src_ip: Ipv4Addr, dst_ip: Ipv4Addr,
-    sport: u16, dport: u16,
+    src_port: u16, dst_port: u16,
     seq: u32, ack: u32,
     flags: u8, payload: &[u8],
 ) -> u64 {
-    let tcp_len = 20 + payload.len();
+    let tcp_hdr_len: usize = 20;
+    let tcp_len = tcp_hdr_len + payload.len();
     let ip_len = 20 + tcp_len;
     let mut pkt = vec![0u8; ip_len];
 
-    // IP header
-    pkt[0] = 0x45; pkt[1] = 0x00;
+    // ── IP header ──
+    pkt[0] = 0x45; // version=4, IHL=5
+    pkt[1] = 0x00; // DSCP/ECN
     pkt[2..4].copy_from_slice(&(ip_len as u16).to_be_bytes());
     pkt[4..6].copy_from_slice(&[0, 0]); // ID
     pkt[6..8].copy_from_slice(&[0x40, 0x00]); // DF
-    pkt[8] = 64; pkt[9] = 6; // TTL=64, proto=TCP
-    pkt[10..12].fill(0); // checksum (kernel fills)
+    pkt[8] = 64; // TTL
+    pkt[9] = 6;  // protocol = TCP
+    // checksum filled below
     pkt[12..16].copy_from_slice(&ip_to_bytes(src_ip));
     pkt[16..20].copy_from_slice(&ip_to_bytes(dst_ip));
+    let ip_cksum = ip_checksum(&pkt);
+    pkt[10..12].copy_from_slice(&ip_cksum.to_be_bytes());
 
-    // TCP header
+    // ── TCP header ──
     let o = 20;
-    pkt[o..o+2].copy_from_slice(&dport.to_be_bytes());  // src=server
-    pkt[o+2..o+4].copy_from_slice(&sport.to_be_bytes()); // dst=client
+    pkt[o..o+2].copy_from_slice(&src_port.to_be_bytes());   // CORRECT: src = remote server port
+    pkt[o+2..o+4].copy_from_slice(&dst_port.to_be_bytes()); // CORRECT: dst = app source port
     pkt[o+4..o+8].copy_from_slice(&seq.to_be_bytes());
     pkt[o+8..o+12].copy_from_slice(&ack.to_be_bytes());
-    pkt[o+12] = 0x50; // data offset
+    pkt[o+12] = 0x50; // data offset = 5 (20 bytes)
     pkt[o+13] = flags;
     pkt[o+14..o+16].copy_from_slice(&65535u16.to_be_bytes()); // window
-    pkt[o+16..o+18].fill(0); // checksum (kernel fills)
-    pkt[o+18..o+20].copy_from_slice(&0u16.to_be_bytes()); // urgent
+    // checksum filled below
+    pkt[o+18..o+20].copy_from_slice(&0u16.to_be_bytes()); // urgent ptr
     if !payload.is_empty() {
         pkt[o+20..].copy_from_slice(payload);
     }
+    let tcp_cksum = tcp_checksum(src_ip, dst_ip, &pkt[20..]);
+    pkt[o+16..o+18].copy_from_slice(&tcp_cksum.to_be_bytes());
 
-    // Wait for writable
+    // ── write to TUN ──
     let mut guard = match tun.ready(Interest::WRITABLE).await {
         Ok(g) => g,
         Err(_) => return 0,
@@ -141,29 +201,42 @@ async fn send_tcp(
     }
 }
 
+// ─── build & write UDP packet to TUN ────────────────────────────────
+
 async fn send_udp(
     tun: &tokio::io::unix::AsyncFd<std::fs::File>,
     src_ip: Ipv4Addr, dst_ip: Ipv4Addr,
-    sport: u16, dport: u16,
+    src_port: u16, dst_port: u16,
     payload: &[u8],
 ) -> u64 {
     let udp_len = 8 + payload.len();
     let ip_len = 20 + udp_len;
     let mut pkt = vec![0u8; ip_len];
 
-    pkt[0] = 0x45; pkt[1] = 0x00;
+    // ── IP header ──
+    pkt[0] = 0x45;
+    pkt[1] = 0x00;
     pkt[2..4].copy_from_slice(&(ip_len as u16).to_be_bytes());
-    pkt[8] = 64; pkt[9] = 17; // TTL, proto=UDP
+    pkt[4..6].copy_from_slice(&[0, 0]); // ID
+    pkt[6..8].copy_from_slice(&[0x40, 0x00]); // DF
+    pkt[8] = 64; // TTL
+    pkt[9] = 17; // protocol = UDP
     pkt[12..16].copy_from_slice(&ip_to_bytes(src_ip));
     pkt[16..20].copy_from_slice(&ip_to_bytes(dst_ip));
+    let ip_cksum = ip_checksum(&pkt);
+    pkt[10..12].copy_from_slice(&ip_cksum.to_be_bytes());
 
+    // ── UDP header ──
     let o = 20;
-    pkt[o..o+2].copy_from_slice(&sport.to_be_bytes());
-    pkt[o+2..o+4].copy_from_slice(&dport.to_be_bytes());
+    pkt[o..o+2].copy_from_slice(&src_port.to_be_bytes());
+    pkt[o+2..o+4].copy_from_slice(&dst_port.to_be_bytes());
     pkt[o+4..o+6].copy_from_slice(&(udp_len as u16).to_be_bytes());
-    pkt[o+6..o+8].fill(0);
+    // checksum filled below
     pkt[o+8..].copy_from_slice(payload);
+    let udp_cksum = udp_checksum(src_ip, dst_ip, &pkt[20..]);
+    pkt[o+6..o+8].copy_from_slice(&udp_cksum.to_be_bytes());
 
+    // ── write to TUN ──
     let mut guard = match tun.ready(Interest::WRITABLE).await {
         Ok(g) => g,
         Err(_) => return 0,
@@ -212,6 +285,7 @@ async fn handle_udp(
     match forward_dns_tcp(upstream, dst_ip, payload).await {
         Ok(response) => {
             ffi::record_log(format!("[tun2socks] DNS response OK ({}B)", response.len()));
+            // Response goes from DNS server → app: src=dns_ip:53, dst=app_ip:src_port
             send_udp(tun, dst_ip, src_ip, 53, src_port, &response).await
         }
         Err(e) => {
@@ -226,31 +300,45 @@ async fn handle_udp(
 async fn tun_response_reader(
     mut read_half: ReadHalf<TcpStream>,
     tun: tokio::io::unix::AsyncFd<std::fs::File>,
-    src_ip: Ipv4Addr, dst_ip: Ipv4Addr,
-    sport: u16, dport: u16,
+    tun_ip: Ipv4Addr,   // the TUN interface IP (10.0.0.2) — appears as dst_ip in responses
+    remote_ip: Ipv4Addr, // the remote server IP — appears as src_ip in responses
+    tun_port: u16,       // the app's source port
+    remote_port: u16,    // the remote server's port
     mut seq_to_tun: u32,
+    mut ack_from_tun: u32,
 ) {
-    ffi::record_log(format!("[tun2socks] reader task running for sport={}", sport));
     let mut buf = vec![0u8; 65535];
     loop {
         match read_half.read(&mut buf).await {
             Ok(0) => {
-                ffi::record_log(format!("[tun2socks] reader EOF sport={}", sport));
-                // Connection closed — send FIN
-                let _ = send_tcp(&tun, dst_ip, src_ip, sport, dport,
-                    seq_to_tun, 0, 0x11, &[]).await; // FIN+ACK
+                // Connection closed — send FIN+ACK
+                let _ = send_tcp(
+                    &tun, remote_ip, tun_ip,
+                    remote_port, tun_port,
+                    seq_to_tun, ack_from_tun,
+                    0x11, &[], // FIN+ACK
+                ).await;
                 break;
             }
             Ok(n) => {
-                ffi::record_log(format!("[tun2socks] reader GOT {} bytes sport={}", n, sport));
-                let _ = send_tcp(&tun, dst_ip, src_ip, sport, dport,
-                    seq_to_tun, 0, 0x18, &buf[..n]).await; // PSH+ACK
+                // Data from remote → send PSH+ACK to TUN
+                // Response packet: src=remote_ip:remote_port, dst=tun_ip:tun_port
+                let _ = send_tcp(
+                    &tun, remote_ip, tun_ip,
+                    remote_port, tun_port,
+                    seq_to_tun, ack_from_tun,
+                    0x18, &buf[..n], // PSH+ACK
+                ).await;
                 seq_to_tun = seq_to_tun.wrapping_add(n as u32);
             }
-            Err(e) => {
-                ffi::record_log(format!("[tun2socks] reader ERROR sport={}: {}", sport, e));
-                let _ = send_tcp(&tun, dst_ip, src_ip, sport, dport,
-                    seq_to_tun, 0, 0x04, &[]).await; // RST
+            Err(_) => {
+                // Error — send RST
+                let _ = send_tcp(
+                    &tun, remote_ip, tun_ip,
+                    remote_port, tun_port,
+                    seq_to_tun, ack_from_tun,
+                    0x04, &[], // RST
+                ).await;
                 break;
             }
         }
@@ -277,9 +365,6 @@ async fn handle_tcp(
     let payload_len = if tcp.len() > tcp_hdr_len { tcp.len() - tcp_hdr_len } else { 0 };
     let payload = &tcp[tcp_hdr_len..tcp.len()];
 
-    let src = SocketAddr::new(IpAddr::V4(src_ip), sport);
-    let dst = SocketAddr::new(IpAddr::V4(dst_ip), dport);
-
     // FIN / RST → cleanup
     if is_fin || is_rst_flag(tcp) {
         conns.lock().await.remove(&sport);
@@ -288,39 +373,58 @@ async fn handle_tcp(
 
     // SYN → connect through upstream SOCKS5
     if is_syn {
-        ffi::record_log(format!("[tun2socks] TCP SYN {src} -> {dst}"));
+        let dst = SocketAddr::new(IpAddr::V4(dst_ip), dport);
+
+        // SYN retransmission check: if connection already exists, resend SYN-ACK
+        if conns.lock().await.contains_key(&sport) {
+            // Already connecting/connected — resend SYN-ACK
+            if let Some(conn) = conns.lock().await.get(&sport) {
+                let _ = send_tcp(
+                    tun, dst_ip, src_ip,
+                    dport, sport,
+                    conn.seq_to_tun, seq_num.wrapping_add(1),
+                    0x12, &[], // SYN+ACK
+                ).await;
+            }
+            return 64;
+        }
+
+        ffi::record_log(format!("[tun2socks] TCP SYN {src_ip}:{sport} -> {dst}"));
         match connect_through_socks(upstream, dst).await {
             Ok(stream) => {
                 ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT OK {dst}"));
                 let seq_to_tun: u32 = rand_u32();
+                let ack_to_send = seq_num.wrapping_add(1);
                 let (read_half, write_half) = tokio::io::split(stream);
-                
-                // Spawn response reader FIRST (needs read_half)
+
+                // Spawn response reader FIRST
                 let tun_clone_fd = unsafe { libc::dup(tun.as_raw_fd()) };
                 if tun_clone_fd >= 0 {
                     let tun_clone_file = unsafe { std::fs::File::from_raw_fd(tun_clone_fd) };
                     let tun_clone = tokio::io::unix::AsyncFd::new(tun_clone_file).unwrap();
-                    let sport_clone = sport;
-                    let dport_clone = dport;
                     tokio::spawn(async move {
-                        ffi::record_log(format!("[tun2socks] reader task STARTED for sport={}", sport_clone));
-                        tun_response_reader(read_half, tun_clone, src_ip, dst_ip, sport_clone, dport_clone, seq_to_tun.wrapping_add(1)).await;
-                        ffi::record_log(format!("[tun2socks] reader task ENDED for sport={}", sport_clone));
+                        tun_response_reader(
+                            read_half, tun_clone,
+                            src_ip, dst_ip,
+                            sport, dport,
+                            seq_to_tun.wrapping_add(1), // server's first data starts at seq+1
+                            ack_to_send,
+                        ).await;
                     });
-                } else {
-                    ffi::record_log(format!("[tun2socks] ERROR: dup(tun_fd) failed for reader task"));
                 }
-                
-                // Store write_half for sending data
+
+                // Store connection state
                 conns.lock().await.insert(sport, TcpConn {
                     write_half,
                     seq_to_tun,
-                    ack_from_tun: seq_num.wrapping_add(1),
+                    ack_from_tun: ack_to_send,
                 });
-                
+
+                // Send SYN-ACK: src=dst_ip:dport (remote), dst=src_ip:sport (app)
                 let _ = send_tcp(
-                    tun, dst_ip, src_ip, dport, sport,
-                    seq_to_tun, seq_num.wrapping_add(1),
+                    tun, dst_ip, src_ip,
+                    dport, sport,
+                    seq_to_tun, ack_to_send,
                     0x12, &[], // SYN+ACK
                 ).await;
                 64
@@ -328,12 +432,10 @@ async fn handle_tcp(
             Err(e) => {
                 ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT FAILED {dst}: {e}"));
                 let _ = send_tcp(
-                    tun, dst_ip, src_ip, dport, sport,
-                    0, seq_num.wrapping_add(1), 0x14, &[], // ACK
-                ).await;
-                let _ = send_tcp(
-                    tun, dst_ip, src_ip, dport, sport,
-                    0, seq_num.wrapping_add(1), 0x04, &[], // RST
+                    tun, dst_ip, src_ip,
+                    dport, sport,
+                    0, seq_num.wrapping_add(1),
+                    0x04, &[], // RST
                 ).await;
                 0
             }
@@ -341,29 +443,28 @@ async fn handle_tcp(
     }
     // Established connection with data → forward to SOCKS
     else if is_ack && payload_len > 0 {
-        if let Some(conn) = conns.lock().await.get_mut(&sport) {
-            ffi::record_log(format!("[tun2socks] DATA forward sport={} payload_len={} ack_from_tun={}", sport, payload_len, conn.ack_from_tun));
+        let mut conn_opt = conns.lock().await;
+        if let Some(conn) = conn_opt.get_mut(&sport) {
             conn.ack_from_tun = seq_num.wrapping_add(payload_len as u32);
-            match conn.write_half.write_all(payload).await {
-                Ok(_) => {
-                    ffi::record_log(format!("[tun2socks] DATA written to SOCKS sport={} ok", sport));
-                }
-                Err(e) => {
-                    ffi::record_log(format!("[tun2socks] DATA write error sport={}: {}", sport, e));
-                }
-            }
-            // Send ACK to app
+            let _ = conn.write_half.write_all(payload).await;
+
+            // Send ACK back to app
+            let seq_ack = conn.seq_to_tun;
+            let ack_val = conn.ack_from_tun;
+            drop(conn_opt);
+
             let _ = send_tcp(
-                tun, dst_ip, src_ip, dport, sport,
-                conn.seq_to_tun, conn.ack_from_tun,
+                tun, dst_ip, src_ip,
+                dport, sport,
+                seq_ack, ack_val,
                 0x10, &[], // ACK
             ).await;
             payload_len as u64
         } else {
-            ffi::record_log(format!("[tun2socks] DATA but no conn for sport={}", sport));
             0
         }
     } else {
+        // Pure ACK with no data — ignore
         0
     }
 }
@@ -393,7 +494,7 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
     }
 
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let mut tun = tokio::io::unix::AsyncFd::new(file)?;
+    let tun = tokio::io::unix::AsyncFd::new(file)?;
 
     let conns: Arc<Mutex<HashMap<u16, TcpConn>>> = Arc::new(Mutex::new(HashMap::new()));
 
@@ -436,9 +537,6 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
 
                 match proto {
                     6 => {
-                        if rx_total < 5000 {
-                            ffi::record_log(format!("[tun2socks] TCP packet {src_ip} -> {dst_ip}"));
-                        }
                         let delta = handle_tcp(
                             packet, ihl, src_ip, dst_ip, &tun, &conns, upstream,
                         ).await;
@@ -450,11 +548,7 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
                         ).await;
                         tx_total += delta;
                     }
-                    other => {
-                        if rx_total < 1000 {
-                            ffi::record_log(format!("[tun2socks] ignored proto={other} from {src_ip} to {dst_ip}"));
-                        }
-                    }
+                    _ => {}
                 }
             }
             _ => {}
