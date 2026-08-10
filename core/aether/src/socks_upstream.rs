@@ -436,6 +436,9 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
 
                 match proto {
                     6 => {
+                        if rx_total < 5000 {
+                            ffi::record_log(format!("[tun2socks] TCP packet {src_ip} -> {dst_ip}"));
+                        }
                         let delta = handle_tcp(
                             packet, ihl, src_ip, dst_ip, &tun, &conns, upstream,
                         ).await;
