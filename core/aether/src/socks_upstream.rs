@@ -75,7 +75,7 @@ struct TcpConn {
     /// Send data from app → SOCKS5 (via channel, no lock contention)
     data_tx: Option<mpsc::Sender<Vec<u8>>>,
     /// Shared ACK value — updated by handle_tcp, read by tun_response_reader
-    ack_from_tun: Arc<AtomicU32>,
+    ack_shared: Arc<AtomicU32>,
     /// Our sequence number for packets sent to TUN
     seq_to_tun: u32,
     connecting: bool,
