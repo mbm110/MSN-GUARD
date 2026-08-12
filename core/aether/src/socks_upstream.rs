@@ -5,12 +5,24 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, Interest, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
+
+/// Shared, writable view of the TUN device used by spawned tasks.
+type TunW = Arc<tokio::io::unix::AsyncFd<std::fs::File>>;
+
+/// DNS answer cache: question (query minus transaction ID) → (response body, expiry).
+type DnsCache = Arc<Mutex<HashMap<Vec<u8>, (Vec<u8>, Instant)>>>;
+
+/// How long a cached DNS answer stays valid.
+const DNS_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Upper bound on DNS lookups in flight at once, so a burst of lookups
+/// (e.g. Chrome opening a page) cannot open dozens of SOCKS connections.
+const DNS_MAX_INFLIGHT: usize = 8;
 
 use crate::error::{AetherError, Result};
 use crate::ffi;
@@ -137,39 +149,56 @@ async fn socks5_connect(stream: &mut TcpStream, target: SocketAddr) -> Result<()
 }
 
 async fn connect_through_socks(upstream: SocketAddr, target: SocketAddr) -> Result<TcpStream> {
+    // Silent retry across a Psiphon rotation, but bounded by a WALL-CLOCK
+    // deadline rather than an attempt count. The previous version allowed
+    // 20 attempts x 3s timeout = up to 60s; a SYN-ACK that arrives 22s late is
+    // useless because the app has already sent RST (seen in build #50 logs for
+    // 20.33.33.16:5222 — "recovered after 9 retries", then immediate RST).
+    let deadline = Instant::now() + Duration::from_secs(4);
     let mut last_err = None;
-    // Silent retry for Psiphon rotation: 20 attempts x 150ms = 3s window
-    for attempt in 0..20u8 {
+    let mut attempt: u32 = 0;
+
+    while Instant::now() < deadline {
         if attempt > 0 {
-            // Tight retry loop for Psiphon rotation (1s downtime)
             tokio::time::sleep(Duration::from_millis(150)).await;
+            if Instant::now() >= deadline { break; }
         }
-        match tokio::time::timeout(
-            Duration::from_secs(3),
-            async {
-                let mut stream = TcpStream::connect(upstream).await?;
-                socks5_handshake(&mut stream).await?;
-                socks5_connect(&mut stream, target).await?;
-                Ok::<TcpStream, AetherError>(stream)
-            },
-        )
+        attempt += 1;
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let per_try = remaining.min(Duration::from_millis(1500));
+        if per_try.is_zero() { break; }
+
+        match tokio::time::timeout(per_try, async {
+            let mut stream = TcpStream::connect(upstream).await?;
+            stream.set_nodelay(true).ok();
+            socks5_handshake(&mut stream).await?;
+            socks5_connect(&mut stream, target).await?;
+            Ok::<TcpStream, AetherError>(stream)
+        })
         .await
         {
             Ok(Ok(stream)) => {
-                if attempt > 0 {
+                if attempt > 1 {
                     ffi::record_log(format!(
-                        "[tun2socks] SOCKS5 recovered after {attempt} retries for {target}"
+                        "[tun2socks] SOCKS5 recovered after {} retries for {target}",
+                        attempt - 1
                     ));
                 }
                 return Ok(stream);
             }
             Ok(Err(e)) => {
-                last_err = Some(e.to_string());
-                // Connection refused = Psiphon rotating, keep retrying silently
-                // reply:5 = general failure, keep retrying
                 let err_str = e.to_string();
-                if !err_str.contains("Connection refused") && !err_str.contains("reply: 5") {
-                    // Hard failure (host unreachable, auth failed) — bail immediately
+                last_err = Some(err_str.clone());
+                // Transient during rotation: listener gone (refused), or Psiphon
+                // answering with general failure (reply 1) / host-unreachable
+                // style codes (reply 4/5) because no tunnel is up yet.
+                let transient = err_str.contains("Connection refused")
+                    || err_str.contains("reset")
+                    || err_str.contains("reply: 1")
+                    || err_str.contains("reply: 4")
+                    || err_str.contains("reply: 5");
+                if !transient {
                     return Err(e);
                 }
             }
@@ -178,13 +207,10 @@ async fn connect_through_socks(upstream: SocketAddr, target: SocketAddr) -> Resu
             }
         }
     }
-    // Log final failure only after all retries exhausted
-    ffi::record_log(format!(
-        "[tun2socks] SOCKS5 connect failed for {target} after 20 retries (3s): {}",
-        last_err.as_deref().unwrap_or("unknown")
-    ));
+
     Err(AetherError::Other(format!(
-        "SOCKS5 connect failed after 20 attempts: {}",
+        "SOCKS5 connect failed for {target} within 4s ({} attempts): {}",
+        attempt,
         last_err.unwrap_or_default()
     )))
 }
@@ -351,32 +377,97 @@ async fn forward_dns_tcp(upstream: SocketAddr, dns_server: Ipv4Addr, query: &[u8
     Ok(resp)
 }
 
-async fn handle_udp(
+/// Strip the 2-byte transaction ID so identical questions share a cache slot.
+fn dns_cache_key(dns_server: Ipv4Addr, query: &[u8]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(query.len() + 2);
+    k.extend_from_slice(&ip_to_bytes(dns_server));
+    if query.len() > 2 {
+        k.extend_from_slice(&query[2..]);
+    }
+    k
+}
+
+/// Handle a UDP packet from the TUN.
+///
+/// Only DNS (port 53) is supported. The lookup is **spawned**, never awaited
+/// inline: the previous version awaited a full SOCKS5 connect + TCP DNS
+/// round-trip inside the single TUN read loop, so one slow lookup stalled every
+/// TCP connection on the device. That is what made Telegram die the moment
+/// Chrome fired a burst of DNS queries.
+fn handle_udp_spawn(
     packet: &[u8], ihl: usize,
     src_ip: Ipv4Addr, dst_ip: Ipv4Addr,
-    tun: &tokio::io::unix::AsyncFd<std::fs::File>,
+    tun: &TunW,
     upstream: SocketAddr,
-) -> u64 {
-    if packet.len() < ihl + 8 { return 0; }
+    cache: &DnsCache,
+    sem: &Arc<Semaphore>,
+    tx_total: &Arc<AtomicU64>,
+) {
+    if packet.len() < ihl + 8 { return; }
     let udp = &packet[ihl..];
     let src_port = u16::from_be_bytes([udp[0], udp[1]]);
     let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
-    let payload = if udp.len() > 8 { &udp[8..] } else { &[] };
+    if dst_port != 53 || udp.len() <= 8 { return; }
+    let payload = udp[8..].to_vec();
 
-    if dst_port != 53 || payload.is_empty() { return 0; }
-    ffi::record_log(format!("[tun2socks] DNS query {src_ip}:{src_port} -> {dst_ip}:53 ({}B)", payload.len()));
+    let tun = Arc::clone(tun);
+    let cache = Arc::clone(cache);
+    let sem = Arc::clone(sem);
+    let tx_total = Arc::clone(tx_total);
 
-    match forward_dns_tcp(upstream, dst_ip, payload).await {
-        Ok(response) => {
-            ffi::record_log(format!("[tun2socks] DNS response OK ({}B)", response.len()));
-            // Response goes from DNS server → app: src=dns_ip:53, dst=app_ip:src_port
-            send_udp(tun, dst_ip, src_ip, 53, src_port, &response).await
+    tokio::spawn(async move {
+        let key = dns_cache_key(dst_ip, &payload);
+
+        // Serve from cache when possible — Chrome/Telegram re-query the same
+        // names constantly and each miss costs a SOCKS5 connect.
+        let cached = {
+            let mut c = cache.lock().await;
+            match c.get(&key) {
+                Some((resp, exp)) if *exp > Instant::now() => Some(resp.clone()),
+                Some(_) => { c.remove(&key); None }
+                None => None,
+            }
+        };
+
+        if let Some(mut resp) = cached {
+            // Restore this query's transaction ID
+            if resp.len() >= 2 && payload.len() >= 2 {
+                resp[0] = payload[0];
+                resp[1] = payload[1];
+            }
+            let n = send_udp(&tun, dst_ip, src_ip, 53, src_port, &resp).await;
+            tx_total.fetch_add(n, Ordering::Relaxed);
+            return;
         }
-        Err(e) => {
-            ffi::record_log(format!("[tun2socks] DNS FAILED: {e}"));
-            0
+
+        // Cap concurrent lookups; if the gate is closed, drop the query and let
+        // the resolver retry (DNS is expected to be lossy).
+        let _permit = match sem.try_acquire() {
+            Ok(p) => p,
+            Err(_) => {
+                ffi::record_log("[tun2socks] DNS throttled (too many in flight)".to_string());
+                return;
+            }
+        };
+
+        match forward_dns_tcp(upstream, dst_ip, &payload).await {
+            Ok(response) => {
+                ffi::record_log(format!(
+                    "[tun2socks] DNS {dst_ip} miss→resolved ({}B)", response.len()
+                ));
+                {
+                    let mut c = cache.lock().await;
+                    if c.len() > 512 { c.clear(); }
+                    c.insert(key, (response.clone(), Instant::now() + DNS_CACHE_TTL));
+                }
+                let n = send_udp(&tun, dst_ip, src_ip, 53, src_port, &response).await;
+                tx_total.fetch_add(n, Ordering::Relaxed);
+            }
+            Err(e) => {
+                ffi::record_log(format!("[tun2socks] DNS FAILED: {e}"));
+            }
         }
-    }
+    });
 }
 
 // ─── TUN reader: reads responses from SOCKS and writes to TUN ──────
@@ -564,6 +655,23 @@ async fn handle_tcp(
 
             match connect_through_socks(upstream, dst).await {
                 Ok(stream) => {
+                    // The app may have given up while we were retrying through a
+                    // Psiphon rotation. handle_tcp removes the entry on RST/FIN, so
+                    // its absence means this SYN is dead — completing the handshake
+                    // now would make the app answer with RST (build #50, port 38132).
+                    {
+                        let guard = conns_clone.lock().await;
+                        match guard.get(&sport) {
+                            Some(c) if c.connecting => {}
+                            _ => {
+                                ffi::record_log(format!(
+                                    "[tun2socks] SOCKS5 late OK for {dst} — app already gave up, dropping"
+                                ));
+                                return;
+                            }
+                        }
+                    }
+
                     ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT OK {dst}"));
                     let (read_half, write_half) = tokio::io::split(stream);
 
@@ -758,12 +866,15 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
     }
 
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let tun = tokio::io::unix::AsyncFd::new(file)?;
+    let tun: TunW = Arc::new(tokio::io::unix::AsyncFd::new(file)?);
 
     let conns: Arc<Mutex<HashMap<u16, TcpConn>>> = Arc::new(Mutex::new(HashMap::new()));
+    let dns_cache: DnsCache = Arc::new(Mutex::new(HashMap::new()));
+    let dns_sem = Arc::new(Semaphore::new(DNS_MAX_INFLIGHT));
+    // tx is now incremented by spawned tasks too, so it has to be shared.
+    let tx_total = Arc::new(AtomicU64::new(0));
 
     let mut rx_total: u64 = 0;
-    let mut tx_total: u64 = 0;
     let mut last_report = Instant::now();
 
     let mut pkt = vec![0u8; 65535];
@@ -774,8 +885,9 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
             Ok(Ok(g)) => g,
             _ => {
                 if last_report.elapsed() >= Duration::from_secs(1) {
-                    if rx_total > 0 || tx_total > 0 {
-                        ffi::emit_traffic(rx_total, tx_total);
+                    let tx = tx_total.load(Ordering::Relaxed);
+                    if rx_total > 0 || tx > 0 {
+                        ffi::emit_traffic(rx_total, tx);
                     }
                     last_report = Instant::now();
                 }
@@ -804,13 +916,15 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
                         let delta = handle_tcp(
                             packet, ihl, src_ip, dst_ip, &tun, &conns, upstream,
                         ).await;
-                        tx_total += delta;
+                        tx_total.fetch_add(delta, Ordering::Relaxed);
                     }
                     17 => {
-                        let delta = handle_udp(
+                        // Spawned, NOT awaited — a slow DNS lookup must never
+                        // stall TCP forwarding for the whole device.
+                        handle_udp_spawn(
                             packet, ihl, src_ip, dst_ip, &tun, upstream,
-                        ).await;
-                        tx_total += delta;
+                            &dns_cache, &dns_sem, &tx_total,
+                        );
                     }
                     _ => {}
                 }
@@ -819,8 +933,9 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
         }
 
         if last_report.elapsed() >= Duration::from_secs(1) {
-            if rx_total > 0 || tx_total > 0 {
-                ffi::emit_traffic(rx_total, tx_total);
+            let tx = tx_total.load(Ordering::Relaxed);
+            if rx_total > 0 || tx > 0 {
+                ffi::emit_traffic(rx_total, tx);
             }
             last_report = Instant::now();
         }
