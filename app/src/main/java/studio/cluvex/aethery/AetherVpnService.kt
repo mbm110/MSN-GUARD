@@ -23,6 +23,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import ca.psiphon.PsiphonTunnel
+import ca.psiphon.Tun2SocksJniLoader
 
 class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.HostService {
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
@@ -103,11 +104,6 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
 
     override fun onConnected() {
         ConnectionLog.record("Psiphon connected — upstream tunnel ready")
-        // Guard: if Rust core already started, this is a Psiphon reconnect after network change.
-        if (psiphonVpnActivated) {
-            ConnectionLog.record("Psiphon reconnected (tunnel already active, skipping)")
-            return
-        }
 
         val port = activeSocksPort
         if (port <= 0) {
@@ -123,48 +119,29 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
             return
         }
 
-        // VPN MODE: TUN is already up (created in startTunnel() before Psiphon started).
-        // Just start the Rust core to bridge TUN → SOCKS.
-        psiphonVpnActivated = true
-        ConnectionLog.record("Psiphon VPN — starting Rust core TUN → SOCKS $socksProxy")
-
-        worker.execute {
-            try {
-                val config = storedConfig ?: error("No stored config")
-                val bridgeConfig = buildPsiphonBridgeConfig(config, socksProxy)
-                // TUN already exists — just start Rust core.
-                ConnectionLog.record("Starting Rust core → Psiphon SOCKS $socksProxy")
-                sendStatus(STATUS_CONNECTED)
-
-                // Psiphon sockets are protected via bindToDevice() callback
-                ConnectionLog.record("Psiphon VPN interface established, sockets protected via bindToDevice()")
-
-                val result = NativeCore.start(bridgeConfig, tun!!.fd)
-                if (result != 0 && !stopRequested.get()) {
-                    val detail = NativeCore.lastError().ifBlank { "Tunnel exited with code $result" }
-                    ConnectionLog.record("Native tunnel exited: $detail")
-                    sendStatus(STATUS_FAILED, detail)
-                } else if (stopRequested.get()) {
-                    sendStatus(STATUS_DISCONNECTED)
-                } else {
-                    ConnectionLog.record("Native tunnel stopped unexpectedly")
-                    sendStatus(STATUS_FAILED, "Tunnel stopped unexpectedly")
-                }
-            } catch (error: Exception) {
-                val detail = NativeCore.lastError().ifBlank { error.message ?: "Tunnel setup failed" }
-                Log.e(LOG_TAG, "Psiphon tunnel failed: $detail", error)
-                sendStatus(STATUS_FAILED, detail)
-            } finally {
-                NativeCore.detach()
-                vpnModeActive.set(false)
-                tun?.close()
-                tun = null
-                connected.set(false)
-                psiphonVpnActivated = false
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-            }
+        // VPN MODE: TUN is already up (created in startTunnel() before Psiphon
+        // started). tun2socks keeps running across Psiphon rotations — the SOCKS
+        // port is fixed, so a rotation only breaks in-flight upstream sockets and
+        // lwIP resets those individual flows while the TUN device stays up.
+        if (psiphonVpnActivated && Tun2SocksManager.isRunning) {
+            ConnectionLog.record("Psiphon reconnected — tun2socks still routing, nothing to do")
+            sendStatus(STATUS_CONNECTED)
+            return
         }
+
+        val tunFd = tun
+        if (tunFd == null) {
+            sendStatus(STATUS_FAILED, "VPN interface missing")
+            return
+        }
+
+        if (!Tun2SocksManager.start(tunFd, port)) {
+            sendStatus(STATUS_FAILED, "Could not start whole-device routing")
+            return
+        }
+        psiphonVpnActivated = true
+        ConnectionLog.record("Whole-device routing active via tun2socks → $socksProxy")
+        sendStatus(STATUS_CONNECTED)
     }
 
     override fun onExiting() {
@@ -189,7 +166,13 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
     }
 
     override fun onBytesTransferred(sent: Long, received: Long) {
-        // Traffic stats handled by NativeCore callback
+        // In VPN mode there is no Rust core in the data path anymore, so Psiphon's
+        // own byte counters are the source of traffic stats. These arrive as
+        // deltas, not totals.
+        if (!psiphonVpnMode) return
+        currentTx += sent
+        currentRx += received
+        updateTrafficNotification(currentTx, currentRx)
     }
 
     override fun onDiagnosticMessage(message: String) {
@@ -199,20 +182,6 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
     override fun getContext(): android.content.Context = this
 
     override fun getPsiphonConfig(): String = psiphonConfigJson
-
-    private fun buildPsiphonBridgeConfig(baseConfig: String, socksProxy: String): String {
-        return try {
-            val json = org.json.JSONObject(baseConfig)
-            json.put("upstream_proxy", socksProxy)
-            json.put("protocol", "psiphon")
-            json.toString()
-        } catch (e: Exception) {
-            baseConfig.replace(
-                "\"protocol\":\"psiphon\"",
-                "\"protocol\":\"psiphon\",\"upstream_proxy\":\"$socksProxy\""
-            )
-        }
-    }
 
     private fun buildPsiphonConfig(vpnMode: Boolean = true): String {
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
@@ -232,11 +201,12 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
             put("RemoteServerListSignaturePublicKey", "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42KcotLFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7GstZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1OgeF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xalKxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=")
             put("ServerEntrySignaturePublicKey", "sHuUVTWaRyh5pZwy4UguSgkwmBe0EHtJJkoF5WrxmvA=")
             put("ExchangeObfuscationKey", "DpXzloJk1Hw6aSzmKKky0xcahsEHubch81Mi6K0XMlU=")
-            // CRITICAL: Prevent Psiphon's Go NetworkMonitor from restarting
-            // when Android's tun0 interface appears. Without this, Psiphon
-            // detects the network change (MOBILE → VPN) and tears down the
-            // SOCKS proxy, causing a 13-second restart loop.
-            put("DisableNetworkManager", true)
+            // Note: "DisableNetworkManager" was tried here and is a no-op — the
+            // key does not exist in libgojni.so (verified with strings). Psiphon's
+            // NetworkMonitor still restarts the tunnel when tun0 appears. That is
+            // survivable now: tun2socks holds the TUN fd and the SOCKS port is
+            // fixed, so a rotation only kills in-flight upstream sockets and lwIP
+            // resets those flows individually instead of dropping the interface.
         }.toString()
     }
 
@@ -281,7 +251,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
                 val config = storedConfig
                 if (config != null && connected.get()) {
                     ConnectionLog.record("Quick reconnect requested")
-                    stopTunnel(notify = false)
+                    stopTunnel(notify = false, teardownService = false)
                     worker.execute {
                         try { Thread.sleep(500) } catch (_: InterruptedException) {}
                         startTunnel(config, storedVpnMode)
@@ -355,25 +325,28 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
                         // VPN MODE: Create TUN FIRST, then start Psiphon.
                         // This prevents Psiphon's NetworkMonitor from seeing a "change"
                         // when tun0 appears — the 13-second restart loop is eliminated.
-                        val config = storedConfig ?: error("No stored config")
                         val socksPort = getSharedPreferences("settings", MODE_PRIVATE)
                             .getInt("default_socks_port", 1819)
-                        val socksProxy = "127.0.0.1:$socksPort"
-                        val bridgeConfig = buildPsiphonBridgeConfig(config, socksProxy)
-                        NativeCore.attach(this@AetherVpnService)
+
+                        // Address plan comes from tun2socks: the interface gets
+                        // .ipAddress while lwIP answers on .router, which is also
+                        // the DNS resolver the system will use. These must not be
+                        // swapped or lwIP drops every packet.
+                        val address = Tun2SocksManager.selectPrivateAddress()
+
                         ConnectionLog.record("Creating TUN interface BEFORE Psiphon starts")
                         tun = Builder()
                             .setSession("MSN-VPN")
-                            .setMtu(1500)
-                            .addAddress("10.0.0.2", 24)
+                            .setMtu(Tun2SocksManager.VPN_INTERFACE_MTU)
+                            .addAddress(address.ipAddress, address.prefixLength)
                             .addRoute("0.0.0.0", 0)
-                            .addRoute("::", 0)
+                            .addRoute(address.subnet, address.prefixLength)
+                            .addDnsServer(address.router)
                             .addDisallowedApplication(packageName)
-                            .applyDns(bridgeConfig)
                             .establish() ?: error("Android could not establish the VPN interface")
                         vpnModeActive.set(true)
                         ConnectionLog.record("TUN ready — now starting Psiphon on port $socksPort")
-                        // Pre-save the SOCKS port so onConnected() can start Rust core immediately.
+                        // Pre-save the SOCKS port so onConnected() can start tun2socks immediately.
                         activeSocksPort = socksPort
                         startPsiphonTunnel(vpnMode)
                         sendStatus(STATUS_CONNECTING, "Psiphon starting...")
@@ -453,10 +426,33 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
     }
 
 
-    private fun stopTunnel(notify: Boolean = true) {
-        stopPsiphonTunnel()
+    private fun stopTunnel(notify: Boolean = true, teardownService: Boolean = true) {
         stopRequested.set(true)
+        // Order matters: stop routing first so no more packets enter a tunnel
+        // that is being torn down, then stop Psiphon itself.
+        Tun2SocksManager.stop()
+        stopPsiphonTunnel()
         NativeCore.stop()
+
+        if (psiphonVpnMode) {
+            // In VPN mode nothing else owns the service lifecycle now that the
+            // Rust core is out of the data path, so tear down here.
+            NativeCore.detach()
+            vpnModeActive.set(false)
+            psiphonVpnActivated = false
+            tun?.close()
+            tun = null
+            connected.set(false)
+            if (notify) sendStatus(STATUS_DISCONNECTED)
+            // A reconnect re-enters startTunnel() on the worker thread, so the
+            // service must survive; only a real disconnect stops it.
+            if (teardownService) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+            return
+        }
+
         if (notify && !connected.get()) sendStatus(STATUS_DISCONNECTED)
     }
 

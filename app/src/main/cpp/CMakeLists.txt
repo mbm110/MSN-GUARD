@@ -12,3 +12,8 @@ target_link_options(aether_jni PRIVATE
     "-Wl,-z,common-page-size=16384")
 find_library(log-lib log)
 target_link_libraries(aether_jni aether ${log-lib})
+
+# badvpn tun2socks (lwIP-based) — builds libtun2socks.so.
+# This is the whole-device TUN path; the Rust core keeps handling Psiphon
+# lifecycle and exposes the local SOCKS5 port that tun2socks dials.
+add_subdirectory(badvpn)
