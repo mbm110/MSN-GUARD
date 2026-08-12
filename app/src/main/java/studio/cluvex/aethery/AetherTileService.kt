@@ -32,7 +32,7 @@ class AetherTileService : TileService() {
 
     private fun updateTile() {
         val tile = qsTile ?: return
-        val isConnected = NativeCore.isRunning()
+        val isConnected = TunnelStatus.isActive()
         val state = if (isConnected) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
 
         tile.state = state
@@ -50,7 +50,7 @@ class AetherTileService : TileService() {
 
     private fun toggleConnection() {
         val tile = qsTile ?: return
-        val isConnected = NativeCore.isRunning()
+        val isConnected = TunnelStatus.isActive()
 
         if (isConnected) {
             // Disconnect

@@ -34,7 +34,15 @@
 #define DEFAULT_UDPGW_MAX_CONNECTIONS 256
 
 // udpgw per-connection send buffer size, in number of packets
-#define DEFAULT_UDPGW_CONNECTION_BUFFER_SIZE 8
+//
+// Raised from upstream's 8. This is a PER-CONNECTION queue of packets waiting to
+// go out over the single SOCKS5 stream to the udpgw server. When it fills,
+// UdpGwClient logs "out of buffer" and SILENTLY DROPS the packet — see
+// udpgw_client/UdpGwClient.c:346. Eight packets is far too shallow for QUIC:
+// Chrome opens a UDP/443 flow and immediately bursts its initial congestion
+// window, so a single page load overruns the queue and loses datagrams.
+// The cost is bounded: udpgw_mtu bytes per slot per active connection.
+#define DEFAULT_UDPGW_CONNECTION_BUFFER_SIZE 64
 
 // udpgw reconnect time after connection fails
 #define UDPGW_RECONNECT_TIME 5000

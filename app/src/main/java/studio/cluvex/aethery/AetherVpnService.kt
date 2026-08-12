@@ -140,6 +140,13 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
         }
         psiphonVpnActivated = true
         ConnectionLog.record("Whole-device routing active via tun2socks → $socksProxy")
+        connected.set(true)
+        // Replace the placeholder "Connecting..." notification immediately. It used
+        // to be overwritten by the first traffic sample from the Rust core; with
+        // tun2socks the first sample can be seconds away, so the notification
+        // would sit on "Connecting..." while the device was fully tunnelled.
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, notification(currentTx, currentRx))
         sendStatus(STATUS_CONNECTED)
     }
 
@@ -200,6 +207,12 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
             put("RemoteServerListSignaturePublicKey", "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42KcotLFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7GstZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1OgeF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xalKxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=")
             put("ServerEntrySignaturePublicKey", "sHuUVTWaRyh5pZwy4UguSgkwmBe0EHtJJkoF5WrxmvA=")
             put("ExchangeObfuscationKey", "DpXzloJk1Hw6aSzmKKky0xcahsEHubch81Mi6K0XMlU=")
+            // Required for onBytesTransferred() to ever fire. Psiphon suppresses
+            // the BytesTransferred notice unless this is set, and in VPN mode
+            // Psiphon's counters are the ONLY traffic source now that the Rust
+            // core is out of the data path — without it the notification stays
+            // stuck on "Connecting..." forever and data usage reads 0.
+            put("EmitBytesTransferred", true)
             // Note: "DisableNetworkManager" was tried here and is a no-op — the
             // key does not exist in libgojni.so (verified with strings). Psiphon's
             // NetworkMonitor still restarts the tunnel when tun0 appears. That is

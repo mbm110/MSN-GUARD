@@ -590,7 +590,7 @@ class MainActivity : Activity() {
         } as HttpURLConnection
 
     private fun updateNotificationHealth(ip: String? = null, ping: String? = null) {
-        if (!NativeCore.isRunning()) return
+        if (!TunnelStatus.isActive()) return
         startService(Intent(this, AetherVpnService::class.java)
             .setAction(AetherVpnService.ACTION_NOTIFICATION_HEALTH)
             .apply {
@@ -911,7 +911,7 @@ class MainActivity : Activity() {
     private fun openScannerScreen(animate: Boolean = true) {
         if (visualState == ConnectionControl.State.CONNECTING ||
             visualState == ConnectionControl.State.CONNECTED ||
-            NativeCore.isRunning()
+            TunnelStatus.isActive()
         ) return
 
         showingScanner = true
@@ -1167,7 +1167,7 @@ class MainActivity : Activity() {
     private fun showConnectionTypeSheet() {
         if (visualState == ConnectionControl.State.CONNECTING ||
             visualState == ConnectionControl.State.CONNECTED ||
-            NativeCore.isRunning()
+            TunnelStatus.isActive()
         ) return
 
         val dialog = Dialog(this).apply {
@@ -1243,7 +1243,7 @@ class MainActivity : Activity() {
     private fun openModeScreen() {
         if (visualState == ConnectionControl.State.CONNECTING ||
             visualState == ConnectionControl.State.CONNECTED ||
-            NativeCore.isRunning()
+            TunnelStatus.isActive()
         ) return
 
         showingMode = true
@@ -2645,7 +2645,7 @@ class MainActivity : Activity() {
     }
 
     private fun toggleTunnel() {
-        if (NativeCore.isRunning()) {
+        if (TunnelStatus.isActive()) {
             startService(Intent(this, AetherVpnService::class.java).setAction(AetherVpnService.ACTION_DISCONNECT))
             showDisconnected("Disconnecting")
             return
@@ -2674,7 +2674,7 @@ class MainActivity : Activity() {
     private fun configJson(): String = CoreConfig.json(this, selectedProtocol.coreName)
 
     private fun renderStatus() {
-        if (!NativeCore.isRunning() && isTunnelActive()) {
+        if (!TunnelStatus.isActive() && isTunnelActive()) {
             NativeCore.lastError().takeIf(String::isNotBlank)?.let(::showFailure) ?: showDisconnected("Tunnel stopped unexpectedly")
         }
     }
