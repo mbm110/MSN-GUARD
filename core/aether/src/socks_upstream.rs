@@ -469,6 +469,15 @@ async fn handle_tcp(
     let payload_len = if tcp.len() > tcp_hdr_len { tcp.len() - tcp_hdr_len } else { 0 };
     let payload = &tcp[tcp_hdr_len..tcp.len()];
 
+    // DIAGNOSTIC: log EVERY TCP packet — this closes the blind spot where
+    // data arrives but conn lookup fails silently (return 0, no log).
+    let is_rst = is_rst_flag(tcp);
+    ffi::record_log(format!(
+        "[tun2socks] TCP-IN {src_ip}:{sport}->{dst_ip}:{dport} flags[syn={} ack={} fin={} rst={}] seq={} ack_n={} plen={}",
+        is_syn as u8, is_ack as u8, is_fin as u8, is_rst as u8,
+        seq_num, ack_num, payload_len
+    ));
+
     // FIN / RST → cleanup
     if is_fin || is_rst_flag(tcp) {
         conns.lock().await.remove(&sport);
