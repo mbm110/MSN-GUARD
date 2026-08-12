@@ -74,10 +74,19 @@ fn ip_from_bytes(b: &[u8]) -> Ipv4Addr { Ipv4Addr::new(b[0], b[1], b[2], b[3]) }
 struct TcpConn {
     /// Send data from app → SOCKS5 (via channel, no lock contention)
     data_tx: Option<mpsc::Sender<Vec<u8>>>,
-    /// Shared ACK value — updated by handle_tcp, read by tun_response_reader
+    /// Shared ACK value — next byte we expect FROM the app.
+    /// Written by handle_tcp (in-order data only), read by tun_response_reader.
     ack_shared: Arc<AtomicU32>,
-    /// Our sequence number for packets sent to TUN
-    seq_to_tun: u32,
+    /// Our sequence number for packets sent to TUN.
+    /// SHARED so handle_tcp's ACKs use the same seq the response reader advanced to.
+    /// Bug before: this was a plain u32 copied by value into the reader, so every
+    /// byte received from the server desynchronised the two — the app dropped our
+    /// ACKs as out-of-window and retransmitted forever.
+    seq_shared: Arc<AtomicU32>,
+    /// The initial sequence number we advertised in the SYN-ACK.
+    /// Needed to answer a retransmitted SYN correctly — a SYN-ACK must always
+    /// carry the ISN, never the current (advanced) sequence number.
+    isn: u32,
     connecting: bool,
 }
 
@@ -379,7 +388,7 @@ async fn tun_response_reader(
     remote_ip: Ipv4Addr,
     tun_port: u16,
     remote_port: u16,
-    mut seq_to_tun: u32,
+    seq_shared: Arc<AtomicU32>,
     ack_shared: Arc<AtomicU32>,
     conns: Arc<Mutex<HashMap<u16, TcpConn>>>,
 ) {
@@ -392,20 +401,22 @@ async fn tun_response_reader(
                     "[tun2socks] idle timeout {remote_ip}:{remote_port} -> {tun_ip}:{tun_port}"
                 ));
                 let ack = ack_shared.load(Ordering::Relaxed);
+                let seq = seq_shared.load(Ordering::Relaxed);
                 let _ = send_tcp(
                     &tun, remote_ip, tun_ip,
                     remote_port, tun_port,
-                    seq_to_tun, ack,
+                    seq, ack,
                     0x11, &[], // FIN+ACK
                 ).await;
                 break;
             }
             Ok(Ok(0)) => {
                 let ack = ack_shared.load(Ordering::Relaxed);
+                let seq = seq_shared.load(Ordering::Relaxed);
                 let _ = send_tcp(
                     &tun, remote_ip, tun_ip,
                     remote_port, tun_port,
-                    seq_to_tun, ack,
+                    seq, ack,
                     0x11, &[], // FIN+ACK
                 ).await;
                 break;
@@ -413,21 +424,24 @@ async fn tun_response_reader(
             Ok(Ok(n)) => {
                 // Read the LATEST ack from app (may have been updated by handle_tcp)
                 let ack = ack_shared.load(Ordering::Relaxed);
-                ffi::record_log(format!("[tun2socks] RECV {n}B from {remote_ip}:{remote_port} → {tun_ip}:{tun_port}"));
+                let seq = seq_shared.load(Ordering::Relaxed);
+                ffi::record_log(format!("[tun2socks] RECV {n}B from {remote_ip}:{remote_port} → {tun_ip}:{tun_port} seq={seq} ack={ack}"));
                 let _ = send_tcp(
                     &tun, remote_ip, tun_ip,
                     remote_port, tun_port,
-                    seq_to_tun, ack,
+                    seq, ack,
                     0x18, &buf[..n], // PSH+ACK
                 ).await;
-                seq_to_tun = seq_to_tun.wrapping_add(n as u32);
+                // Advance the SHARED seq so handle_tcp's pure ACKs stay in-window
+                seq_shared.store(seq.wrapping_add(n as u32), Ordering::Relaxed);
             }
             Ok(Err(_)) => {
                 let ack = ack_shared.load(Ordering::Relaxed);
+                let seq = seq_shared.load(Ordering::Relaxed);
                 let _ = send_tcp(
                     &tun, remote_ip, tun_ip,
                     remote_port, tun_port,
-                    seq_to_tun, ack,
+                    seq, ack,
                     0x04, &[], // RST
                 ).await;
                 break;
@@ -503,12 +517,15 @@ async fn handle_tcp(
         {
             let conns_guard = conns.lock().await;
             if let Some(conn) = conns_guard.get(&sport) {
-                // Only resend SYN-ACK if already connected (not during connecting phase)
+                // Only resend SYN-ACK if already connected (not during connecting phase).
+                // A SYN-ACK must carry the ISN — using the advanced seq would make the
+                // app reject the segment.
                 if !conn.connecting {
                     let _ = send_tcp_ex(
                         tun, dst_ip, src_ip,
                         dport, sport,
-                        conn.seq_to_tun, conn.ack_shared.load(Ordering::Relaxed),
+                        conn.isn,
+                        conn.ack_shared.load(Ordering::Relaxed),
                         0x12, &[], true,
                     ).await;
                 }
@@ -517,13 +534,18 @@ async fn handle_tcp(
             }
         }
 
-        // Pre-generate ISN before creating connecting entry (fixes seq mismatch)
+        // Pre-generate ISN before creating connecting entry (fixes seq mismatch).
+        // The SYN-ACK carries `isn`; everything sent after it starts at isn+1.
+        // Both the reader and handle_tcp share this ONE atomic so their view of
+        // our sequence number can never drift apart.
         let isn = rand_u32();
         let ack_shared = Arc::new(AtomicU32::new(seq_num.wrapping_add(1)));
+        let seq_shared = Arc::new(AtomicU32::new(isn));
         conns.lock().await.insert(sport, TcpConn {
             data_tx: None,
             ack_shared: Arc::clone(&ack_shared),
-            seq_to_tun: isn,
+            seq_shared: Arc::clone(&seq_shared),
+            isn,
             connecting: true,
         });
 
@@ -543,24 +565,29 @@ async fn handle_tcp(
             match connect_through_socks(upstream, dst).await {
                 Ok(stream) => {
                     ffi::record_log(format!("[tun2socks] SOCKS5 CONNECT OK {dst}"));
-                    // Use the pre-generated ISN (already stored in conn)
-                    let seq_to_tun: u32 = isn;
                     let (read_half, write_half) = tokio::io::split(stream);
 
                     // Create channel for app→SOCKS5 data
                     let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(128);
 
+                    // Everything after the SYN-ACK starts at isn+1.
+                    // Set this BEFORE spawning the reader so it can never send
+                    // a segment stamped with the SYN's own sequence number.
+                    seq_shared.store(isn.wrapping_add(1), Ordering::Relaxed);
+
                     // Store connection state BEFORE sending SYN-ACK (fixes race condition)
                     conns_clone.lock().await.insert(sport, TcpConn {
                         data_tx: Some(data_tx),
                         ack_shared: Arc::clone(&ack_shared),
-                        seq_to_tun,
+                        seq_shared: Arc::clone(&seq_shared),
+                        isn,
                         connecting: false,
                     });
 
                     // Spawn response reader
                     let tun_reader_fd = unsafe { libc::dup(tun_async.as_raw_fd()) };
                     let ack_for_reader = Arc::clone(&ack_shared);
+                    let seq_for_reader = Arc::clone(&seq_shared);
                     if tun_reader_fd >= 0 {
                         let tun_reader_file = unsafe { std::fs::File::from_raw_fd(tun_reader_fd) };
                         let tun_reader = tokio::io::unix::AsyncFd::new(tun_reader_file).unwrap();
@@ -570,7 +597,7 @@ async fn handle_tcp(
                                 read_half, tun_reader,
                                 src_ip, dst_ip,
                                 sport, dport,
-                                seq_to_tun.wrapping_add(1),
+                                seq_for_reader,
                                 ack_for_reader,
                                 conns_reader,
                             ).await;
@@ -580,13 +607,13 @@ async fn handle_tcp(
                     // Spawn SOCKS writer task
                     tokio::spawn(socks_writer_task(write_half, data_rx));
 
-                    // Send SYN-ACK with MSS (connection already stored above)
+                    // Send SYN-ACK with MSS — carries the ISN itself, not isn+1
                     let ack_val = ack_shared.load(Ordering::Relaxed);
-                    ffi::record_log(format!("[tun2socks] Sending SYN-ACK {dst_ip}:{dport} -> {src_ip}:{sport}"));
+                    ffi::record_log(format!("[tun2socks] Sending SYN-ACK {dst_ip}:{dport} -> {src_ip}:{sport} isn={isn} ack={ack_val}"));
                     let _ = send_tcp_ex(
                         &tun_async, dst_ip, src_ip,
                         dport, sport,
-                        seq_to_tun, ack_val,
+                        isn, ack_val,
                         0x12, &[], true,
                     ).await;
                 }
@@ -607,8 +634,17 @@ async fn handle_tcp(
 
     // Established connection with data → forward to SOCKS
     if is_ack && payload_len > 0 {
-        // Quick lock, no await inside lock
-        let data_tx_clone = {
+        // Decide what (if anything) is genuinely new, under a short lock.
+        // Before: every arriving segment was forwarded blindly and ack_shared was
+        // overwritten with seq+len, so a retransmit both re-injected duplicate bytes
+        // into the TLS stream (corrupting it server-side) and dragged our ACK
+        // backwards. Now we only forward the bytes past what we already have.
+        enum Action {
+            Forward(usize, Option<mpsc::Sender<Vec<u8>>>), // offset into payload
+            AckOnly,
+        }
+
+        let action = {
             let conns_guard = conns.lock().await;
             let conn = match conns_guard.get(&sport) {
                 Some(c) => c,
@@ -618,39 +654,79 @@ async fn handle_tcp(
                 ffi::record_log(format!("[tun2socks] DATA while connecting {src_ip}:{sport} -> {dst_ip}:{dport} ({payload_len}B) — dropped"));
                 return 0;
             }
-            // Update ACK atomically (response reader will see it)
-            conn.ack_shared.store(
-                seq_num.wrapping_add(payload_len as u32),
-                Ordering::Relaxed,
-            );
-            conn.data_tx.clone()
+
+            let expected = conn.ack_shared.load(Ordering::Relaxed);
+            // Signed wrapping distance: how far this segment starts before `expected`
+            let behind = expected.wrapping_sub(seq_num) as i32;
+
+            if behind == 0 {
+                // Exactly in order — forward everything
+                conn.ack_shared
+                    .store(seq_num.wrapping_add(payload_len as u32), Ordering::Relaxed);
+                Action::Forward(0, conn.data_tx.clone())
+            } else if behind > 0 {
+                // Starts before what we already have
+                if (behind as usize) >= payload_len {
+                    // Fully duplicate — re-ACK only, never re-forward
+                    ffi::record_log(format!(
+                        "[tun2socks] DUP seq={seq_num} len={payload_len} expected={expected} {src_ip}:{sport} — re-ACK only"
+                    ));
+                    Action::AckOnly
+                } else {
+                    // Partial overlap — forward only the tail we haven't seen
+                    let off = behind as usize;
+                    ffi::record_log(format!(
+                        "[tun2socks] PARTIAL-DUP seq={seq_num} len={payload_len} skip={off} {src_ip}:{sport}"
+                    ));
+                    conn.ack_shared
+                        .store(seq_num.wrapping_add(payload_len as u32), Ordering::Relaxed);
+                    Action::Forward(off, conn.data_tx.clone())
+                }
+            } else {
+                // Gap: segment is ahead of `expected`. We have no reassembly buffer,
+                // so hold the ACK where it is and let the app retransmit the hole.
+                ffi::record_log(format!(
+                    "[tun2socks] OUT-OF-ORDER seq={seq_num} expected={expected} {src_ip}:{sport} — holding ACK"
+                ));
+                Action::AckOnly
+            }
         };
 
-        if let Some(tx) = data_tx_clone {
-            ffi::record_log(format!("[tun2socks] DATA {src_ip}:{sport} -> {dst_ip}:{dport} ({payload_len}B) → SOCKS5"));
-            if tx.try_send(payload.to_vec()).is_err() {
-                ffi::record_log(format!("[tun2socks] DATA channel full for {sport}"));
+        match action {
+            Action::Forward(off, tx_opt) => {
+                if let Some(tx) = tx_opt {
+                    let slice = &payload[off..];
+                    ffi::record_log(format!(
+                        "[tun2socks] DATA {src_ip}:{sport} -> {dst_ip}:{dport} ({}B) → SOCKS5",
+                        slice.len()
+                    ));
+                    if tx.try_send(slice.to_vec()).is_err() {
+                        ffi::record_log(format!("[tun2socks] DATA channel full for {sport}"));
+                    }
+                }
             }
-            // Send ACK to app
-            let seq_ack;
-            let ack_val;
-            {
-                let conns_guard = conns.lock().await;
-                let conn = match conns_guard.get(&sport) {
-                    Some(c) => c,
-                    None => return payload_len as u64,
-                };
-                seq_ack = conn.seq_to_tun;
-                ack_val = conn.ack_shared.load(Ordering::Relaxed);
-            }
-            let _ = send_tcp(
-                tun, dst_ip, src_ip,
-                dport, sport,
-                seq_ack, ack_val,
-                0x10, &[], // ACK
-            ).await;
-            return payload_len as u64;
+            Action::AckOnly => {}
         }
+
+        // ACK the app using the SHARED seq (kept in step with the response reader)
+        let seq_ack;
+        let ack_val;
+        {
+            let conns_guard = conns.lock().await;
+            let conn = match conns_guard.get(&sport) {
+                Some(c) => c,
+                None => return payload_len as u64,
+            };
+            seq_ack = conn.seq_shared.load(Ordering::Relaxed);
+            ack_val = conn.ack_shared.load(Ordering::Relaxed);
+        }
+        let _ = send_tcp(
+            tun, dst_ip, src_ip,
+            dport, sport,
+            seq_ack, ack_val,
+            0x10, &[], // ACK
+        ).await;
+        return payload_len as u64;
     }
 
     // Pure ACK with no data — ignore
