@@ -739,10 +739,12 @@ fn service_tcp(s: &mut NetStack) -> bool {
 
                     // Get the remote/local endpoint from the socket
                     let socket = s.sockets.get_mut::<tcp::Socket>(handle);
-                    let remote_ep = socket.remote_endpoint();
-                    let local_ep = socket.local_endpoint();
-                    let remote = endpoint_to_socketaddr(remote_ep);
-                    let local = endpoint_to_socketaddr(local_ep);
+                    let remote = socket.remote_endpoint()
+                        .map(endpoint_to_socketaddr)
+                        .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+                    let local = socket.local_endpoint()
+                        .map(endpoint_to_socketaddr)
+                        .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
 
                     if let Some(accept_tx) = &s.accept_tx {
                         let accepted = AcceptedTcp {

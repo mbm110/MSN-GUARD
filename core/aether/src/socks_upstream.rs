@@ -162,7 +162,7 @@ async fn pipe_tcp_to_socks(
     mut from_netstack: mpsc::Receiver<Vec<u8>>,
 ) {
     // Skip private IPs — they can't be routed through SOCKS5
-    if target.ip().is_private() {
+    if matches!(target.ip(), IpAddr::V4(v4) if v4.is_private()) {
         ffi::record_log(format!("[tun2socks] SKIP private IP {target}"));
         // smoltcp will RST because we close the sender without connecting
         sender.close().await;
@@ -303,8 +303,10 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
     ));
 
     // Channels between TUN bridge and netstack
+    // inbound: TUN → netstack (app packets entering the VPN)
     let (inbound_tx, inbound_rx) = mpsc::channel::<Vec<u8>>(1024);
-    let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(1024);
+    // outbound: netstack → TUN (responses going back to apps)
+    let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(1024);
 
     // Spawn smoltcp netstack with TUN's IP configuration
     // TUN is configured as 10.0.0.2/24 by Android VPN Builder
@@ -312,8 +314,8 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
         "10.0.0.2/24",
         "",      // no IPv6
         1500,    // MTU
-        inbound_rx,
-        outbound_tx,
+        inbound_rx,   // TUN → netstack
+        outbound_tx,  // netstack → TUN
     )?;
 
     // Enable transparent TCP accept mode
@@ -336,7 +338,13 @@ pub async fn serve(upstream: SocketAddr, tun_fd: i32) -> Result<()> {
     });
 
     // Spawn TUN bridge: raw packets between Android TUN and netstack
-    let tun_task = tokio::spawn(tun::bridge(tun_fd, inbound_tx, outbound_rx));
+    // tun::bridge(tun_fd, inbound_rx, outbound_tx):
+    //   inbound_rx = packets from tunnel → write to TUN
+    //   outbound_tx = packets read from TUN → send to tunnel
+    // In our case: "tunnel" = netstack
+    //   outbound_rx (netstack output) → TUN  (these are responses to apps)
+    //   inbound_tx (TUN input) → netstack (these are app requests)
+    let tun_task = tokio::spawn(tun::bridge(tun_fd, outbound_rx, inbound_tx));
 
     ffi::record_log("[tun2socks] smoltcp netstack started, accepting connections...");
 
