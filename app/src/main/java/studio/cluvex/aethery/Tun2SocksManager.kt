@@ -1,6 +1,7 @@
 package studio.cluvex.aethery
 
 import android.os.ParcelFileDescriptor
+import ca.psiphon.Tun2SocksJniLoader
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.NetworkInterface
