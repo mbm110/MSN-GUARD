@@ -111,6 +111,22 @@ pub enum Cmd {
         v4: Option<(Ipv4Addr, u8)>,
         v6: Option<(Ipv6Addr, u8)>,
     },
+    /// Enable transparent TCP accept mode.
+    /// When set, any incoming SYN to any destination is accepted,
+    /// and the accepted connection is sent via the channel.
+    EnableAccept {
+        accept_tx: mpsc::Sender<AcceptedTcp>,
+    },
+}
+
+/// An accepted TCP connection in transparent mode.
+pub struct AcceptedTcp {
+    /// The remote address that connected (the app's source).
+    pub remote: SocketAddr,
+    /// The local address (the destination the app was trying to reach).
+    pub local: SocketAddr,
+    /// The netstack TCP connection — use into_split() to get sender/receiver.
+    pub conn: TcpConn,
 }
 
 pub enum DataIn {
@@ -254,6 +270,17 @@ impl StackHandle {
             .await
             .map_err(|_| AetherError::Other("netstack closed".into()))
     }
+
+    /// Enable transparent TCP accept mode.
+    /// Returns a receiver that yields accepted TCP connections.
+    pub async fn enable_accept(&self) -> Result<mpsc::Receiver<AcceptedTcp>> {
+        let (accept_tx, accept_rx) = mpsc::channel(app_queue());
+        self.cmd_tx
+            .send(Cmd::EnableAccept { accept_tx })
+            .await
+            .map_err(|_| AetherError::Other("netstack closed".into()))?;
+        Ok(accept_rx)
+    }
 }
 
 struct TcpState {
@@ -280,6 +307,8 @@ pub struct NetStack {
     next_id: usize,
     next_port: u16,
     data_in_tx: mpsc::Sender<DataIn>,
+    /// When set, incoming TCP SYNs are auto-accepted and yielded here.
+    accept_tx: Option<mpsc::Sender<AcceptedTcp>>,
 }
 
 fn strip_cidr(s: &str) -> &str {
@@ -408,6 +437,7 @@ pub fn spawn(
         next_id: 1,
         next_port: 49152,
         data_in_tx: data_in_tx.clone(),
+        accept_tx: None,
     };
 
     tokio::spawn(run(stack, cmd_rx, data_in_rx, inbound_rx, outbound_tx));
@@ -483,7 +513,49 @@ async fn run(
                 match maybe {
                     Some(pkt) => {
                         rx_total += pkt.len() as u64;
-                        s.device.rx.push_back(pkt);
+
+                        // Transparent accept: intercept TCP SYN before feeding to netstack.
+                        // When accept mode is on, create a listening socket for the SYN's
+                        // destination, then feed the packet so smoltcp can accept it.
+                        if s.accept_tx.is_some() && is_tcp_syn(&pkt) {
+                            if let Some((dst_ip, dst_port, src_ip, src_port)) = parse_tcp_syn(&pkt) {
+                                // Create a listening socket for this destination
+                                let rx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_buf()]);
+                                let tx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_buf()]);
+                                let mut socket = tcp::Socket::new(rx_buf, tx_buf);
+                                socket.set_nagle_enabled(false);
+
+                                let local_ep = IpEndpoint::new(to_ip_address(dst_ip), dst_port);
+                                if socket.listen(local_ep).is_ok() {
+                                    let handle = s.sockets.add(socket);
+                                    let id = s.next_id;
+                                    s.next_id += 1;
+                                    let (to_app_tx, to_app_rx) = mpsc::channel(app_queue());
+                                    s.tcp_conns.insert(
+                                        id,
+                                        TcpState {
+                                            handle,
+                                            to_app: to_app_tx,
+                                            from_stack_rx: Some(to_app_rx),
+                                            connect_resp: None, // not from open_tcp
+                                            pending: Vec::new(),
+                                            established: false,
+                                            half_closed: false,
+                                        },
+                                    );
+                                    log::debug!(
+                                        "[netstack] listening for SYN to {dst_ip}:{dst_port} (id={id})"
+                                    );
+                                }
+                                // Feed the packet so smoltcp can accept it
+                                s.device.rx.push_back(pkt);
+                            } else {
+                                s.device.rx.push_back(pkt);
+                            }
+                        } else {
+                            s.device.rx.push_back(pkt);
+                        }
+
                         let mut n = 0;
                         while n < MAX_INGEST_PER_TICK {
                             match inbound_rx.try_recv() {
@@ -600,6 +672,10 @@ fn handle_cmd(s: &mut NetStack, cmd: Cmd) {
             apply_addrs(&mut s.iface, v4, v6);
             log::info!("netstack addresses synchronized from edge capsule");
         }
+        Cmd::EnableAccept { accept_tx } => {
+            s.accept_tx = Some(accept_tx);
+            log::info!("netstack transparent TCP accept mode enabled");
+        }
     }
 }
 
@@ -646,12 +722,37 @@ fn service_tcp(s: &mut NetStack) -> bool {
             if let Some(st) = s.tcp_conns.get_mut(&id) {
                 st.established = true;
                 if let (Some(resp), Some(rx)) = (st.connect_resp.take(), st.from_stack_rx.take()) {
+                    // This is from open_tcp() — send via oneshot
                     let conn = TcpConn {
                         id,
                         from_stack: rx,
                         data_in: data_in_tx.clone(),
                     };
                     let _ = resp.send(Ok(conn));
+                } else if let Some(rx) = st.from_stack_rx.take() {
+                    // This is from transparent accept — send via accept channel
+                    let conn = TcpConn {
+                        id,
+                        from_stack: rx,
+                        data_in: data_in_tx.clone(),
+                    };
+
+                    // Get the remote/local endpoint from the socket
+                    let socket = s.sockets.get_mut::<tcp::Socket>(handle);
+                    let remote_ep = socket.remote_endpoint();
+                    let local_ep = socket.local_endpoint();
+                    let remote = endpoint_to_socketaddr(remote_ep);
+                    let local = endpoint_to_socketaddr(local_ep);
+
+                    if let Some(accept_tx) = &s.accept_tx {
+                        let accepted = AcceptedTcp {
+                            remote,
+                            local,
+                            conn,
+                        };
+                        // Use try_send to avoid blocking the poll loop
+                        let _ = accept_tx.try_send(accepted);
+                    }
                 }
             }
         }
@@ -737,6 +838,38 @@ fn service_tcp(s: &mut NetStack) -> bool {
     }
 
     backpressured
+}
+
+// ─── Helpers for transparent TCP accept ──────────────────────────
+
+/// Check if a raw IP packet is a TCP SYN (not ACK).
+fn is_tcp_syn(pkt: &[u8]) -> bool {
+    if pkt.len() < 40 { return false; }
+    let version = pkt[0] >> 4;
+    if version != 4 { return false; }
+    let proto = pkt[9];
+    if proto != 6 { return false; }
+    let ihl = ((pkt[0] & 0x0f) as usize) * 4;
+    if pkt.len() < ihl + 20 { return false; }
+    let tcp = &pkt[ihl..];
+    let flags = tcp[13];
+    // SYN only (bit 1 set, bit 4 not set)
+    (flags & 0x02) != 0 && (flags & 0x10) == 0
+}
+
+/// Parse a TCP SYN packet and return (dst_ip, dst_port, src_ip, src_port).
+fn parse_tcp_syn(pkt: &[u8]) -> Option<(IpAddr, u16, IpAddr, u16)> {
+    if pkt.len() < 40 { return None; }
+    let version = pkt[0] >> 4;
+    if version != 4 { return None; }
+    let ihl = ((pkt[0] & 0x0f) as usize) * 4;
+    if pkt.len() < ihl + 20 { return None; }
+    let src_ip = IpAddr::V4(Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]));
+    let dst_ip = IpAddr::V4(Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]));
+    let tcp = &pkt[ihl..];
+    let src_port = u16::from_be_bytes([tcp[0], tcp[1]]);
+    let dst_port = u16::from_be_bytes([tcp[2], tcp[3]]);
+    Some((dst_ip, dst_port, src_ip, src_port))
 }
 
 fn service_udp(s: &mut NetStack) -> bool {
