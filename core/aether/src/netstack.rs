@@ -480,6 +480,11 @@ async fn run(
 
         if last_report.elapsed() >= std::time::Duration::from_millis(1000) {
             ffi::emit_traffic(tx_total, rx_total);
+            if rx_total == 0 && tx_total == 0 {
+                // Diagnostic: log when no traffic flows (helps debug "Degraded" status)
+                let conns = s.tcp_conns.len() + s.udp_conns.len();
+                log::debug!("[netstack] no traffic: tcp+udp conns={conns}");
+            }
             last_report = std::time::Instant::now();
         }
 
@@ -513,6 +518,17 @@ async fn run(
                 match maybe {
                     Some(pkt) => {
                         rx_total += pkt.len() as u64;
+
+                        // Diagnostic: log first few packets to verify TUN bridge works
+                        if rx_total < 5000 {
+                            let pkt_len = pkt.len();
+                            let proto_str = if pkt_len > 9 {
+                                match pkt[9] { 6 => "TCP", 17 => "UDP", _ => "other" }
+                            } else { "?" };
+                            ffi::record_log(format!(
+                                "[netstack] RX {pkt_len}B {proto_str} (total={rx_total})"
+                            ));
+                        }
 
                         // Transparent accept: intercept TCP SYN before feeding to netstack.
                         // When accept mode is on, create a listening socket for the SYN's
