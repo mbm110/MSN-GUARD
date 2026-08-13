@@ -583,7 +583,7 @@ class MainActivity : Activity() {
     }
 
     private fun openTunnelConnection(url: String): HttpURLConnection =
-        if (connectionType() == ConnectionType.PROXY && NativeCore.isRunning()) {
+        if (TunnelStatus.isActive()) {
             URL(url).openConnection(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort())))
         } else {
             URL(url).openConnection()
