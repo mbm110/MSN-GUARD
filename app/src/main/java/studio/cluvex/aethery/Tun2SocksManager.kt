@@ -26,13 +26,7 @@ object Tun2SocksManager {
 
     /** Psiphon's convention; the server intercepts this exact address. */
     private const val UDPGW_SERVER_PORT = 7300
-    // Lowered from upstream 1500. The Psiphon transport encrypts and fragments
-    // every IP packet; a 1500-byte TUN packet plus tunnel overhead can exceed
-    // the carrier's path MTU and force IP-level fragmentation, which lwIP has
-    // to reassemble and frequently drops. 1380 keeps us under typical mobile
-    // path MTU (1390–1400 on most Iranian carriers) and eliminates that
-    // reassembly cost. lwIP and tun2socks both derive their MSS from this.
-    const val VPN_INTERFACE_MTU = 1380
+    const val VPN_INTERFACE_MTU = 1500
     const val VPN_INTERFACE_IPV4_NETMASK = "255.255.255.0"
 
     /**
