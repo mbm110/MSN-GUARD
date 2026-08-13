@@ -709,7 +709,13 @@ fail4:
     PacketPassInterface_Free(&device_read_interface);
     BTap_Free(&device);
 fail3:
-    BSignal_Finish();
+    // Only finish signal subsystem if it was initialized. We set set_signal=0
+    // in the JNI entry point (Android handles signals), so BSignal_Init() is
+    // never called — calling BSignal_Finish() here fires ASSERT(initialized)
+    // → abort() on disconnect. Mirror the init guard from run().
+    if (options.set_signal) {
+        BSignal_Finish();
+    }
 fail2:
     BReactor_Free(&ss);
 fail1:
