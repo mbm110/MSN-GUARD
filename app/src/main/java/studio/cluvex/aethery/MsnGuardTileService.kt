@@ -9,7 +9,7 @@ import android.service.quicksettings.TileService
 import android.util.Log
 import android.net.VpnService
 
-class AetherTileService : TileService() {
+class MsnGuardTileService : TileService() {
 
     override fun onTileAdded() {
         super.onTileAdded()
@@ -54,7 +54,7 @@ class AetherTileService : TileService() {
 
         if (isConnected) {
             // Disconnect
-            startService(Intent(this, AetherVpnService::class.java).setAction(AetherVpnService.ACTION_DISCONNECT))
+            startService(Intent(this, MsnGuardVpnService::class.java).setAction(MsnGuardVpnService.ACTION_DISCONNECT))
             tile.state = Tile.STATE_INACTIVE
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 tile.subtitle = getString(R.string.vpn_disconnected)
@@ -67,10 +67,10 @@ class AetherTileService : TileService() {
                 // Proxy mode doesn't need VPN permission
                 val config = configJson()
                 startForegroundService(
-                    Intent(this, AetherVpnService::class.java)
-                        .setAction(AetherVpnService.ACTION_CONNECT)
-                        .putExtra(AetherVpnService.EXTRA_CONFIG, config)
-                        .putExtra(AetherVpnService.EXTRA_VPN_MODE, false)
+                    Intent(this, MsnGuardVpnService::class.java)
+                        .setAction(MsnGuardVpnService.ACTION_CONNECT)
+                        .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config)
+                        .putExtra(MsnGuardVpnService.EXTRA_VPN_MODE, false)
                 )
                 tile.state = Tile.STATE_ACTIVE
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -84,10 +84,10 @@ class AetherTileService : TileService() {
                     // Already have permission
                     val config = configJson()
                     startForegroundService(
-                        Intent(this, AetherVpnService::class.java)
-                            .setAction(AetherVpnService.ACTION_CONNECT)
-                            .putExtra(AetherVpnService.EXTRA_CONFIG, config)
-                            .putExtra(AetherVpnService.EXTRA_VPN_MODE, true)
+                        Intent(this, MsnGuardVpnService::class.java)
+                            .setAction(MsnGuardVpnService.ACTION_CONNECT)
+                            .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config)
+                            .putExtra(MsnGuardVpnService.EXTRA_VPN_MODE, true)
                     )
                     tile.state = Tile.STATE_ACTIVE
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

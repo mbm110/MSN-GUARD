@@ -9,43 +9,43 @@
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
-        </intent>
-    </queries>
+       </intent>
+   </queries>
 
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
-        android:label="Aethery"
+        android:label="MSN-GUARD"
         android:roundIcon="@mipmap/ic_launcher"
-        android:theme="@style/Theme.Aethery">
+        android:theme="@style/Theme.MsnGuard">
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:theme="@style/Theme.Aethery.Starting">
+            android:theme="@style/Theme.MsnGuard.Starting">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+           </intent-filter>
+       </activity>
 
         <service
-            android:name=".AetherVpnService"
+            android:name=".MsnGuardVpnService"
             android:exported="false"
             android:foregroundServiceType="dataSync"
             android:permission="android.permission.BIND_VPN_SERVICE">
             <intent-filter>
                 <action android:name="android.net.VpnService" />
-            </intent-filter>
-        </service>
+           </intent-filter>
+       </service>
 
         <service
-            android:name=".AetherTileService"
+            android:name=".MsnGuardTileService"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
-            </intent-filter>
-        </service>
+           </intent-filter>
+       </service>
 
         <provider
             android:name="androidx.core.content.FileProvider"
@@ -55,6 +55,6 @@
             <meta-data
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/update_file_paths" />
-        </provider>
-    </application>
+       </provider>
+   </application>
 </manifest>

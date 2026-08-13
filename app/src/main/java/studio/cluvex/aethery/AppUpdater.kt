@@ -36,7 +36,7 @@ class AppUpdater(private val activity: Activity) {
                     .onSuccess { release ->
                         when {
                             release == null -> showMessage("No update available", "No compatible release was found")
-                            !isNewer(release.version, appVersion()) -> showMessage("You're up to date", "Aethery ${appVersion()} is installed")
+                            !isNewer(release.version, appVersion()) -> showMessage("You're up to date", "MSN-GUARD ${appVersion()} is installed")
                             else -> confirmDownload(release)
                         }
                     }
@@ -54,7 +54,7 @@ class AppUpdater(private val activity: Activity) {
     private fun confirmDownload(release: Release) {
         dialogBuilder()
             .setTitle("Update available")
-            .setMessage("Aethery ${release.version} is ready to download.")
+            .setMessage("MSN-GUARD ${release.version} is ready to download.")
             .setNegativeButton("Not now", null)
             .setPositiveButton("Download") { _, _ -> download(release) }
             .show()
@@ -80,7 +80,7 @@ class AppUpdater(private val activity: Activity) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.packageManager.canRequestPackageInstalls()) {
             dialogBuilder()
                 .setTitle("Allow update installs")
-                .setMessage("Android needs permission to install the downloaded Aethery update.")
+                .setMessage("Android needs permission to install the downloaded MSN-GUARD update.")
                 .setNegativeButton("Cancel") { _, _ -> pendingApk = null }
                 .setPositiveButton("Open settings") { _, _ ->
                     activity.startActivity(Intent(
@@ -105,8 +105,8 @@ class AppUpdater(private val activity: Activity) {
         val connection = (URL(RELEASE_URL).openConnection() as HttpURLConnection).apply {
             connectTimeout = 10_000
             readTimeout = 20_000
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "Aethery-Android")
+            setRequestProperty("Accept", "application/vnd.github+json")
+            setRequestProperty("User-Agent", "MSN-GUARD-Android")
         }
         try {
             if (connection.responseCode == HttpURLConnection.HTTP_NOT_FOUND) return null
@@ -148,7 +148,7 @@ class AppUpdater(private val activity: Activity) {
         val connection = (URL(release.downloadUrl).openConnection() as HttpURLConnection).apply {
             connectTimeout = 10_000
             readTimeout = 30_000
-            setRequestProperty("User-Agent", "Aethery-Android")
+            setRequestProperty("User-Agent", "MSN-GUARD-Android")
         }
         try {
             check(connection.responseCode == HttpURLConnection.HTTP_OK) { "Download returned ${connection.responseCode}" }
@@ -205,7 +205,7 @@ class AppUpdater(private val activity: Activity) {
         dialogBuilder().setTitle(title).setMessage(message).setPositiveButton("OK", null).show()
     }
 
-    private fun dialogBuilder() = MaterialAlertDialogBuilder(activity, R.style.ThemeOverlay_Aethery_AlertDialog)
+    private fun dialogBuilder() = MaterialAlertDialogBuilder(activity, R.style.ThemeOverlay_MsnGuard_AlertDialog)
 
     private fun appVersion(): String = activity.packageManager
         .getPackageInfo(activity.packageName, 0).versionName ?: "0.0.0"
@@ -215,8 +215,8 @@ class AppUpdater(private val activity: Activity) {
     private data class Release(val version: String, val assetName: String, val downloadUrl: String)
 
     private companion object {
-        const val RELEASE_HOST = "git.diastom.xyz"
-        const val RELEASE_URL = "https://$RELEASE_HOST/api/v1/repos/ZethRise/Aethery/releases/latest"
+        const val RELEASE_HOST = "api.github.com"
+        const val RELEASE_URL = "https://$RELEASE_HOST/repos/mbm110/MSN-GUARD/releases/latest"
 
         fun isNewer(remote: String, local: String): Boolean {
             val remoteParts = remote.split('.', '-', '+').map { it.toIntOrNull() ?: 0 }

@@ -139,23 +139,23 @@ class MainActivity : Activity() {
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.hasExtra(AetherVpnService.EXTRA_TRAFFIC_TX)) {
-                trafficTx = intent.getLongExtra(AetherVpnService.EXTRA_TRAFFIC_TX, 0)
-                trafficRx = intent.getLongExtra(AetherVpnService.EXTRA_TRAFFIC_RX, 0)
-                trafficSpeedTx = intent.getLongExtra(AetherVpnService.EXTRA_TRAFFIC_SPEED_TX, 0)
-                trafficSpeedRx = intent.getLongExtra(AetherVpnService.EXTRA_TRAFFIC_SPEED_RX, 0)
-                trafficMonthTx = intent.getLongExtra(AetherVpnService.EXTRA_TRAFFIC_MONTH_TX, 0)
-                trafficMonthRx = intent.getLongExtra(AetherVpnService.EXTRA_TRAFFIC_MONTH_RX, 0)
+            if (intent.hasExtra(MsnGuardVpnService.EXTRA_TRAFFIC_TX)) {
+                trafficTx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_TX, 0)
+                trafficRx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_RX, 0)
+                trafficSpeedTx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_SPEED_TX, 0)
+                trafficSpeedRx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_SPEED_RX, 0)
+                trafficMonthTx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_MONTH_TX, 0)
+                trafficMonthRx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_MONTH_RX, 0)
                 renderTrafficMonitor()
                 return
             }
-            when (intent.getStringExtra(AetherVpnService.EXTRA_STATUS)) {
-                AetherVpnService.STATUS_CONNECTING -> showConnecting(intent.getStringExtra(AetherVpnService.EXTRA_DETAIL))
-                AetherVpnService.STATUS_STARTING -> showStarting()
-                AetherVpnService.STATUS_SCANNING -> showScanning()
-                AetherVpnService.STATUS_CONNECTED -> showConnected()
-                AetherVpnService.STATUS_FAILED -> showFailure(intent.getStringExtra(AetherVpnService.EXTRA_DETAIL))
-                AetherVpnService.STATUS_DISCONNECTED -> showDisconnected()
+            when (intent.getStringExtra(MsnGuardVpnService.EXTRA_STATUS)) {
+                MsnGuardVpnService.STATUS_CONNECTING -> showConnecting(intent.getStringExtra(MsnGuardVpnService.EXTRA_DETAIL))
+                MsnGuardVpnService.STATUS_STARTING -> showStarting()
+                MsnGuardVpnService.STATUS_SCANNING -> showScanning()
+                MsnGuardVpnService.STATUS_CONNECTED -> showConnected()
+                MsnGuardVpnService.STATUS_FAILED -> showFailure(intent.getStringExtra(MsnGuardVpnService.EXTRA_DETAIL))
+                MsnGuardVpnService.STATUS_DISCONNECTED -> showDisconnected()
             }
         }
     }
@@ -235,7 +235,7 @@ class MainActivity : Activity() {
             rightMargin = dp(24)
             topMargin = dp(17)
         })
-        mainRoot.addView(label("AETHER CORE", 12f, MUTED).apply {
+        mainRoot.addView(label("MSN-GUARD", 12f, MUTED).apply {
             letterSpacing = 0.12f
             gravity = Gravity.CENTER
         }, FrameLayout.LayoutParams(
@@ -257,7 +257,7 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
-        val filter = IntentFilter(AetherVpnService.ACTION_STATUS)
+        val filter = IntentFilter(MsnGuardVpnService.ACTION_STATUS)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
@@ -591,11 +591,11 @@ class MainActivity : Activity() {
 
     private fun updateNotificationHealth(ip: String? = null, ping: String? = null) {
         if (!TunnelStatus.isActive()) return
-        startService(Intent(this, AetherVpnService::class.java)
-            .setAction(AetherVpnService.ACTION_NOTIFICATION_HEALTH)
+        startService(Intent(this, MsnGuardVpnService::class.java)
+            .setAction(MsnGuardVpnService.ACTION_NOTIFICATION_HEALTH)
             .apply {
-                ip?.let { putExtra(AetherVpnService.EXTRA_NOTIFICATION_IP, it) }
-                ping?.let { putExtra(AetherVpnService.EXTRA_NOTIFICATION_PING, it) }
+                ip?.let { putExtra(MsnGuardVpnService.EXTRA_NOTIFICATION_IP, it) }
+                ping?.let { putExtra(MsnGuardVpnService.EXTRA_NOTIFICATION_PING, it) }
             })
     }
 
@@ -695,7 +695,7 @@ class MainActivity : Activity() {
             addView(label("Logs", 22f, INK, TypefaceStyle.MEDIUM))
         }
         content.addView(header)
-        content.addView(label("Aether and VPN events", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label("Tunnel and VPN events", 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(16) })
@@ -1270,7 +1270,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { bottomMargin = dp(8) })
 
-        content.addView(label("Choose how Aethery connects", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label("Choose how MSN-GUARD connects", 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
@@ -1473,8 +1473,8 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
         ).apply { topMargin = dp(12) })
-        content.addView(createSettingsButton("Aethery on Zeth Git", R.drawable.ic_forgejo) {
-            openLink("https://git.diastom.xyz/ZethRise/Aethery")
+        content.addView(createSettingsButton("MSN-GUARD on GitHub", R.drawable.ic_forgejo) {
+            openLink("https://github.com/mbm110/MSN-GUARD")
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
@@ -1716,7 +1716,7 @@ class MainActivity : Activity() {
 
     private fun chooseLogLevel() = showChoiceSheet(
         title = "Log level",
-        subtitle = "Control verbosity of Aether core logs",
+        subtitle = "Control verbosity of logs",
         options = LogLevel.entries.toList(),
         selected = logLevel(),
         label = { it.label },
@@ -2194,7 +2194,7 @@ class MainActivity : Activity() {
             addView(createHeaderBackButton { closeTrafficMonitorScreen() }, LinearLayout.LayoutParams(dp(48), dp(48)))
             addView(label("Traffic monitor", 22f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) })
         })
-        content.addView(label("Traffic carried by Aethery. Per-app attribution is not available from encrypted tunnel counters.", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label("Traffic carried by MSN-GUARD. Per-app attribution is not available from encrypted tunnel counters.", 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
@@ -2270,7 +2270,7 @@ class MainActivity : Activity() {
             addView(label("Split tunneling", 22f, INK, TypefaceStyle.MEDIUM))
         }
         content.addView(header)
-        content.addView(label("Choose which apps use Aethery. Changes apply next connection.", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label("Choose which apps use MSN-GUARD. Changes apply next connection.", 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(20) })
@@ -2646,7 +2646,7 @@ class MainActivity : Activity() {
 
     private fun toggleTunnel() {
         if (TunnelStatus.isActive()) {
-            startService(Intent(this, AetherVpnService::class.java).setAction(AetherVpnService.ACTION_DISCONNECT))
+            startService(Intent(this, MsnGuardVpnService::class.java).setAction(MsnGuardVpnService.ACTION_DISCONNECT))
             showDisconnected("Disconnecting")
             return
         }
@@ -2665,10 +2665,10 @@ class MainActivity : Activity() {
 
     private fun connect(config: String) {
         showConnecting()
-        startForegroundService(Intent(this, AetherVpnService::class.java)
-            .setAction(AetherVpnService.ACTION_CONNECT)
-            .putExtra(AetherVpnService.EXTRA_CONFIG, config)
-            .putExtra(AetherVpnService.EXTRA_VPN_MODE, connectionType() == ConnectionType.VPN))
+        startForegroundService(Intent(this, MsnGuardVpnService::class.java)
+            .setAction(MsnGuardVpnService.ACTION_CONNECT)
+            .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config)
+            .putExtra(MsnGuardVpnService.EXTRA_VPN_MODE, connectionType() == ConnectionType.VPN))
     }
 
     private fun configJson(): String = CoreConfig.json(this, selectedProtocol.coreName)
@@ -2992,7 +2992,7 @@ class MainActivity : Activity() {
         val settings = SplitTunnelSettings(this)
         val count = settings.packages().size
         return when (settings.mode()) {
-            SplitTunnelSettings.Mode.ALL -> "All apps use Aethery"
+            SplitTunnelSettings.Mode.ALL -> "All apps use MSN-GUARD"
             SplitTunnelSettings.Mode.INCLUDE -> "Only $count selected app${if (count == 1) "" else "s"}"
             SplitTunnelSettings.Mode.EXCLUDE -> "Exclude $count selected app${if (count == 1) "" else "s"}"
         }

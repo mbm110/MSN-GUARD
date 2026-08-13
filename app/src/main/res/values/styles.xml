@@ -1,5 +1,5 @@
 <resources>
-    <style name="Theme.Aethery" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Theme.MsnGuard" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="colorPrimary">#A4D8BB</item>
         <item name="colorOnPrimary">#07351E</item>
@@ -11,16 +11,16 @@
         <item name="android:statusBarColor">#101411</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
-        <item name="materialAlertDialogTheme">@style/ThemeOverlay.Aethery.AlertDialog</item>
-    </style>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.MsnGuard.AlertDialog</item>
+   </style>
 
-    <style name="Theme.Aethery.Starting" parent="Theme.Aethery" />
+    <style name="Theme.MsnGuard.Starting" parent="Theme.MsnGuard" />
 
-    <style name="ThemeOverlay.Aethery.AlertDialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
-        <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.Aethery.Dialog</item>
-    </style>
+    <style name="ThemeOverlay.MsnGuard.AlertDialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.MsnGuard.Dialog</item>
+   </style>
 
-    <style name="ShapeAppearance.Aethery.Dialog" parent="ShapeAppearance.Material3.MediumComponent">
+    <style name="ShapeAppearance.MsnGuard.Dialog" parent="ShapeAppearance.Material3.MediumComponent">
         <item name="cornerSize">28dp</item>
-    </style>
+   </style>
 </resources>

@@ -24,7 +24,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import ca.psiphon.PsiphonTunnel
 
-class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.HostService {
+class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.HostService {
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
     private val connected = AtomicBoolean(false)
     private val stopRequested = AtomicBoolean(false)
@@ -52,7 +52,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
     private var activeSocksPort = 0
 
     companion object {
-        const val LOG_TAG = "AetherVpnService"
+        const val LOG_TAG = "MsnGuardVpnService"
         const val ACTION_CONNECT = "studio.cluvex.aethery.CONNECT"
         const val ACTION_DISCONNECT = "studio.cluvex.aethery.DISCONNECT"
         const val ACTION_RECONNECT = "studio.cluvex.aethery.RECONNECT"
@@ -495,7 +495,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
             .apply { detail?.let { putExtra(EXTRA_DETAIL, it) } })
         TileService.requestListeningState(
             this,
-            ComponentName(this, AetherTileService::class.java),
+            ComponentName(this, MsnGuardTileService::class.java),
         )
     }
 
@@ -588,7 +588,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
             this, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val disconnectIntent = Intent(this, AetherVpnService::class.java).apply {
+        val disconnectIntent = Intent(this, MsnGuardVpnService::class.java).apply {
             action = ACTION_DISCONNECT
             putExtra(EXTRA_CONFIG, storedConfig ?: "")
             putExtra(EXTRA_VPN_MODE, storedVpnMode)
@@ -597,7 +597,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
             this, 1, disconnectIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val reconnectIntent = Intent(this, AetherVpnService::class.java).apply {
+        val reconnectIntent = Intent(this, MsnGuardVpnService::class.java).apply {
             action = ACTION_RECONNECT
         }
         val reconnectPendingIntent = PendingIntent.getService(
@@ -617,7 +617,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.Ho
     }
 
     private fun Builder.applySplitTunneling(): Builder {
-        val settings = SplitTunnelSettings(this@AetherVpnService)
+        val settings = SplitTunnelSettings(this@MsnGuardVpnService)
         val mode = settings.mode()
         val packages = settings.packages()
 

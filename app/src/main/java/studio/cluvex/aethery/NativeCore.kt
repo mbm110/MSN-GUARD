@@ -35,7 +35,7 @@ object NativeCore {
     fun isReady(): Boolean = nativeIsReady()
     fun lastError(): String = nativeLastError()
     fun lastLog(): String = nativeLastLog()
-    fun attach(service: AetherVpnService) = nativeAttach(service)
+    fun attach(service: MsnGuardVpnService) = nativeAttach(service)
     fun detach() = nativeDetach()
 
     interface CoreCallback {
@@ -53,6 +53,6 @@ object NativeCore {
     @JvmStatic private external fun nativeIsReady(): Boolean
     @JvmStatic private external fun nativeLastError(): String
     @JvmStatic private external fun nativeLastLog(): String
-    @JvmStatic private external fun nativeAttach(service: AetherVpnService)
+    @JvmStatic private external fun nativeAttach(service: MsnGuardVpnService)
     @JvmStatic private external fun nativeDetach()
 }
