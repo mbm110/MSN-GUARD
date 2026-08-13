@@ -35,14 +35,12 @@
 
 // udpgw per-connection send buffer size, in number of packets
 //
-// Raised from upstream's 8. This is a PER-CONNECTION queue of packets waiting to
-// go out over the single SOCKS5 stream to the udpgw server. When it fills,
-// UdpGwClient logs "out of buffer" and SILENTLY DROPS the packet — see
-// udpgw_client/UdpGwClient.c:346. Eight packets is far too shallow for QUIC:
-// Chrome opens a UDP/443 flow and immediately bursts its initial congestion
-// window, so a single page load overruns the queue and loses datagrams.
-// The cost is bounded: udpgw_mtu bytes per slot per active connection.
-#define DEFAULT_UDPGW_CONNECTION_BUFFER_SIZE 64
+// Raised from upstream's 8, then from 64. This is a per-connection queue of
+// packets waiting to go out over the single SOCKS5 stream to the udpgw server.
+// When it fills, UdpGwClient logs "out of buffer" and SILENTLY DROPS the packet
+// — see udpgw_client/UdpGwClient.c:346. 128 gives QUIC/WebRTC room to burst
+// without dropping. Cost: udpgw_mtu bytes per slot per active connection.
+#define DEFAULT_UDPGW_CONNECTION_BUFFER_SIZE 128
 
 // udpgw reconnect time after connection fails
 #define UDPGW_RECONNECT_TIME 5000
