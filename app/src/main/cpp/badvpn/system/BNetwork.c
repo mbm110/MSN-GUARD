@@ -51,7 +51,14 @@ int bnetwork_initialized = 0;
 
 int BNetwork_GlobalInit (void)
 {
-    ASSERT(!bnetwork_initialized)
+    // badvpn is designed as a single-shot process entry point, but the Psiphon
+    // JNI wrapper calls run() — and therefore this function — on every
+    // connect/disconnect cycle. The original ASSERT(!bnetwork_initialized)
+    // aborts on the second call. SIGPIPE→SIG_IGN is idempotent, so just
+    // short-circuit instead.
+    if (bnetwork_initialized) {
+        return 1;
+    }
     
 #ifdef BADVPN_USE_WINAPI
     
