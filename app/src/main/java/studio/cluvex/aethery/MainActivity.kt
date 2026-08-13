@@ -308,7 +308,7 @@ class MainActivity : Activity() {
             isClickable = true
         }
         val logo = ImageView(this).apply {
-            setImageResource(R.drawable.aethery_splash_logo)
+            setImageResource(R.drawable.msnguard_splash_logo)
             contentDescription = getString(R.string.app_name)
             scaleType = ScaleType.FIT_CENTER
             alpha = 0f
@@ -391,7 +391,7 @@ class MainActivity : Activity() {
     private fun createHeader(): LinearLayout = LinearLayout(this).apply {
         gravity = Gravity.CENTER_VERTICAL
         addView(ImageView(this@MainActivity).apply {
-            setImageResource(R.drawable.aethery_logo)
+            setImageResource(R.drawable.msnguard_logo)
             contentDescription = getString(R.string.app_name)
             scaleType = ScaleType.CENTER_INSIDE
             adjustViewBounds = true
