@@ -909,7 +909,15 @@ fn masque_h2_ports(base: &[u16]) -> Vec<u16> {
 /// working through the rest of the list.
 const IDENTITY_REJECTED_LIMIT: u32 = 3;
 
-/// HTTP/2 fallback candidates, in dial order.
+/// How many extra MASQUE gateways the HTTP/3 pass may try.
+///
+/// HTTP/3 needs UDP/443. Where that is throttled every attempt burns its whole
+/// timeout, so the first pass stays short and the HTTP/2 fallback is reached in
+/// seconds rather than minutes. Enough to give HTTP/3 a fair chance at a real
+/// gateway, which it never previously got.
+const MASQUE_H3_PROBE_LIMIT: usize = 4;
+
+/// MASQUE gateway candidates, in dial order. Used by both transports.
 ///
 /// This used to walk `consts::CDN_ANYCAST_POOL` — 104.16-104.28 and
 /// 172.64-172.67 — which is Cloudflare's *website* CDN. Those edges complete TCP
@@ -923,7 +931,7 @@ const IDENTITY_REJECTED_LIMIT: u32 = 3;
 /// `prober::MASQUE_SEEDS`. Dial the seeds first, then the head of each MASQUE
 /// /24 — `masque_cidrs_v4()` already moves the Zero Trust range to the front
 /// when `AETHER_TEAM` is set.
-fn h2_anycast_peers() -> Vec<SocketAddr> {
+fn masque_gateway_peers() -> Vec<SocketAddr> {
     let mut out: Vec<SocketAddr> = Vec::new();
     let mut seen: HashSet<SocketAddr> = HashSet::new();
 
@@ -1012,6 +1020,70 @@ enum PeerOutcome {
     Unreachable,
 }
 
+/// Turn an identity-rejection count into the user-facing failure.
+fn identity_rejected_error(count: u32) -> AetherError {
+    crate::ffi::record_log(format!(
+        "{count} gateways rejected this device certificate for MASQUE; \
+         the WARP registration needs refreshing"
+    ));
+    AetherError::Masque(
+        "MASQUE identity rejected by every gateway that answered; \
+         re-register the WARP device"
+            .to_string(),
+    )
+}
+
+/// Result of dialling a whole candidate list with one transport.
+enum PassOutcome {
+    /// A gateway accepted the connect-ip CONNECT.
+    Connected(SocketAddr),
+    /// Enough gateways answered and refused the device certificate that the
+    /// identity, not the peer list, is the problem. Carries the running count.
+    IdentityRejected(u32),
+    /// Every candidate failed at the transport level. Worth trying another way.
+    Exhausted,
+}
+
+async fn dial_masque_pass(
+    identity: &account::Identity,
+    candidates: &[(SocketAddr, &'static str)],
+    options: &StartOptions,
+) -> PassOutcome {
+    dial_masque_pass_from(identity, candidates, options, 0).await
+}
+
+/// Dial each candidate in order, carrying an identity-rejection count in from a
+/// previous pass.
+///
+/// The count carries across transports on purpose: a 4xx on the CONNECT means
+/// the edge read our client certificate and refused it, which no change of
+/// transport or peer can fix.
+async fn dial_masque_pass_from(
+    identity: &account::Identity,
+    candidates: &[(SocketAddr, &'static str)],
+    options: &StartOptions,
+    mut identity_rejections: u32,
+) -> PassOutcome {
+    for (peer, source) in candidates {
+        match try_masque_peer(identity, *peer, source, options).await {
+            PeerOutcome::Accepted => return PassOutcome::Connected(*peer),
+            PeerOutcome::IdentityRejected => {
+                identity_rejections += 1;
+                if identity_rejections >= IDENTITY_REJECTED_LIMIT {
+                    return PassOutcome::IdentityRejected(identity_rejections);
+                }
+            }
+            PeerOutcome::Unreachable => {}
+        }
+    }
+
+    if identity_rejections > 0 {
+        PassOutcome::IdentityRejected(identity_rejections)
+    } else {
+        PassOutcome::Exhausted
+    }
+}
+
 async fn try_known_masque_peer(
     identity: &account::Identity,
     peer: SocketAddr,
@@ -1050,11 +1122,12 @@ async fn try_masque_peer(
 
 /// True when the edge answered the CONNECT with a 4xx.
 ///
-/// Matches the message `masque_h2::verify_h2` produces:
-/// `h2 connect-ip status <code>`.
+/// Matches both transports, because the messages differ by one word:
+///   * HTTP/2 — `masque: h2 connect-ip status 400` (`masque_h2::verify_h2`)
+///   * HTTP/3 — `other: connect-ip status 400` (`quic::poll_h3`)
 fn is_identity_rejection(error: &AetherError) -> bool {
     let text = error.to_string();
-    let Some(rest) = text.split("h2 connect-ip status ").nth(1) else {
+    let Some(rest) = text.split("connect-ip status ").nth(1) else {
         return false;
     };
     rest.split_whitespace()
@@ -1142,7 +1215,7 @@ async fn hunt_masque_peer(
             crate::ffi::record_log("Checking Cloudflare CDN anycast for HTTP/2");
             if let Some(best) = prober::verify_cached_gateways(
                 &h2_probe,
-                h2_anycast_peers(),
+                masque_gateway_peers(),
             )
             .await
             {
@@ -1218,51 +1291,61 @@ async fn run_masque(
             known.len()
         ));
 
-        for (peer, source) in &known {
-            if try_known_masque_peer(&identity, *peer, source, options).await {
-                quick_peer = Some(*peer);
-                break;
+        // Pass 1 — current transport (HTTP/3 unless forced): the account and
+        // cached peers, then a few real MASQUE gateways.
+        //
+        // Previously this pass only ever dialled `known`, so when the single
+        // account endpoint failed the code fell straight to HTTP/2 without
+        // giving HTTP/3 one honest attempt at a gateway that actually serves
+        // connect-ip. That is why the field log shows HTTP/3 "rejected" after
+        // exactly one peer (104.16.24.84, the CDN address the account handed
+        // out) and then never appears again.
+        //
+        // The extra list is capped: if UDP/443 is throttled or blocked by the
+        // carrier every HTTP/3 attempt burns its full timeout, and we still
+        // want to reach the HTTP/2 fallback quickly.
+        let mut h3_candidates = known.clone();
+        let mut h3_seen = seen.clone();
+        for peer in masque_gateway_peers().into_iter().take(MASQUE_H3_PROBE_LIMIT) {
+            if h3_seen.insert(peer) {
+                h3_candidates.push((peer, "masque gateway"));
             }
         }
 
+        let mut identity_rejections = 0u32;
+        match dial_masque_pass(&identity, &h3_candidates, options).await {
+            PassOutcome::Connected(peer) => quick_peer = Some(peer),
+            PassOutcome::IdentityRejected(count) if count >= IDENTITY_REJECTED_LIMIT => {
+                return Err(identity_rejected_error(count));
+            }
+            PassOutcome::IdentityRejected(count) => identity_rejections = count,
+            PassOutcome::Exhausted => {}
+        }
+
+        // Pass 2 — HTTP/2 with TLS fragmentation over the full gateway list.
         if quick_peer.is_none() && !masque_h2::enabled() {
             crate::ffi::record_log(
                 "HTTP/3 did not accept a known gateway; switching to HTTP/2 with TLS fragmentation",
             );
             enable_restricted_h2();
-            for peer in h2_anycast_peers() {
+            for peer in masque_gateway_peers() {
                 if seen.insert(peer) {
                     known.push((peer, "masque gateway"));
                 }
             }
+
             // Stop early when several unrelated edges all reject the device
-            // certificate. Previously every peer was dialled regardless, so a
-            // registration problem burned ~2 minutes of 8-second timeouts before
-            // the user saw anything — exactly the 17:12:13 → 17:14:28 stretch in
-            // the field log.
-            let mut identity_rejections = 0u32;
-            for (peer, source) in &known {
-                match try_masque_peer(&identity, *peer, source, options).await {
-                    PeerOutcome::Accepted => {
-                        quick_peer = Some(*peer);
-                        break;
-                    }
-                    PeerOutcome::IdentityRejected => {
-                        identity_rejections += 1;
-                        if identity_rejections >= IDENTITY_REJECTED_LIMIT {
-                            crate::ffi::record_log(format!(
-                                "{identity_rejections} gateways rejected this device certificate \
-                                 for MASQUE; the WARP registration needs refreshing"
-                            ));
-                            return Err(AetherError::Masque(
-                                "MASQUE identity rejected by every gateway that answered; \
-                                 re-register the WARP device"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                    PeerOutcome::Unreachable => {}
+            // certificate. Rejections carry over from the HTTP/3 pass, because a
+            // 4xx on the CONNECT is a property of the identity and not of the
+            // transport. Without this the run burned ~2 minutes of 8-second
+            // timeouts before saying anything — the 17:12:13 → 17:14:28 stretch
+            // in the field log.
+            match dial_masque_pass_from(&identity, &known, options, identity_rejections).await {
+                PassOutcome::Connected(peer) => quick_peer = Some(peer),
+                PassOutcome::IdentityRejected(count) => {
+                    return Err(identity_rejected_error(count));
                 }
+                PassOutcome::Exhausted => {}
             }
         }
     }
@@ -2647,7 +2730,7 @@ mod tests {
 
     #[test]
     fn http2_anycast_peers_only_target_real_masque_gateways() {
-        let peers = h2_anycast_peers();
+        let peers = masque_gateway_peers();
 
         // Seeds come first so the fastest known gateway is dialled before any
         // /24 head.
@@ -2692,5 +2775,47 @@ mod tests {
         assert!(!is_identity_rejection(&AetherError::Tls(
             "h2 tls handshake: Connection reset by peer".to_string()
         )));
+        // The HTTP/3 path words it without the "h2" prefix; it must count too,
+        // otherwise a 4xx over QUIC looks like a transport failure and the run
+        // keeps dialling peers that will all refuse the same certificate.
+        assert!(is_identity_rejection(&AetherError::Other(
+            "connect-ip status 400".to_string()
+        )));
+    }
+
+    #[test]
+    fn h2_connect_request_is_an_extended_connect() {
+        let cfg = masque_h2::H2TunnelConfig {
+            peer: "162.159.196.1:443".parse().unwrap(),
+            sni: consts::L4_CONNECT_SNI.to_string(),
+            authority: quic::default_authority().to_string(),
+            path: quic::default_path().to_string(),
+            cert_pem: Vec::new(),
+            key_pem: Vec::new(),
+            local_ipv4: "172.16.0.2".parse().unwrap(),
+            quiet: true,
+            pin_endpoint: false,
+            expected_pins: Vec::new(),
+        };
+
+        let request = masque_h2::connect_request_for_test(&cfg).expect("request builds");
+
+        // Without :protocol the h2 crate drops :scheme and :path, which is what
+        // made every gateway answer 400.
+        assert_eq!(
+            request
+                .extensions()
+                .get::<h2::ext::Protocol>()
+                .map(|p| p.as_str()),
+            Some(consts::CF_CONNECT_PROTOCOL)
+        );
+        assert_eq!(request.method(), http::Method::CONNECT);
+        assert_eq!(request.uri().scheme_str(), Some("https"));
+        assert_eq!(request.uri().host(), Some(quic::default_authority()));
+        assert_eq!(request.uri().path(), "/");
+        assert_eq!(
+            request.headers().get("capsule-protocol").map(|v| v.as_bytes()),
+            Some(b"?1".as_ref())
+        );
     }
 }

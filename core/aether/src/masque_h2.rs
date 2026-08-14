@@ -192,17 +192,72 @@ fn build_tls(cfg: &H2TunnelConfig) -> Result<boring::ssl::ConnectConfiguration> 
     Ok(config)
 }
 
+/// Build the connect-ip request as an RFC 8441 *extended* CONNECT.
+///
+/// This is the fix for `h2 connect-ip status 400` on every gateway, including
+/// the genuine MASQUE ones at 162.159.196.1 and 162.159.195.1.
+///
+/// connect-ip over HTTP/2 is not a classic CONNECT tunnel. RFC 9484 carries it
+/// inside RFC 8441 extended CONNECT, which requires four pseudo-headers plus the
+/// capsule negotiation:
+///
+///     :method    CONNECT
+///     :protocol  connect-ip     <- the whole point; identifies the payload
+///     :scheme    https
+///     :authority cloudflareaccess.com
+///     :path      /
+///     capsule-protocol: ?1
+///
+/// What this function used to send was a plain origin CONNECT: method CONNECT,
+/// an authority-form URI, and `cf-connect-proto` as an ordinary header. In the
+/// `h2` crate, `Pseudo::request` special-cases exactly this shape —
+///
+///     let (scheme, path) = if method == Method::CONNECT && protocol.is_none() {
+///         (None, None)
+///
+/// — so the frame went out with no `:protocol`, no `:scheme` and no `:path`. To
+/// Cloudflare that is a request to open a TCP tunnel to `cloudflareaccess.com:443`,
+/// not an IP-tunnel request, and the edge correctly answers 400.
+///
+/// The `h2` crate sends `:protocol` only when an `h2::ext::Protocol` is present
+/// in the request extensions; it is removed from the extensions and promoted to
+/// a pseudo-header in `streams.rs`. Setting it also flips `Pseudo::request` into
+/// its normal branch, which is what makes `:scheme` and `:path` appear.
+///
+/// Header shape now mirrors `masque::connect_ip_request`, the HTTP/3 path, which
+/// has always sent the correct pseudo-header set.
 fn build_connect_request(cfg: &H2TunnelConfig) -> Result<http::Request<()>> {
-    let authority = format!("{}:443", cfg.authority);
-    let uri = format!("https://{}", authority);
-    http::Request::builder()
+    let path = if cfg.path.is_empty() { "/" } else { &cfg.path };
+    // Authority-only host, exactly like the h3 request. The scheme and path are
+    // taken from this URI once `:protocol` is set.
+    let uri = format!("https://{}{}", cfg.authority, path);
+
+    let mut request = http::Request::builder()
         .method(Method::CONNECT)
         .uri(uri)
+        // Tells the peer we speak the capsule protocol, i.e. the stream body is
+        // a sequence of capsules rather than raw bytes. RFC 9297.
+        .header("capsule-protocol", "?1")
         .header("cf-connect-proto", consts::CF_CONNECT_PROTOCOL)
         .header("pq-enabled", "false")
         .header("user-agent", "")
         .body(())
-        .map_err(|e| AetherError::Masque(format!("build request: {e}")))
+        .map_err(|e| AetherError::Masque(format!("build request: {e}")))?;
+
+    request
+        .extensions_mut()
+        .insert(h2::ext::Protocol::from_static(consts::CF_CONNECT_PROTOCOL));
+
+    Ok(request)
+}
+
+/// Test-only accessor for [`build_connect_request`].
+///
+/// The header shape is the entire fix for the `status 400` failures, so it is
+/// asserted from `main.rs`'s test module rather than left uncovered.
+#[doc(hidden)]
+pub fn connect_request_for_test(cfg: &H2TunnelConfig) -> Result<http::Request<()>> {
+    build_connect_request(cfg)
 }
 
 pub async fn verify_h2(cfg: &H2TunnelConfig, timeout: Duration) -> Result<Duration> {
