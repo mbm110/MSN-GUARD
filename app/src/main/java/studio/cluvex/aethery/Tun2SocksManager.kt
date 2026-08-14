@@ -30,6 +30,16 @@ object Tun2SocksManager {
     const val VPN_INTERFACE_IPV4_NETMASK = "255.255.255.0"
 
     /**
+     * How long to wait for a previous native run() to unwind.
+     *
+     * The native side notices g_terminate on its TCP timer tick (250ms in lwIP's
+     * default config) and then tears down the reactor, so exit is normally well
+     * under a second. 5s is generous headroom without hanging the UI thread's
+     * caller for an unbounded time.
+     */
+    private const val NATIVE_EXIT_GRACE_MS = 5_000L
+
+    /**
      * Address plan for the TUN device.
      *
      * Note the asymmetry, which matters: [ipAddress] is what the VPN interface
@@ -47,6 +57,17 @@ object Tun2SocksManager {
 
     @Volatile
     private var tun2SocksThread: Thread? = null
+
+    /**
+     * The most recent native thread, kept after [stop] clears [tun2SocksThread].
+     *
+     * [isRunning] must go false as soon as a stop is requested (the UI and the
+     * service both key off it), but the native run() call keeps touching its
+     * globals until it actually returns. This handle is what [start] joins on to
+     * guarantee the two never overlap.
+     */
+    @Volatile
+    private var lastThread: Thread? = null
 
     @Volatile
     var privateAddress: PrivateAddress = defaultPrivateAddress()
@@ -113,6 +134,38 @@ object Tun2SocksManager {
             ConnectionLog.record("tun2socks already running")
             return true
         }
+        // Refuse to start while a previous native run() is still unwinding.
+        //
+        // This is the fix for the abort() crash seen when connect/disconnect is
+        // tapped repeatedly. tun2socks.c keeps its lwIP state in file-scope
+        // globals (netif_ipaddr, have_netif, listener, listener_ip6, quitting,
+        // the BReactor `ss`), so two concurrent run() calls share one set of
+        // globals. The second one reaches lwip_init_job_hadler(), hits
+        // ASSERT(!have_netif) — still 1 from the first run — and asserts are
+        // live in a debug build, so ASSERT calls abort(). That is exactly the
+        // reported stack: abort() <- 3 frames of libtun2socks.so <- the
+        // Tun2SocksManager.start$lambda$0 thread.
+        //
+        // stop() previously used thread.join(3000) and cleared the handle
+        // regardless of whether the thread actually died, so a fast re-tap
+        // could enter start() while run() was still live.
+        val previous = lastThread
+        if (previous != null && previous.isAlive) {
+            try {
+                previous.join(NATIVE_EXIT_GRACE_MS)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+            if (previous.isAlive) {
+                // Starting now would abort the process. Refusing is recoverable:
+                // the caller reports a failed connect and the user can retry.
+                ConnectionLog.record(
+                    "tun2socks: previous native instance still shutting down; refusing to start a second one"
+                )
+                return false
+            }
+        }
+        lastThread = null
         if (socksProxyPort <= 0) {
             ConnectionLog.record("tun2socks: invalid SOCKS port $socksProxyPort")
             return false
@@ -159,23 +212,34 @@ object Tun2SocksManager {
         }, "tun2socks")
         thread.start()
         tun2SocksThread = thread
+        lastThread = thread
         ConnectionLog.record("tun2socks started → SOCKS $socksServerAddress, udpgw $udpgwServerAddress")
         return true
     }
 
+    /**
+     * Signal the native side to shut down and return immediately.
+     *
+     * Deliberately does NOT join the native thread. stop() is reached from
+     * onStartCommand() on the main thread when the user taps disconnect, and a
+     * multi-second join there is an ANR. The overlap protection lives in
+     * [start] instead, which joins [lastThread] before touching the natives —
+     * the only place where waiting is actually required and where it is always
+     * off the main thread.
+     *
+     * [isRunning] goes false synchronously here, so the UI and the service see
+     * "not routing" the instant the user asks for it.
+     */
     @Synchronized
     fun stop() {
-        val thread = tun2SocksThread ?: return
+        if (tun2SocksThread == null) return
         tun2SocksThread = null
         try {
             Tun2SocksJniLoader.terminateTun2Socks()
-            thread.join(3000)
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
         } catch (e: Throwable) {
             ConnectionLog.record("tun2socks stop error: ${e.message}")
         }
-        ConnectionLog.record("tun2socks stopped")
+        ConnectionLog.record("tun2socks stopping (native thread unwinding)")
     }
 
     /**

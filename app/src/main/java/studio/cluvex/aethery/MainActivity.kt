@@ -2738,7 +2738,14 @@ class MainActivity : Activity() {
     }
 
     private fun toggleTunnel() {
-        if (TunnelStatus.isActive()) {
+        // Cancelling mid-connect must work. Previously this only asked
+        // TunnelStatus.isActive(), which is false while Psiphon is still
+        // establishing (tun2socks has not started yet). The tap therefore fell
+        // through to the connect path, where the service's
+        // connected.compareAndSet(false, true) guard rejected it silently — so
+        // the UI sat on "Connecting" until the tunnel came up on its own or the
+        // user force-stopped the app.
+        if (TunnelStatus.isActive() || visualState == ConnectionControl.State.CONNECTING) {
             startService(Intent(this, MsnGuardVpnService::class.java).setAction(MsnGuardVpnService.ACTION_DISCONNECT))
             showDisconnected("Disconnecting")
             return
