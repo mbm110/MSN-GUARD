@@ -8,14 +8,21 @@ object NativeCore {
         System.loadLibrary("aether_jni")
     }
 
-    data class TunnelAddresses(val ipv4: String, val ipv6: String)
+    data class TunnelAddresses(
+        val ipv4: String,
+        val ipv6: String,
+        val gatewayProxy: String = "",
+        val organization: String = "",
+    )
 
     fun prepare(config: String): TunnelAddresses {
         check(nativePrepare(config) == 0) { nativeLastError() }
         val result = JSONObject(nativeLastResult())
         return TunnelAddresses(
             result.getString("ipv4"),
-            result.getString("ipv6"),
+            result.optString("ipv6"),
+            result.optString("gateway_proxy"),
+            result.optString("organization"),
         )
     }
 

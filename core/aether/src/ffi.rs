@@ -38,6 +38,8 @@ static LAST_RESULT: LazyLock<Mutex<CString>> =
     LazyLock::new(|| Mutex::new(CString::new("").unwrap()));
 static LAST_LOG: LazyLock<Mutex<CString>> = LazyLock::new(|| Mutex::new(CString::new("").unwrap()));
 static LOGS: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
+static LOG_PATH: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+const MAX_LOG_FILE_BYTES: u64 = 512 * 1024;
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -201,12 +203,43 @@ fn parse_address(name: &str, value: &str) -> Result<SocketAddr, String> {
 
 fn set_last_error(error: impl ToString) {
     let clean = error.to_string().replace('\0', " ");
+    if !clean.is_empty() {
+        persist_log_line(&format!("ERROR {clean}"));
+    }
     *LAST_ERROR.lock().unwrap() = CString::new(clean).unwrap();
 }
 
 fn clear_logs() {
     LOGS.lock().unwrap().clear();
     *LAST_LOG.lock().unwrap() = CString::new("").unwrap();
+    persist_log_line("--- new session ---");
+}
+
+pub(crate) fn set_log_path(path: Option<String>) {
+    if let Some(ref path) = path {
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.len() > MAX_LOG_FILE_BYTES {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    *LOG_PATH.lock().unwrap() = path;
+}
+
+fn persist_log_line(line: &str) {
+    let path = LOG_PATH.lock().unwrap().clone();
+    let Some(path) = path else {
+        return;
+    };
+    let stamp = chrono::Local::now().format("%H:%M:%S");
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            writeln!(file, "{stamp}  {line}")
+        });
 }
 
 pub(crate) fn record_log(message: impl ToString) {
@@ -214,6 +247,7 @@ pub(crate) fn record_log(message: impl ToString) {
     emit_event(Event::Log {
         message: text.clone(),
     });
+    persist_log_line(&text);
     let snapshot = {
         let mut logs = LOGS.lock().unwrap();
         if logs.len() == 400 {
@@ -369,8 +403,18 @@ pub unsafe extern "C" fn aether_prepare_json(json: *const c_char) -> i32 {
         };
 
         match runtime.block_on(crate::prepare(&options)) {
-            Ok(TunnelAddresses { ipv4, ipv6 }) => {
-                set_last_result(serde_json::json!({ "ipv4": ipv4, "ipv6": ipv6 }));
+            Ok(TunnelAddresses {
+                ipv4,
+                ipv6,
+                gateway_proxy,
+                organization,
+            }) => {
+                set_last_result(serde_json::json!({
+                    "ipv4": ipv4,
+                    "ipv6": ipv6,
+                    "gateway_proxy": gateway_proxy,
+                    "organization": organization,
+                }));
                 0
             }
             Err(error) => {

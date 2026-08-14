@@ -5,6 +5,8 @@ Usage: aether [OPTIONS]
 
 Connection:
   --bind <addr>            local SOCKS5 listen address (default 127.0.0.1:1819)
+  --http-proxy <addr>      also expose an HTTP CONNECT proxy on this address
+                           (off by default, e.g. 127.0.0.1:1820)
   --quick-reconnect        auto-accept reconnecting with the last known working gateway
   --no-quick-reconnect     always scan fresh, ignore any saved last-connection gateway
   -4                       scan/connect over IPv4 only (default)
@@ -36,6 +38,7 @@ MASQUE transport:
   --ech <auto|base64>      enable Encrypted Client Hello
   --no-data-check          skip the end-to-end data-plane validation
   --validate-secs <n>      seconds to wait for data-plane validation (default 10)
+  --startup-secs <n>       total MASQUE startup deadline (default 30)
   --reconnect-secs <n>     delay before reconnecting after a tunnel drop (default 2)
   --dns <list>             resolvers used inside the tunnel (default 1.1.1.1,1.0.0.1)
   --fragment               fragment the TLS ClientHello on the HTTP/2 transport
@@ -93,7 +96,10 @@ Advanced:
 ";
 
 pub fn parse_and_apply() -> crate::error::Result<()> {
-    let args: Vec<String> = env::args().skip(1).collect();
+    parse_args(env::args().skip(1).collect())
+}
+
+pub fn parse_args(args: Vec<String>) -> crate::error::Result<()> {
     let mut i = 0;
 
     while i < args.len() {
@@ -120,6 +126,7 @@ pub fn parse_and_apply() -> crate::error::Result<()> {
             }
 
             "--bind" => set("AETHER_SOCKS", next_value!()),
+            "--http-proxy" => set("AETHER_HTTP_PROXY", next_value!()),
             "--quick-reconnect" => set("AETHER_QUICK_RECONNECT", "1"),
             "--no-quick-reconnect" => set("AETHER_QUICK_RECONNECT", "0"),
 
@@ -157,6 +164,7 @@ pub fn parse_and_apply() -> crate::error::Result<()> {
                 set("AETHER_MASQUE_VALIDATE_SECS", &value);
                 set("AETHER_WG_VALIDATE_SECS", &value);
             }
+            "--startup-secs" => set("AETHER_MASQUE_STARTUP_SECS", next_value!()),
             "--reconnect-secs" => {
                 let value = next_value!().clone();
                 set("AETHER_MASQUE_RECONNECT_SECS", &value);

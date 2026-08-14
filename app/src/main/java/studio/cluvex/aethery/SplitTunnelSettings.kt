@@ -20,8 +20,8 @@ class SplitTunnelSettings(context: Context) {
     fun save(mode: Mode, packages: Set<String>) {
         preferences.edit()
             .putString(MODE, mode.name)
-            .putStringSet(PACKAGES, packages)
-            .apply()
+            .putStringSet(PACKAGES, packages.toHashSet())
+            .commit()
     }
 
     fun cleanup(installedPackages: Set<String>) {

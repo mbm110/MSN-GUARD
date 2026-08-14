@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.service.quicksettings.TileService
 import android.net.IpPrefix
+import android.net.ProxyInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -81,7 +82,15 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         super.onDestroy()
     }
 
-    fun protectSocket(fd: Int): Boolean = !vpnModeActive.get() || protect(fd)
+    fun protectSocket(fd: Int): Boolean {
+        if (!vpnModeActive.get()) return true
+        val ok = protect(fd)
+        if (!ok) {
+            Log.w(LOG_TAG, "VpnService.protect($fd) failed")
+            ConnectionLog.record("Socket protect failed for fd=$fd")
+        }
+        return ok
+    }
 
     override fun onEvent(json: String) {
         try {
@@ -121,20 +130,22 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         startAsForeground()
         worker.execute {
             try {
+                ConnectionLog.bind(java.io.File(filesDir, "connection.log"))
                 ConnectionLog.record("Preparing $currentProtocol identity")
                 NativeCore.attach(this)
                 val result = if (vpnMode) {
                     val addresses = NativeCore.prepare(config)
                     ConnectionLog.record("Creating Android VPN interface")
+                    if (addresses.organization.isNotBlank()) {
+                        ConnectionLog.record("Zero Trust organization ${addresses.organization}")
+                    }
                     tun = Builder()
                         .setSession("Aethery")
                         .setMtu(1280)
-                        .addAddress(addresses.ipv4, 32)
-                        .addAddress(addresses.ipv6, 128)
-                        .addRoute("0.0.0.0", 0)
-                        .addRoute("::", 0)
-                        .applyDns(config)
-                        .applyLanAccess()
+                        .applyTunnelAddresses(addresses)
+                        .applyDns(config, addresses)
+                        .applyGatewayProxy(config, addresses)
+                        .applyLanAccess(addresses)
                         .applySplitTunneling()
                         .establish() ?: error("Android could not establish the VPN interface")
                     ConnectionLog.record("Scanning gateways for VPN")
@@ -149,6 +160,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
                     ConnectionLog.record("Native tunnel exited: $detail")
                     sendStatus(STATUS_FAILED, detail)
                 } else if (stopRequested.get()) {
+                    ConnectionLog.record("Disconnect requested")
                     sendStatus(STATUS_DISCONNECTED)
                 } else {
                     ConnectionLog.record("Native tunnel stopped unexpectedly")
@@ -162,14 +174,14 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
                 NativeCore.detach()
                 vpnModeActive.set(false)
                 val killSwitch = getSharedPreferences("settings", MODE_PRIVATE).getBoolean("kill_switch", false)
-                tun?.close()
-                tun = null
                 connected.set(false)
                 if (killSwitch && !stopRequested.get()) {
                     ConnectionLog.record("Kill switch active; blocking all traffic")
                     sendStatus(STATUS_FAILED, "Kill switch active — tunnel dropped")
                     rebuildKillSwitchVpn()
                 } else {
+                    tun?.close()
+                    tun = null
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 }
@@ -184,19 +196,24 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
     }
 
     private fun rebuildKillSwitchVpn() {
+        val oldTun = tun
         try {
-            tun?.close()
-            tun = Builder()
+            val blockingTun = Builder()
                 .setSession("Aethery — Kill Switch")
                 .setMtu(1280)
                 .addAddress("100.64.0.1", 32)
                 .addRoute("0.0.0.0", 0)
                 .addRoute("::", 0)
                 .addDnsServer("1.1.1.1")
+                .setBlocking(true)
                 .establish()
+            tun = blockingTun
+            oldTun?.close()
             ConnectionLog.record("Kill switch VPN active; all traffic blocked")
         } catch (e: Exception) {
             Log.e(LOG_TAG, "Kill switch rebuild failed: ${e.message}")
+            oldTun?.close()
+            tun = null
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
@@ -294,12 +311,10 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
     }
 
     private fun notification(tx: Long, rx: Long): Notification {
-        val openAppIntent = PendingIntent.getActivity(
+        val launchIntent = PendingIntent.getActivity(
             this,
             0,
-            Intent(this, MainActivity::class.java).addFlags(
-                Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP,
-            ),
+            Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val disconnectIntent = PendingIntent.getService(
@@ -314,37 +329,50 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
             Intent(this, AetherVpnService::class.java).setAction(ACTION_RECONNECT),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val health = listOfNotNull(
-            currentVpnIp.takeIf(String::isNotBlank)?.let { "VPN $it" },
-            currentPing.takeIf(String::isNotBlank),
-        ).joinToString(" · ")
-        val traffic = if (tx > 0 || rx > 0) {
-            val speedText = if (currentSpeedTx > 0 || currentSpeedRx > 0) {
-                "  \u2191${formatSpeed(currentSpeedTx)} \u2193${formatSpeed(currentSpeedRx)}"
-            } else ""
-            "${getString(R.string.vpn_download)}: ${formatBytes(rx)}  ${getString(R.string.vpn_upload)}: ${formatBytes(tx)}$speedText"
-        } else {
-            getString(R.string.vpn_notification)
-        }
-        val contentText = listOf(health, traffic).filter(String::isNotBlank).joinToString(" · ")
-
-        return Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.aethery_notification)
-            .setContentTitle("${getString(R.string.app_name)} · $currentProtocol")
-            .setContentText(contentText)
-            .setContentIntent(openAppIntent)
+        val builder = Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("Aethery \u2014 $currentProtocol")
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentIntent(launchIntent)
+            .setOngoing(true)
+            .setShowWhen(false)
             .setOnlyAlertOnce(true)
-            .addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
-                getString(R.string.vpn_disconnect),
-                disconnectIntent,
-            )
-            .addAction(
-                android.R.drawable.ic_menu_revert,
-                "Quick Reconnect",
+
+        val healthParts = mutableListOf<String>()
+        if (currentVpnIp.isNotBlank()) healthParts.add(currentVpnIp)
+        if (currentPing.isNotBlank()) healthParts.add(currentPing)
+        val healthLine = if (healthParts.isNotEmpty()) healthParts.joinToString(" \u00b7 ") else null
+
+        val speedLine = if (currentSpeedTx > 0 || currentSpeedRx > 0) {
+            "\u2191 ${formatSpeed(currentSpeedTx)}  \u2193 ${formatSpeed(currentSpeedRx)}"
+        } else null
+        val totalLine = "\u2191 ${formatBytes(tx)}  \u2193 ${formatBytes(rx)}"
+
+        val subText = listOfNotNull(healthLine, speedLine).joinToString("  \u00b7  ")
+        if (subText.isNotBlank()) {
+            builder.setContentText(subText)
+            builder.setSubText(totalLine)
+        } else {
+            builder.setContentText(totalLine)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            builder.addAction(Notification.Action.Builder(
+                null,
+                "Reconnect",
                 reconnectIntent,
-            )
-            .build()
+            ).build())
+            builder.addAction(Notification.Action.Builder(
+                null,
+                "Disconnect",
+                disconnectIntent,
+            ).build())
+        } else {
+            @Suppress("DEPRECATION")
+            builder.addAction(0, "Reconnect", reconnectIntent)
+            @Suppress("DEPRECATION")
+            builder.addAction(0, "Disconnect", disconnectIntent)
+        }
+        return builder.build()
     }
 
     private fun Builder.applySplitTunneling(): Builder {
@@ -354,8 +382,6 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
 
         if (mode == SplitTunnelSettings.Mode.ALL) return this
         if (mode == SplitTunnelSettings.Mode.INCLUDE) {
-            // Keep Aethery's UI requests (including the public-IP card) in the VPN.
-            // The native transport protects its own sockets before connecting.
             addAllowedApplication(packageName)
         }
         if (packages.isEmpty()) {
@@ -366,9 +392,10 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         }
 
         var addedCount = 0
-        packages.forEach { pkg ->
+        for (pkg in packages) {
             try {
                 when (mode) {
+                    SplitTunnelSettings.Mode.ALL -> Unit
                     SplitTunnelSettings.Mode.INCLUDE -> {
                         addAllowedApplication(pkg)
                         addedCount++
@@ -395,19 +422,46 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         return this
     }
 
-    private fun Builder.applyLanAccess(): Builder {
-        if (!getSharedPreferences("settings", MODE_PRIVATE).getBoolean("lan_sharing", false)) return this
+    private fun Builder.applyTunnelAddresses(addresses: NativeCore.TunnelAddresses): Builder {
+        val v4 = parseTunnelAddress(addresses.ipv4, 32)
+            ?: error("Zero Trust identity has no usable IPv4 address")
+        addAddress(v4.first, v4.second)
+        addRoute("0.0.0.0", 0)
+        val v6 = parseTunnelAddress(addresses.ipv6, 128)
+        if (v6 != null) {
+            addAddress(v6.first, v6.second)
+            addRoute("::", 0)
+        }
+        return this
+    }
+
+    private fun lanBypassEnabled(): Boolean {
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        if (!prefs.contains("lan_bypass") && prefs.getBoolean("lan_sharing", false)) {
+            prefs.edit().putBoolean("lan_bypass", true).apply()
+            return true
+        }
+        return prefs.getBoolean("lan_bypass", false)
+    }
+
+    private fun Builder.applyLanAccess(addresses: NativeCore.TunnelAddresses): Builder {
+        if (!lanBypassEnabled()) return this
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             ConnectionLog.record("LAN access uses system local routes on Android 12 and older")
             return this
         }
-        listOf(
+        val ranges = mutableListOf(
             "10.0.0.0/8",
-            "172.16.0.0/12",
             "192.168.0.0/16",
             "fc00::/7",
             "fe80::/10",
-        ).forEach { cidr ->
+        )
+        // WARP/Zero Trust device and gateway addresses live in 172.16.0.0/12.
+        // Excluding that range would leak org DNS/gateway onto the LAN.
+        if (!isWarpCgnat(addresses)) {
+            ranges.add(1, "172.16.0.0/12")
+        }
+        ranges.forEach { cidr ->
             val (address, prefix) = cidr.split('/')
             excludeRoute(IpPrefix(InetAddress.getByName(address), prefix.toInt()))
         }
@@ -415,7 +469,7 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
         return this
     }
 
-    private fun Builder.applyDns(config: String): Builder {
+    private fun Builder.applyDns(config: String, addresses: NativeCore.TunnelAddresses): Builder {
         val configured = JSONObject(config).optString("dns_servers")
         val servers = configured.split(',', ';', ' ', '\n')
             .map(String::trim)
@@ -429,8 +483,68 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
                 runCatching { InetAddress.getByName(address) }.getOrNull()
             }
             .distinct()
-        (servers.ifEmpty { listOf(InetAddress.getByName("1.1.1.1")) }).forEach { addDnsServer(it) }
+        val fallbacks = mutableListOf("1.1.1.1", "1.0.0.1")
+        if (addresses.ipv6.isNotBlank()) {
+            fallbacks.add("2606:4700:4700::1111")
+        }
+        val fallbackAddrs = fallbacks.mapNotNull { runCatching { InetAddress.getByName(it) }.getOrNull() }
+        (servers.ifEmpty { fallbackAddrs }).forEach { addDnsServer(it) }
         return this
+    }
+
+    private fun Builder.applyGatewayProxy(
+        config: String,
+        addresses: NativeCore.TunnelAddresses,
+    ): Builder {
+        if (!JSONObject(config).optBoolean("gateway", false)) return this
+        val parsed = parseSocketAddress(addresses.gatewayProxy) ?: return this
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            setHttpProxy(ProxyInfo.buildDirectProxy(parsed.first, parsed.second))
+            ConnectionLog.record("Zero Trust gateway ${parsed.first}:${parsed.second}")
+        } else {
+            ConnectionLog.record("Gateway filtering in VPN mode needs Android 10 or newer")
+        }
+        return this
+    }
+
+    private fun parseTunnelAddress(raw: String, defaultPrefix: Int): Pair<InetAddress, Int>? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        val host = trimmed.substringBefore('/')
+        val prefix = trimmed.substringAfter('/', missingDelimiterValue = "")
+            .toIntOrNull() ?: defaultPrefix
+        val address = runCatching { InetAddress.getByName(host) }.getOrNull() ?: return null
+        val maxPrefix = if (address.address.size == 4) 32 else 128
+        return address to prefix.coerceIn(0, maxPrefix)
+    }
+
+    private fun parseSocketAddress(raw: String): Pair<String, Int>? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        return if (trimmed.startsWith('[')) {
+            val host = trimmed.substringAfter('[').substringBefore(']')
+            val port = trimmed.substringAfter("]:", "").toIntOrNull() ?: return null
+            host to port
+        } else {
+            val separator = trimmed.lastIndexOf(':')
+            if (separator <= 0) return null
+            val host = trimmed.substring(0, separator)
+            val port = trimmed.substring(separator + 1).toIntOrNull() ?: return null
+            host to port
+        }
+    }
+
+    private fun isWarpCgnat(addresses: NativeCore.TunnelAddresses): Boolean {
+        val host = addresses.ipv4.substringBefore('/').trim()
+        val octets = host.split('.')
+        if (octets.size == 4) {
+            val first = octets[0].toIntOrNull()
+            val second = octets[1].toIntOrNull()
+            if (first == 172 && second != null && second in 16..31) return true
+        }
+        return addresses.gatewayProxy.contains("172.16.") ||
+            addresses.gatewayProxy.contains("172.17.") ||
+            addresses.gatewayProxy.contains("172.18.")
     }
 
     companion object {
@@ -469,12 +583,24 @@ class AetherVpnService : VpnService(), NativeCore.CoreCallback {
 
 object ConnectionLog {
     private const val MAX_ENTRIES = 100
+    private const val MAX_FILE_BYTES = 256 * 1024L
     private val entries = ArrayDeque<String>()
+    private var sink: java.io.File? = null
+
+    @Synchronized
+    fun bind(file: java.io.File) {
+        sink = file
+        if (file.exists() && file.length() > MAX_FILE_BYTES) {
+            file.delete()
+        }
+    }
 
     @Synchronized
     fun record(message: String) {
+        val line = "${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())}  $message"
         if (entries.size == MAX_ENTRIES) entries.removeFirst()
-        entries.addLast("${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())}  $message")
+        entries.addLast(line)
+        runCatching { sink?.appendText(line + "\n") }
     }
 
     @Synchronized

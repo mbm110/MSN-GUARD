@@ -35,6 +35,9 @@ async fn bind_udp_fast(bind_addr: SocketAddr) -> Result<UdpSocket> {
     let _ = sock.set_send_buffer_size(buf_size);
 
     sock.bind(&bind_addr.into()).map_err(AetherError::Io)?;
+    // VPN/TUN mode routes 0.0.0.0/0 into the tunnel. Protect this socket so
+    // MASQUE/QUIC handshakes leave on the real network instead of looping.
+    crate::platform::protect_socket(&sock).map_err(AetherError::Io)?;
     UdpSocket::from_std(sock.into()).map_err(AetherError::Io)
 }
 

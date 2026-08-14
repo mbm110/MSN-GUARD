@@ -36,10 +36,9 @@ class AetherTileService : TileService() {
         val state = if (isConnected) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
 
         tile.state = state
-        // Use the app's launcher icon for the tile
         tile.icon = Icon.createWithResource(
             this,
-            R.mipmap.ic_launcher
+            R.drawable.ic_notification
         )
         tile.label = getString(R.string.vpn_tile_label)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -170,7 +169,7 @@ class AetherTileService : TileService() {
         .getString(PERF_PROFILE, "auto") ?: "auto"
 
     private fun h2Fragmentation(): Boolean = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        .getString(H2_FRAGMENTATION, "off") == "on"
+        .getString(H2_FRAGMENTATION, "on") == "on"
 
     companion object {
         private const val LOG_TAG = "AetherTile"

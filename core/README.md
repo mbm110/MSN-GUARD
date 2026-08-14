@@ -1,7 +1,9 @@
 # Aether
 
-### اینترنت آزاد برای همه :))
-**[راهنمای فارسی](README.fa.md)** · **[English Guide](Docs/GUIDE.en.md)** · **[راهنمای کامل فارسی](Docs/GUIDE.fa.md)**
+![Aether](Docs/Aether.png)
+
+### اینترنت آزاد برای همه:))
+**[راهنمای فارسی](README.fa.md)** · **[English Guide](Docs/DOCS.en.md)** · **[راهنمای کامل فارسی](Docs/DOCS.fa.md)**
 
 Telegram: https://t.me/CluvexStudio
 
@@ -11,13 +13,14 @@ Unlike traditional VPN clients, Aether is built for environments where Deep Pack
 
 ## Features
 
-- Automatic endpoint discovery
-- MASQUE (HTTP/3 & HTTP/2)
+- Automatic endpoint discovery, with end-to-end data-plane validation so a gateway is only trusted once it actually passes traffic, not just once it answers the handshake
+- MASQUE (HTTP/3 & HTTP/2), with optional TLS ClientHello fragmentation on HTTP/2
 - WireGuard support
 - Nested WireGuard mode (`gool`)
 - Traffic obfuscation
-- Automatic reconnection
+- Automatic reconnection, and quick-reconnect to your last known-good gateway to skip rescanning
 - Local SOCKS5 proxy
+- Command-line flags, environment variables, or interactive prompts — your choice
 - Linux, Windows, macOS and Android (Termux)
 
 ## Download
@@ -71,20 +74,53 @@ Binary:
 target/release/aether
 ```
 
+## Docker
+
+You can run Aether in an isolated environment using Docker. The official image is available on GitHub Container Registry (GHCR).
+
+> **The SOCKS5 proxy has no authentication.** Anyone who can reach the port can use your tunnel. Every command below publishes the port to `127.0.0.1` only, so it stays reachable from your own machine and nothing else. Do not replace it with `-p 1819:1819`, because that form listens on every interface of the host and turns the proxy into an open relay. If you genuinely need to serve other machines, put an authenticated front end in front of it and firewall the port.
+
+The `-v aether-data:/data` volume keeps the generated WARP identity between runs. Without it every start registers a brand new device, and Cloudflare begins rate limiting your address.
+
+Pull and run the pre-built image (interactive mode is required for initial setup):
+
+```bash
+docker run -it -p 127.0.0.1:1819:1819 -v aether-data:/data ghcr.io/cluvexstudio/aether:latest
+```
+
+You can also bypass prompts by providing environment variables:
+
+```bash
+docker run -it -p 127.0.0.1:1819:1819 -v aether-data:/data \
+  -e AETHER_PROTOCOL=masque \
+  -e AETHER_SCAN=balanced \
+  ghcr.io/cluvexstudio/aether:latest
+```
+
+If you prefer to build the image manually from source:
+
+```bash
+docker build -t aether .
+docker run -it -p 127.0.0.1:1819:1819 -v aether-data:/data aether
+```
+
 ## Usage
 
-Run:
+Run with no arguments and answer the prompts:
 
 ```bash
 ./target/release/aether
 ```
 
-Aether will ask you to select:
+Or skip the prompts with flags:
 
-- Protocol
-- Obfuscation profile
-- Listening port
-- Scan mode
+```bash
+./target/release/aether --masque -4 --scan turbo --noize firewall
+```
+
+On Windows, double-click `run-aether.bat` (included in the release zip) instead — it opens a terminal, runs `aether.exe`, and keeps the window open afterwards so you can read any errors.
+
+Every prompt has a flag and an environment variable equivalent. Run `./target/release/aether --help` for the full list, or see the guides linked below.
 
 After startup, a SOCKS5 proxy will be available at:
 
@@ -131,6 +167,14 @@ MASQUE support is built on top of Cloudflare's **Quiche** library.
 > **Experienced network developers and protocol engineers are welcome to contribute.**
 
 > **Please keep the codebase clean, maintainable, and well-engineered. Low-quality or vibe-coded contributions will not be accepted.**
+
+## Donate
+
+If Aether has been useful to you, consider supporting its development:
+
+- **TRX (Tron):** `TRxVSHcoADZnBfztFmFb2TQopusAwWYEVR`
+- **BTC:** `bc1qnjnvzsa5avgj7n0uy383cv5zdxfjnvvp257egm`
+- **TON:** `UQAH75bXaaRUhZMwiF0ZujOXFDDmvLSPASKoOsWF0HNasiaM`
 
 ## License
 

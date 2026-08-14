@@ -1,6 +1,6 @@
 # Architecture
 
-Aethery is a native Android client around retained Aether v1.5.0 core sources. Android code owns the user interface, VPN lifecycle, and platform integration; Aether owns route discovery, destination rules, Zero Trust enrolment, and tunnel transport. The retained core is marked vendored for GitHub language statistics and still builds into `libaether.so` for each Android ABI.
+Aethery is a native Android client around retained Aether v1.6.0 core sources. Android code owns the user interface, VPN lifecycle, and platform integration; Aether owns route discovery, destination rules, Zero Trust enrolment, and tunnel transport. The retained core is marked vendored for GitHub language statistics and still builds into `libaether.so` for each Android ABI.
 
 ```text
 MainActivity

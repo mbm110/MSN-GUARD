@@ -105,12 +105,12 @@ class AppUpdater(private val activity: Activity) {
         val connection = (URL(RELEASE_URL).openConnection() as HttpURLConnection).apply {
             connectTimeout = 10_000
             readTimeout = 20_000
-            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Accept", "application/vnd.github+json")
             setRequestProperty("User-Agent", "Aethery-Android")
         }
         try {
             if (connection.responseCode == HttpURLConnection.HTTP_NOT_FOUND) return null
-            check(connection.responseCode == HttpURLConnection.HTTP_OK) { "Forgejo returned ${connection.responseCode}" }
+            check(connection.responseCode == HttpURLConnection.HTTP_OK) { "GitHub returned ${connection.responseCode}" }
             val json = JSONObject(connection.inputStream.bufferedReader().use { reader -> reader.readText() })
             val version = json.getString("tag_name").removePrefix("v")
             val assets = json.getJSONArray("assets")
@@ -141,10 +141,11 @@ class AppUpdater(private val activity: Activity) {
     }
 
     private fun downloadApk(release: Release): File {
-        val target = File(activity.cacheDir, "updates/${release.assetName}").apply {
-            parentFile?.mkdirs()
-            delete()
-        }
+        val safeAssetName = File(release.assetName).name.filter { it.isLetterOrDigit() || it in ".-_" }
+        val sanitizedName = if (safeAssetName.endsWith(".apk")) safeAssetName else "Aethery-${release.version}.apk"
+        val updatesDir = File(activity.cacheDir, "updates").apply { mkdirs() }
+        val target = File(updatesDir, sanitizedName).apply { delete() }
+
         val connection = (URL(release.downloadUrl).openConnection() as HttpURLConnection).apply {
             connectTimeout = 10_000
             readTimeout = 30_000
@@ -154,6 +155,7 @@ class AppUpdater(private val activity: Activity) {
             check(connection.responseCode == HttpURLConnection.HTTP_OK) { "Download returned ${connection.responseCode}" }
             val total = connection.contentLengthLong
             var downloaded = 0L
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
             connection.inputStream.use { input ->
                 target.outputStream().use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -161,6 +163,7 @@ class AppUpdater(private val activity: Activity) {
                         val read = input.read(buffer)
                         if (read < 0) break
                         output.write(buffer, 0, read)
+                        digest.update(buffer, 0, read)
                         downloaded += read
                         if (total > 0) updateProgress((downloaded * 100 / total).toInt())
                     }
@@ -170,6 +173,11 @@ class AppUpdater(private val activity: Activity) {
             connection.disconnect()
         }
         check(target.length() > 0) { "Downloaded update is empty" }
+        val archiveInfo = activity.packageManager.getPackageArchiveInfo(target.absolutePath, 0)
+        check(archiveInfo != null && archiveInfo.packageName == activity.packageName) {
+            target.delete()
+            "Downloaded update is corrupted or package signature does not match"
+        }
         return target
     }
 
@@ -215,8 +223,7 @@ class AppUpdater(private val activity: Activity) {
     private data class Release(val version: String, val assetName: String, val downloadUrl: String)
 
     private companion object {
-        const val RELEASE_HOST = "git.diastom.xyz"
-        const val RELEASE_URL = "https://$RELEASE_HOST/api/v1/repos/ZethRise/Aethery/releases/latest"
+        const val RELEASE_URL = "https://api.github.com/repos/ZethRise/Aethery/releases/latest"
 
         fun isNewer(remote: String, local: String): Boolean {
             val remoteParts = remote.split('.', '-', '+').map { it.toIntOrNull() ?: 0 }

@@ -12,10 +12,13 @@ import android.content.pm.PackageManager
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.PorterDuff
 import android.graphics.RectF
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.widget.ImageView.ScaleType
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
@@ -25,10 +28,12 @@ import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
@@ -62,7 +67,7 @@ class MainActivity : Activity() {
     private lateinit var ipAddressLabel: TextView
     private lateinit var ipAddressValue: TextView
     private lateinit var ipAddressCard: LinearLayout
-    private lateinit var ipRefreshIcon: RetryView
+    private lateinit var ipRefreshIcon: ImageView
     private lateinit var modeSelector: LinearLayout
     private lateinit var modeValue: TextView
     private lateinit var connectionTypeValue: TextView
@@ -101,6 +106,11 @@ class MainActivity : Activity() {
     private var modePage: View? = null
     private var splitTunnelPage: View? = null
     private var splitTunnelAppsPage: View? = null
+    private var splitTunnelSummaryButton: TextView? = null
+    private var splitTunnelDraftMode: SplitTunnelSettings.Mode? = null
+    private var splitTunnelDraftPackages: MutableSet<String>? = null
+    private var headerLogo: ImageView? = null
+    private var themePage: View? = null
     private var trafficMonitorPage: View? = null
     private var trafficSpeedValue: TextView? = null
     private var trafficSessionValue: TextView? = null
@@ -125,16 +135,18 @@ class MainActivity : Activity() {
             statusHandler.postDelayed(this, STATUS_POLL_MS)
         }
     }
-    private val CANVAS by lazy { dynamicColor(android.R.color.system_neutral1_900, FALLBACK_CANVAS) }
-    private val SURFACE by lazy { dynamicColor(android.R.color.system_neutral1_800, FALLBACK_SURFACE) }
-    private val SURFACE_VARIANT by lazy { dynamicColor(android.R.color.system_neutral2_800, FALLBACK_SURFACE_VARIANT) }
-    private val INK by lazy { dynamicColor(android.R.color.system_neutral1_50, FALLBACK_INK) }
-    private val MUTED by lazy { dynamicColor(android.R.color.system_neutral2_300, FALLBACK_MUTED) }
-    private val DIVIDER by lazy { dynamicColor(android.R.color.system_neutral2_600, FALLBACK_DIVIDER) }
-    private val primary by lazy { dynamicColor(android.R.color.system_accent1_300, FALLBACK_PRIMARY) }
-    private val primaryContainer by lazy { dynamicColor(android.R.color.system_accent1_800, FALLBACK_PRIMARY_CONTAINER) }
-    private val connected = 0xFF22C55E.toInt()
-    private val connectedContainer = 0xFF052E16.toInt()
+    private lateinit var palette: AppAppearance.Palette
+    private var lastNightMode = false
+    private val CANVAS get() = palette.canvas
+    private val SURFACE get() = palette.surface
+    private val SURFACE_VARIANT get() = palette.surfaceVariant
+    private val INK get() = palette.ink
+    private val MUTED get() = palette.muted
+    private val DIVIDER get() = palette.divider
+    private val primary get() = palette.primary
+    private val primaryContainer get() = palette.primaryContainer
+    private val connected get() = palette.connected
+    private val connectedContainer get() = palette.connectedContainer
     private val motionInterpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
 
     private val statusReceiver = object : BroadcastReceiver() {
@@ -163,7 +175,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         DynamicColors.applyToActivityIfAvailable(this)
         super.onCreate(savedInstanceState)
-        configureSystemBars()
+        palette = AppAppearance.load(this)
+        lastNightMode = AppAppearance.isNight(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             OnBackInvokedCallback { handleBack() }.also { callback ->
                 predictiveBackCallback = callback
@@ -174,9 +187,11 @@ class MainActivity : Activity() {
             }
         }
         requestNotificationPermission()
+        ConnectionLog.bind(File(filesDir, "connection.log"))
         appUpdater = AppUpdater(this)
 
         connectionControl = ConnectionControl(this, primary, primaryContainer, connected, connectedContainer).apply {
+            id = View.generateViewId()
             setOnClickListener { toggleTunnel() }
         }
         connectionTitle = label(textSize = 20f, color = INK, style = TypefaceStyle.MEDIUM).apply {
@@ -193,14 +208,16 @@ class MainActivity : Activity() {
         latencyGraph = LatencyGraphView(this).apply {
             isClickable = true
             isFocusable = true
+            setColors(primary, INK, MUTED)
             setOnClickListener { pingConnection() }
+            highlightOnFocus(16, Color.TRANSPARENT, DIVIDER)
         }
         ipAddressLabel = label("PUBLIC IP", 12f, MUTED, TypefaceStyle.MEDIUM).apply {
             letterSpacing = 0.1f
         }
         ipAddressValue = label("Checking…", 16f, INK, TypefaceStyle.MEDIUM, singleLine = true)
         ipAddressCard = createIpAddressCard()
-        selectedProtocol = Protocol.MASQUE
+        selectedProtocol = savedProtocol()
         modeValue = label(selectedProtocol.label, 16f, INK, TypefaceStyle.MEDIUM)
         modeSelector = createModeSelector()
         connectionTypeValue = label(connectionType().label, 16f, INK, TypefaceStyle.MEDIUM)
@@ -251,6 +268,7 @@ class MainActivity : Activity() {
             ))
         }
         setContentView(pageHost)
+        configureSystemBars()
         showOpeningOverlay()
         refreshPublicIp()
     }
@@ -288,6 +306,10 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (palette.theme.followsSystem && lastNightMode != AppAppearance.isNight(this)) {
+            recreate()
+            return
+        }
         renderStatus()
         appUpdater.resumeInstallIfPermitted()
     }
@@ -334,7 +356,10 @@ class MainActivity : Activity() {
                         overlay.animate()
                             .alpha(0f)
                             .setDuration(300)
-                            .withEndAction { pageHost.removeView(overlay) }
+                            .withEndAction {
+                                pageHost.removeView(overlay)
+                                connectionControl.requestFocus()
+                            }
                             .start()
                     }
                     .start()
@@ -391,12 +416,16 @@ class MainActivity : Activity() {
     private fun createHeader(): LinearLayout = LinearLayout(this).apply {
         gravity = Gravity.CENTER_VERTICAL
         addView(ImageView(this@MainActivity).apply {
+            headerLogo = this
             setImageResource(R.drawable.aethery_logo)
             contentDescription = getString(R.string.app_name)
             scaleType = ScaleType.CENTER_INSIDE
             adjustViewBounds = true
             scaleX = 1.20f
             scaleY = 1.20f
+            if (palette.theme != AppAppearance.Theme.FOREST) {
+                setColorFilter(primary, PorterDuff.Mode.SRC_IN)
+            }
         }, LinearLayout.LayoutParams(dp(36), dp(40)))
         addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
         addView(ImageView(this@MainActivity).apply {
@@ -463,6 +492,7 @@ class MainActivity : Activity() {
         contentDescription = "Public IP address"
         isClickable = true
         isFocusable = true
+        highlightOnFocus(20, SURFACE_VARIANT, DIVIDER)
         setOnClickListener { refreshPublicIp() }
         val labels = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.VERTICAL
@@ -473,8 +503,11 @@ class MainActivity : Activity() {
             ).apply { topMargin = dp(2) })
         }
         addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        ipRefreshIcon = RetryView(this@MainActivity, INK)
-        addView(ipRefreshIcon, LinearLayout.LayoutParams(dp(24), dp(24)))
+        ipRefreshIcon = ImageView(this@MainActivity).apply {
+            setImageResource(R.drawable.ic_refresh)
+            setColorFilter(INK)
+        }
+        addView(ipRefreshIcon, LinearLayout.LayoutParams(dp(22), dp(22)))
     }
 
     private fun refreshPublicIp() {
@@ -583,11 +616,14 @@ class MainActivity : Activity() {
     }
 
     private fun openTunnelConnection(url: String): HttpURLConnection =
-        if (connectionType() == ConnectionType.PROXY && NativeCore.isRunning()) {
+        (if (connectionType() == ConnectionType.PROXY && NativeCore.isRunning()) {
             URL(url).openConnection(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort())))
         } else {
             URL(url).openConnection()
-        } as HttpURLConnection
+        } as HttpURLConnection).apply {
+            connectTimeout = IP_TIMEOUT_MS
+            readTimeout = IP_TIMEOUT_MS
+        }
 
     private fun updateNotificationHealth(ip: String? = null, ping: String? = null) {
         if (!NativeCore.isRunning()) return
@@ -607,6 +643,7 @@ class MainActivity : Activity() {
         contentDescription = "Connection mode, ${selectedProtocol.label}"
         isClickable = true
         isFocusable = true
+        highlightOnFocus(20, SURFACE_VARIANT, DIVIDER)
         setOnClickListener { openModeScreen() }
 
         addView(label("MODE", 12f, MUTED).apply { letterSpacing = 0.1f })
@@ -624,6 +661,7 @@ class MainActivity : Activity() {
         contentDescription = "View connection log"
         isClickable = true
         isFocusable = true
+        highlightOnFocus(20, SURFACE_VARIANT, DIVIDER)
         setOnClickListener { openLogsScreen() }
 
         addView(label("LOG", 12f, MUTED).apply { letterSpacing = 0.1f })
@@ -643,6 +681,7 @@ class MainActivity : Activity() {
         contentDescription = "Performance profile, ${perfProfile().label}"
         isClickable = true
         isFocusable = true
+        highlightOnFocus(20, SURFACE_VARIANT, DIVIDER)
         setOnClickListener { choosePerfProfile() }
 
         addView(label("PERF", 12f, MUTED).apply { letterSpacing = 0.1f })
@@ -662,6 +701,7 @@ class MainActivity : Activity() {
         contentDescription = "Scanner options, ${scanSummary()}"
         isClickable = true
         isFocusable = true
+        highlightOnFocus(20, SURFACE_VARIANT, DIVIDER)
         setOnClickListener { openScannerScreen() }
 
         addView(label("SCAN", 12f, MUTED).apply { letterSpacing = 0.08f })
@@ -1392,13 +1432,24 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(24) })
         val lanShareRow = createToggleRow(
-            "Internet LAN connection",
-            "Expose SOCKS5 to devices on this Wi-Fi network in Proxy mode",
+            "Share on LAN",
+            "Let other devices on this Wi-Fi use the SOCKS5 proxy",
             lanSharingEnabled(),
         ) {
             preferences().edit().putBoolean(LAN_SHARING, it).apply()
         }
         content.addView(lanShareRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(72),
+        ).apply { topMargin = dp(8) })
+        val lanBypassRow = createToggleRow(
+            "Bypass LAN",
+            "Keep local network devices reachable while VPN is connected",
+            lanBypassEnabled(),
+        ) {
+            preferences().edit().putBoolean(LAN_BYPASS, it).apply()
+        }
+        content.addView(lanBypassRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(72),
         ).apply { topMargin = dp(8) })
@@ -1450,7 +1501,16 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(24) })
-        content.addView(createSettingsButton("${splitTunnelSummary()} ›") { openSplitTunnelScreen() }, LinearLayout.LayoutParams(
+        splitTunnelSummaryButton = createSettingsButton("${splitTunnelSummary()} ›") { openSplitTunnelScreen() }
+        content.addView(splitTunnelSummaryButton, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(52),
+        ).apply { topMargin = dp(10) })
+        content.addView(label("APPEARANCE", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(24) })
+        content.addView(createSettingsButton("Theme · ${AppAppearance.current(this).label} ›") { openThemeScreen() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(52),
         ).apply { topMargin = dp(10) })
@@ -1473,8 +1533,8 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
         ).apply { topMargin = dp(12) })
-        content.addView(createSettingsButton("Aethery on Zeth Git", R.drawable.ic_forgejo) {
-            openLink("https://git.diastom.xyz/ZethRise/Aethery")
+        content.addView(createSettingsButton("Aethery on GitHub", R.drawable.ic_github, tintIcon = false) {
+            openLink("https://github.com/ZethRise/Aethery")
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
@@ -1977,12 +2037,12 @@ class MainActivity : Activity() {
 
     private fun openZeroTrustScreen() {
         zeroTrustPage?.let(pageHost::removeView)
-        val team = settingsField(preferences().getString(ZERO_TRUST_TEAM, "").orEmpty(), "team name")
-        val email = settingsField(preferences().getString(ZERO_TRUST_EMAIL, "").orEmpty(), "you@example.com")
+        val team = settingsField(SecureStore.getSecret(this, ZERO_TRUST_TEAM), "team name")
+        val email = settingsField(SecureStore.getSecret(this, ZERO_TRUST_EMAIL), "you@example.com")
         val code = settingsField("", "email code")
-        val clientId = settingsField(preferences().getString(ZERO_TRUST_CLIENT_ID, "").orEmpty(), "service token client ID")
-        val clientSecret = settingsField(preferences().getString(ZERO_TRUST_CLIENT_SECRET, "").orEmpty(), "service token secret", secure = true)
-        val token = settingsField(preferences().getString(ZERO_TRUST_TOKEN, "").orEmpty(), "Access JWT", secure = true)
+        val clientId = settingsField(SecureStore.getSecret(this, ZERO_TRUST_CLIENT_ID), "service token client ID")
+        val clientSecret = settingsField(SecureStore.getSecret(this, ZERO_TRUST_CLIENT_SECRET), "service token secret", secure = true)
+        val token = settingsField(SecureStore.getSecret(this, ZERO_TRUST_TOKEN), "Access JWT", secure = true)
         val status = label("", 13f, MUTED)
         val page = FrameLayout(this).apply {
             setBackgroundColor(CANVAS)
@@ -2019,7 +2079,7 @@ class MainActivity : Activity() {
         }
         content.addView(createToggleRow(
             "Gateway filtering",
-            "Route HTTP/S through the organization gateway in Proxy mode",
+            "Route HTTP/S through the organization gateway in VPN and Proxy modes",
             preferences().getBoolean(ZERO_TRUST_GATEWAY, false),
         ) { preferences().edit().putBoolean(ZERO_TRUST_GATEWAY, it).apply() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(72),
@@ -2029,10 +2089,8 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(12) })
         val authButtons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         authButtons.addView(createSettingsButton("Send code") {
-            preferences().edit()
-                .putString(ZERO_TRUST_TEAM, team.text.toString().trim())
-                .putString(ZERO_TRUST_EMAIL, email.text.toString().trim())
-                .apply()
+            SecureStore.putSecret(this, ZERO_TRUST_TEAM, team.text.toString().trim())
+            SecureStore.putSecret(this, ZERO_TRUST_EMAIL, email.text.toString().trim())
             status.text = "Requesting code\u2026"
             Thread {
                 val result = runCatching { NativeCore.requestEmailCode(team.text.toString(), email.text.toString()) }
@@ -2049,7 +2107,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     result.onSuccess {
                         token.setText(it)
-                        preferences().edit().putString(ZERO_TRUST_TOKEN, it).apply()
+                        SecureStore.putSecret(this, ZERO_TRUST_TOKEN, it)
                     }
                     status.setTextColor(if (result.isSuccess) connected else ERROR)
                     status.text = result.fold({ "Verified. Access token saved." }, { it.message ?: "Code rejected" })
@@ -2059,14 +2117,12 @@ class MainActivity : Activity() {
         content.addView(authButtons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(12) })
         val saveButtons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         saveButtons.addView(createSettingsButton("Clear") {
-            preferences().edit()
-                .remove(ZERO_TRUST_TEAM)
-                .remove(ZERO_TRUST_EMAIL)
-                .remove(ZERO_TRUST_CLIENT_ID)
-                .remove(ZERO_TRUST_CLIENT_SECRET)
-                .remove(ZERO_TRUST_TOKEN)
-                .remove(ZERO_TRUST_GATEWAY)
-                .apply()
+            SecureStore.removeSecret(this, ZERO_TRUST_TEAM)
+            SecureStore.removeSecret(this, ZERO_TRUST_EMAIL)
+            SecureStore.removeSecret(this, ZERO_TRUST_CLIENT_ID)
+            SecureStore.removeSecret(this, ZERO_TRUST_CLIENT_SECRET)
+            SecureStore.removeSecret(this, ZERO_TRUST_TOKEN)
+            preferences().edit().remove(ZERO_TRUST_GATEWAY).apply()
             zeroTrustControlButton?.text = "Zero Trust · ${zeroTrustSummary()} ›"
             closeZeroTrustScreen()
         }, LinearLayout.LayoutParams(0, dp(52), 1f))
@@ -2075,13 +2131,11 @@ class MainActivity : Activity() {
                 team.error = "Team is required"
                 return@createSettingsButton
             }
-            preferences().edit()
-                .putString(ZERO_TRUST_TEAM, team.text.toString().trim())
-                .putString(ZERO_TRUST_EMAIL, email.text.toString().trim())
-                .putString(ZERO_TRUST_CLIENT_ID, clientId.text.toString().trim())
-                .putString(ZERO_TRUST_CLIENT_SECRET, clientSecret.text.toString().trim())
-                .putString(ZERO_TRUST_TOKEN, token.text.toString().trim())
-                .apply()
+            SecureStore.putSecret(this, ZERO_TRUST_TEAM, team.text.toString().trim())
+            SecureStore.putSecret(this, ZERO_TRUST_EMAIL, email.text.toString().trim())
+            SecureStore.putSecret(this, ZERO_TRUST_CLIENT_ID, clientId.text.toString().trim())
+            SecureStore.putSecret(this, ZERO_TRUST_CLIENT_SECRET, clientSecret.text.toString().trim())
+            SecureStore.putSecret(this, ZERO_TRUST_TOKEN, token.text.toString().trim())
             zeroTrustControlButton?.text = "Zero Trust · ${zeroTrustSummary()} ›"
             closeZeroTrustScreen()
         }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
@@ -2259,6 +2313,8 @@ class MainActivity : Activity() {
         splitTunnelPage?.let(pageHost::removeView)
         val settings = SplitTunnelSettings(this)
         val selected = settings.packages().toMutableSet()
+        splitTunnelDraftMode = settings.mode()
+        splitTunnelDraftPackages = selected
         val page = FrameLayout(this).apply {
             setBackgroundColor(CANVAS)
             isClickable = true
@@ -2267,7 +2323,11 @@ class MainActivity : Activity() {
         val header = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { closeSplitTunnelScreen() }, LinearLayout.LayoutParams(dp(48), dp(56)))
-            addView(label("Split tunneling", 22f, INK, TypefaceStyle.MEDIUM))
+            addView(label("Split tunneling", 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(createSettingsButton("Done", backgroundOverride = primary, textColorOverride = primaryContainer) {
+                settings.save(settings.mode(), selected)
+                closeSplitTunnelScreen()
+            }, LinearLayout.LayoutParams(dp(88), dp(40)).apply { marginEnd = dp(4) })
         }
         content.addView(header)
         content.addView(label("Choose which apps use Aethery. Changes apply next connection.", 14f, MUTED), LinearLayout.LayoutParams(
@@ -2279,10 +2339,11 @@ class MainActivity : Activity() {
         SplitTunnelSettings.Mode.entries.forEachIndexed { index, mode ->
             val option = createSplitModeOption(mode, settings.mode()) { chosen ->
                 modeOptions.forEach { (m, opt) -> setSelectionState(opt, m == chosen, animate = true) }
-                settings.save(chosen, selected)
+                splitTunnelDraftMode = chosen
+                splitTunnelDraftPackages = selected
+                settings.save(chosen, selected.toHashSet())
                 if (chosen == SplitTunnelSettings.Mode.ALL) {
                     closeSplitTunnelScreen()
-                    openSettingsScreen(animate = false)
                 } else {
                     openSplitTunnelAppsScreen(chosen, selected)
                 }
@@ -2320,6 +2381,8 @@ class MainActivity : Activity() {
 
     private fun openSplitTunnelAppsScreen(mode: SplitTunnelSettings.Mode, selected: MutableSet<String>) {
         splitTunnelAppsPage?.let(pageHost::removeView)
+        splitTunnelDraftMode = mode
+        splitTunnelDraftPackages = selected
         val settings = SplitTunnelSettings(this)
         val page = FrameLayout(this).apply {
             setBackgroundColor(CANVAS)
@@ -2332,6 +2395,11 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { closeSplitTunnelAppsScreen() }, LinearLayout.LayoutParams(dp(48), dp(56)))
             addView(label("Apps", 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(createSettingsButton("Done", backgroundOverride = primary, textColorOverride = primaryContainer) {
+                settings.save(mode, selected.toHashSet())
+                closeSplitTunnelAppsScreen()
+                closeSplitTunnelScreen()
+            }, LinearLayout.LayoutParams(dp(88), dp(40)).apply { marginEnd = dp(4) })
         })
         content.addView(label("Select apps to ${if (mode == SplitTunnelSettings.Mode.INCLUDE) "include" else "exclude"}", 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2500,7 +2568,7 @@ class MainActivity : Activity() {
                 } else {
                     selected -= packageName
                 }
-                settings.save(mode, selected)
+                settings.save(mode, selected.toHashSet())
                 updateSelection(checked, animate = true)
             }
         }
@@ -2577,11 +2645,21 @@ class MainActivity : Activity() {
     }
 
     private fun closeSplitTunnelScreen() {
+        persistSplitTunnelDraft()
         splitTunnelPage?.let { animatePageClose(it) { splitTunnelPage = null } }
+        splitTunnelSummaryButton?.text = "${splitTunnelSummary()} ›"
     }
 
     private fun closeSplitTunnelAppsScreen() {
+        persistSplitTunnelDraft()
         splitTunnelAppsPage?.let { animatePageClose(it) { splitTunnelAppsPage = null } }
+        splitTunnelSummaryButton?.text = "${splitTunnelSummary()} ›"
+    }
+
+    private fun persistSplitTunnelDraft() {
+        val mode = splitTunnelDraftMode ?: return
+        val packages = splitTunnelDraftPackages ?: return
+        SplitTunnelSettings(this).save(mode, packages.toHashSet())
     }
 
     private fun loadUserApps(onLoaded: (List<ApplicationInfo>) -> Unit) {
@@ -2612,6 +2690,7 @@ class MainActivity : Activity() {
         when {
             splitTunnelAppsPage != null -> closeSplitTunnelAppsScreen()
             splitTunnelPage != null -> closeSplitTunnelScreen()
+            themePage != null -> closeThemeScreen()
             trafficMonitorPage != null -> closeTrafficMonitorScreen()
             zeroTrustPage != null -> closeZeroTrustScreen()
             tunnelControlsPage != null -> closeTunnelControlsScreen()
@@ -2627,6 +2706,7 @@ class MainActivity : Activity() {
     private fun updateConnectionMode(protocol: Protocol) {
         if (selectedProtocol == protocol) return
         selectedProtocol = protocol
+        preferences().edit().putString(DEFAULT_PROTOCOL, protocol.coreName).apply()
         modeSelector.contentDescription = "Connection mode, ${protocol.label}"
         scanValue.text = scanSummary()
         scannerSelector.contentDescription = "Scanner options, ${scanSummary()}"
@@ -2764,7 +2844,36 @@ class MainActivity : Activity() {
     private fun configureSystemBars() {
         window.statusBarColor = CANVAS
         window.navigationBarColor = CANVAS
-        window.decorView.systemUiVisibility = 0
+        val lightBars = !isDarkCanvas()
+        val applied = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val flags = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+            runCatching {
+                window.insetsController?.setSystemBarsAppearance(if (lightBars) flags else 0, flags)
+            }.isSuccess
+        } else {
+            false
+        }
+        if (!applied) {
+            @Suppress("DEPRECATION")
+            var visibility = 0
+            if (lightBars) {
+                visibility = visibility or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    visibility = visibility or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+                }
+            }
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = visibility
+        }
+    }
+
+    private fun isDarkCanvas(): Boolean {
+        val color = CANVAS
+        val r = color shr 16 and 0xFF
+        val g = color shr 8 and 0xFF
+        val b = color and 0xFF
+        return (r * 299 + g * 587 + b * 114) / 1000 < 140
     }
 
     private fun createHeaderBackButton(onClick: () -> Unit): ImageView = ImageView(this).apply {
@@ -2829,6 +2938,7 @@ class MainActivity : Activity() {
         icon: Int? = null,
         backgroundOverride: Int? = null,
         textColorOverride: Int? = null,
+        tintIcon: Boolean = true,
         onClick: () -> Unit,
     ): TextView = label(text, 15f, textColorOverride ?: INK, TypefaceStyle.MEDIUM).apply {
         gravity = Gravity.CENTER
@@ -2837,10 +2947,11 @@ class MainActivity : Activity() {
         isClickable = true
         isFocusable = true
         contentDescription = text
+        highlightOnFocus(16, backgroundOverride ?: SURFACE_VARIANT, backgroundOverride ?: SURFACE_VARIANT)
         icon?.let {
             setCompoundDrawablesRelativeWithIntrinsicBounds(it, 0, 0, 0)
             compoundDrawablePadding = dp(12)
-            compoundDrawablesRelative[0]?.setTint(textColorOverride ?: primary)
+            if (tintIcon) compoundDrawablesRelative[0]?.setTint(textColorOverride ?: primary)
             gravity = Gravity.CENTER_VERTICAL
         }
         setOnClickListener { onClick() }
@@ -2911,6 +3022,98 @@ class MainActivity : Activity() {
 
     private fun lanSharingEnabled(): Boolean = preferences().getBoolean(LAN_SHARING, false)
 
+    private fun lanBypassEnabled(): Boolean {
+        if (!preferences().contains(LAN_BYPASS) && lanSharingEnabled()) {
+            preferences().edit().putBoolean(LAN_BYPASS, true).apply()
+            return true
+        }
+        return preferences().getBoolean(LAN_BYPASS, false)
+    }
+
+    private fun savedProtocol(): Protocol {
+        val name = preferences().getString(DEFAULT_PROTOCOL, Protocol.MASQUE.coreName)
+        return Protocol.entries.firstOrNull { it.coreName == name && it.androidAvailable } ?: Protocol.MASQUE
+    }
+
+    private fun openThemeScreen() {
+        themePage?.let(pageHost::removeView)
+        val page = FrameLayout(this).apply {
+            setBackgroundColor(CANVAS)
+            isClickable = true
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(16), dp(24), dp(24))
+        }
+        content.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { closeThemeScreen() }, LinearLayout.LayoutParams(dp(48), dp(56)))
+            addView(label("Theme", 22f, INK, TypefaceStyle.MEDIUM))
+        })
+        content.addView(label("Dynamic follows the phone's light or dark theme. The other palettes stay until you change them.", 14f, MUTED), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(20) })
+        val current = AppAppearance.current(this)
+        AppAppearance.Theme.entries.forEachIndexed { index, theme ->
+            val selected = theme == current
+            content.addView(LinearLayout(this).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(dp(18), 0, dp(18), 0)
+                background = roundedBackground(
+                    if (selected) primaryContainer else SURFACE_VARIANT,
+                    18,
+                    if (selected) primary else SURFACE_VARIANT,
+                )
+                isClickable = true
+                isFocusable = true
+                highlightOnFocus(18, if (selected) primaryContainer else SURFACE_VARIANT, if (selected) primary else DIVIDER)
+                setOnClickListener {
+                    if (theme != current) {
+                        AppAppearance.save(this@MainActivity, theme)
+                        recreate()
+                    } else {
+                        closeThemeScreen()
+                    }
+                }
+                val texts = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                texts.addView(label(theme.label, 16f, INK, TypefaceStyle.MEDIUM))
+                texts.addView(label(theme.description, 13f, MUTED), LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(2) })
+                addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                if (selected) addView(label("CURRENT", 11f, primary, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f })
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(76),
+            ).apply { topMargin = if (index == 0) 0 else dp(10) })
+        }
+        page.addView(content, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+        page.setOnApplyWindowInsetsListener { _, insets ->
+            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24))
+            insets
+        }
+        themePage = page
+        pageHost.addView(page)
+        page.requestApplyInsets()
+        animatePageOpen(page)
+    }
+
+    private fun closeThemeScreen() {
+        themePage?.let { animatePageClose(it) { themePage = null } }
+    }
+
+    private fun View.highlightOnFocus(radius: Int, fill: Int, stroke: Int) {
+        onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
+            view.background = roundedBackground(fill, radius, if (focused) primary else stroke, if (focused) 2 else 1)
+        }
+    }
+
     private fun createToggleRow(title: String, subtitle: String, checked: Boolean, onToggle: (Boolean) -> Unit): LinearLayout {
         val texts = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2969,7 +3172,7 @@ class MainActivity : Activity() {
         ?: PerfProfile.AUTO
 
     private fun h2Fragmentation(): H2Fragmentation = preferences()
-        .getString(H2_FRAGMENTATION, H2Fragmentation.OFF.coreName)
+        .getString(H2_FRAGMENTATION, H2Fragmentation.ON.coreName)
         ?.let { name -> H2Fragmentation.entries.firstOrNull { it.coreName == name } }
         ?: H2Fragmentation.OFF
 
@@ -2983,7 +3186,7 @@ class MainActivity : Activity() {
         ) "Off" else "Custom"
 
     private fun zeroTrustSummary(): String =
-        preferences().getString(ZERO_TRUST_TEAM, "")?.takeIf { it.isNotBlank() } ?: "Off"
+        SecureStore.getSecret(this, ZERO_TRUST_TEAM).takeIf { it.isNotBlank() } ?: "Off"
 
     private fun socksPort(): Int = getSharedPreferences(SETTINGS, MODE_PRIVATE)
         .getInt(DEFAULT_SOCKS_PORT, DEFAULT_SOCKS_PORT_VALUE)
@@ -3052,8 +3255,8 @@ class MainActivity : Activity() {
         val coreName: String,
         val description: String,
     ) {
-        H3("HTTP/3", "h3", "QUIC; best on healthy UDP networks"),
-        H2("HTTP/2", "h2", "TCP; use when UDP or QUIC is blocked"),
+        H3("HTTP/3", "h3", "QUIC first; falls back to HTTP/2 if UDP is blocked"),
+        H2("HTTP/2", "h2", "TCP with TLS fragmentation; use on restricted networks"),
     }
 
     private enum class EndpointDiscovery(
@@ -3150,6 +3353,8 @@ class MainActivity : Activity() {
         const val WIREGUARD_DATA_CHECK = "wireguard_data_check"
         const val KILL_SWITCH = "kill_switch"
         const val LAN_SHARING = "lan_sharing"
+        const val LAN_BYPASS = "lan_bypass"
+        const val DEFAULT_PROTOCOL = "default_protocol"
         const val LOG_LEVEL = "log_level"
         const val PERF_PROFILE = "perf_profile"
         const val H2_FRAGMENTATION = "h2_fragmentation"
@@ -3194,24 +3399,6 @@ private class ChevronView(context: Context, private val color: Int) : View(conte
     }
 }
 
-private class RetryView(context: Context, color: Int) : View(context) {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-        strokeWidth = resources.displayMetrics.density * 1.8f
-        this.color = color
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        val d = resources.displayMetrics.density
-        val center = width / 2f
-        val radius = d * 6f
-        canvas.drawArc(center - radius, center - radius, center + radius, center + radius, -50f, 285f, false, paint)
-        canvas.drawLine(center + radius - d, center - radius, center + radius, center - radius, paint)
-        canvas.drawLine(center + radius, center - radius, center + radius, center - radius + d * 4f, paint)
-    }
-}
 
 private class ConnectionControl(
     context: Context,
@@ -3248,8 +3435,23 @@ private class ConnectionControl(
     init {
         isClickable = true
         isFocusable = true
+        isFocusableInTouchMode = false
         contentDescription = "Connect"
         setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+    }
+
+    override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: android.graphics.Rect?) {
+        super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
+        invalidate()
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
+            performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+            performClick()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -3264,7 +3466,7 @@ private class ConnectionControl(
         val radius = dp(95).toFloat() + if (state == State.CONNECTING) dp(3) * pulse else 0f
         val palette = when (state) {
             State.DISCONNECTED, State.CONNECTING -> Palette(primaryContainer, primary)
-            State.CONNECTED -> Palette(CONNECTED_BRIGHT_CONTAINER, CONNECTED_BRIGHT)
+            State.CONNECTED -> Palette(connectedContainer, connected)
             State.DEGRADED -> Palette(DEGRADED_CONTAINER, DEGRADED)
             State.FAILED -> Palette(ERROR_CONTAINER, ERROR)
         }
@@ -3279,9 +3481,13 @@ private class ConnectionControl(
         paint.clearShadowLayer()
 
         paint.style = Paint.Style.STROKE
-        paint.strokeWidth = dp(if (state == State.DISCONNECTED) 1 else 2).toFloat()
+        paint.strokeWidth = dp(if (isFocused) 4 else if (state == State.DISCONNECTED) 1 else 2).toFloat()
         paint.color = palette.accent
         canvas.drawCircle(centerX, centerY, radius, paint)
+        if (isFocused) {
+            paint.strokeWidth = dp(2).toFloat()
+            canvas.drawCircle(centerX, centerY, radius + dp(8), paint)
+        }
 
         val iconRadius = dp(31).toFloat()
         arcBounds.set(centerX - iconRadius, centerY - iconRadius, centerX + iconRadius, centerY + iconRadius)
@@ -3403,6 +3609,14 @@ private class LatencyGraphView(context: Context) : View(context) {
     private val mutedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFB9C6BB.toInt()
         textSize = resources.displayMetrics.density * 11f
+    }
+
+    fun setColors(accent: Int, ink: Int, muted: Int) {
+        linePaint.color = accent
+        fillPaint.color = (accent and 0x00FFFFFF) or 0x30000000
+        textPaint.color = ink
+        mutedPaint.color = muted
+        invalidate()
     }
     private val density = resources.displayMetrics.density
     private val path = android.graphics.Path()
