@@ -198,7 +198,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             put("PropagationChannelId", "FFFFFFFFFFFFFFFF")
             put("SponsorId", "1111111111111111")
             put("EgressRegion", "")
-            put("EstablishTunnelTimeoutSeconds", 0)
+            put("EstablishTunnelTimeoutSeconds", 120)
             put("DataDirectory", filesDir.absolutePath)
             put("ClientVersion", "1")
             put("TunnelProtocol", "")
@@ -213,6 +213,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // core is out of the data path — without it the notification stays
             // stuck on "Connecting..." forever and data usage reads 0.
             put("EmitBytesTransferred", true)
+            // --- Anti-censorship tuning for restrictive ISPs (e.g. Hamrah-e-Aval) ---
+            // Tell Psiphon the user is in Iran so Iran-specific Tactics (protocol
+            // selection, padding, server prioritization) are downloaded and applied.
+            put("DeviceRegion", "IR")
+            // More concurrent connection attempts = higher probability of finding
+            // a server/protocol that survives DPI on restrictive networks.
+            put("ConnectionWorkerPoolSize", 12)
+            // Emit detailed diagnostic notices so we can see exactly which
+            // protocols/servers fail on which carriers.
+            put("EmitDiagnosticNotices", true)
             // Note: "DisableNetworkManager" was tried here and is a no-op — the
             // key does not exist in libgojni.so (verified with strings). Psiphon's
             // NetworkMonitor still restarts the tunnel when tun0 appears. That is
