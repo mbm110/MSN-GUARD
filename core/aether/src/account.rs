@@ -830,6 +830,18 @@ pub struct MasqueEnrollment {
     pub key_pem: Vec<u8>,
     pub issued_at: u64,
     pub renewed: bool,
+    /// Gateway the account assigns *after* the MASQUE key is enrolled.
+    ///
+    /// This is not the same address as the one from `/reg`. A fresh registration
+    /// is `tunnel_type: wireguard` and hands back a WireGuard endpoint — often a
+    /// website-CDN address such as `104.16.192.82`, which has no connect-ip
+    /// listener at all. Enrolling the secp256r1 key with `tunnel_type: masque`
+    /// makes the API return a real MASQUE gateway (measured: `162.159.198.2`).
+    ///
+    /// The response used to be dropped on the floor (`Ok(_) =>`), so the client
+    /// kept dialling the stale WireGuard endpoint as its only "account" peer.
+    /// Empty when the response carried no endpoint.
+    pub assigned_endpoint: String,
 }
 
 pub async fn ensure_masque_enrolled(identity: &Identity) -> Result<MasqueEnrollment> {
@@ -841,6 +853,7 @@ pub async fn ensure_masque_enrolled(identity: &Identity) -> Result<MasqueEnrollm
             key_pem: identity.key_pem.clone(),
             issued_at: identity.cert_issued_at,
             renewed: false,
+            assigned_endpoint: identity.assigned_endpoint.clone(),
         });
     }
 
@@ -859,13 +872,24 @@ pub async fn ensure_masque_enrolled(identity: &Identity) -> Result<MasqueEnrollm
     )
     .await
     {
-        Ok(_) => {
-            log::info!("[+] MASQUE key enrolled");
+        Ok(updated) => {
+            // Read the gateway out of the enrollment response. Registration was
+            // tunnel_type wireguard, so until now the only "account" peer the
+            // client knew was a WireGuard endpoint that does not serve
+            // connect-ip. This response is the first time the API names a real
+            // MASQUE gateway.
+            let assigned_endpoint = endpoint_from(&updated);
+            if assigned_endpoint.is_empty() {
+                log::info!("[+] MASQUE key enrolled");
+            } else {
+                log::info!("[+] MASQUE key enrolled; gateway {assigned_endpoint}");
+            }
             Ok(MasqueEnrollment {
                 cert_pem: keypair.cert_pem,
                 key_pem: keypair.key_pem,
                 issued_at: now_unix(),
                 renewed: true,
+                assigned_endpoint,
             })
         }
         Err(error) if cert_still_usable(identity) => {
@@ -877,6 +901,7 @@ pub async fn ensure_masque_enrolled(identity: &Identity) -> Result<MasqueEnrollm
                 key_pem: identity.key_pem.clone(),
                 issued_at: identity.cert_issued_at,
                 renewed: false,
+                assigned_endpoint: identity.assigned_endpoint.clone(),
             })
         }
         Err(error) => Err(error),

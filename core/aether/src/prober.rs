@@ -15,13 +15,16 @@ pub const MASQUE_DOCUMENTED_CIDRS_V4: &[&str] = &["162.159.197.0/24", "162.159.1
 pub const MASQUE_DOH_CIDRS_V4: &[&str] = &["162.159.36.0/24", "162.159.46.0/24"];
 
 pub const MASQUE_CIDRS_V4: &[&str] = &[
+    // 162.159.198.0/24 first: measured probing showed it is the only range whose
+    // hosts answer connect-ip (198.2 and 198.1 both return :status 200), and the
+    // account API assigns 162.159.198.2 after a MASQUE key is enrolled.
+    "162.159.198.0/24",
+    "162.159.197.0/24",
     "162.159.196.0/24",
     "162.159.195.0/24",
     "162.159.192.0/24",
     "162.159.193.0/24",
     "162.159.204.0/24",
-    "162.159.197.0/24",
-    "162.159.198.0/24",
     "172.65.251.0/24",
     "188.114.96.0/24",
     "188.114.97.0/24",
@@ -31,14 +34,37 @@ pub const MASQUE_CIDRS_V4: &[&str] = &[
     "162.159.46.0/24",
 ];
 
+/// MASQUE gateway seeds, in dial order.
+///
+/// Order is measured, not guessed. Probing every one of these from a clean host
+/// with a freshly enrolled device certificate and `:protocol = cf-connect-ip`
+/// over HTTP/3 gave:
+///
+/// ```text
+/// 162.159.198.2   -> :status 200   (also the endpoint the account API assigns)
+/// 162.159.198.1   -> :status 200
+/// 162.159.197.1   -> QUIC terminated, error 305
+/// 162.159.196.1   -> no QUIC listener at all
+/// 162.159.195.1   -> no QUIC listener at all
+/// 162.159.192.1   -> no QUIC listener at all
+/// 162.159.197.3   -> no QUIC listener at all
+/// 162.159.193.1   -> no QUIC listener at all
+/// 162.159.192.2   -> no QUIC listener at all
+/// 188.114.96.1    -> no QUIC listener at all
+/// 172.65.251.1    -> no QUIC listener at all
+/// ```
+///
+/// Only the 162.159.198.0/24 pair actually serves connect-ip. The old order put
+/// four dead addresses first, which is why the field log burned its whole HTTP/3
+/// budget on 196.1, 195.1, 192.1 and 197.3 and never reached a working gateway.
 pub const MASQUE_SEEDS: &[&str] = &[
+    "162.159.198.2",
+    "162.159.198.1",
+    "162.159.197.1",
     "162.159.196.1",
     "162.159.195.1",
     "162.159.192.1",
     "162.159.197.3",
-    "162.159.197.1",
-    "162.159.198.2",
-    "162.159.198.1",
     "162.159.193.1",
 ];
 

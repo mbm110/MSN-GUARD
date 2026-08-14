@@ -194,38 +194,34 @@ fn build_tls(cfg: &H2TunnelConfig) -> Result<boring::ssl::ConnectConfiguration> 
 
 /// Build the connect-ip request as an RFC 8441 *extended* CONNECT.
 ///
-/// This is the fix for `h2 connect-ip status 400` on every gateway, including
-/// the genuine MASQUE ones at 162.159.196.1 and 162.159.195.1.
+/// Header shape mirrors `masque::connect_ip_request`, the HTTP/3 path:
 ///
-/// connect-ip over HTTP/2 is not a classic CONNECT tunnel. RFC 9484 carries it
-/// inside RFC 8441 extended CONNECT, which requires four pseudo-headers plus the
-/// capsule negotiation:
+/// ```text
+/// :method    CONNECT
+/// :protocol  cf-connect-ip
+/// :scheme    https
+/// :authority cloudflareaccess.com
+/// :path      /
+/// capsule-protocol: ?1
+/// ```
 ///
-///     :method    CONNECT
-///     :protocol  connect-ip     <- the whole point; identifies the payload
-///     :scheme    https
-///     :authority cloudflareaccess.com
-///     :path      /
-///     capsule-protocol: ?1
+/// This used to send a plain origin CONNECT — authority-form URI, and
+/// `cf-connect-proto` as an ordinary header. In the `h2` crate,
+/// `Pseudo::request` special-cases exactly that shape: when the method is
+/// CONNECT and no protocol is set, it sends neither `:scheme` nor `:path`. So the
+/// frame went out with no `:protocol`, no `:scheme` and no `:path`. The crate
+/// sends `:protocol` only when an `h2::ext::Protocol` sits in the request
+/// extensions; setting it also flips `Pseudo::request` into its normal branch,
+/// which is what makes `:scheme` and `:path` appear.
 ///
-/// What this function used to send was a plain origin CONNECT: method CONNECT,
-/// an authority-form URI, and `cf-connect-proto` as an ordinary header. In the
-/// `h2` crate, `Pseudo::request` special-cases exactly this shape —
-///
-///     let (scheme, path) = if method == Method::CONNECT && protocol.is_none() {
-///         (None, None)
-///
-/// — so the frame went out with no `:protocol`, no `:scheme` and no `:path`. To
-/// Cloudflare that is a request to open a TCP tunnel to `cloudflareaccess.com:443`,
-/// not an IP-tunnel request, and the edge correctly answers 400.
-///
-/// The `h2` crate sends `:protocol` only when an `h2::ext::Protocol` is present
-/// in the request extensions; it is removed from the extensions and promoted to
-/// a pseudo-header in `streams.rs`. Setting it also flips `Pseudo::request` into
-/// its normal branch, which is what makes `:scheme` and `:path` appear.
-///
-/// Header shape now mirrors `masque::connect_ip_request`, the HTTP/3 path, which
-/// has always sent the correct pseudo-header set.
+/// Fixing the shape did not make HTTP/2 work, and that is worth recording. Probed
+/// from a clean host with a freshly enrolled certificate, no Cloudflare edge
+/// serves connect-ip over HTTP/2: the two gateways that answer `:status 200` over
+/// HTTP/3 reply `RST_STREAM` here, and every other address answers `400`
+/// regardless of headers — including requests sent with no client certificate at
+/// all. No edge advertised `SETTINGS_ENABLE_CONNECT_PROTOCOL` either. So this
+/// path is standby only, kept correct in case Cloudflare enables extended CONNECT
+/// on TCP, which matters where UDP/443 is blocked outright.
 fn build_connect_request(cfg: &H2TunnelConfig) -> Result<http::Request<()>> {
     let path = if cfg.path.is_empty() { "/" } else { &cfg.path };
     // Authority-only host, exactly like the h3 request. The scheme and path are

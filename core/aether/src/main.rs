@@ -666,12 +666,7 @@ async fn load_or_provision_masque(config_path: &str) -> Result<account::Identity
         }
         log::info!("[+] masque identity needs a certificate; enrolling masque key");
         let enrollment = account::ensure_masque_enrolled(&identity).await?;
-        let identity = account::Identity {
-            cert_pem: enrollment.cert_pem,
-            key_pem: enrollment.key_pem,
-            cert_issued_at: enrollment.issued_at,
-            ..identity
-        };
+        let identity = apply_masque_enrollment(identity, enrollment);
         config::save(config_path, &identity)?;
         return Ok(identity);
     }
@@ -679,16 +674,38 @@ async fn load_or_provision_masque(config_path: &str) -> Result<account::Identity
     log::info!("[+] no masque identity found; provisioning dedicated masque account");
     let identity = provision_account().await?;
     let enrollment = account::ensure_masque_enrolled(&identity).await?;
-    let identity = account::Identity {
-        cert_pem: enrollment.cert_pem,
-        key_pem: enrollment.key_pem,
-        cert_issued_at: enrollment.issued_at,
-        ..identity
-    };
+    let identity = apply_masque_enrollment(identity, enrollment);
     let identity = adopt_team_profile(identity).await;
     config::save(config_path, &identity)?;
     log::info!("[+] provisioned and saved new masque identity to {config_path}");
     Ok(identity)
+}
+
+/// Fold an enrollment result into the identity.
+///
+/// Keeps the gateway the enrollment response named. Registration is
+/// `tunnel_type: wireguard` and returns a WireGuard endpoint — in the field log
+/// `104.16.192.82`, a website-CDN address with no connect-ip listener — and that
+/// stale value was the only "account" peer the MASQUE dialler ever had. The
+/// enrollment response is the first point where the API names a real MASQUE
+/// gateway, so prefer it and fall back to the old value when absent.
+fn apply_masque_enrollment(
+    identity: account::Identity,
+    enrollment: account::MasqueEnrollment,
+) -> account::Identity {
+    let assigned_endpoint = if enrollment.assigned_endpoint.is_empty() {
+        identity.assigned_endpoint.clone()
+    } else {
+        enrollment.assigned_endpoint.clone()
+    };
+
+    account::Identity {
+        cert_pem: enrollment.cert_pem,
+        key_pem: enrollment.key_pem,
+        cert_issued_at: enrollment.issued_at,
+        assigned_endpoint,
+        ..identity
+    }
 }
 
 async fn select_peer(
@@ -909,13 +926,24 @@ fn masque_h2_ports(base: &[u16]) -> Vec<u16> {
 /// working through the rest of the list.
 const IDENTITY_REJECTED_LIMIT: u32 = 3;
 
-/// How many extra MASQUE gateways the HTTP/3 pass may try.
+/// How many MASQUE gateways the HTTP/3 pass may try.
 ///
-/// HTTP/3 needs UDP/443. Where that is throttled every attempt burns its whole
-/// timeout, so the first pass stays short and the HTTP/2 fallback is reached in
-/// seconds rather than minutes. Enough to give HTTP/3 a fair chance at a real
-/// gateway, which it never previously got.
-const MASQUE_H3_PROBE_LIMIT: usize = 4;
+/// HTTP/3 is the only transport that works: measured against every gateway in
+/// `prober::MASQUE_SEEDS`, `162.159.198.2` and `162.159.198.1` answer
+/// `:status 200` over HTTP/3, while HTTP/2 gets `RST_STREAM` from those same two
+/// and a content-free `400` from everything else. So the budget belongs here,
+/// not in the fallback. Dead addresses fail fast — no QUIC listener means no
+/// handshake, not a timeout — so a larger list is cheap.
+const MASQUE_H3_PROBE_LIMIT: usize = 12;
+
+/// How many gateways the HTTP/2 fallback may try.
+///
+/// Kept small on purpose. No Cloudflare edge was observed serving connect-ip
+/// over HTTP/2, so this pass exists only in case a network blocks UDP/443
+/// outright and Cloudflare later enables extended CONNECT on TCP. Every attempt
+/// costs a full 8-second verify timeout, and the ~2-minute stall in the field log
+/// was this pass grinding through 30 peers that could never work.
+const MASQUE_H2_PROBE_LIMIT: usize = 4;
 
 /// MASQUE gateway candidates, in dial order. Used by both transports.
 ///
@@ -1120,11 +1148,21 @@ async fn try_masque_peer(
     }
 }
 
-/// True when the edge answered the CONNECT with a 4xx.
+/// True when the edge answered the CONNECT with an *authorization* verdict.
 ///
-/// Matches both transports, because the messages differ by one word:
-///   * HTTP/2 — `masque: h2 connect-ip status 400` (`masque_h2::verify_h2`)
-///   * HTTP/3 — `other: connect-ip status 400` (`quic::poll_h3`)
+/// Deliberately narrow: `401` and `403` only.
+///
+/// `400` used to count, which produced a false diagnosis. Probing every gateway
+/// from a clean host with a freshly enrolled certificate showed that no
+/// Cloudflare edge serves connect-ip over HTTP/2 at all — the real gateways
+/// answer `RST_STREAM`, and every other address answers `400` no matter what is
+/// sent, including a request carrying no client certificate. So a `400` says
+/// nothing about our identity; treating it as one is what produced
+/// "re-register the WARP device" while the certificate was in fact fine.
+///
+/// A `403` is different: over HTTP/3 the gateway returns it after accepting our
+/// certificate at the TLS layer, so it is a genuine verdict on the identity or
+/// on the requested protocol.
 fn is_identity_rejection(error: &AetherError) -> bool {
     let text = error.to_string();
     let Some(rest) = text.split("connect-ip status ").nth(1) else {
@@ -1133,7 +1171,7 @@ fn is_identity_rejection(error: &AetherError) -> bool {
     rest.split_whitespace()
         .next()
         .and_then(|code| code.parse::<u16>().ok())
-        .is_some_and(|code| (400..500).contains(&code))
+        .is_some_and(|code| matches!(code, 401 | 403))
 }
 
 async fn want_quick_reconnect(cached: &lastconn::LastConnection) -> bool {
@@ -1291,22 +1329,21 @@ async fn run_masque(
             known.len()
         ));
 
-        // Pass 1 — current transport (HTTP/3 unless forced): the account and
-        // cached peers, then a few real MASQUE gateways.
+        // Pass 1 — HTTP/3, the transport that actually works.
         //
-        // Previously this pass only ever dialled `known`, so when the single
-        // account endpoint failed the code fell straight to HTTP/2 without
-        // giving HTTP/3 one honest attempt at a gateway that actually serves
-        // connect-ip. That is why the field log shows HTTP/3 "rejected" after
-        // exactly one peer (104.16.24.84, the CDN address the account handed
-        // out) and then never appears again.
-        //
-        // The extra list is capped: if UDP/443 is throttled or blocked by the
-        // carrier every HTTP/3 attempt burns its full timeout, and we still
-        // want to reach the HTTP/2 fallback quickly.
+        // Measured: the gateway answers `:status 200` to an extended CONNECT with
+        // `:protocol = cf-connect-ip` over HTTP/3, and `RST_STREAM` over HTTP/2.
+        // Previously this pass only dialled `known`, which was one address — the
+        // WireGuard endpoint from registration (`104.16.192.82`, a website-CDN
+        // host with no connect-ip listener) — so HTTP/3 was written off after a
+        // single doomed attempt and the run spent its time in a fallback that
+        // cannot succeed.
         let mut h3_candidates = known.clone();
         let mut h3_seen = seen.clone();
-        for peer in masque_gateway_peers().into_iter().take(MASQUE_H3_PROBE_LIMIT) {
+        for peer in masque_gateway_peers()
+            .into_iter()
+            .take(MASQUE_H3_PROBE_LIMIT)
+        {
             if h3_seen.insert(peer) {
                 h3_candidates.push((peer, "masque gateway"));
             }
@@ -1322,24 +1359,23 @@ async fn run_masque(
             PassOutcome::Exhausted => {}
         }
 
-        // Pass 2 — HTTP/2 with TLS fragmentation over the full gateway list.
+        // Pass 2 — HTTP/2 with TLS fragmentation, for networks that block UDP/443.
         if quick_peer.is_none() && !masque_h2::enabled() {
             crate::ffi::record_log(
                 "HTTP/3 did not accept a known gateway; switching to HTTP/2 with TLS fragmentation",
             );
             enable_restricted_h2();
-            for peer in masque_gateway_peers() {
+            for peer in masque_gateway_peers()
+                .into_iter()
+                .take(MASQUE_H2_PROBE_LIMIT)
+            {
                 if seen.insert(peer) {
                     known.push((peer, "masque gateway"));
                 }
             }
 
-            // Stop early when several unrelated edges all reject the device
-            // certificate. Rejections carry over from the HTTP/3 pass, because a
-            // 4xx on the CONNECT is a property of the identity and not of the
-            // transport. Without this the run burned ~2 minutes of 8-second
-            // timeouts before saying anything — the 17:12:13 → 17:14:28 stretch
-            // in the field log.
+            // Identity rejections carry over from the HTTP/3 pass: a 401/403 on
+            // the CONNECT is a property of the certificate, not of the transport.
             match dial_masque_pass_from(&identity, &known, options, identity_rejections).await {
                 PassOutcome::Connected(peer) => quick_peer = Some(peer),
                 PassOutcome::IdentityRejected(count) => {
@@ -2732,9 +2768,11 @@ mod tests {
     fn http2_anycast_peers_only_target_real_masque_gateways() {
         let peers = masque_gateway_peers();
 
-        // Seeds come first so the fastest known gateway is dialled before any
-        // /24 head.
-        assert_eq!(peers.first(), Some(&"162.159.196.1:443".parse().unwrap()));
+        // 162.159.198.2 leads: it is the only address measured answering
+        // :status 200 to connect-ip, and the one the account API assigns once a
+        // MASQUE key is enrolled.
+        assert_eq!(peers.first(), Some(&"162.159.198.2:443".parse().unwrap()));
+        assert_eq!(peers.get(1), Some(&"162.159.198.1:443".parse().unwrap()));
 
         // Every /24 in the MASQUE list contributes its .1 and .2.
         assert!(peers.contains(&"162.159.192.1:443".parse().unwrap()));
@@ -2751,10 +2789,122 @@ mod tests {
                 "website CDN peer {text} must not be a MASQUE candidate"
             );
             assert!(
-                !text.starts_with("172.64.") && !text.starts_with("172.66.") && !text.starts_with("172.67."),
+                !text.starts_with("172.64.")
+                    && !text.starts_with("172.66.")
+                    && !text.starts_with("172.67."),
                 "website CDN peer {text} must not be a MASQUE candidate"
             );
         }
+    }
+
+    /// The gateway the enrollment response names must win over the stale
+    /// WireGuard endpoint from registration.
+    #[test]
+    fn masque_enrollment_adopts_the_gateway_it_returns() {
+        let identity = account::Identity {
+            device_id: "device".into(),
+            access_token: "token".into(),
+            cert_pem: Vec::new(),
+            key_pem: Vec::new(),
+            cert_issued_at: 0,
+            ipv4: "172.16.0.2".into(),
+            ipv6: String::new(),
+            wg_private_key: [0u8; 32],
+            wg_peer_public_key: [0u8; 32],
+            client_id: [0u8; 3],
+            organization: String::new(),
+            gateway_proxy: String::new(),
+            // What /reg hands back: a WireGuard endpoint on the website CDN.
+            assigned_endpoint: "104.16.192.82".into(),
+        };
+
+        let enrolled = apply_masque_enrollment(
+            identity.clone(),
+            account::MasqueEnrollment {
+                cert_pem: b"cert".to_vec(),
+                key_pem: b"key".to_vec(),
+                issued_at: 42,
+                renewed: true,
+                assigned_endpoint: "162.159.198.2".into(),
+            },
+        );
+        assert_eq!(enrolled.assigned_endpoint, "162.159.198.2");
+        assert_eq!(enrolled.cert_issued_at, 42);
+        assert_eq!(
+            assigned_masque_peer(&enrolled),
+            Some("162.159.198.2:443".parse().unwrap())
+        );
+
+        // No endpoint in the response: keep whatever we already had.
+        let unchanged = apply_masque_enrollment(
+            identity,
+            account::MasqueEnrollment {
+                cert_pem: b"cert".to_vec(),
+                key_pem: b"key".to_vec(),
+                issued_at: 7,
+                renewed: false,
+                assigned_endpoint: String::new(),
+            },
+        );
+        assert_eq!(unchanged.assigned_endpoint, "104.16.192.82");
+    }
+
+    /// A 400 must not be read as an identity verdict: every non-MASQUE Cloudflare
+    /// edge answers 400 to connect-ip over HTTP/2 even with no client certificate,
+    /// so counting it produced a bogus "re-register the WARP device".
+    #[test]
+    fn only_401_and_403_count_as_identity_rejections() {
+        assert!(is_identity_rejection(&AetherError::Other(
+            "connect-ip status 403".to_string()
+        )));
+        assert!(is_identity_rejection(&AetherError::Masque(
+            "h2 connect-ip status 401".to_string()
+        )));
+
+        assert!(!is_identity_rejection(&AetherError::Masque(
+            "h2 connect-ip status 400".to_string()
+        )));
+        assert!(!is_identity_rejection(&AetherError::Other(
+            "connect-ip status 404".to_string()
+        )));
+        assert!(!is_identity_rejection(&AetherError::Other(
+            "closed before data-plane confirmation".to_string()
+        )));
+    }
+
+    /// The HTTP/2 request must carry the pseudo-header set extended CONNECT needs.
+    #[test]
+    fn h2_connect_request_is_an_extended_connect() {
+        let cfg = masque_h2::H2TunnelConfig {
+            peer: "162.159.198.2:443".parse().unwrap(),
+            sni: consts::CONNECT_SNI.to_string(),
+            authority: "cloudflareaccess.com".to_string(),
+            path: "/".to_string(),
+            cert_pem: b"cert".to_vec(),
+            key_pem: b"key".to_vec(),
+            local_ipv4: "172.16.0.2".parse().unwrap(),
+            quiet: true,
+            pin_endpoint: false,
+            expected_pins: Vec::new(),
+        };
+
+        let request = masque_h2::connect_request_for_test(&cfg).expect("request builds");
+        assert_eq!(request.method(), http::Method::CONNECT);
+
+        // Without this extension the h2 crate drops :protocol, :scheme and :path.
+        let protocol = request
+            .extensions()
+            .get::<h2::ext::Protocol>()
+            .expect(":protocol must be set for extended CONNECT");
+        assert_eq!(protocol.as_str(), consts::CF_CONNECT_PROTOCOL);
+
+        assert_eq!(request.uri().scheme_str(), Some("https"));
+        assert_eq!(request.uri().authority().map(|a| a.as_str()), Some("cloudflareaccess.com"));
+        assert_eq!(request.uri().path(), "/");
+        assert_eq!(
+            request.headers().get("capsule-protocol").map(|v| v.as_bytes()),
+            Some(&b"?1"[..])
+        );
     }
 
     #[test]
