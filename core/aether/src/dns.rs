@@ -42,6 +42,7 @@ async fn query_ech(server: SocketAddr, host: &str) -> Result<Vec<u8>> {
         "[::]:0"
     };
     let sock = UdpSocket::bind(bind).await?;
+    crate::platform::protect_socket(&sock).map_err(AetherError::Io)?;
     sock.connect(server).await?;
 
     let (query, id) = build_query(host, RR_HTTPS);

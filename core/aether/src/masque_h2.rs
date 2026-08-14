@@ -58,6 +58,14 @@ async fn connect_tcp(peer: SocketAddr) -> Result<TcpStream> {
     }
     .map_err(AetherError::Io)?;
     crate::platform::protect_socket(&socket).map_err(AetherError::Io)?;
+    // Bind unspecified so Android does not pick the VPN address (172.16.0.2)
+    // as the source after the TUN interface is already up.
+    let bind = if peer.is_ipv4() {
+        "0.0.0.0:0".parse().unwrap()
+    } else {
+        "[::]:0".parse().unwrap()
+    };
+    socket.bind(bind).map_err(AetherError::Io)?;
     socket.connect(peer).await.map_err(AetherError::Io)
 }
 

@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.service.quicksettings.TileService
 import android.net.IpPrefix
+import android.net.ProxyInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -746,16 +747,21 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 NativeCore.attach(this)
                 val result = if (vpnMode) {
                     val addresses = NativeCore.prepare(config)
+                    if (addresses.organization.isNotBlank()) {
+                        ConnectionLog.record("Zero Trust organization ${addresses.organization}")
+                    }
                     ConnectionLog.record("Creating Android VPN interface")
                     tun = Builder()
                         .setSession("MSN-VPN")
                         .setMtu(1280)
-                        .addAddress(addresses.ipv4, 32)
-                        .addAddress(addresses.ipv6, 128)
-                        .addRoute("0.0.0.0", 0)
-                        .addRoute("::", 0)
-                        .applyDns(config)
-                        .applyLanAccess()
+                        // applyTunnelAddresses replaces the hardcoded /32 + /128
+                        // pair: v0.8.0 identities can carry a real prefix length,
+                        // and a WARP identity without a v6 address must not get a
+                        // v6 default route.
+                        .applyTunnelAddresses(addresses)
+                        .applyDns(config, addresses)
+                        .applyGatewayProxy(config, addresses)
+                        .applyLanAccess(addresses)
                         .applySplitTunneling()
                         // applySplitTunneling() handles app exclusion per mode.
                         .establish() ?: error("Android could not establish the VPN interface")
@@ -1041,19 +1047,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         return this
     }
 
-    private fun Builder.applyLanAccess(): Builder {
-        if (!getSharedPreferences("settings", MODE_PRIVATE).getBoolean("lan_sharing", false)) return this
+    private fun Builder.applyLanAccess(addresses: NativeCore.TunnelAddresses): Builder {
+        if (!lanBypassEnabled()) return this
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             ConnectionLog.record("LAN access uses system local routes on Android 12 and older")
             return this
         }
-        listOf(
+        val ranges = mutableListOf(
             "10.0.0.0/8",
-            "172.16.0.0/12",
             "192.168.0.0/16",
             "fc00::/7",
             "fe80::/10",
-        ).forEach { cidr ->
+        )
+        // Upstream v0.8.0: WARP/Zero Trust device and gateway addresses live in
+        // 172.16.0.0/12. Excluding that range would leak org DNS/gateway onto the
+        // LAN, so it is only bypassed when we are not on a WARP CGNAT identity.
+        if (!isWarpCgnat(addresses)) {
+            ranges.add(1, "172.16.0.0/12")
+        }
+        ranges.forEach { cidr ->
             val (address, prefix) = cidr.split('/')
             excludeRoute(IpPrefix(InetAddress.getByName(address), prefix.toInt()))
         }
@@ -1061,11 +1073,104 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         return this
     }
 
-    private fun Builder.applyDns(config: String): Builder {
-        // Always force known-good public DNS to prevent carrier DNS leaks.
-        // Carrier DNS (10.x.x.x) is rejected by Psiphon SOCKS5 (reply 5).
+    /**
+     * Upstream v0.8.0 renamed the LAN preference from `lan_sharing` to
+     * `lan_bypass` and migrates the old value on first read. Kept verbatim so the
+     * service and the merged MainActivity agree on which key is authoritative.
+     */
+    private fun lanBypassEnabled(): Boolean {
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        if (!prefs.contains("lan_bypass") && prefs.getBoolean("lan_sharing", false)) {
+            prefs.edit().putBoolean("lan_bypass", true).apply()
+            return true
+        }
+        return prefs.getBoolean("lan_bypass", false)
+    }
+
+    private fun Builder.applyTunnelAddresses(addresses: NativeCore.TunnelAddresses): Builder {
+        val v4 = parseTunnelAddress(addresses.ipv4, 32)
+            ?: error("Zero Trust identity has no usable IPv4 address")
+        addAddress(v4.first, v4.second)
+        addRoute("0.0.0.0", 0)
+        val v6 = parseTunnelAddress(addresses.ipv6, 128)
+        if (v6 != null) {
+            addAddress(v6.first, v6.second)
+            addRoute("::", 0)
+        }
+        return this
+    }
+
+    private fun Builder.applyGatewayProxy(
+        config: String,
+        addresses: NativeCore.TunnelAddresses,
+    ): Builder {
+        if (!JSONObject(config).optBoolean("gateway", false)) return this
+        val parsed = parseSocketAddress(addresses.gatewayProxy) ?: return this
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            setHttpProxy(ProxyInfo.buildDirectProxy(parsed.first, parsed.second))
+            ConnectionLog.record("Zero Trust gateway ${parsed.first}:${parsed.second}")
+        } else {
+            ConnectionLog.record("Gateway filtering in VPN mode needs Android 10 or newer")
+        }
+        return this
+    }
+
+    private fun parseTunnelAddress(raw: String, defaultPrefix: Int): Pair<InetAddress, Int>? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        val host = trimmed.substringBefore('/')
+        val prefix = trimmed.substringAfter('/', missingDelimiterValue = "")
+            .toIntOrNull() ?: defaultPrefix
+        val address = runCatching { InetAddress.getByName(host) }.getOrNull() ?: return null
+        val maxPrefix = if (address.address.size == 4) 32 else 128
+        return address to prefix.coerceIn(0, maxPrefix)
+    }
+
+    private fun parseSocketAddress(raw: String): Pair<String, Int>? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        return if (trimmed.startsWith('[')) {
+            val host = trimmed.substringAfter('[').substringBefore(']')
+            val port = trimmed.substringAfter("]:", "").toIntOrNull() ?: return null
+            host to port
+        } else {
+            val separator = trimmed.lastIndexOf(':')
+            if (separator <= 0) return null
+            val host = trimmed.substring(0, separator)
+            val port = trimmed.substring(separator + 1).toIntOrNull() ?: return null
+            host to port
+        }
+    }
+
+    private fun isWarpCgnat(addresses: NativeCore.TunnelAddresses): Boolean {
+        val host = addresses.ipv4.substringBefore('/').trim()
+        val octets = host.split('.')
+        if (octets.size == 4) {
+            val first = octets[0].toIntOrNull()
+            val second = octets[1].toIntOrNull()
+            if (first == 172 && second != null && second in 16..31) return true
+        }
+        return addresses.gatewayProxy.contains("172.16.") ||
+            addresses.gatewayProxy.contains("172.17.") ||
+            addresses.gatewayProxy.contains("172.18.")
+    }
+
+    private fun Builder.applyDns(config: String, addresses: NativeCore.TunnelAddresses): Builder {
+        // OURS, kept over upstream's version — this is load-bearing for Psiphon.
+        //
+        // Carrier DNS on Iranian mobile networks is both censored and rejected by
+        // Psiphon's SOCKS5 (reply 5), so public resolvers are forced first and any
+        // carrier-supplied server is filtered out rather than merely appended
+        // after. Upstream instead uses 1.1.1.1/1.0.0.1 only as a *fallback* when
+        // the config lists nothing, which would let carrier DNS through.
         val forcedDns = listOf("1.1.1.1", "8.8.8.8")
         forcedDns.forEach { addDnsServer(InetAddress.getByName(it)) }
+
+        // From upstream v0.8.0: advertise a v6 resolver when the identity has a
+        // v6 address, otherwise v6-only lookups have nowhere to go.
+        if (addresses.ipv6.isNotBlank()) {
+            runCatching { addDnsServer(InetAddress.getByName("2606:4700:4700::1111")) }
+        }
 
         // Also add any DNS servers from config (for non-Psiphon protocols).
         val configured = JSONObject(config).optString("dns_servers")
@@ -1093,12 +1198,29 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
 object ConnectionLog {
     private const val MAX_ENTRIES = 100
+    private const val MAX_FILE_BYTES = 256 * 1024L
     private val entries = ArrayDeque<String>()
+    private var sink: java.io.File? = null
+
+    /**
+     * Ported from upstream v0.8.0: mirror the ring buffer to a file so logs
+     * survive the process being killed. Required — the merged MainActivity calls
+     * this on startup. Capped and self-truncating so it cannot grow unbounded.
+     */
+    @Synchronized
+    fun bind(file: java.io.File) {
+        sink = file
+        if (file.exists() && file.length() > MAX_FILE_BYTES) {
+            file.delete()
+        }
+    }
 
     @Synchronized
     fun record(message: String) {
+        val line = "${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())}  $message"
         if (entries.size == MAX_ENTRIES) entries.removeFirst()
-        entries.addLast("${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())}  $message")
+        entries.addLast(line)
+        runCatching { sink?.appendText(line + "\n") }
     }
 
     @Synchronized

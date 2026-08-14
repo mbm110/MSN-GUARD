@@ -8,6 +8,7 @@ use crate::error::{AetherError, Result};
 const TEAM_SUFFIX: &str = "cloudflareaccess.com";
 const ENROLL_PATH: &str = "/warp";
 const AUTH_TIMEOUT: Duration = Duration::from_secs(20);
+const CODE_WAIT: Duration = Duration::from_secs(300);
 const CODE_ATTEMPTS: u32 = 3;
 const INSTALL_ID_LEN: usize = 22;
 const FCM_SUFFIX_LEN: usize = 134;
@@ -298,6 +299,8 @@ fn percent_decode(raw: &str) -> String {
 
 static TOKEN_CACHE: tokio::sync::Mutex<Option<(String, String)>> =
     tokio::sync::Mutex::const_new(None);
+static PENDING_EMAIL_LOGIN: tokio::sync::Mutex<Option<EmailSignIn>> =
+    tokio::sync::Mutex::const_new(None);
 
 pub async fn resolve_token(settings: &TeamSettings) -> Result<String> {
     {
@@ -317,6 +320,33 @@ pub async fn resolve_token(settings: &TeamSettings) -> Result<String> {
     Ok(token)
 }
 
+pub async fn store_token(token: &str) -> Result<()> {
+    let token = token.trim();
+    if !looks_like_jwt(token) {
+        return Err(AetherError::Api(
+            "that value is not a jwt; copy the value that follows token= on the enrolment page"
+                .into(),
+        ));
+    }
+    if jwt_expired(token, crate::account::now_unix()) {
+        return Err(AetherError::Api(
+            "that token has already expired; sign in again to get a fresh one".into(),
+        ));
+    }
+    *TOKEN_CACHE.lock().await = Some((String::new(), token.to_string()));
+    Ok(())
+}
+
+pub async fn cached_token() -> Option<String> {
+    TOKEN_CACHE.lock().await.clone().and_then(|(_, token)| {
+        (!jwt_expired(&token, crate::account::now_unix())).then_some(token)
+    })
+}
+
+pub async fn clear_token() {
+    *TOKEN_CACHE.lock().await = None;
+}
+
 async fn sign_in(settings: &TeamSettings) -> Result<String> {
     if let Some(token) = &settings.token {
         if !looks_like_jwt(token) {
@@ -331,10 +361,7 @@ async fn sign_in(settings: &TeamSettings) -> Result<String> {
                 "the supplied access token has expired; sign in again to get a fresh one".into(),
             ));
         }
-        log::info!(
-            "[+] using the access token supplied for team {}",
-            settings.team
-        );
+        log::info!("[+] using the access token supplied for team {}", settings.team);
         return Ok(token.clone());
     }
 
@@ -356,39 +383,95 @@ async fn sign_in(settings: &TeamSettings) -> Result<String> {
     )))
 }
 
-struct PendingEmailLogin {
-    settings: TeamSettings,
-    email: String,
-    nonce: String,
-    cookies: std::sync::Arc<reqwest::cookie::Jar>,
-}
-
-static PENDING_EMAIL_LOGIN: tokio::sync::Mutex<Option<PendingEmailLogin>> =
-    tokio::sync::Mutex::const_new(None);
-
-fn access_client(cookies: std::sync::Arc<reqwest::cookie::Jar>) -> Result<reqwest::Client> {
+fn access_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(crate::consts::UA_REGISTER)
         .timeout(AUTH_TIMEOUT)
-        .cookie_provider(cookies)
+        .cookie_store(true)
         .build()
         .map_err(|e| AetherError::Api(format!("access client: {e}")))
 }
 
-pub async fn request_email_code(team: &str, email: &str) -> Result<()> {
-    let team = normalize_team(team)
-        .ok_or_else(|| AetherError::Api("enter a valid Zero Trust team name".into()))?;
-    let email = email.trim();
-    if email.is_empty() || !email.contains('@') {
-        return Err(AetherError::Api("enter a valid email address".into()));
+#[derive(Debug, Clone)]
+pub enum CodeOutcome {
+    Token(String),
+    Rejected(u16),
+}
+
+pub struct EmailSignIn {
+    client: reqwest::Client,
+    team: String,
+    email: String,
+    nonce: String,
+    verify_url: String,
+}
+
+impl EmailSignIn {
+    pub fn team(&self) -> &str {
+        &self.team
     }
-    let settings = TeamSettings {
-        team,
-        email: Some(email.to_string()),
-        ..Default::default()
-    };
-    let cookies = std::sync::Arc::new(reqwest::cookie::Jar::default());
-    let client = access_client(cookies.clone())?;
+
+    pub fn email(&self) -> &str {
+        &self.email
+    }
+
+    pub fn verify_url(&self) -> &str {
+        &self.verify_url
+    }
+
+    pub fn nonce(&self) -> &str {
+        &self.nonce
+    }
+
+    pub async fn resend_code(&mut self) -> Result<()> {
+        if let Some(nonce) =
+            send_email_code(&self.client, &self.verify_url, &self.email, None).await?
+        {
+            self.nonce = nonce;
+        }
+        Ok(())
+    }
+
+    pub async fn submit_code(&self, code: &str) -> Result<CodeOutcome> {
+        let code = code.trim();
+        if code.is_empty() {
+            return Err(AetherError::Api("no login code was entered".into()));
+        }
+
+        let callback = format!("{}/cdn-cgi/access/callback", team_domain(&self.team));
+        let confirmed = self
+            .client
+            .post(&callback)
+            .form(&[("code", code), ("nonce", self.nonce.as_str())])
+            .send()
+            .await
+            .map_err(|e| AetherError::Api(format!("confirming the login code: {e}")))?;
+
+        let status = confirmed.status();
+        let body = confirmed
+            .text()
+            .await
+            .map_err(|e| AetherError::Api(format!("callback body: {e}")))?;
+
+        match extract_jwt_from_html(&body) {
+            Some(token) => {
+                log::info!("[+] signed in to team {} with the email code", self.team);
+                Ok(CodeOutcome::Token(token))
+            }
+            None => Ok(CodeOutcome::Rejected(status.as_u16())),
+        }
+    }
+}
+
+pub async fn begin_email_signin(settings: &TeamSettings, email: &str) -> Result<EmailSignIn> {
+    let email = email.trim();
+    if email.is_empty() {
+        return Err(AetherError::Api(
+            "an email address is needed to request a login code".into(),
+        ));
+    }
+
+    let client = access_client()?;
 
     log::info!(
         "[*] opening the device enrolment page for team {}",
@@ -415,9 +498,70 @@ pub async fn request_email_code(team: &str, email: &str) -> Result<()> {
         ))
     })?;
 
+    let nonce = send_email_code(&client, &verify_url, email, Some(&login_url))
+        .await?
+        .ok_or_else(|| {
+            AetherError::Api(
+                "cloudflare did not return a nonce for the login code; the enrolment flow \
+                 may have changed"
+                    .into(),
+            )
+        })?;
+
+    Ok(EmailSignIn {
+        client,
+        team: settings.team.clone(),
+        email: email.to_string(),
+        nonce,
+        verify_url,
+    })
+}
+
+/// Android FFI: start an email OTP session and remember it for `confirm_email_code`.
+pub async fn request_email_code(team: &str, email: &str) -> Result<()> {
+    let team = normalize_team(team)
+        .ok_or_else(|| AetherError::Api("enter a valid Zero Trust team name".into()))?;
+    let email = email.trim();
+    if email.is_empty() || !email.contains('@') {
+        return Err(AetherError::Api("enter a valid email address".into()));
+    }
+    let settings = TeamSettings {
+        team,
+        email: Some(email.to_string()),
+        ..Default::default()
+    };
+    let session = begin_email_signin(&settings, email).await?;
+    *PENDING_EMAIL_LOGIN.lock().await = Some(session);
+    Ok(())
+}
+
+/// Android FFI: submit the emailed OTP for the pending session.
+pub async fn confirm_email_code(code: &str) -> Result<String> {
+    let mut pending = PENDING_EMAIL_LOGIN.lock().await;
+    let session = pending.as_mut().ok_or_else(|| {
+        AetherError::Api("request a fresh email code before confirming it".into())
+    })?;
+    match session.submit_code(code).await? {
+        CodeOutcome::Token(token) => {
+            *TOKEN_CACHE.lock().await = Some((session.team().to_string(), token.clone()));
+            *pending = None;
+            Ok(token)
+        }
+        CodeOutcome::Rejected(status) => Err(AetherError::Api(format!(
+            "the login code was not accepted (status {status}); check it or request a fresh code"
+        ))),
+    }
+}
+
+async fn send_email_code(
+    client: &reqwest::Client,
+    verify_url: &str,
+    email: &str,
+    fallback_url: Option<&str>,
+) -> Result<Option<String>> {
     log::info!("[*] asking cloudflare to email a login code to {email}");
     let sent = client
-        .post(&verify_url)
+        .post(verify_url)
         .form(&[
             ("email", email),
             ("client_id", ""),
@@ -439,112 +583,90 @@ pub async fn request_email_code(team: &str, email: &str) -> Result<()> {
         )));
     }
 
-    let nonce = query_value(&sent_url, "nonce")
-        .or_else(|| query_value(&login_url, "nonce"))
-        .ok_or_else(|| {
-            AetherError::Api(
-                "cloudflare did not return a nonce for the login code; the enrolment flow \
-                 may have changed"
-                    .into(),
-            )
-        })?;
-
-    *PENDING_EMAIL_LOGIN.lock().await = Some(PendingEmailLogin {
-        settings,
-        email: email.to_string(),
-        nonce,
-        cookies,
-    });
-    Ok(())
-}
-
-pub async fn confirm_email_code(code: &str) -> Result<String> {
-    let code = code.trim();
-    if code.is_empty() {
-        return Err(AetherError::Api("enter the emailed login code".into()));
-    }
-    let (settings, email, nonce, cookies) = {
-        let pending = PENDING_EMAIL_LOGIN.lock().await;
-        let pending = pending.as_ref().ok_or_else(|| {
-            AetherError::Api("request a fresh email code before confirming it".into())
-        })?;
-        (
-            pending.settings.clone(),
-            pending.email.clone(),
-            pending.nonce.clone(),
-            pending.cookies.clone(),
-        )
-    };
-
-    let callback = format!("{}/cdn-cgi/access/callback", settings.team_domain());
-    let client = access_client(cookies)?;
-    let confirmed = client
-        .post(&callback)
-        .form(&[("code", code), ("nonce", nonce.as_str())])
-        .send()
-        .await
-        .map_err(|e| AetherError::Api(format!("confirming the login code: {e}")))?;
-    let status = confirmed.status();
-    let body = confirmed
-        .text()
-        .await
-        .map_err(|e| AetherError::Api(format!("callback body: {e}")))?;
-
-    let token = extract_jwt_from_html(&body).ok_or_else(|| {
-        AetherError::Api(format!(
-            "the login code was not accepted (status {status}); check it or request a fresh code"
-        ))
-    })?;
-    log::info!("[+] signed in to team {} as {}", settings.team, email);
-    *TOKEN_CACHE.lock().await = Some((settings.team.clone(), token.clone()));
-    *PENDING_EMAIL_LOGIN.lock().await = None;
-    Ok(token)
+    Ok(query_value(&sent_url, "nonce")
+        .or_else(|| fallback_url.and_then(|url| query_value(url, "nonce"))))
 }
 
 async fn fetch_token_with_email_code(settings: &TeamSettings, email: &str) -> Result<String> {
-    request_email_code(&settings.team, email).await?;
+    let session = begin_email_signin(settings, email).await?;
+    let mut last_status: Option<u16> = None;
+
     for attempt in 1..=CODE_ATTEMPTS {
-        let code = prompt_login_code(email, attempt).await?;
-        match confirm_email_code(&code).await {
-            Ok(token) => return Ok(token),
-            Err(error) if attempt < CODE_ATTEMPTS => {
-                log::warn!("[-] {error}");
+        let code = prompt_login_code(session.email(), attempt).await?;
+
+        match session.submit_code(&code).await? {
+            CodeOutcome::Token(token) => return Ok(token),
+            CodeOutcome::Rejected(status) => {
+                last_status = Some(status);
+                let left = CODE_ATTEMPTS - attempt;
+                if left > 0 {
+                    log::warn!("[-] that code was not accepted; {left} attempt(s) left");
+                }
             }
-            Err(error) => return Err(error),
-        }
-        let left = CODE_ATTEMPTS - attempt;
-        if left > 0 {
-            log::warn!("[-] that code was not accepted; {left} attempt(s) left");
         }
     }
-    Err(AetherError::Api("the login code was not accepted".into()))
+
+    Err(AetherError::Api(format!(
+        "the login code was not accepted after {CODE_ATTEMPTS} attempts (last status {}); \
+         request a fresh code and try again",
+        last_status
+            .map(|status| status.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    )))
+}
+
+pub const CODE_PROMPT_MARKER: &str = "[zerotrust] login-code-needed";
+
+pub fn code_prompt_line(email: &str, attempt: u32) -> String {
+    format!("{CODE_PROMPT_MARKER} attempt={attempt} email={email}")
 }
 
 async fn prompt_login_code(email: &str, attempt: u32) -> Result<String> {
     use std::io::IsTerminal;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    if !std::io::stdin().is_terminal() {
-        return Err(AetherError::Api(format!(
-            "a login code was emailed to {email}, but there is no terminal to read it from; \
-             re-run interactively or set AETHER_ACCESS_TOKEN instead"
-        )));
-    }
+    let interactive = std::io::stdin().is_terminal();
 
-    let banner = if attempt == 1 {
-        format!("\nA login code was emailed to {email}.\nEnter the code: ")
-    } else {
-        format!("\nThat code was not accepted. Enter the code emailed to {email} again: ")
+    let banner = match (interactive, attempt) {
+        (true, 1) => format!("\nA login code was emailed to {email}.\nEnter the code: "),
+        (true, _) => {
+            format!("\nThat code was not accepted. Enter the code emailed to {email} again: ")
+        }
+        (false, _) => format!("{}\n", code_prompt_line(email, attempt)),
     };
 
     let mut stdout = tokio::io::stdout();
     let _ = stdout.write_all(banner.as_bytes()).await;
     let _ = stdout.flush().await;
 
+    if !interactive {
+        log::info!("[*] waiting for the login code emailed to {email}");
+    }
+
     let mut line = String::new();
     let mut reader = BufReader::new(tokio::io::stdin());
-    match reader.read_line(&mut line).await {
-        Ok(0) | Err(_) => Err(AetherError::Api("no login code was entered".into())),
+    let read = reader.read_line(&mut line);
+
+    let outcome = match interactive {
+        true => read.await.map_err(|_| ()),
+        false => match tokio::time::timeout(CODE_WAIT, read).await {
+            Ok(result) => result.map_err(|_| ()),
+            Err(_) => {
+                return Err(AetherError::Api(format!(
+                    "no login code arrived within {}s; request a fresh code and try again",
+                    CODE_WAIT.as_secs()
+                )))
+            }
+        },
+    };
+
+    match outcome {
+        Ok(0) | Err(()) => Err(AetherError::Api(match interactive {
+            true => "no login code was entered".to_string(),
+            false => format!(
+                "a login code was emailed to {email} but nothing was sent back to answer it"
+            ),
+        })),
         Ok(_) => {
             let code = line.trim().to_string();
             if code.is_empty() {
@@ -825,6 +947,18 @@ mod tests {
         };
         let second = resolve_token(&bare).await.expect("cached");
         assert_eq!(second, token);
+    }
+
+    #[test]
+    fn the_code_prompt_line_carries_the_attempt_and_the_address() {
+        let line = code_prompt_line("me@example.com", 1);
+        assert!(line.starts_with(CODE_PROMPT_MARKER));
+        assert!(line.contains("attempt=1"));
+        assert!(line.contains("email=me@example.com"));
+        assert!(!line.contains('\n'));
+
+        let retry = code_prompt_line("me@example.com", 3);
+        assert!(retry.contains("attempt=3"));
     }
 
     #[test]

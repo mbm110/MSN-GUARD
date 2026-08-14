@@ -8,6 +8,40 @@ Aether is a tunnel. Its job is to open an encrypted path out of a restricted net
 
 The proxy's default address is `127.0.0.1:1819`.
 
+## Running it: prompts, flags, or environment variables
+
+Aether can be driven three ways, and you can mix them:
+
+1. **Interactive prompts** — just run the binary with no arguments and answer the questions.
+2. **Command-line flags** — a short, memorable syntax for the common choices.
+3. **Environment variables** — for scripts, services, and full control (every flag maps to one).
+
+The flag syntax looks like this:
+
+```
+./aether --bind 127.0.0.1:1819 -4 --masque --turbo --noize firewall
+./aether --wg --scan balanced --keepalive 25
+./aether --gool --wg-peer 162.159.192.1:2408 --dual
+```
+
+Run `./aether --help` to see the full list. The most common ones:
+
+```
+--bind <addr>            local SOCKS5 listen address (default 127.0.0.1:1819)
+-4 / -6 / --dual          scan IPv4 only / IPv6 only / both
+--peer <ip:port>          force a peer and skip scanning
+--masque / --wg / --gool  choose the transport
+--scan <mode>             turbo | balanced | thorough | stealth | ironclad
+--turbo/--balanced/--thorough/--stealth/--ironclad  shortcuts for --scan
+--noize <profile>         obfuscation profile
+--h2, --http2             use HTTP/2 instead of HTTP/3 for MASQUE
+--fragment                fragment the TLS ClientHello (HTTP/2 only)
+--quick-reconnect         skip the prompt, always reuse the last working gateway
+--no-quick-reconnect      skip the prompt, always scan fresh
+```
+
+Any flag you don't pass falls back to its environment variable, and any environment variable you don't set falls back to the interactive prompt (or a sane default). Setting a flag or variable is what suppresses the corresponding prompt.
+
 ## Three transports, three different logics
 
 When you run Aether, the first thing it asks is which protocol to use. You have three choices:
@@ -28,12 +62,13 @@ Here one WireGuard session is wrapped inside another WireGuard session. That mea
 
 Aether does not nail any address inside itself. The reason is simple: every network and every operator is different, and an address that works on one network today may not respond at all on another. So instead of guessing, it runs a scan: it tries a set of different addresses and ports, measures the real response and the response time (ping), and picks the best one it finds.
 
-At startup it asks how serious the scan should be. You have four modes:
+At startup it asks how serious the scan should be. You have five modes:
 
 - **turbo** — fast, satisfied with the first answer it catches. For when you just want to connect quickly.
 - **balanced** — the default, balanced mode. Good for most situations.
 - **thorough** — deep, looks for the best ping. Slower but a higher-quality result.
 - **stealth** — calm and patient. Scans slowly to make less noise on the network.
+- **ironclad** — the slowest but the most certain. All other modes decide a candidate is good based on a handshake and a small data-plane probe. Ironclad goes further: it first gathers a shortlist of handshake-verified candidates the same way balanced does, then for each one it opens a full, real tunnel, sends a genuine HTTP request through it, and waits for a real response — the same kind of check tools like v2ray/xray use to confirm a proxy actually works end to end, not just that it answers a probe. The candidate with the fastest real round trip wins. Use this when you've been burned by a gateway that looked fine during scanning but didn't pass real traffic once connected.
 
 It also asks whether to look on IPv4 addresses, IPv6, or both. If your network has no IPv6, stay on IPv4.
 
@@ -87,19 +122,63 @@ The rule of thumb is simple:
 - **Try h3 first** (the default). If it connected and was stable, you are done.
 - **If the network blocks or throttles UDP or QUIC** — meaning h3 does not connect at all or keeps dropping — switch to h2. Some networks deliberately throttle UDP so QUIC does not work; in that case h2, which runs on TCP, slips through the restriction.
 
-To turn on h2, all you need is to set the following variable before running:
+To turn on h2, all you need is to set the following variable before running (or pass `--h2`):
 
 ```
 AETHER_MASQUE_HTTP2=1 ./target/release/aether
+./target/release/aether --h2
 ```
 
 The values `1`, `true`, `h2`, `yes`, and `on` all turn on h2. If you do not set this, it is always h3.
+
+### Fragmenting the ClientHello (h2 only)
+
+On some networks, DPI blocks the connection the moment it sees a complete, single TLS ClientHello record with a recognizable SNI. When you run MASQUE over h2, Aether can split that first TLS flight into several small chunks and send them with a short random delay in between, so no single packet on the wire contains the whole handshake or the SNI in one piece. This is the same idea used elsewhere as "TLS ClientHello fragmentation" — this is only available for h2 because it needs a TCP stream to fragment; h3 runs over QUIC/UDP where the concept does not apply the same way.
+
+It is off by default because it adds a small delay to every reconnect. Turn it on with:
+
+```
+AETHER_MASQUE_H2_FRAGMENT=1 ./target/release/aether --h2
+./target/release/aether --h2 --fragment
+```
+
+You can tune the chunk size and delay:
+
+```
+AETHER_MASQUE_H2_FRAGMENT_SIZE=8-24 AETHER_MASQUE_H2_FRAGMENT_DELAY=5-15 ./target/release/aether --h2 --fragment
+./target/release/aether --h2 --fragment --fragment-size 8-24 --fragment-delay 5-15
+```
+
+Both accept either a single number or an `a-b` range in bytes (for size) or milliseconds (for delay). If your network is aggressively blocking h2's TLS handshake specifically, try this before giving up on h2 entirely.
+
+### Why a gateway is only accepted after real data flows
+
+Both scanning and the live tunnel used to trust a MASQUE gateway as soon as the CONNECT-IP request came back with `:status 200`. On some networks that is not enough: the handshake and the control response go through, but the DPI system silently drops any data sent afterwards. The result looked like a working connection that never actually passed traffic.
+
+Aether now pushes a small end-to-end probe packet through the tunnel and waits for a real reply before it trusts a gateway or opens the local SOCKS5 port. This applies to the scan (so a "no clean endpoint" result now genuinely means no candidate could pass data, not just that no candidate answered) and to the live tunnel (SOCKS5 stays closed until the very first connection has proven it can carry real traffic, instead of opening immediately after the handshake). If you need the old, faster-but-less-certain behavior, set `AETHER_MASQUE_NO_DATA_CHECK=1` or pass `--no-data-check`.
 
 ## Staying connected and automatic reconnection
 
 A tunnel can appear to be open while in practice it is dead; that is, the proxy is still open but no data is being exchanged. This happened mostly on gool, when the outer layer was cut by the network but the proxy did not know.
 
-Aether has a watchdog that watches the flow of data. If it sees that you are sending but for a long time (default 20 seconds) nothing comes back, it concludes that the path is dead; it tears it down and automatically reconnects to a freshly scanned endpoint. When you have no traffic (idle), it does not reconnect pointlessly.
+If a MASQUE or WireGuard tunnel drops or fails its data-plane validation, Aether now reconnects on its own: it waits a short delay (default 2 seconds, `AETHER_MASQUE_RECONNECT_SECS` / `AETHER_WG_RECONNECT_SECS`) and retries, instead of exiting. On reconnect it first re-verifies the last gateway that was actually working — only if that gateway no longer responds does it fall back to a fresh full scan, so a dropped connection does not always mean sitting through another complete scan (especially noticeable in `ironclad` mode, which is slow by design).
+
+## Reconnecting quickly with your last known-good gateway
+
+Scanning takes time, and if you connect from the same network often, rescanning every single time is wasted effort. Aether remembers the last gateway that actually worked (saved next to your identity config, in a small `*-lastconn.toml` file — never committed to git, see `.gitignore`).
+
+The next time you start Aether, if a saved gateway exists, it asks:
+
+```
+Last working gateway: 162.159.198.1:443 (profile 'firewall')
+Reconnect to it now without rescanning? [Y/n]:
+```
+
+- Answer yes (or just press Enter) and Aether re-verifies that specific gateway is still alive — a single quick check, not a full scan — and connects immediately if it passes.
+- Answer no and Aether ignores the cache and goes through the normal scan exactly as before.
+- If the cached gateway no longer works, Aether says so and falls back to a full scan automatically, so you are never stuck on a dead cached endpoint.
+
+To skip the prompt entirely (useful for services and scripts), set `AETHER_QUICK_RECONNECT=1` (or pass `--quick-reconnect`) to always try the cache first, or `AETHER_QUICK_RECONNECT=0` (or `--no-quick-reconnect`) to always scan fresh.
 
 ## Full table of environment variables
 
@@ -110,27 +189,39 @@ Every prompt has a variable equivalent. If you set a variable beforehand, Aether
 - `AETHER_PROTOCOL` — protocol: `masque`, `wg`, or `gool`.
 - `AETHER_SOCKS` — the proxy listen address. Default `127.0.0.1:1819`.
 - `AETHER_NOIZE` — obfuscation profile (explained above).
-- `AETHER_SCAN` — scan mode: `turbo`, `balanced`, `thorough`, `stealth`.
+- `AETHER_SCAN` — scan mode: `turbo`, `balanced`, `thorough`, `stealth`, `ironclad`.
 - `AETHER_IP` — IP version for scanning: IPv4, IPv6, or both.
 
 ### Specific to MASQUE
 
-- `AETHER_MASQUE_HTTP2` — if it is `1`/`true`/`h2`/`yes`/`on`, it uses h2. Otherwise h3.
-- `AETHER_MASQUE_H2_PEER` — manual override of the destination address for h2 mode.
+- `AETHER_MASQUE_HTTP2` (`--h2`, `--http2`) — if it is `1`/`true`/`h2`/`yes`/`on`, it uses h2. Otherwise h3.
+- `AETHER_MASQUE_H2_PEER` (`--h2-peer`) — manual override of the destination address for h2 mode.
+- `AETHER_MASQUE_H2_FRAGMENT` (`--fragment`) — fragment the TLS ClientHello on h2. Off by default.
+- `AETHER_MASQUE_H2_FRAGMENT_SIZE` (`--fragment-size`) — fragment chunk size in bytes, `n` or `a-b`. Default `16-32`.
+- `AETHER_MASQUE_H2_FRAGMENT_DELAY` (`--fragment-delay`) — delay between fragments in ms, `n` or `a-b`. Default `2-10`.
+- `AETHER_MASQUE_NO_DATA_CHECK` (`--no-data-check`) — if set, a `:status 200` alone is enough; the end-to-end data-plane probe is skipped.
+- `AETHER_MASQUE_VALIDATE_SECS` (`--validate-secs`) — seconds to wait for the data-plane probe to succeed before giving up on a gateway. Default `10`.
+- `AETHER_MASQUE_STARTUP_SECS` (`--startup-secs`) — total deadline for TCP/QUIC, TLS, CONNECT-IP, and initial data-plane validation. Default `30`.
+- `AETHER_MASQUE_RECONNECT_SECS` (`--reconnect-secs`) — delay before automatically reconnecting after the MASQUE tunnel drops or fails validation. Default `2`.
+- `AETHER_WG_RECONNECT_SECS` — delay before automatically reconnecting after the WireGuard tunnel drops. Default `2`.
 
 ### Specific to WireGuard and gool
 
-- `AETHER_WG_KEEPALIVE` — the keepalive packet interval in seconds. Default `5`.
-- `AETHER_WG_STALL` — the threshold for detecting a stall and reconnecting, in seconds. Default `20`.
-- `AETHER_NO_WATCHDOG` — if set, the watchdog and automatic reconnection are turned off.
-- `AETHER_WG_NO_DATA_CHECK` — if set, real data passage is not verified during the scan (faster but less reliable).
-- `AETHER_WG_NO_PROFILE_RETRY` — if set, on a failed scan it does not retry with other noise profiles.
+- `AETHER_WG_KEEPALIVE` (`--keepalive`) — the keepalive packet interval in seconds. Default `5`.
+- `AETHER_WG_NO_DATA_CHECK` (`--no-data-check`) — if set, real data passage is not verified during the scan (faster but less reliable).
+- `AETHER_WG_NO_PROFILE_RETRY` (`--no-profile-retry`) — if set, on a failed scan it does not retry with other noise profiles.
+
+### Quick reconnect
+
+- `AETHER_QUICK_RECONNECT` (`--quick-reconnect` / `--no-quick-reconnect`) — set to `1` to always reuse the last known-good gateway without asking, or `0` to always scan fresh without asking. Unset means Aether asks you at startup if a cached gateway exists.
 
 ### Forcing the endpoint and the config path
 
-- `AETHER_PEER` or `AETHER_WG_PEER` — if you want to give a fixed address yourself and bypass the scan.
-- `AETHER_CONFIG` — the path of the base config file. Default `aether.toml`.
-- `AETHER_WG_CONFIG` and `AETHER_MASQUE_CONFIG` — the config path specific to each protocol.
+- `AETHER_PEER` or `AETHER_WG_PEER` (`--peer`, `--wg-peer`) — if you want to give a fixed address yourself and bypass the scan.
+- `AETHER_CONFIG` (`--config`) — the path of the base config file. Default `aether.toml`.
+- `AETHER_WG_CONFIG` and `AETHER_MASQUE_CONFIG` (`--wg-config`, `--masque-config`) — the config path specific to each protocol.
+- `AETHER_WG_ENDPOINT_COOLDOWN_SECS` — how long an endpoint that fails twice is excluded from rescans. Default `300`.
+- `AETHER_TLS_GROUPS` (`--tls-groups`) — override the TLS key-share groups advertised in the handshake. Default mimics Chrome (`P-256:X25519:P-384`).
 
 ## Practical examples
 
@@ -160,6 +251,41 @@ AETHER_PROTOCOL=wg AETHER_NOIZE=aggressive AETHER_SCAN=thorough ./target/release
 AETHER_PROTOCOL=gool AETHER_SOCKS=127.0.0.1:1080 ./target/release/aether
 ```
 
+### MASQUE on h2 with ClientHello fragmentation, for a network that blocks the h2 handshake specifically
+
+```
+./target/release/aether --masque --h2 --fragment --noize firewall
+```
+
+### Always reconnect fast without being asked (service / script use)
+
+```
+AETHER_QUICK_RECONNECT=1 ./target/release/aether --masque
+```
+
+### Running with Docker
+
+You can run the official Aether Docker image directly from the GitHub Container Registry (GHCR), which provides an isolated environment without needing to install Rust or C++ compilers.
+
+> **The SOCKS5 proxy has no authentication.** The commands below publish the port to `127.0.0.1` only. Writing `-p 1819:1819` instead would listen on every interface of the host and let anyone on the network use your tunnel as an open relay.
+
+The `-v aether-data:/data` volume keeps the WARP identity across restarts. Skip it and every run registers a fresh device, which is what eventually gets your address rate limited by Cloudflare.
+
+```bash
+docker run -it -p 127.0.0.1:1819:1819 -v aether-data:/data \
+  -e AETHER_PROTOCOL=masque \
+  -e AETHER_SCAN=balanced \
+  ghcr.io/cluvexstudio/aether:latest
+```
+*(The `-it` flag is necessary for interactive prompts if you do not provide the environment variables beforehand.)*
+
+If you prefer to build the image locally:
+
+```bash
+docker build -t aether .
+docker run -it -p 127.0.0.1:1819:1819 -v aether-data:/data aether
+```
+
 ## Testing whether it works
 
 As soon as it says the proxy is listening, run this:
@@ -172,11 +298,13 @@ If you got an answer and saw something like `warp=on` or connection details insi
 
 ## When something does not work
 
-- **It does not connect at all:** first change the protocol. If MASQUE did not work on h3, turn on h2. If it still did not work, try WireGuard or gool.
+- **It does not connect at all:** first change the protocol. If MASQUE did not work on h3, turn on h2. If h2's handshake itself gets blocked, try `--fragment`. If nothing on MASQUE works, try WireGuard or gool.
+- **The scan finds a gateway but the tunnel never passes traffic ("connects" but nothing loads):** this is exactly what the data-plane validation now catches — a gateway that answers the handshake but silently drops data. Aether will reject that gateway and keep scanning automatically. If it happens constantly and you'd rather connect anyway, you can disable the check with `--no-data-check`, but expect the same silent-drop behavior you had before.
 - **It connects but keeps dropping:** take the noise profile one step heavier.
 - **The scan takes too long:** set the scan mode to turbo.
 - **It is slow:** if you are on gool, come to single-layer WireGuard; and if you are on h2 and your network leaves UDP open, try h3.
+- **You keep waiting through a full scan every time you reconnect on the same network:** say yes to the "reconnect to last working gateway" prompt, or set `AETHER_QUICK_RECONNECT=1` permanently.
 
 ## Summary
 
-If you want it in one sentence: start from MASQUE with the default profile, if UDP is blocked turn on h2, and if it is still strict, make the noise profile heavier or move to WireGuard and gool. Aether takes care of the rest.
+If you want it in one sentence: start from MASQUE with the default profile, if UDP is blocked turn on h2 (and fragment the ClientHello if h2 itself gets blocked), and if it is still strict, make the noise profile heavier or move to WireGuard and gool. Aether takes care of the rest — including refusing gateways that don't actually pass data, and reconnecting on its own if the tunnel drops.

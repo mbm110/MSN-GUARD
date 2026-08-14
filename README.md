@@ -9,13 +9,13 @@
 </p>
 
 <p align="center">
-  <a href="https://git.diastom.xyz/ZethRise/Aethery/releases"><img src="https://img.shields.io/badge/releases-Gitea-74c69d?style=for-the-badge" alt="Releases"></a>
-  <a href="https://git.diastom.xyz/ZethRise/Aethery/actions"><img src="https://img.shields.io/badge/CI-Gitea%20Actions-74c69d?style=for-the-badge" alt="Android build"></a>
+  <a href="https://github.com/ZethRise/Aethery/stargazers"><img src="https://img.shields.io/github/stars/ZethRise/Aethery?style=for-the-badge&logo=github" alt="GitHub stars"></a>
+  <a href="https://github.com/ZethRise/Aethery/releases/latest"><img src="https://img.shields.io/github/downloads/ZethRise/Aethery/latest/total?style=for-the-badge" alt="Latest release downloads"></a>
+  <a href="https://github.com/CluvexStudio/Aether"><img src="https://img.shields.io/badge/core-v1.6.0-101411?style=for-the-badge" alt="Aether core v1.6.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-6c5ce7?style=for-the-badge" alt="AGPL-3.0"></a>
-  <a href="https://github.com/CluvexStudio/Aether"><img src="https://img.shields.io/badge/core-Aether-101411?style=for-the-badge" alt="Aether core"></a>
 </p>
 
-> **v0.6.0** — Aethery is an Android app around the [Aether core](https://github.com/CluvexStudio/Aether). It is not a replacement or fork of Aether's networking engine.
+> **v0.8.0** — Aethery is an Android app around the [Aether core](https://github.com/CluvexStudio/Aether). It is not a replacement or fork of Aether's networking engine.
 
 ## What Aethery does
 
@@ -41,9 +41,9 @@ Android UI + Android VPN/TUN
 - **WireGuard** for networks where it is reachable.
 - **WARP-on-WARP** (`gool`) support through the Aether core.
 - Automatic endpoint scanning with IP-level diagnostics, cached-gateway reconnect, and Ironclad verification.
-- Aether v1.5.0 Zero Trust enrolment through email OTP, service tokens, or an Access JWT.
-- Custom DNS plus destination block/direct rules in Proxy mode and optional Zero Trust gateway filtering.
-- Retained Aether v1.5.0 Android FFI core builds into `libaether.so`; it is excluded from repository language statistics.
+- Aether v1.6.0 Zero Trust enrolment through email OTP, service tokens, or an Access JWT.
+- Custom DNS plus destination block/direct rules in Proxy mode and optional Zero Trust gateway filtering in VPN and Proxy modes.
+- Retained Aether v1.6.0 Android FFI core builds into `libaether.so`; it is excluded from repository language statistics.
 - App-level default protocol setting and direct links to releases/source.
 
 ## Protocol notes
@@ -109,10 +109,10 @@ app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
 
 The [Android release workflow](.gitea/workflows/android-release.yml) runs manually and builds signed release APKs for `arm64-v8a` and `armeabi-v7a`. It uploads direct `.apk` files to a **draft** Gitea Release. See the [release guide](docs/release.md).
 
-To prepare v0.5.0:
+To prepare v0.8.0:
 
 ```text
-Open Gitea Actions, select Build Android APKs, choose Run workflow, and enter v0.5.0 as the release tag.
+Open Gitea Actions, select Build Android APKs, choose Run workflow, and enter v0.8.0 as the release tag.
 ```
 
 Review the draft assets and release note in Gitea, then publish the release when ready.
