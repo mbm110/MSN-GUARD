@@ -38,5 +38,9 @@ Thumbs.db
 key.properties
 *.jks
 *.keystore
-.zethcode/
+*zethcode/
 .mimocode/
+# Signing secrets (release keystore passwords)
+keystore.jks
+keystore.env
+*.env

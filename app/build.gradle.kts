@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -53,16 +55,28 @@ android {
     }
 
     if (releaseKeystore != null) {
+        val envProps = Properties().apply {
+            val envFile = rootProject.file("keystore.env")
+            if (envFile.exists()) {
+                envFile.inputStream().use { load(it) }
+            }
+        }
         signingConfigs {
             create("release") {
-                storeFile = file(releaseKeystore)
+                storeFile = rootProject.file(releaseKeystore)
                 storePassword = System.getenv("AETHERY_KEYSTORE_PASSWORD")
+                    ?: envProps.getProperty("storePassword")
                 keyAlias = System.getenv("AETHERY_KEY_ALIAS")
+                    ?: envProps.getProperty("keyAlias")
                 keyPassword = System.getenv("AETHERY_KEY_PASSWORD")
+                    ?: envProps.getProperty("keyPassword")
             }
         }
         buildTypes.named("release") {
             signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = false
+            isShrinkResources = false
+            isDebuggable = false
         }
     }
 }
