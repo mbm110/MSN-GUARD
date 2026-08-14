@@ -13,6 +13,9 @@ package studio.cluvex.aethery
  * "should the UI look connected". Ask NativeCore directly only when the question
  * is specifically about the Rust core (e.g. routing an HTTP check through its
  * local SOCKS listener in proxy mode).
+ *
+ * The app is single-process (no android:process in the manifest), so the service
+ * and the activity see the same statics here.
  */
 object TunnelStatus {
 
@@ -22,4 +25,21 @@ object TunnelStatus {
     /** True when the whole device is being routed through tun2socks. */
     val isWholeDeviceRouting: Boolean
         get() = Tun2SocksManager.isRunning
+
+    /**
+     * True while the Rust core is driving an Android TUN directly.
+     *
+     * This is the WireGuard / MASQUE VPN-mode data path: `aether_start_json_with_tun`
+     * takes the `Some(fd)` branch in main.rs and spawns `tun::bridge`, so
+     * `socks::serve` — which lives in the `else` arm — never runs and **no local
+     * SOCKS listener exists**.
+     *
+     * Anything that wants to send a request "through the tunnel" must go direct
+     * in this mode. Dialling 127.0.0.1:<socksPort> gets connection-refused, which
+     * is what made the health check fail and paint "Connection degraded" over a
+     * perfectly working WireGuard tunnel.
+     */
+    @Volatile
+    var isNativeTunMode: Boolean = false
+        internal set
 }

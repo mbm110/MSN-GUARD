@@ -900,24 +900,57 @@ fn masque_h2_ports(base: &[u16]) -> Vec<u16> {
     ports
 }
 
+/// How many distinct gateways may reject the device certificate before we stop
+/// dialling more of them.
+///
+/// A `4xx` on the connect-ip CONNECT is the edge saying *this client certificate
+/// is not valid for MASQUE*. That is a property of the identity, not of the peer,
+/// so once several unrelated gateways agree there is nothing left to discover by
+/// working through the rest of the list.
+const IDENTITY_REJECTED_LIMIT: u32 = 3;
+
+/// HTTP/2 fallback candidates, in dial order.
+///
+/// This used to walk `consts::CDN_ANYCAST_POOL` — 104.16-104.28 and
+/// 172.64-172.67 — which is Cloudflare's *website* CDN. Those edges complete TCP
+/// and TLS happily and then either answer the connect-ip CONNECT with `400` or
+/// accept the stream and never reply. That is exactly the `status 400` /
+/// `h2 verify timeout` mixture the Iranian field logs showed across 30
+/// consecutive peers, not one of which can ever serve MASQUE.
+///
+/// The gateways that do serve connect-ip live in `prober::MASQUE_CIDRS_V4`
+/// (162.159.192-198, 172.65.251, 188.114.96-99) and are seeded by
+/// `prober::MASQUE_SEEDS`. Dial the seeds first, then the head of each MASQUE
+/// /24 — `masque_cidrs_v4()` already moves the Zero Trust range to the front
+/// when `AETHER_TEAM` is set.
 fn h2_anycast_peers() -> Vec<SocketAddr> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for net in consts::CDN_ANYCAST_POOL {
-        let Ok(ip) = net.parse::<Ipv4Addr>() else {
-            continue;
-        };
-        let o = ip.octets();
-        for host in [
-            Ipv4Addr::new(o[0], o[1], o[2], 1),
-            Ipv4Addr::new(o[0], o[1], 192, 82),
-        ] {
-            let peer = SocketAddr::new(IpAddr::V4(host), 443);
+    let mut out: Vec<SocketAddr> = Vec::new();
+    let mut seen: HashSet<SocketAddr> = HashSet::new();
+
+    for seed in prober::MASQUE_SEEDS {
+        if let Ok(ip) = seed.parse::<Ipv4Addr>() {
+            let peer = SocketAddr::new(IpAddr::V4(ip), consts::QUIC_PORT);
             if seen.insert(peer) {
                 out.push(peer);
             }
         }
     }
+
+    for cidr in prober::masque_cidrs_v4() {
+        let network = cidr.split('/').next().unwrap_or(cidr);
+        let Ok(base) = network.parse::<Ipv4Addr>() else {
+            continue;
+        };
+        let o = base.octets();
+        for host in [1u8, 2] {
+            let ip = Ipv4Addr::new(o[0], o[1], o[2], host);
+            let peer = SocketAddr::new(IpAddr::V4(ip), consts::QUIC_PORT);
+            if seen.insert(peer) {
+                out.push(peer);
+            }
+        }
+    }
+
     out
 }
 
@@ -961,24 +994,73 @@ async fn quick_verify_masque_peer(
     Ok(())
 }
 
+/// What a single gateway attempt told us.
+///
+/// The distinction matters because the three failures in the field logs mean
+/// completely different things and only one of them is worth retrying elsewhere:
+///
+///   * `masque: h2 connect-ip status 400` — TCP and TLS succeeded and a real
+///     Cloudflare edge answered, refusing the CONNECT. The device certificate is
+///     not valid for MASQUE. Trying another gateway cannot fix that.
+///   * `other: h2 verify timeout` / `tls: ... reset by peer` — this peer does not
+///     serve connect-ip, or the path to it is blocked. Move on.
+enum PeerOutcome {
+    Accepted,
+    /// The edge answered and rejected our identity (4xx on the CONNECT).
+    IdentityRejected,
+    /// Transport-level failure: timeout, reset, TLS error.
+    Unreachable,
+}
+
 async fn try_known_masque_peer(
     identity: &account::Identity,
     peer: SocketAddr,
     source: &str,
     options: &StartOptions,
 ) -> bool {
+    matches!(
+        try_masque_peer(identity, peer, source, options).await,
+        PeerOutcome::Accepted
+    )
+}
+
+async fn try_masque_peer(
+    identity: &account::Identity,
+    peer: SocketAddr,
+    source: &str,
+    options: &StartOptions,
+) -> PeerOutcome {
     let label = masque_transport_label();
     crate::ffi::record_log(format!("Trying {source} {peer} via {label}"));
     match quick_verify_masque_peer(identity, peer, options).await {
         Ok(()) => {
             crate::ffi::record_log(format!("Accepted {peer} via {label}"));
-            true
+            PeerOutcome::Accepted
         }
         Err(error) => {
             crate::ffi::record_log(format!("Rejected {peer} via {label}: {error}"));
-            false
+            if is_identity_rejection(&error) {
+                PeerOutcome::IdentityRejected
+            } else {
+                PeerOutcome::Unreachable
+            }
         }
     }
+}
+
+/// True when the edge answered the CONNECT with a 4xx.
+///
+/// Matches the message `masque_h2::verify_h2` produces:
+/// `h2 connect-ip status <code>`.
+fn is_identity_rejection(error: &AetherError) -> bool {
+    let text = error.to_string();
+    let Some(rest) = text.split("h2 connect-ip status ").nth(1) else {
+        return false;
+    };
+    rest.split_whitespace()
+        .next()
+        .and_then(|code| code.parse::<u16>().ok())
+        .is_some_and(|code| (400..500).contains(&code))
 }
 
 async fn want_quick_reconnect(cached: &lastconn::LastConnection) -> bool {
@@ -1150,13 +1232,36 @@ async fn run_masque(
             enable_restricted_h2();
             for peer in h2_anycast_peers() {
                 if seen.insert(peer) {
-                    known.push((peer, "cdn"));
+                    known.push((peer, "masque gateway"));
                 }
             }
+            // Stop early when several unrelated edges all reject the device
+            // certificate. Previously every peer was dialled regardless, so a
+            // registration problem burned ~2 minutes of 8-second timeouts before
+            // the user saw anything — exactly the 17:12:13 → 17:14:28 stretch in
+            // the field log.
+            let mut identity_rejections = 0u32;
             for (peer, source) in &known {
-                if try_known_masque_peer(&identity, *peer, source, options).await {
-                    quick_peer = Some(*peer);
-                    break;
+                match try_masque_peer(&identity, *peer, source, options).await {
+                    PeerOutcome::Accepted => {
+                        quick_peer = Some(*peer);
+                        break;
+                    }
+                    PeerOutcome::IdentityRejected => {
+                        identity_rejections += 1;
+                        if identity_rejections >= IDENTITY_REJECTED_LIMIT {
+                            crate::ffi::record_log(format!(
+                                "{identity_rejections} gateways rejected this device certificate \
+                                 for MASQUE; the WARP registration needs refreshing"
+                            ));
+                            return Err(AetherError::Masque(
+                                "MASQUE identity rejected by every gateway that answered; \
+                                 re-register the WARP device"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    PeerOutcome::Unreachable => {}
                 }
             }
         }
@@ -2541,9 +2646,51 @@ mod tests {
     }
 
     #[test]
-    fn http2_anycast_peers_cover_the_assigned_cdn_range() {
+    fn http2_anycast_peers_only_target_real_masque_gateways() {
         let peers = h2_anycast_peers();
-        assert!(peers.contains(&"104.16.0.1:443".parse().unwrap()));
-        assert!(peers.contains(&"104.16.192.82:443".parse().unwrap()));
+
+        // Seeds come first so the fastest known gateway is dialled before any
+        // /24 head.
+        assert_eq!(peers.first(), Some(&"162.159.196.1:443".parse().unwrap()));
+
+        // Every /24 in the MASQUE list contributes its .1 and .2.
+        assert!(peers.contains(&"162.159.192.1:443".parse().unwrap()));
+        assert!(peers.contains(&"188.114.96.2:443".parse().unwrap()));
+        assert!(peers.contains(&"172.65.251.1:443".parse().unwrap()));
+
+        // The website CDN ranges must never be dialled for connect-ip: those
+        // edges answer 400 or hang, which is what wasted two minutes per attempt
+        // in the field logs.
+        for peer in &peers {
+            let text = peer.to_string();
+            assert!(
+                !text.starts_with("104."),
+                "website CDN peer {text} must not be a MASQUE candidate"
+            );
+            assert!(
+                !text.starts_with("172.64.") && !text.starts_with("172.66.") && !text.starts_with("172.67."),
+                "website CDN peer {text} must not be a MASQUE candidate"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_rejection_is_distinguished_from_transport_failure() {
+        assert!(is_identity_rejection(&AetherError::Masque(
+            "h2 connect-ip status 400".to_string()
+        )));
+        assert!(is_identity_rejection(&AetherError::Masque(
+            "h2 connect-ip status 403".to_string()
+        )));
+        // 5xx is the edge failing, not our certificate.
+        assert!(!is_identity_rejection(&AetherError::Masque(
+            "h2 connect-ip status 502".to_string()
+        )));
+        assert!(!is_identity_rejection(&AetherError::Other(
+            "h2 verify timeout".to_string()
+        )));
+        assert!(!is_identity_rejection(&AetherError::Tls(
+            "h2 tls handshake: Connection reset by peer".to_string()
+        )));
     }
 }

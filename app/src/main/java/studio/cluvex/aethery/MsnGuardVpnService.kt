@@ -854,9 +854,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         // applySplitTunneling() handles app exclusion per mode.
                         .establish() ?: error("Android could not establish the VPN interface")
                     ConnectionLog.record("Scanning gateways for VPN")
+                    // The Rust core is about to bind this TUN fd directly, which
+                    // means no local SOCKS listener will exist for this session.
+                    // The UI health check must go direct, not via 127.0.0.1.
+                    TunnelStatus.isNativeTunMode = true
                     NativeCore.start(config, tun!!.fd)
                 } else {
                     ConnectionLog.record("Starting local SOCKS5 proxy")
+                    TunnelStatus.isNativeTunMode = false
                     NativeCore.startProxy(config)
                 }
 
@@ -877,6 +882,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             } finally {
                 NativeCore.detach()
                 vpnModeActive.set(false)
+                TunnelStatus.isNativeTunMode = false
                 val killSwitch = getSharedPreferences("settings", MODE_PRIVATE).getBoolean("kill_switch", false)
                 tun?.close()
                 tun = null
@@ -905,6 +911,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         Tun2SocksManager.stop()
         stopPsiphonTunnel()
         NativeCore.stop()
+        TunnelStatus.isNativeTunMode = false
 
         if (psiphonVpnMode) {
             // In VPN mode nothing else owns the service lifecycle now that the

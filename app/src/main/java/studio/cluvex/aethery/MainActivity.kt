@@ -384,21 +384,9 @@ class MainActivity : Activity() {
         val request = ++latencyRequest
         latencyGraph.setLabel("Pinging\u2026")
         Thread {
-            val result = runCatching {
-                val startedAt = System.nanoTime()
-                val connection = openTunnelConnection(PING_URL)
-                try {
-                    connection.connectTimeout = PING_TIMEOUT_MS
-                    connection.readTimeout = PING_TIMEOUT_MS
-                    connection.requestMethod = "GET"
-                    connection.instanceFollowRedirects = false
-                    check(connection.responseCode in 200..399) { "HTTP ${connection.responseCode}" }
-                    val ms = (System.nanoTime() - startedAt) / 1_000_000
-                    "${ms} ms" to ms.toFloat()
-                } finally {
-                    connection.disconnect()
-                }
-            }.getOrElse { "Ping unavailable" to null }
+            // Try each endpoint until one answers. A single unreachable probe URL
+            // must not be reported as a degraded tunnel.
+            val result: Pair<String, Float?> = pingAnyEndpoint() ?: ("Ping unavailable" to null)
             runOnUiThread {
                 pingInFlight = false
                 if (request == latencyRequest && isTunnelActive()) {
@@ -411,6 +399,34 @@ class MainActivity : Activity() {
                 }
             }
         }.start()
+    }
+
+    /**
+     * Probe every health-check endpoint in turn, returning the first success.
+     *
+     * Returns null only when all of them failed, which is the one case that
+     * genuinely warrants the degraded state.
+     */
+    private fun pingAnyEndpoint(): Pair<String, Float>? {
+        for (url in PING_URLS) {
+            val attempt = runCatching {
+                val startedAt = System.nanoTime()
+                val connection = openTunnelConnection(url)
+                try {
+                    connection.connectTimeout = PING_TIMEOUT_MS
+                    connection.readTimeout = PING_TIMEOUT_MS
+                    connection.requestMethod = "GET"
+                    connection.instanceFollowRedirects = false
+                    check(connection.responseCode in 200..399) { "HTTP ${connection.responseCode}" }
+                    val ms = (System.nanoTime() - startedAt) / 1_000_000
+                    "${ms} ms" to ms.toFloat()
+                } finally {
+                    connection.disconnect()
+                }
+            }
+            attempt.getOrNull()?.let { return it }
+        }
+        return null
     }
 
     private fun createHeader(): LinearLayout = LinearLayout(this).apply {
@@ -628,10 +644,31 @@ class MainActivity : Activity() {
         // tunnel exit. Routing through the local SOCKS port whenever any tunnel is
         // active is what makes the header IP and flag correct.
         //
-        // Upstream's connect/read timeouts are a genuine gain and are kept.
-        (if (TunnelStatus.isActive()) {
+        // But a local SOCKS listener only exists when something is actually
+        // listening. Psiphon VPN mode has one (port 1819, which tun2socks also
+        // dials). WireGuard and MASQUE VPN mode do NOT: the Rust core takes the
+        // `tun_fd` branch in main.rs and binds a TUN bridge instead of calling
+        // socks::serve, which only runs in the `else` (proxy) branch. Sending the
+        // health check to 127.0.0.1:1819 there gets connection-refused on every
+        // poll, pingConnection() lands in its `?: showDegraded()` arm, and the UI
+        // says "Connection degraded" while the tunnel is carrying traffic fine.
+        //
+        // So: use the proxy only when a proxy is really there. In native VPN mode
+        // go direct — the request rides the TUN like any other app's traffic, and
+        // because our process is only excluded in the Psiphon path this still
+        // measures the tunnel, not the carrier link.
+        (if (TunnelStatus.isActive() && Tun2SocksManager.isRunning) {
+            // tun2socks is up, which only happens in Psiphon VPN mode, and it
+            // implies a live SOCKS listener on this port.
+            URL(url).openConnection(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort())))
+        } else if (TunnelStatus.isActive() && !TunnelStatus.isNativeTunMode) {
+            // Rust core running as a local proxy: no TUN, so the only way to
+            // reach the tunnel is its SOCKS port.
             URL(url).openConnection(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort())))
         } else {
+            // Either nothing is running, or the Rust core is in TUN mode where
+            // there is no SOCKS listener and the system route already points at
+            // the tunnel.
             URL(url).openConnection()
         } as HttpURLConnection).apply {
             connectTimeout = IP_TIMEOUT_MS
@@ -3343,8 +3380,20 @@ class MainActivity : Activity() {
         const val STATUS_POLL_MS = 2_000L
         const val PAGE_ANIMATION_MS = 220L
         const val LOG_CLOSE_ANIMATION_MS = 160L
-        const val PING_URL = "https://www.google.com/generate_204"
         const val PING_TIMEOUT_MS = 5_000
+        /**
+         * Health-check endpoints, tried in order until one answers.
+         *
+         * Google stays first — it is reachable from Iran and returns an empty
+         * 204, which is the cheapest possible probe. The rest exist so a single
+         * endpoint having a bad day cannot paint "Connection degraded" over a
+         * working tunnel.
+         */
+        val PING_URLS = arrayOf(
+            "https://www.google.com/generate_204",
+            "https://cp.cloudflare.com/generate_204",
+            "https://www.gstatic.com/generate_204",
+        )
         val IP_INFO_URLS = arrayOf(
             "https://www.cloudflare.com/cdn-cgi/trace",
             "https://one.one.one.one/cdn-cgi/trace",
