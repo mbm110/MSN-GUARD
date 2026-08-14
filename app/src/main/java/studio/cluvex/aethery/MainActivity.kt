@@ -633,7 +633,7 @@ class MainActivity : Activity() {
         return country.uppercase().map { char -> String(Character.toChars(0x1F1E6 + char.code - 'A'.code)) }.joinToString("")
     }
 
-    private fun openTunnelConnection(url: String): HttpURLConnection =
+    private fun openTunnelConnection(url: String): HttpURLConnection {
         // OURS, deliberately kept over upstream's
         // `connectionType() == PROXY && NativeCore.isRunning()`.
         //
@@ -657,23 +657,24 @@ class MainActivity : Activity() {
         // go direct — the request rides the TUN like any other app's traffic, and
         // because our process is only excluded in the Psiphon path this still
         // measures the tunnel, not the carrier link.
-        (if (TunnelStatus.isActive() && Tun2SocksManager.isRunning) {
+        val useSocksProxy = TunnelStatus.isActive() &&
             // tun2socks is up, which only happens in Psiphon VPN mode, and it
-            // implies a live SOCKS listener on this port.
-            URL(url).openConnection(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort())))
-        } else if (TunnelStatus.isActive() && !TunnelStatus.isNativeTunMode) {
-            // Rust core running as a local proxy: no TUN, so the only way to
-            // reach the tunnel is its SOCKS port.
-            URL(url).openConnection(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort())))
+            // implies a live SOCKS listener on this port. Otherwise the Rust core
+            // is running: it only has a SOCKS listener in proxy mode, never when
+            // it is driving a TUN directly.
+            (Tun2SocksManager.isRunning || !TunnelStatus.isNativeTunMode)
+
+        val target = URL(url)
+        val connection = if (useSocksProxy) {
+            target.openConnection(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort())))
         } else {
-            // Either nothing is running, or the Rust core is in TUN mode where
-            // there is no SOCKS listener and the system route already points at
-            // the tunnel.
-            URL(url).openConnection()
-        } as HttpURLConnection).apply {
+            target.openConnection()
+        }
+        return (connection as HttpURLConnection).apply {
             connectTimeout = IP_TIMEOUT_MS
             readTimeout = IP_TIMEOUT_MS
         }
+    }
 
     private fun updateNotificationHealth(ip: String? = null, ping: String? = null) {
         if (!TunnelStatus.isActive()) return
