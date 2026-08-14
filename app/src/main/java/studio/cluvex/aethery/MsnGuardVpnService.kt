@@ -29,6 +29,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 import ca.psiphon.PsiphonTunnel
 
 /**
+ * Protocol sets shared between a rung's config and its winner-detection.
+ *
+ * Declared top-level (not in the companion) so the ladder property initializer
+ * can reference them without depending on companion init order.
+ */
+private val PROTOCOLS_443 = listOf("TLS-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH", "FRONTED-MEEK-OSSH")
+private val PROTOCOLS_FRONTED = listOf("FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH", "FRONTED-MEEK-QUIC-OSSH")
+private val PROTOCOLS_INPROXY_BOOTSTRAP = listOf("FRONTED-MEEK-OSSH", "FRONTED-MEEK-QUIC-OSSH", "TLS-OSSH")
+
+/**
  * One rung of the Psiphon escalation ladder.
  *
  * Each rung is a complete, self-contained Psiphon config variant plus the time
@@ -41,6 +51,16 @@ private class PsiphonStrategy(
     val name: String,
     val label: String,
     val timeoutSeconds: Int,
+    /**
+     * Protocols this rung asks Psiphon to try first.
+     *
+     * This is only a *preference*: Psiphon falls back to its full protocol set
+     * once InitialLimitTunnelProtocolsCandidateCount candidates are exhausted.
+     * So the protocol that ends up carrying the tunnel is often not from this
+     * list, which is exactly why winner detection reads the live ActiveTunnel
+     * notice instead of assuming the active rung won.
+     */
+    val preferredProtocols: List<String>,
     val configure: (JSONObject) -> Unit,
 )
 
@@ -70,6 +90,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var psiphonVpnMode = false
     private var psiphonVpnActivated = false
     private var activeSocksPort = 0
+
+    // Evidence about how the tunnel was actually established, gathered from
+    // Psiphon's own notices rather than inferred from which rung was active.
+    private var activeTunnelProtocol = ""
+    private var inproxyInUse = false
 
     // --- Psiphon escalation ladder state ---
     // A hostile carrier (Hamrah-e-Aval) null-routes Psiphon's server IPs, so the
@@ -106,14 +131,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             name = "B",
             label = "443-only protocols",
             timeoutSeconds = 45,
+            preferredProtocols = PROTOCOLS_443,
         ) { config ->
             // Every one of these listens on 443 and looks like ordinary HTTPS on
             // the wire. Psiphon tries these first, then falls back to the full
             // set on its own if the initial limit yields nothing.
-            config.put(
-                "InitialLimitTunnelProtocols",
-                JSONArray(listOf("TLS-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH", "FRONTED-MEEK-OSSH")),
-            )
+            config.put("InitialLimitTunnelProtocols", JSONArray(PROTOCOLS_443))
             config.put("InitialLimitTunnelProtocolsCandidateCount", 40)
             config.put("ConnectionWorkerPoolSize", 12)
         },
@@ -121,15 +144,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             name = "A",
             label = "domain-fronted + public DNS",
             timeoutSeconds = 60,
+            preferredProtocols = PROTOCOLS_FRONTED,
         ) { config ->
             // Fronted protocols reach a CDN edge (Amazon/Cloudflare), never a
             // Psiphon-owned IP, so a carrier IP blocklist cannot touch them.
-            // They are useless without DNS, which is what setLadderDnsEscape()
-            // fixes on the TUN side for this rung.
-            config.put(
-                "InitialLimitTunnelProtocols",
-                JSONArray(listOf("FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH", "FRONTED-MEEK-QUIC-OSSH")),
-            )
+            // They need working DNS to resolve the front, which is why the TUN
+            // also lists public resolvers (see the Builder below).
+            config.put("InitialLimitTunnelProtocols", JSONArray(PROTOCOLS_FRONTED))
             config.put("InitialLimitTunnelProtocolsCandidateCount", 60)
             config.put("ConnectionWorkerPoolSize", 16)
             // Give slow CDN paths room to complete instead of being cut off as
@@ -140,6 +161,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             name = "C",
             label = "in-proxy (peer relay)",
             timeoutSeconds = 90,
+            preferredProtocols = PROTOCOLS_INPROXY_BOOTSTRAP,
         ) { config ->
             // In-proxy routes through other Psiphon users' devices over WebRTC.
             // Their IPs are residential and not in the carrier's blocklist, which
@@ -158,10 +180,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // Fronted protocols stay available: the broker specs are not shipped
             // in our server_entries.txt, so the broker list has to arrive via a
             // Tactics request, and that request needs a working egress itself.
-            config.put(
-                "InitialLimitTunnelProtocols",
-                JSONArray(listOf("FRONTED-MEEK-OSSH", "FRONTED-MEEK-QUIC-OSSH", "TLS-OSSH")),
-            )
+            config.put("InitialLimitTunnelProtocols", JSONArray(PROTOCOLS_INPROXY_BOOTSTRAP))
             config.put("ConnectionWorkerPoolSize", 16)
             config.put("NetworkLatencyMultiplier", 3.0)
         },
@@ -219,16 +238,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     override fun onConnected() {
         ConnectionLog.record("Psiphon connected — upstream tunnel ready")
-        // A rung succeeded: disarm the watchdog and remember which one worked so
-        // the next connect starts from the strategy that is known to survive this
-        // carrier instead of walking the ladder from the top again.
+        // A tunnel exists: disarm the watchdog so it cannot tear down a working
+        // connection, then work out which rung deserves the credit.
         ladderActive.set(false)
         cancelLadderTimer()
-        psiphonLadder.getOrNull(ladderIndex)?.let { winner ->
-            getSharedPreferences("settings", MODE_PRIVATE).edit()
-                .putInt("psiphon_winning_strategy", ladderIndex).apply()
-            ConnectionLog.record("Strategy ${winner.name} (${winner.label}) succeeded — saved as preferred")
-        }
+        recordLadderWinner()
         ladderAttempts = 0
 
         val port = activeSocksPort
@@ -319,6 +333,28 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     override fun onDiagnosticMessage(message: String) {
         ConnectionLog.record("Psiphon: $message")
+        // Capture the protocol that actually carried the tunnel.
+        //
+        // InitialLimitTunnelProtocols is a preference, not a constraint: once the
+        // candidate budget is spent Psiphon reverts to its full protocol set. Both
+        // reported field logs proved this — Hamrah-e-Aval ended on
+        // FRONTED-MEEK-OSSH (rung A's protocol) while rung B was active, and
+        // SamanTel ended on plain OSSH with an in-proxy broker (rung C's mechanism)
+        // while rung B was active. Attributing the win to the active rung was
+        // therefore wrong in both cases, and persisting that wrong rung meant the
+        // next connect started from a strategy that had not actually worked.
+        if (message.startsWith("ActiveTunnel:")) {
+            runCatching {
+                val protocol = JSONObject(message.substringAfter("ActiveTunnel:").trim())
+                    .optString("protocol")
+                if (protocol.isNotBlank()) activeTunnelProtocol = protocol
+            }
+        }
+        // An in-proxy broker selection is decisive evidence the peer-relay path is
+        // in play, regardless of which OSSH variant rides on top of it.
+        if (message.contains("inproxy: selected broker")) {
+            inproxyInUse = true
+        }
     }
 
     override fun getContext(): android.content.Context = this
@@ -385,6 +421,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     private fun startPsiphonTunnel(vpnMode: Boolean = true) {
         try {
+            // Clear evidence from any previous rung: attribution must reflect this
+            // attempt only, otherwise a protocol notice from a failed rung would
+            // be credited to whichever rung eventually connects.
+            activeTunnelProtocol = ""
+            inproxyInUse = false
             val tunnel = PsiphonTunnel.newPsiphonTunnel(this)
             // Always SOCKS mode — in VPN mode we bridge TUN→SOCKS ourselves.
             tunnel.setVpnMode(false)
@@ -433,6 +474,66 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private fun cancelLadderTimer() {
         ladderTimer?.cancel(false)
         ladderTimer = null
+    }
+
+    /**
+     * Persist the rung that genuinely produced the tunnel.
+     *
+     * Attribution is by *evidence*, in order of how conclusive it is:
+     *
+     *  1. An in-proxy broker was selected -> rung C, whatever protocol rode on
+     *     top. SamanTel connected with plain "OSSH" but the log also showed
+     *     "inproxy: selected broker", so protocol alone would have mislabelled it.
+     *  2. The live ActiveTunnel protocol matches exactly one rung's preferred
+     *     list -> that rung. Hamrah-e-Aval ended on FRONTED-MEEK-OSSH, which is
+     *     rung A's signature.
+     *  3. The protocol appears in several rungs' lists (FRONTED-MEEK-OSSH is in
+     *     all three) -> keep the rung that was active, since it is consistent
+     *     with the evidence and switching on ambiguity would just add churn.
+     *  4. No protocol notice arrived at all -> keep the active rung.
+     *
+     * Getting this right matters because the stored value decides where the next
+     * connect *starts*: a wrong entry costs the user a full rung timeout before
+     * the ladder stumbles onto the path that already worked on their carrier.
+     */
+    private fun recordLadderWinner() {
+        val protocol = activeTunnelProtocol
+        val inproxyRung = psiphonLadder.indexOfFirst { it.name == "C" }
+
+        val (winnerIndex, reason) = when {
+            inproxyInUse && inproxyRung >= 0 ->
+                inproxyRung to "in-proxy broker in use"
+
+            protocol.isNotBlank() -> {
+                val matches = psiphonLadder.indices.filter { i ->
+                    psiphonLadder[i].preferredProtocols.contains(protocol)
+                }
+                when {
+                    matches.size == 1 -> matches[0] to "protocol $protocol is unique to this strategy"
+                    matches.contains(ladderIndex) -> ladderIndex to "protocol $protocol consistent with active strategy"
+                    matches.isNotEmpty() -> matches[0] to "protocol $protocol best match"
+                    else -> ladderIndex to "protocol $protocol not in any preference list; keeping active strategy"
+                }
+            }
+
+            else -> ladderIndex to "no protocol notice; keeping active strategy"
+        }
+
+        val winner = psiphonLadder.getOrNull(winnerIndex) ?: return
+        getSharedPreferences("settings", MODE_PRIVATE).edit()
+            .putInt("psiphon_winning_strategy", winnerIndex).apply()
+
+        val via = if (protocol.isNotBlank()) " via $protocol" else ""
+        ConnectionLog.record(
+            "Connected$via — crediting strategy ${winner.name} (${winner.label}): $reason"
+        )
+        if (winnerIndex != ladderIndex) {
+            val active = psiphonLadder.getOrNull(ladderIndex)
+            ConnectionLog.record(
+                "Note: strategy ${active?.name ?: "?"} was active but ${winner.name} " +
+                    "carried the tunnel — next connect will start from ${winner.name}"
+            )
+        }
     }
 
     /**
