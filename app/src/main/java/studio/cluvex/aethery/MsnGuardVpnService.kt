@@ -16,13 +16,33 @@ import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.InetAddress
 import java.util.ArrayDeque
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import ca.psiphon.PsiphonTunnel
+
+/**
+ * One rung of the Psiphon escalation ladder.
+ *
+ * Each rung is a complete, self-contained Psiphon config variant plus the time
+ * we are willing to spend on it before moving to the next rung. The ladder is
+ * ordered by *expected time to first connection on a hostile carrier*, not by
+ * how clever the technique is — the cheapest thing that plausibly works goes
+ * first so the common case stays fast.
+ */
+private class PsiphonStrategy(
+    val name: String,
+    val label: String,
+    val timeoutSeconds: Int,
+    val configure: (JSONObject) -> Unit,
+)
 
 class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.HostService {
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
@@ -50,6 +70,102 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var psiphonVpnMode = false
     private var psiphonVpnActivated = false
     private var activeSocksPort = 0
+
+    // --- Psiphon escalation ladder state ---
+    // A hostile carrier (Hamrah-e-Aval) null-routes Psiphon's server IPs, so the
+    // first rung of the ladder will time out. Rather than sitting on one config
+    // for two minutes and giving up, we walk the ladder automatically: each rung
+    // gets its own budget, and a timeout promotes us to the next rung without
+    // any user interaction.
+    private val ladderScheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
+    private var ladderIndex = 0
+    private var ladderAttempts = 0
+    private var ladderTimer: ScheduledFuture<*>? = null
+    private val ladderActive = AtomicBoolean(false)
+
+    /**
+     * The escalation ladder, ordered by expected time-to-connect on a carrier
+     * that blocks Psiphon by IP.
+     *
+     * Rung 1 (B) is first because it costs nothing: same servers, same code
+     * path, just a protocol preference. 100% of TLS-OSSH entries and 60% of MEEK
+     * entries listen on 443, versus 4% of plain OSSH — so preferring them means
+     * we stop wasting the budget dialling ports 53/554 that the carrier drops.
+     *
+     * Rung 2 (A) adds the DNS escape hatch. FRONTED-MEEK needs working DNS to
+     * resolve its CDN front, and in VPN mode our own TUN was swallowing those
+     * queries. This rung re-dials with the resolver loop broken.
+     *
+     * Rung 3 (C) is in-proxy: connect through volunteer peers over WebRTC.
+     * Their IPs are residential and not in the carrier's blocklist, so this is
+     * the rung that works when every Psiphon server IP is unreachable. It is
+     * last because WebRTC negotiation is slow and needs a broker handshake.
+     */
+    private val psiphonLadder: List<PsiphonStrategy> = listOf(
+        PsiphonStrategy(
+            name = "B",
+            label = "443-only protocols",
+            timeoutSeconds = 45,
+        ) { config ->
+            // Every one of these listens on 443 and looks like ordinary HTTPS on
+            // the wire. Psiphon tries these first, then falls back to the full
+            // set on its own if the initial limit yields nothing.
+            config.put(
+                "InitialLimitTunnelProtocols",
+                JSONArray(listOf("TLS-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH", "FRONTED-MEEK-OSSH")),
+            )
+            config.put("InitialLimitTunnelProtocolsCandidateCount", 40)
+            config.put("ConnectionWorkerPoolSize", 12)
+        },
+        PsiphonStrategy(
+            name = "A",
+            label = "domain-fronted + public DNS",
+            timeoutSeconds = 60,
+        ) { config ->
+            // Fronted protocols reach a CDN edge (Amazon/Cloudflare), never a
+            // Psiphon-owned IP, so a carrier IP blocklist cannot touch them.
+            // They are useless without DNS, which is what setLadderDnsEscape()
+            // fixes on the TUN side for this rung.
+            config.put(
+                "InitialLimitTunnelProtocols",
+                JSONArray(listOf("FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH", "FRONTED-MEEK-QUIC-OSSH")),
+            )
+            config.put("InitialLimitTunnelProtocolsCandidateCount", 60)
+            config.put("ConnectionWorkerPoolSize", 16)
+            // Give slow CDN paths room to complete instead of being cut off as
+            // if they were a dead direct dial.
+            config.put("NetworkLatencyMultiplier", 2.0)
+        },
+        PsiphonStrategy(
+            name = "C",
+            label = "in-proxy (peer relay)",
+            timeoutSeconds = 90,
+        ) { config ->
+            // In-proxy routes through other Psiphon users' devices over WebRTC.
+            // Their IPs are residential and not in the carrier's blocklist, which
+            // is what makes this rung work when every Psiphon server IP is dead.
+            //
+            // Deliberately NOT setting InitialLimitTunnelProtocols to an
+            // INPROXY-* name here: only the 14-char prefix "INPROXY-WEBRTC"
+            // exists as a literal in libgojni.so, so the full protocol names are
+            // assembled at runtime and we cannot verify the exact spelling. An
+            // unrecognised name in that list risks failing config validation and
+            // taking the whole rung down. Enabling the in-proxy flags and letting
+            // Psiphon choose is equivalent and cannot misfire.
+            config.put("InproxyEnabled", true)
+            config.put("InproxyAllowClient", true)
+            config.put("InproxySkipAwaitFullyConnected", true)
+            // Fronted protocols stay available: the broker specs are not shipped
+            // in our server_entries.txt, so the broker list has to arrive via a
+            // Tactics request, and that request needs a working egress itself.
+            config.put(
+                "InitialLimitTunnelProtocols",
+                JSONArray(listOf("FRONTED-MEEK-OSSH", "FRONTED-MEEK-QUIC-OSSH", "TLS-OSSH")),
+            )
+            config.put("ConnectionWorkerPoolSize", 16)
+            config.put("NetworkLatencyMultiplier", 3.0)
+        },
+    )
 
     companion object {
         const val LOG_TAG = "MsnGuardVpnService"
@@ -103,6 +219,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     override fun onConnected() {
         ConnectionLog.record("Psiphon connected — upstream tunnel ready")
+        // A rung succeeded: disarm the watchdog and remember which one worked so
+        // the next connect starts from the strategy that is known to survive this
+        // carrier instead of walking the ladder from the top again.
+        ladderActive.set(false)
+        cancelLadderTimer()
+        psiphonLadder.getOrNull(ladderIndex)?.let { winner ->
+            getSharedPreferences("settings", MODE_PRIVATE).edit()
+                .putInt("psiphon_winning_strategy", ladderIndex).apply()
+            ConnectionLog.record("Strategy ${winner.name} (${winner.label}) succeeded — saved as preferred")
+        }
+        ladderAttempts = 0
 
         val port = activeSocksPort
         if (port <= 0) {
@@ -153,6 +280,15 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     override fun onExiting() {
         ConnectionLog.record("Psiphon exiting")
         psiphonTunnel = null
+        // Psiphon hit its own EstablishTunnelTimeout and shut the controller down.
+        // That is the definitive "this rung is dead" signal, and it arrives before
+        // our watchdog's grace period expires — so escalate now instead of leaving
+        // the user staring at a stalled spinner for another 8 seconds.
+        // Guarded: a user-initiated stop also lands here, and so does a teardown
+        // that follows a successful connection.
+        if (!stopRequested.get() && !psiphonVpnActivated && ladderActive.get()) {
+            escalateLadder()
+        }
     }
 
     override fun onClientAddress(address: String?) {
@@ -194,7 +330,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // VPN mode: always use fixed port 1819 so TUN can be pre-created.
         // Proxy mode: use user-configured port (default 1819).
         val socksPort = prefs.getInt("default_socks_port", 1819)
-        return org.json.JSONObject().apply {
+        val config = org.json.JSONObject().apply {
             put("PropagationChannelId", "FFFFFFFFFFFFFFFF")
             put("SponsorId", "1111111111111111")
             put("EgressRegion", "")
@@ -229,7 +365,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // survivable now: tun2socks holds the TUN fd and the SOCKS port is
             // fixed, so a rotation only kills in-flight upstream sockets and lwIP
             // resets those flows individually instead of dropping the interface.
-        }.toString()
+        }
+
+        // Apply the current rung of the escalation ladder. Each rung overrides
+        // protocol selection and worker-pool sizing on top of the base config,
+        // and owns the establish timeout so a dead rung is abandoned quickly
+        // instead of burning the full two minutes.
+        val strategy = psiphonLadder.getOrNull(ladderIndex)
+        if (strategy != null) {
+            strategy.configure(config)
+            config.put("EstablishTunnelTimeoutSeconds", strategy.timeoutSeconds)
+            ConnectionLog.record(
+                "Strategy ${ladderIndex + 1}/${psiphonLadder.size} " +
+                    "(${strategy.name}): ${strategy.label} — ${strategy.timeoutSeconds}s budget"
+            )
+        }
+        return config.toString()
     }
 
     private fun startPsiphonTunnel(vpnMode: Boolean = true) {
@@ -252,9 +403,84 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // onConnected() starts the Rust core to bridge TUN → SOCKS.
             tunnel.startTunneling(serverEntries)
             ConnectionLog.record("Psiphon tunnel starting...")
+            armLadderTimer()
         } catch (e: Exception) {
             ConnectionLog.record("Psiphon start failed: ${e.message}")
             activeSocksPort = 0
+        }
+    }
+
+    /**
+     * Arm the watchdog for the current rung.
+     *
+     * Psiphon's own EstablishTunnelTimeout fires inside the Go core and shuts the
+     * controller down without telling us which rung failed, so we keep our own
+     * timer with a small grace period on top. Whichever fires first, the effect
+     * is the same: [escalateLadder] moves to the next rung.
+     */
+    private fun armLadderTimer() {
+        val strategy = psiphonLadder.getOrNull(ladderIndex) ?: return
+        cancelLadderTimer()
+        ladderActive.set(true)
+        // +8s grace so Psiphon's internal timeout and teardown land first; racing
+        // it would restart the tunnel while the old controller is still stopping.
+        val budget = strategy.timeoutSeconds.toLong() + 8L
+        ladderTimer = ladderScheduler.schedule({
+            if (ladderActive.get() && !psiphonVpnActivated) escalateLadder()
+        }, budget, TimeUnit.SECONDS)
+    }
+
+    private fun cancelLadderTimer() {
+        ladderTimer?.cancel(false)
+        ladderTimer = null
+    }
+
+    /**
+     * Move to the next rung and re-dial, or give up if the ladder is exhausted.
+     *
+     * The TUN interface is deliberately left up across rungs: it was created
+     * before Psiphon started, tun2socks is not running yet (no tunnel ever came
+     * up), and rebuilding it would drop the VPN permission dialog state. Only
+     * the Psiphon controller is torn down and restarted with the next config.
+     */
+    private fun escalateLadder() {
+        if (stopRequested.get()) return
+        if (!ladderActive.compareAndSet(true, false)) return
+        cancelLadderTimer()
+
+        val failed = psiphonLadder.getOrNull(ladderIndex)
+        ladderAttempts += 1
+
+        // Wrap around instead of walking off the end. Because a successful rung is
+        // remembered and reused first, the ladder can start anywhere — so "done"
+        // means every rung has had a turn, not that the index hit the last slot.
+        if (ladderAttempts >= psiphonLadder.size) {
+            ConnectionLog.record(
+                "All ${psiphonLadder.size} strategies exhausted — carrier is blocking every available path"
+            )
+            sendStatus(STATUS_FAILED, "Could not connect on this carrier. Try Wi-Fi or another SIM.")
+            ladderIndex = 0
+            ladderAttempts = 0
+            return
+        }
+
+        ladderIndex = (ladderIndex + 1) % psiphonLadder.size
+        val next = psiphonLadder[ladderIndex]
+        ConnectionLog.record(
+            "Strategy ${failed?.name ?: "?"} timed out — escalating to ${next.name}: ${next.label}"
+        )
+        sendStatus(STATUS_CONNECTING, "Trying ${next.label}...")
+
+        worker.execute {
+            if (stopRequested.get()) return@execute
+            // Tear down only the Psiphon controller. The TUN stays up.
+            try { psiphonTunnel?.stop() } catch (_: Exception) {}
+            psiphonTunnel = null
+            activeSocksPort = getSharedPreferences("settings", MODE_PRIVATE)
+                .getInt("default_socks_port", 1819)
+            try { Thread.sleep(1200) } catch (_: InterruptedException) {}
+            if (stopRequested.get()) return@execute
+            startPsiphonTunnel(psiphonVpnMode)
         }
     }
 
@@ -292,6 +518,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     override fun onDestroy() {
         stopTunnel(notify = false)
+        cancelLadderTimer()
+        ladderScheduler.shutdownNow()
         worker.shutdownNow()
         super.onDestroy()
     }
@@ -340,6 +568,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         if (currentProtocol.contains("PSIPHON")) {
             psiphonVpnMode = vpnMode  // Save for onConnected() callback
             psiphonVpnActivated = false
+            // Start from the rung that last worked on this device. On the first
+            // ever connect, or after a full ladder failure, this is rung 0.
+            ladderIndex = getSharedPreferences("settings", MODE_PRIVATE)
+                .getInt("psiphon_winning_strategy", 0)
+                .coerceIn(0, psiphonLadder.size - 1)
+            ladderAttempts = 0
             worker.execute {
                 try {
                     ConnectionLog.record("Preparing PSIPHON identity (${if (vpnMode) "VPN" else "Proxy"} mode)")
@@ -364,6 +598,23 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                             .addRoute("0.0.0.0", 0)
                             .addRoute(address.subnet, address.prefixLength)
                             .addDnsServer(address.router)
+                            // --- Strategy A: break the DNS bootstrap deadlock ---
+                            // With only address.router as a resolver, every DNS
+                            // query goes lwIP → udpgw → Psiphon. Before a tunnel
+                            // exists there is nothing on the far end, so DNS is
+                            // dead exactly when Psiphon needs it to resolve the
+                            // CDN hostnames that FRONTED-MEEK depends on. The log
+                            // showed this as "resp 0/0" with 20-second RTTs and
+                            // four consecutive "resolve canceled" tactics failures.
+                            //
+                            // Listing public resolvers as additional DNS servers
+                            // gives the resolver somewhere to go. Combined with
+                            // addDisallowedApplication(packageName) below — which
+                            // keeps our own process off the TUN entirely — Psiphon's
+                            // queries leave over the carrier link and resolve
+                            // normally, so the fronted protocols become usable.
+                            .addDnsServer("1.1.1.1")
+                            .addDnsServer("8.8.8.8")
                             .addDisallowedApplication(packageName)
                             .establish() ?: error("Android could not establish the VPN interface")
                         vpnModeActive.set(true)
@@ -450,6 +701,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     private fun stopTunnel(notify: Boolean = true, teardownService: Boolean = true) {
         stopRequested.set(true)
+        // Disarm the escalation ladder before anything else: a pending timer that
+        // fires after teardown would resurrect Psiphon on a dead TUN.
+        ladderActive.set(false)
+        cancelLadderTimer()
         // Order matters: stop routing first so no more packets enter a tunnel
         // that is being torn down, then stop Psiphon itself.
         Tun2SocksManager.stop()
