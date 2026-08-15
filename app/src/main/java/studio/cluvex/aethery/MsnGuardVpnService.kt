@@ -250,6 +250,21 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val TRAFFIC_MONTH = "month"
         const val TRAFFIC_TX = "tx"
         const val TRAFFIC_RX = "rx"
+
+        /**
+         * elapsedRealtime at the moment the tunnel last reached CONNECTED, or 0
+         * when it is down. The activity reads this so a session timer survives
+         * the UI being destroyed and recreated (rotation, screen off, returning
+         * from Recents) instead of restarting from zero on every rebind.
+         *
+         * Volatile and static because the service and the activity are different
+         * lifecycles in the same process; it is a plain timestamp, so a stale
+         * read is harmless.
+         */
+        @Volatile
+        private var connectedSince = 0L
+
+        fun connectedSinceElapsed(): Long = connectedSince
     }
 
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
@@ -943,6 +958,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     private fun sendStatus(status: String, detail: String? = null) {
         Log.i(LOG_TAG, "status=$status${detail?.let { " detail=$it" } ?: ""}")
+        // Stamp the connect moment here rather than at each call site: there are
+        // several paths to CONNECTED (native tunnel ready, Psiphon proxy ready,
+        // tun2socks up, reconnect) and every one funnels through sendStatus.
+        when (status) {
+            STATUS_CONNECTED -> if (connectedSince == 0L) connectedSince = SystemClock.elapsedRealtime()
+            STATUS_DISCONNECTED, STATUS_FAILED -> connectedSince = 0L
+        }
         sendBroadcast(Intent(ACTION_STATUS)
             .setPackage(packageName)
             .putExtra(EXTRA_STATUS, status)

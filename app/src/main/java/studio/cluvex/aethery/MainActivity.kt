@@ -1,6 +1,5 @@
 package studio.cluvex.aethery
 
-import android.animation.ValueAnimator
 import android.app.Activity
 import android.app.Dialog
 import android.content.BroadcastReceiver
@@ -12,12 +11,9 @@ import android.content.pm.PackageManager
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.RectF
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.widget.ImageView.ScaleType
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
@@ -26,9 +22,6 @@ import android.os.Handler
 import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
-import android.view.HapticFeedbackConstants
-import android.view.KeyEvent
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
@@ -37,7 +30,6 @@ import android.view.WindowManager
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
 import android.view.animation.DecelerateInterpolator
-import android.view.animation.LinearInterpolator
 import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import android.widget.EditText
@@ -57,30 +49,37 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
-    private lateinit var connectionControl: ConnectionControl
+    private lateinit var orbitDial: OrbitDialView
     private lateinit var connectionTitle: TextView
     private lateinit var connectionDetail: TextView
-    private lateinit var connectionLatency: TextView
-    private lateinit var latencyGraph: LatencyGraphView
-    private lateinit var ipAddressLabel: TextView
-    private lateinit var ipAddressValue: TextView
-    private lateinit var ipAddressCard: LinearLayout
-    private lateinit var ipRefreshIcon: ImageView
-    private lateinit var modeSelector: LinearLayout
-    private lateinit var modeValue: TextView
-    private lateinit var logSelector: LinearLayout
-    private lateinit var perfSelector: LinearLayout
-    private lateinit var scannerSelector: LinearLayout
-    private lateinit var scanValue: TextView
+    private lateinit var chipLatency: TextView
+    private lateinit var chipProtocol: TextView
+    private lateinit var tileDown: MetricTile
+    private lateinit var tileUp: MetricTile
+    private lateinit var tileSpeed: MetricTile
+    private lateinit var exitNodeCard: ExitNodeCard
+    private lateinit var transportRail: TransportRail
+    private lateinit var actionBar: OrbitActionBar
+    private lateinit var statusLed: View
     private lateinit var mainRoot: FrameLayout
     private lateinit var pageHost: FrameLayout
     private lateinit var appUpdater: AppUpdater
     private var predictiveBackCallback: Any? = null
     private var selectedProtocol = Protocol.MASQUE
     private var pendingConfig: String? = null
-    private var visualState = ConnectionControl.State.DISCONNECTED
+    private var visualState = OrbitDialView.State.DISCONNECTED
     private var receiverRegistered = false
     private var autoPingRunning = false
+    /** elapsedRealtime at the moment the tunnel came up; 0 when down. */
+    private var sessionStartedAt = 0L
+    private val sessionHandler = Handler(Looper.getMainLooper())
+    private val sessionTicker = object : Runnable {
+        override fun run() {
+            if (sessionStartedAt == 0L) return
+            orbitDial.timerText = formatUptime(android.os.SystemClock.elapsedRealtime() - sessionStartedAt)
+            sessionHandler.postDelayed(this, 1_000L)
+        }
+    }
     private val autoPingHandler = Handler(Looper.getMainLooper())
     private val autoPingRunnable = object : Runnable {
         override fun run() {
@@ -101,7 +100,7 @@ class MainActivity : Activity() {
     private var modePage: View? = null
     private var splitTunnelPage: View? = null
     private var splitTunnelAppsPage: View? = null
-    private var splitTunnelSummaryButton: TextView? = null
+    private var splitTunnelSummaryButton: OrbitSettingsRow? = null
     private var splitTunnelDraftMode: SplitTunnelSettings.Mode? = null
     private var splitTunnelDraftPackages: MutableSet<String>? = null
     private var themePage: View? = null
@@ -121,7 +120,6 @@ class MainActivity : Activity() {
     private var ipRequest = 0
     @Volatile private var ipRefreshInFlight = false
     @Volatile private var ipRefreshPending = false
-    private var ipRefreshAnimator: ValueAnimator? = null
     private val statusHandler = Handler(Looper.getMainLooper())
     private val statusPoll = object : Runnable {
         override fun run() {
@@ -153,6 +151,7 @@ class MainActivity : Activity() {
                 trafficMonthTx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_MONTH_TX, 0)
                 trafficMonthRx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_MONTH_RX, 0)
                 renderTrafficMonitor()
+                renderHomeMetrics()
                 return
             }
             when (intent.getStringExtra(MsnGuardVpnService.EXTRA_STATUS)) {
@@ -184,75 +183,88 @@ class MainActivity : Activity() {
         ConnectionLog.bind(File(filesDir, "connection.log"))
         appUpdater = AppUpdater(this)
 
-        connectionControl = ConnectionControl(this, primary, primaryContainer, connected, connectedContainer).apply {
-            id = View.generateViewId()
+        // Orbit console. Every control below is built in onCreate so a single
+        // pass wires the whole screen; no XML layouts exist in this app.
+        orbitDial = OrbitDialView(this, palette).apply {
             setOnClickListener { toggleTunnel() }
         }
-        connectionTitle = label(textSize = 20f, color = INK, style = TypefaceStyle.MEDIUM).apply {
+        connectionTitle = label(textSize = 21f, color = INK, style = TypefaceStyle.MEDIUM).apply {
             gravity = Gravity.CENTER
         }
-        connectionDetail = label(textSize = 14f, color = MUTED).apply { gravity = Gravity.CENTER }
-        connectionLatency = label("Latency unavailable", 13f, MUTED).apply {
+        connectionDetail = label(textSize = 13.5f, color = MUTED).apply { gravity = Gravity.CENTER }
+        chipLatency = label("Latency —", 12f, MUTED, TypefaceStyle.MEDIUM).apply {
             gravity = Gravity.CENTER
             contentDescription = "Ping connection"
             isClickable = true
             isFocusable = true
             setOnClickListener { pingConnection() }
         }
-        latencyGraph = LatencyGraphView(this).apply {
-            isClickable = true
-            isFocusable = true
-            setColors(primary, INK, MUTED)
-            setOnClickListener { pingConnection() }
-            highlightOnFocus(16, Color.TRANSPARENT, DIVIDER)
+        chipProtocol = label(selectedProtocol.label.uppercase(), 12f, MUTED, TypefaceStyle.MEDIUM).apply {
+            gravity = Gravity.CENTER
+            letterSpacing = 0.08f
         }
-        ipAddressLabel = label("PUBLIC IP", 12f, MUTED, TypefaceStyle.MEDIUM).apply {
-            letterSpacing = 0.1f
-        }
-        ipAddressValue = label("Checking…", 16f, INK, TypefaceStyle.MEDIUM, singleLine = true)
-        ipAddressCard = createIpAddressCard()
         selectedProtocol = savedProtocol()
-        modeValue = label(selectedProtocol.label, 16f, INK, TypefaceStyle.MEDIUM)
-        modeSelector = createModeSelector()
-        logSelector = createLogSelector()
-        perfSelector = createPerfSelector()
-        scanValue = label(scanSummary(), 14f, INK, TypefaceStyle.MEDIUM)
-        scannerSelector = createScannerSelector()
+        chipProtocol.text = selectedProtocol.label.uppercase()
+        tileDown = MetricTile(this, palette, "↓ DOWN", primary) { openTrafficMonitorScreen() }
+        tileUp = MetricTile(this, palette, "↑ UP", primary) { openTrafficMonitorScreen() }
+        tileSpeed = MetricTile(this, palette, "SPEED", primary) { openTrafficMonitorScreen() }
+        exitNodeCard = ExitNodeCard(this, palette) { refreshPublicIp() }
+        transportRail = TransportRail(this, palette, Protocol.entries.map { railLabel(it) }) { index ->
+            updateConnectionMode(Protocol.entries[index])
+        }
+        transportRail.select(Protocol.entries.indexOf(selectedProtocol), animate = false)
+        actionBar = OrbitActionBar(this, palette, listOf(
+            OrbitActionBar.Entry("LOG", OrbitActionBar.Glyph.LOG) { openLogsScreen() },
+            OrbitActionBar.Entry("SPLIT", OrbitActionBar.Glyph.SPLIT) { openSplitTunnelScreen() },
+            OrbitActionBar.Entry("SCAN MODE", OrbitActionBar.Glyph.SCAN) { openScannerScreen() },
+        ))
+        statusLed = View(this).apply {
+            background = Sculpt.sculptedBackground(
+                resources.displayMetrics.density,
+                Sculpt.withAlpha(MUTED, 0.5f),
+                999,
+            )
+        }
 
         mainRoot = FrameLayout(this).apply { setBackgroundColor(CANVAS) }
         val header = createHeader()
+        val console = createConnectionConsole()
+        // The console scrolls: on a 5" phone the dial plus three metric rows plus
+        // the rail exceeds the viewport, and clipping the connect button would be
+        // the single worst failure this screen could have.
+        val consoleScroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            isFillViewport = true
+            addView(console, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+        mainRoot.addView(consoleScroll, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ).apply { topMargin = dp(52) })
         mainRoot.addView(header, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply {
-            leftMargin = dp(24)
-            rightMargin = dp(24)
-            topMargin = dp(16)
+            leftMargin = dp(20)
+            rightMargin = dp(20)
+            topMargin = dp(10)
         })
         mainRoot.setOnApplyWindowInsetsListener { _, insets ->
             (header.layoutParams as FrameLayout.LayoutParams).apply {
-                topMargin = insets.systemWindowInsetTop + dp(16)
+                topMargin = insets.systemWindowInsetTop + dp(10)
                 header.layoutParams = this
+            }
+            (consoleScroll.layoutParams as FrameLayout.LayoutParams).apply {
+                topMargin = insets.systemWindowInsetTop + dp(52)
+                bottomMargin = insets.systemWindowInsetBottom
+                consoleScroll.layoutParams = this
             }
             insets
         }
-        mainRoot.addView(createConnectionConsole(), FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.CENTER,
-        ).apply {
-            leftMargin = dp(24)
-            rightMargin = dp(24)
-            topMargin = dp(17)
-        })
-        mainRoot.addView(label("MSN-GUARD", 12f, MUTED).apply {
-            letterSpacing = 0.12f
-            gravity = Gravity.CENTER
-        }, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.BOTTOM,
-        ).apply { bottomMargin = dp(24) })
         pageHost = FrameLayout(this).apply {
             setBackgroundColor(CANVAS)
             addView(mainRoot, FrameLayout.LayoutParams(
@@ -263,6 +275,18 @@ class MainActivity : Activity() {
         setContentView(pageHost)
         configureSystemBars()
         showOpeningOverlay()
+        // Reattach to a tunnel that is already up. Without this the dial opens in
+        // the disconnected state while the VPN is running, and the session timer
+        // would only start on the next status broadcast. restored = true keeps
+        // the elapsed time honest by reading the service's connect timestamp.
+        if (TunnelStatus.isActive()) {
+            showConnected(restored = true)
+            // showConnected(restored) deliberately skips these so a mid-session
+            // health check does not re-probe on every ping; on a cold start we do
+            // want them, otherwise the IP card and latency stay empty.
+            startAutoPing()
+            pingConnection()
+        }
         refreshPublicIp()
     }
 
@@ -289,6 +313,11 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        // The session ticker is a Handler post, not tied to a view, so it has to
+        // be cancelled by hand. The dial's own animators already stop in
+        // onDetachedFromWindow.
+        sessionHandler.removeCallbacks(sessionTicker)
+        autoPingHandler.removeCallbacks(autoPingRunnable)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             (predictiveBackCallback as? OnBackInvokedCallback)?.let {
                 onBackInvokedDispatcher.unregisterOnBackInvokedCallback(it)
@@ -351,7 +380,7 @@ class MainActivity : Activity() {
                             .setDuration(300)
                             .withEndAction {
                                 pageHost.removeView(overlay)
-                                connectionControl.requestFocus()
+                                orbitDial.requestFocus()
                             }
                             .start()
                     }
@@ -375,7 +404,7 @@ class MainActivity : Activity() {
         if (!isTunnelActive() || pingInFlight) return
         pingInFlight = true
         val request = ++latencyRequest
-        latencyGraph.setLabel("Pinging\u2026")
+        chipLatency.text = "Latency …"
         Thread {
             // Try each endpoint until one answers. A single unreachable probe URL
             // must not be reported as a degraded tunnel.
@@ -383,10 +412,9 @@ class MainActivity : Activity() {
             runOnUiThread {
                 pingInFlight = false
                 if (request == latencyRequest && isTunnelActive()) {
-                    latencyGraph.setLabel(result.first)
+                    chipLatency.text = result.second?.let { "Latency ${it.toInt()} ms" } ?: "Latency n/a"
                     result.second?.let {
-                        latencyGraph.addPoint(it)
-                        if (visualState == ConnectionControl.State.DEGRADED) showConnected(restored = true)
+                        if (visualState == OrbitDialView.State.DEGRADED) showConnected(restored = true)
                     } ?: showDegraded()
                     updateNotificationHealth(ping = result.first)
                 }
@@ -426,7 +454,15 @@ class MainActivity : Activity() {
         gravity = Gravity.CENTER_VERTICAL
         // No mark in the header. The brand lives on the launcher icon and the
         // opening splash; repeating it above a single connect button was upstream
-        // furniture, not information.
+        // furniture, not information. What belongs here is live state: a small
+        // LED that mirrors the dial, plus the settings entry.
+        statusLed.layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply {
+            rightMargin = dp(8)
+        }
+        addView(statusLed, statusLed.layoutParams)
+        addView(label("MSN-GUARD", 13f, MUTED, TypefaceStyle.MEDIUM).apply {
+            letterSpacing = 0.14f
+        })
         addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
         addView(ImageView(this@MainActivity).apply {
             setImageResource(R.drawable.ic_settings)
@@ -440,74 +476,89 @@ class MainActivity : Activity() {
             context.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, outValue, true)
             setBackgroundResource(outValue.resourceId)
             setOnClickListener { openSettingsScreen() }
-        }, LinearLayout.LayoutParams(dp(48), dp(48)))
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+    }
+
+    private fun railLabel(protocol: Protocol): String = when (protocol) {
+        Protocol.WARP_IN_WARP -> "WoW"
+        else -> protocol.label
+    }
+
+    /** Status LED colour + glow for the header chip. */
+    private fun renderStatusLed() {
+        val (fill, glow) = when (visualState) {
+            OrbitDialView.State.CONNECTED -> connected to true
+            OrbitDialView.State.DEGRADED -> 0xFFFFC46B.toInt() to true
+            OrbitDialView.State.CONNECTING -> primary to true
+            OrbitDialView.State.FAILED -> 0xFFFF6B7F.toInt() to false
+            OrbitDialView.State.DISCONNECTED -> MUTED to false
+        }
+        statusLed.background = Sculpt.sculptedBackground(
+            resources.displayMetrics.density,
+            if (glow) fill else Sculpt.withAlpha(MUTED, 0.4f),
+            999,
+            accent = if (glow) Sculpt.lighten(fill, 0.4f) else null,
+        )
     }
 
     private fun createConnectionConsole(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_HORIZONTAL
+        setPadding(dp(20), 0, dp(20), dp(20))
+
+        addView(orbitDial, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
+
         addView(connectionTitle, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ))
+        ).apply { topMargin = dp(14) })
         addView(connectionDetail, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(6) })
-        addView(connectionControl, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(16) })
-        addView(latencyGraph, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(64),
-        ).apply { topMargin = dp(6) })
-        addView(ipAddressCard, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(64),
-        ).apply { topMargin = dp(16) })
-        addView(modeSelector, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(64),
-        ).apply { topMargin = dp(16) })
-        addView(scannerSelector, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(64),
-        ).apply { topMargin = dp(12) })
-        addView(LinearLayout(this@MainActivity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            addView(logSelector, LinearLayout.LayoutParams(0, dp(64), 1f).apply { rightMargin = dp(6) })
-            addView(perfSelector, LinearLayout.LayoutParams(0, dp(64), 1f).apply { leftMargin = dp(6) })
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(12) })
-    }
+        ).apply { topMargin = dp(3) })
 
-    private fun createIpAddressCard(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(20), 0, dp(18), 0)
-        background = roundedBackground(SURFACE_VARIANT, 20, DIVIDER)
-        contentDescription = "Public IP address"
-        isClickable = true
-        isFocusable = true
-        highlightOnFocus(20, SURFACE_VARIANT, DIVIDER)
-        setOnClickListener { refreshPublicIp() }
-        val labels = LinearLayout(this@MainActivity).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(ipAddressLabel)
-            addView(ipAddressValue, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(2) })
+        val chipLine = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            chipLatency.setTextColor(Sculpt.withAlpha(MUTED, 0.95f))
+            chipProtocol.setTextColor(Sculpt.withAlpha(MUTED, 0.95f))
+            addView(chipLatency)
+            addView(label("  ·  ", 12f, Sculpt.withAlpha(MUTED, 0.5f)))
+            addView(chipProtocol)
         }
-        addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        ipRefreshIcon = ImageView(this@MainActivity).apply {
-            setImageResource(R.drawable.ic_refresh)
-            setColorFilter(INK)
+        addView(chipLine, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(7) })
+
+        val tiles = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(tileDown, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(9) })
+            addView(tileUp, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(0); rightMargin = dp(9) })
+            addView(tileSpeed, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(0) })
         }
-        addView(ipRefreshIcon, LinearLayout.LayoutParams(dp(22), dp(22)))
+        addView(tiles, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(18) })
+
+        addView(exitNodeCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(12) })
+
+        addView(transportRail, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(46),
+        ).apply { topMargin = dp(12) })
+
+        addView(actionBar, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(56),
+        ).apply { topMargin = dp(10) })
     }
 
     private fun refreshPublicIp() {
@@ -517,9 +568,7 @@ class MainActivity : Activity() {
         }
         ipRefreshInFlight = true
         val request = ++ipRequest
-        startIpRefreshAnimation()
-        ipAddressLabel.text = if (isTunnelActive()) "VPN IP" else "PUBLIC IP"
-        ipAddressValue.text = "Checking…"
+        exitNodeCard.render("", null, isTunnelActive())
         Thread {
             val result = runCatching {
                 repeat(IP_FETCH_ATTEMPTS) { attempt ->
@@ -536,21 +585,12 @@ class MainActivity : Activity() {
                     return@runOnUiThread
                 }
                 if (request != ipRequest) return@runOnUiThread
-                finishIpRefreshAnimation()
                 val (ip, country) = result.getOrElse { "IP unavailable" to "" }
-                ipAddressLabel.text = when {
-                    ip == "IP unavailable" -> "PUBLIC IP"
-                    isTunnelActive() -> "VPN IP"
-                    else -> "PUBLIC IP"
-                }
-                val flag = countryFlag(country)
-                ipAddressValue.text = listOf(flag, ip).filter(String::isNotBlank).joinToString(" ")
-                ipAddressCard.contentDescription = "${ipAddressLabel.text}: ${ipAddressValue.text}"
+                exitNodeCard.render(ip, country, isTunnelActive())
                 if (isTunnelActive() && ip != "IP unavailable") updateNotificationHealth(ip = ip)
-                ipAddressValue.alpha = 0f
-                ipAddressValue.translationY = dp(4).toFloat()
-                ipAddressValue.animate().alpha(1f).translationY(0f)
-                    .setDuration(220).setInterpolator(motionInterpolator).start()
+                exitNodeCard.alpha = 0.45f
+                exitNodeCard.animate().alpha(1f).setDuration(240)
+                    .setInterpolator(motionInterpolator).start()
             }
         }.start()
     }
@@ -580,39 +620,6 @@ class MainActivity : Activity() {
             }
         }
         throw failure ?: IllegalStateException("IP unavailable")
-    }
-
-    private fun startIpRefreshAnimation() {
-        ipRefreshAnimator?.cancel()
-        ipAddressCard.animate().cancel()
-        ipAddressValue.animate().cancel()
-        ipAddressValue.alpha = 0.6f
-        ipRefreshIcon.rotation = 0f
-        ipRefreshAnimator = ValueAnimator.ofFloat(0f, 360f).apply {
-            duration = 900L
-            repeatCount = ValueAnimator.INFINITE
-            interpolator = LinearInterpolator()
-            addUpdateListener { animation ->
-                ipRefreshIcon.rotation = animation.animatedValue as Float
-                val pulse = if (animation.animatedFraction < 0.5f) animation.animatedFraction else 1f - animation.animatedFraction
-                ipAddressCard.alpha = 0.9f + pulse * 0.1f
-            }
-            start()
-        }
-    }
-
-    private fun finishIpRefreshAnimation() {
-        ipRefreshAnimator?.cancel()
-        ipRefreshAnimator = null
-        ipRefreshIcon.rotation = 0f
-        ipAddressCard.alpha = 1f
-        ipAddressCard.scaleX = 1f
-        ipAddressCard.scaleY = 1f
-    }
-
-    private fun countryFlag(country: String): String {
-        if (country.length != 2 || country.any { !it.isLetter() }) return ""
-        return country.uppercase().map { char -> String(Character.toChars(0x1F1E6 + char.code - 'A'.code)) }.joinToString("")
     }
 
     private fun openTunnelConnection(url: String): HttpURLConnection {
@@ -668,91 +675,10 @@ class MainActivity : Activity() {
             })
     }
 
-    private fun createModeSelector(): LinearLayout = LinearLayout(this).apply {
-        gravity = Gravity.CENTER_VERTICAL
-        orientation = LinearLayout.HORIZONTAL
-        setPadding(dp(20), 0, dp(18), 0)
-        background = roundedBackground(SURFACE_VARIANT, 20, DIVIDER)
-        contentDescription = "Connection mode, ${selectedProtocol.label}"
-        isClickable = true
-        isFocusable = true
-        highlightOnFocus(20, SURFACE_VARIANT, DIVIDER)
-        setOnClickListener { openModeScreen() }
-
-        addView(label("MODE", 12f, MUTED).apply { letterSpacing = 0.1f })
-        addView(modeValue, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-            leftMargin = dp(16)
-        })
-        addView(ChevronView(this@MainActivity, INK), LinearLayout.LayoutParams(dp(24), dp(24)))
-    }
-
-    private fun createLogSelector(): LinearLayout = LinearLayout(this).apply {
-        gravity = Gravity.CENTER_VERTICAL
-        orientation = LinearLayout.HORIZONTAL
-        setPadding(dp(20), 0, dp(18), 0)
-        background = roundedBackground(SURFACE_VARIANT, 20, DIVIDER)
-        contentDescription = "View connection log"
-        isClickable = true
-        isFocusable = true
-        highlightOnFocus(20, SURFACE_VARIANT, DIVIDER)
-        setOnClickListener { openLogsScreen() }
-
-        addView(label("LOG", 12f, MUTED).apply { letterSpacing = 0.1f })
-        addView(label("Events", 16f, INK, TypefaceStyle.MEDIUM, singleLine = true), LinearLayout.LayoutParams(
-            0,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            1f,
-        ).apply { leftMargin = dp(16) })
-        addView(ChevronView(this@MainActivity, INK), LinearLayout.LayoutParams(dp(24), dp(24)))
-    }
-
-    private fun createPerfSelector(): LinearLayout = LinearLayout(this).apply {
-        gravity = Gravity.CENTER_VERTICAL
-        orientation = LinearLayout.HORIZONTAL
-        setPadding(dp(20), 0, dp(18), 0)
-        background = roundedBackground(SURFACE_VARIANT, 20, DIVIDER)
-        contentDescription = "Performance profile, ${perfProfile().label}"
-        isClickable = true
-        isFocusable = true
-        highlightOnFocus(20, SURFACE_VARIANT, DIVIDER)
-        setOnClickListener { choosePerfProfile() }
-
-        addView(label("PERF", 12f, MUTED).apply { letterSpacing = 0.1f })
-        addView(label(perfProfile().label, 16f, INK, TypefaceStyle.MEDIUM, singleLine = true), LinearLayout.LayoutParams(
-            0,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            1f,
-        ).apply { leftMargin = dp(16) })
-        addView(ChevronView(this@MainActivity, INK), LinearLayout.LayoutParams(dp(24), dp(24)))
-    }
-
-    private fun createScannerSelector(): LinearLayout = LinearLayout(this).apply {
-        gravity = Gravity.CENTER_VERTICAL
-        orientation = LinearLayout.HORIZONTAL
-        setPadding(dp(20), 0, dp(18), 0)
-        background = roundedBackground(SURFACE_VARIANT, 20, DIVIDER)
-        contentDescription = "Scanner options, ${scanSummary()}"
-        isClickable = true
-        isFocusable = true
-        highlightOnFocus(20, SURFACE_VARIANT, DIVIDER)
-        setOnClickListener { openScannerScreen() }
-
-        addView(label("SCAN", 12f, MUTED).apply { letterSpacing = 0.08f })
-        addView(scanValue.apply {
-            (scanValue.layoutParams as? LinearLayout.LayoutParams)?.let {
-                it.leftMargin = dp(16)
-                scanValue.layoutParams = it
-            }
-            textSize = 16f
-            setSingleLine(true)
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }, LinearLayout.LayoutParams(
-            0,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            1f,
-        ).apply { leftMargin = dp(16) })
-        addView(ChevronView(this@MainActivity, INK), LinearLayout.LayoutParams(dp(24), dp(24)))
-    }
+    // The four main-screen selector rows (MODE / LOG / PERF / SCAN) are gone.
+    // MODE became the sliding TransportRail, LOG and SCAN became sculpted entries
+    // in the ActionBar, and PERF moved into Settings — it is a once-a-year knob
+    // that was occupying a quarter of the home screen.
 
     private fun openLogsScreen() {
         showingLogs = true
@@ -982,8 +908,8 @@ class MainActivity : Activity() {
     }
 
     private fun openScannerScreen(animate: Boolean = true) {
-        if (visualState == ConnectionControl.State.CONNECTING ||
-            visualState == ConnectionControl.State.CONNECTED ||
+        if (visualState == OrbitDialView.State.CONNECTING ||
+            visualState == OrbitDialView.State.CONNECTED ||
             TunnelStatus.isActive()
         ) return
 
@@ -1045,8 +971,6 @@ class MainActivity : Activity() {
             MasqueTransport.entries.forEachIndexed { index, transport ->
                 val option = createMasqueTransportOption(transport) { chosen ->
                     getSharedPreferences(SETTINGS, MODE_PRIVATE).edit().putString(DEFAULT_MASQUE_TRANSPORT, chosen.coreName).apply()
-                    scanValue.text = scanSummary()
-                    scannerSelector.contentDescription = "Scanner options, ${scanSummary()}"
                     transportOptions.forEach { (item, view) -> setSelectionState(view, item == chosen, animate = true) }
                 }
                 transportOptions[transport] = option
@@ -1064,8 +988,6 @@ class MainActivity : Activity() {
         ScanMode.entries.forEachIndexed { index, mode ->
             val option = createScanModeOption(mode) { chosen ->
                 getSharedPreferences(SETTINGS, MODE_PRIVATE).edit().putString(DEFAULT_SCAN_MODE, chosen.coreName).apply()
-                scanValue.text = scanSummary()
-                scannerSelector.contentDescription = "Scanner options, ${scanSummary()}"
                 modeOptions.forEach { (item, view) -> setSelectionState(view, item == chosen, animate = true) }
             }
             modeOptions[mode] = option
@@ -1082,8 +1004,6 @@ class MainActivity : Activity() {
         ScanTarget.entries.forEachIndexed { index, target ->
             val option = createScannerOption(target) { chosen ->
                 getSharedPreferences(SETTINGS, MODE_PRIVATE).edit().putString(DEFAULT_SCAN, chosen.coreName).apply()
-                scanValue.text = scanSummary()
-                scannerSelector.contentDescription = "Scanner options, ${scanSummary()}"
                 targetOptions.forEach { (item, view) -> setSelectionState(view, item == chosen, animate = true) }
             }
             targetOptions[target] = option
@@ -1238,8 +1158,8 @@ class MainActivity : Activity() {
     }
 
     private fun openModeScreen() {
-        if (visualState == ConnectionControl.State.CONNECTING ||
-            visualState == ConnectionControl.State.CONNECTED ||
+        if (visualState == OrbitDialView.State.CONNECTING ||
+            visualState == OrbitDialView.State.CONNECTED ||
             TunnelStatus.isActive()
         ) return
 
@@ -1365,7 +1285,7 @@ class MainActivity : Activity() {
                 setPadding(dp(4), 0, 0, 0)
             })
         }
-        content.addView(label("KILL SWITCH", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+        content.addView(sectionLabel("PROTECTION"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ))
@@ -1375,80 +1295,88 @@ class MainActivity : Activity() {
         }
         content.addView(killSwitchRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(72),
-        ).apply { topMargin = dp(8) })
-
-        content.addView(label("LOCAL NETWORK", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(24) })
+        ).apply { topMargin = dp(10) })
+
         // "Share on LAN" is gone with proxy mode: it only ever widened the SOCKS
         // bind from 127.0.0.1 to 0.0.0.0, and in VPN mode no SOCKS listener is
         // exposed at all. lanSharingEnabled() survives as a private helper
         // because lanBypassEnabled() still migrates the old value forward.
         val lanBypassRow = createToggleRow(
             "Bypass LAN",
-            "Keep local network devices reachable while VPN is connected",
+            "Keep local devices reachable while connected",
             lanBypassEnabled(),
         ) {
             preferences().edit().putBoolean(LAN_BYPASS, it).apply()
         }
         content.addView(lanBypassRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(72),
+            ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
 
-        content.addView(label("TRAFFIC", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+        content.addView(sectionLabel("ROUTING & DATA"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(24) })
-        content.addView(createSettingsButton("Traffic monitor ›") { openTrafficMonitorScreen() }, LinearLayout.LayoutParams(
+        ).apply { topMargin = dp(26) })
+        content.addView(navRow("Traffic monitor", trafficHeadline()) { openTrafficMonitorScreen() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(52),
+            ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
-
-        content.addView(label("NATIVE SPLIT TUNNELING", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(24) })
-        splitTunnelSummaryButton = createSettingsButton("${splitTunnelSummary()} ›") { openSplitTunnelScreen() }
+        splitTunnelSummaryButton = navRow("Split tunneling", splitTunnelSummary()) { openSplitTunnelScreen() }
         content.addView(splitTunnelSummaryButton, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(52),
-        ).apply { topMargin = dp(10) })
-        content.addView(label("APPEARANCE", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+        // PERF moved here off the home screen: a once-a-year knob does not earn
+        // a quarter of the first thing the user sees.
+        content.addView(navRow("Performance", perfProfile().label) { choosePerfProfile() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(24) })
-        content.addView(createSettingsButton("Theme · ${AppAppearance.current(this).label} ›") { openThemeScreen() }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(52),
-        ).apply { topMargin = dp(10) })
-        content.addView(label("CONNECTION ADVANCED", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+        ).apply { topMargin = dp(8) })
+
+        content.addView(sectionLabel("CONNECTION"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(28) })
-        content.addView(createSettingsButton("Tunnel controls ›") { openTunnelControlsScreen() }, LinearLayout.LayoutParams(
+        ).apply { topMargin = dp(26) })
+        content.addView(navRow("Connection mode", selectedProtocol.label) { openModeScreen() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(52),
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
+        content.addView(navRow("Tunnel controls", "Shaping · Anti-DPI") { openTunnelControlsScreen() }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+
+        content.addView(sectionLabel("APPEARANCE"), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(26) })
+        content.addView(navRow("Theme", AppAppearance.current(this).label) { openThemeScreen() }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
 
-        content.addView(label("Version ${appVersion()}", 14f, MUTED).apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, dp(32), 0, 0)
-        })
-        content.addView(createSettingsButton("Check for updates") {
+        content.addView(sectionLabel("ABOUT"), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(26) })
+        content.addView(navRow("Check for updates", "v${appVersion()}") {
             appUpdater.checkForUpdate()
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(56),
-        ).apply { topMargin = dp(12) })
-        content.addView(createSettingsButton("MSN-GUARD on GitHub", R.drawable.ic_forgejo) {
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
+        content.addView(navRow("Source on GitHub", iconRes = R.drawable.ic_forgejo) {
             openLink("https://github.com/mbm110/MSN-GUARD")
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(56),
-        ).apply { topMargin = dp(10) })
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+        content.addView(label("MSN-GUARD ${appVersion()}", 11.5f, Sculpt.withAlpha(MUTED, 0.7f)).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            letterSpacing = 0.06f
+            setPadding(0, dp(22), 0, 0)
+        })
 
         scroll.addView(content)
         page.addView(scroll, FrameLayout.LayoutParams(
@@ -1503,35 +1431,38 @@ class MainActivity : Activity() {
             addView(createHeaderBackButton { closeTunnelControlsScreen() }, LinearLayout.LayoutParams(dp(48), dp(56)))
             addView(label("Tunnel controls", 22f, INK, TypefaceStyle.MEDIUM))
         })
-        content.addView(label("Applied on your next connection", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label("Applied on your next connection", 13.5f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(24) })
-        fun addControl(text: String, action: () -> Unit): TextView = createSettingsButton(text, onClick = action).also { button ->
-            content.addView(button, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(56),
-            ).apply { topMargin = dp(10) })
-        }
-        content.addView(label("CONNECTION SHAPING", 12f, MUTED).apply { letterSpacing = 0.1f })
-        addControl("Obfuscation · ${obfuscationProfile().label} ›") { chooseObfuscation() }
-        addControl("Advanced obfuscation · ${advancedObfuscationSummary()} ›") { editAdvancedObfuscation() }
-        lateinit var retryButton: TextView
-        retryButton = addControl("WireGuard retries · ${if (retryObfuscationProfiles()) "On" else "Off"}") {
+        ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(22) })
+        // Title and current value are separate columns now, so a long value
+        // (a manual endpoint) truncates on its own instead of shoving the title.
+        fun addControl(title: String, value: String?, action: () -> Unit): OrbitSettingsRow =
+            navRow(title, value, onClick = action).also { row ->
+                content.addView(row, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(9) })
+            }
+        content.addView(sectionLabel("CONNECTION SHAPING"))
+        addControl("Obfuscation", obfuscationProfile().label) { chooseObfuscation() }
+        addControl("Advanced obfuscation", advancedObfuscationSummary()) { editAdvancedObfuscation() }
+        lateinit var retryRow: OrbitSettingsRow
+        retryRow = addControl("WireGuard retries", if (retryObfuscationProfiles()) "On" else "Off") {
             preferences().edit().putBoolean(RETRY_OBFUSCATION, !retryObfuscationProfiles()).apply()
-            updateTunnelControlButton(retryButton, "WireGuard retries · ${if (retryObfuscationProfiles()) "On" else "Off"}")
+            retryRow.setValue(if (retryObfuscationProfiles()) "On" else "Off")
         }
-        content.addView(label("ROUTING", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+        content.addView(sectionLabel("ROUTING"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(28) })
-        addControl("Manual endpoint · ${manualEndpoint() ?: "Automatic"} ›") { editManualEndpoint() }
-        addControl("Gateway cache · ${defaultEndpointDiscovery().label} ›") { manageGatewayCache() }
-        content.addView(label("TROUBLESHOOTING", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+        ).apply { topMargin = dp(26) })
+        addControl("Manual endpoint", manualEndpoint() ?: "Automatic") { editManualEndpoint() }
+        addControl("Gateway cache", defaultEndpointDiscovery().label) { manageGatewayCache() }
+        content.addView(sectionLabel("TROUBLESHOOTING"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(28) })
-        addControl("TLS fingerprint · ${tlsCurvePreset().label} ›") { chooseTlsCurvePreset() }
-        lateinit var verificationButton: TextView
-        verificationButton = addControl("WireGuard verification · ${if (wireGuardDataCheck()) "Strict" else "Fast"} ›") {
+        ).apply { topMargin = dp(26) })
+        addControl("TLS fingerprint", tlsCurvePreset().label) { chooseTlsCurvePreset() }
+        lateinit var verificationRow: OrbitSettingsRow
+        verificationRow = addControl("WireGuard verification", if (wireGuardDataCheck()) "Strict" else "Fast") {
             preferences().edit().putBoolean(WIREGUARD_DATA_CHECK, !wireGuardDataCheck()).apply()
-            updateTunnelControlButton(verificationButton, "WireGuard verification · ${if (wireGuardDataCheck()) "Strict" else "Fast"} ›")
+            verificationRow.setValue(if (wireGuardDataCheck()) "Strict" else "Fast")
         }
         // The "VPN CORE" section is gone. It held DNS resolvers, Destination
         // routing, and Zero Trust — all three are proxy-mode features:
@@ -1546,10 +1477,10 @@ class MainActivity : Activity() {
         // The underlying prefs and the core's env bridge are untouched, so the
         // knobs still exist for the CLI; they are simply no longer surfaced as
         // settings that silently do nothing on this device.
-        content.addView(label("ANTI-DPI", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+        content.addView(sectionLabel("ANTI-DPI"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(28) })
-        addControl("TLS fragmentation · ${if (h2Fragmentation() == H2Fragmentation.ON) "On" else "Off"} ›") {
+        ).apply { topMargin = dp(26) })
+        addControl("TLS fragmentation", if (h2Fragmentation() == H2Fragmentation.ON) "On" else "Off") {
             chooseH2Fragmentation()
         }
         scroll.addView(content)
@@ -1571,17 +1502,6 @@ class MainActivity : Activity() {
         content.animate().alpha(1f).translationY(0f).setStartDelay(70)
             .setDuration(PAGE_ANIMATION_MS)
             .setInterpolator(motionInterpolator)
-            .start()
-    }
-
-    private fun updateTunnelControlButton(button: TextView, value: String) {
-        button.animate().cancel()
-        button.animate().alpha(0f).scaleX(0.97f).scaleY(0.97f).setDuration(80)
-            .withEndAction {
-                button.text = value
-                button.animate().alpha(1f).scaleX(1f).scaleY(1f)
-                    .setDuration(160).setInterpolator(DecelerateInterpolator()).start()
-            }
             .start()
     }
 
@@ -1676,7 +1596,6 @@ class MainActivity : Activity() {
         description = { it.description },
     ) { chosen ->
         preferences().edit().putString(PERF_PROFILE, chosen.coreName).apply()
-        (perfSelector.getChildAt(1) as? TextView)?.text = chosen.label
     }
 
     private fun chooseH2Fragmentation() = showChoiceSheet(
@@ -2007,17 +1926,22 @@ class MainActivity : Activity() {
         val value = label("Waiting for tunnel traffic", 18f, INK, TypefaceStyle.MEDIUM)
         parent.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(16), dp(20), dp(16))
-            background = roundedBackground(SURFACE_VARIANT, 20, DIVIDER)
-            addView(label(title, 12f, MUTED, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.1f })
+            setPadding(dp(18), dp(15), dp(18), dp(15))
+            background = Sculpt.sculptedBackground(
+                resources.displayMetrics.density,
+                SURFACE_VARIANT,
+                18,
+                stroke = DIVIDER,
+            )
+            addView(OrbitSectionHeader(this@MainActivity, palette, title))
             addView(value, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(6) })
+            ).apply { topMargin = dp(7) })
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(84),
-        ).apply { bottomMargin = dp(12) })
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { bottomMargin = dp(11) })
         return value
     }
 
@@ -2033,6 +1957,11 @@ class MainActivity : Activity() {
         trafficSessionValue?.text = "↓ ${formatTraffic(trafficRx)}   ↑ ${formatTraffic(trafficTx)}"
         trafficMonthValue?.text = "↓ ${formatTraffic(trafficMonthRx)}   ↑ ${formatTraffic(trafficMonthTx)}"
     }
+
+    /** One-line month total, shown as the Traffic monitor row's value. */
+    private fun trafficHeadline(): String =
+        if (trafficMonthRx + trafficMonthTx == 0L) "No data yet"
+        else formatTraffic(trafficMonthRx + trafficMonthTx) + " this month"
 
     private fun formatTraffic(bytes: Long): String = when {
         bytes < 1_024 -> "$bytes B"
@@ -2379,13 +2308,13 @@ class MainActivity : Activity() {
     private fun closeSplitTunnelScreen() {
         persistSplitTunnelDraft()
         splitTunnelPage?.let { animatePageClose(it) { splitTunnelPage = null } }
-        splitTunnelSummaryButton?.text = "${splitTunnelSummary()} ›"
+        splitTunnelSummaryButton?.setValue(splitTunnelSummary())
     }
 
     private fun closeSplitTunnelAppsScreen() {
         persistSplitTunnelDraft()
         splitTunnelAppsPage?.let { animatePageClose(it) { splitTunnelAppsPage = null } }
-        splitTunnelSummaryButton?.text = "${splitTunnelSummary()} ›"
+        splitTunnelSummaryButton?.setValue(splitTunnelSummary())
     }
 
     private fun persistSplitTunnelDraft() {
@@ -2438,16 +2367,15 @@ class MainActivity : Activity() {
         if (selectedProtocol == protocol) return
         selectedProtocol = protocol
         preferences().edit().putString(DEFAULT_PROTOCOL, protocol.coreName).apply()
-        modeSelector.contentDescription = "Connection mode, ${protocol.label}"
-        scanValue.text = scanSummary()
-        scannerSelector.contentDescription = "Scanner options, ${scanSummary()}"
-        modeValue.animate().cancel()
-        modeValue.animate().alpha(0f).scaleX(0.96f).scaleY(0.96f)
-            .setDuration(80)
+        // Keep the rail in sync when the change came from somewhere else (the
+        // mode screen, a restored preference) rather than from a rail tap.
+        transportRail.select(Protocol.entries.indexOf(protocol), animate = true)
+        chipProtocol.animate().cancel()
+        chipProtocol.animate().alpha(0f).setDuration(80)
             .setInterpolator(DecelerateInterpolator())
             .withEndAction {
-                modeValue.text = protocol.label
-                modeValue.animate().alpha(1f).scaleX(1f).scaleY(1f)
+                chipProtocol.text = protocol.label.uppercase()
+                chipProtocol.animate().alpha(1f)
                     .setDuration(160)
                     .setInterpolator(DecelerateInterpolator())
                     .start()
@@ -2463,7 +2391,7 @@ class MainActivity : Activity() {
         // connected.compareAndSet(false, true) guard rejected it silently — so
         // the UI sat on "Connecting" until the tunnel came up on its own or the
         // user force-stopped the app.
-        if (TunnelStatus.isActive() || visualState == ConnectionControl.State.CONNECTING) {
+        if (TunnelStatus.isActive() || visualState == OrbitDialView.State.CONNECTING) {
             startService(Intent(this, MsnGuardVpnService::class.java).setAction(MsnGuardVpnService.ACTION_DISCONNECT))
             showDisconnected("Disconnecting")
             return
@@ -2508,9 +2436,10 @@ class MainActivity : Activity() {
 
     private fun showConnectionProgress(title: String, detail: String) {
         latencyRequest++
-        connectionLatency.text = "Latency unavailable"
-        visualState = ConnectionControl.State.CONNECTING
-        connectionControl.state = visualState
+        chipLatency.text = "Latency —"
+        visualState = OrbitDialView.State.CONNECTING
+        orbitDial.state = visualState
+        renderStatusLed()
         connectionTitle.setTextColor(primary)
         connectionTitle.text = title
         connectionDetail.text = detail
@@ -2518,12 +2447,14 @@ class MainActivity : Activity() {
     }
 
     private fun showConnected(restored: Boolean = false) {
-        visualState = ConnectionControl.State.CONNECTED
-        connectionControl.state = visualState
+        visualState = OrbitDialView.State.CONNECTED
+        orbitDial.state = visualState
+        renderStatusLed()
         connectionTitle.setTextColor(connected)
         connectionTitle.text = "Connected"
         connectionDetail.text = if (restored) "${selectedProtocol.label} tunnel recovered" else "${selectedProtocol.label} tunnel is active"
-        latencyGraph.setLabel("Pinging\u2026")
+        chipLatency.text = "Latency …"
+        startSessionTimer(restored)
         setModeEnabled(false)
         if (!restored) {
             pingConnection()
@@ -2534,31 +2465,37 @@ class MainActivity : Activity() {
 
     private fun showDegraded() {
         if (!isTunnelActive()) return
-        visualState = ConnectionControl.State.DEGRADED
-        connectionControl.state = visualState
+        visualState = OrbitDialView.State.DEGRADED
+        orbitDial.state = visualState
+        renderStatusLed()
         connectionTitle.setTextColor(0xFFFFD180.toInt())
         connectionTitle.text = "Connection degraded"
         connectionDetail.text = "Tunnel is active; HTTP health check failed"
-        latencyGraph.setLabel("Ping unavailable")
+        chipLatency.text = "Latency n/a"
     }
 
     private fun showFailure(detail: String? = null) {
         latencyRequest++
-        connectionLatency.text = "Latency unavailable"
-        visualState = ConnectionControl.State.FAILED
-        connectionControl.state = visualState
+        chipLatency.text = "Latency —"
+        visualState = OrbitDialView.State.FAILED
+        orbitDial.state = visualState
+        renderStatusLed()
+        stopSessionTimer()
         connectionTitle.setTextColor(ERROR)
         connectionTitle.text = "Connection failed"
         connectionDetail.text = detail ?: "Check the server and try again"
         setModeEnabled(true)
     }
 
-    private fun showDisconnected(detail: String = "Tap the circle to connect") {
+    private fun showDisconnected(detail: String = "Tap the dial to connect") {
         latencyRequest++
         stopAutoPing()
-        latencyGraph.reset()
-        visualState = ConnectionControl.State.DISCONNECTED
-        connectionControl.state = visualState
+        chipLatency.text = "Latency —"
+        visualState = OrbitDialView.State.DISCONNECTED
+        orbitDial.state = visualState
+        renderStatusLed()
+        stopSessionTimer()
+        resetMetrics()
         connectionTitle.setTextColor(INK)
         connectionTitle.text = "Not connected"
         connectionDetail.text = detail
@@ -2566,15 +2503,78 @@ class MainActivity : Activity() {
         refreshPublicIp()
     }
 
-    private fun setModeEnabled(enabled: Boolean) {
-        modeSelector.isEnabled = enabled
-        modeSelector.alpha = if (enabled) 1f else DISABLED_ALPHA
-        scannerSelector.isEnabled = enabled
-        scannerSelector.alpha = if (enabled) 1f else DISABLED_ALPHA
+    /**
+     * Session timer. [restored] means the UI reattached to a tunnel that was
+     * already up — the service knows when it connected, so ask it rather than
+     * restarting the clock at zero and lying to the user.
+     */
+    private fun startSessionTimer(restored: Boolean) {
+        val serviceStart = MsnGuardVpnService.connectedSinceElapsed()
+        sessionStartedAt = when {
+            serviceStart > 0L -> serviceStart
+            sessionStartedAt > 0L && restored -> sessionStartedAt
+            else -> android.os.SystemClock.elapsedRealtime()
+        }
+        sessionHandler.removeCallbacks(sessionTicker)
+        sessionHandler.post(sessionTicker)
     }
 
-    private fun isTunnelActive(): Boolean = visualState == ConnectionControl.State.CONNECTED ||
-        visualState == ConnectionControl.State.DEGRADED
+    private fun stopSessionTimer() {
+        sessionHandler.removeCallbacks(sessionTicker)
+        sessionStartedAt = 0L
+        orbitDial.timerText = ""
+    }
+
+    private fun formatUptime(elapsedMs: Long): String {
+        val total = (elapsedMs / 1000L).coerceAtLeast(0L)
+        val hours = total / 3600L
+        val minutes = (total % 3600L) / 60L
+        val seconds = total % 60L
+        return String.format(java.util.Locale.US, "%02d:%02d:%02d", hours, minutes, seconds)
+    }
+
+    private fun resetMetrics() {
+        tileDown.setValue("0", "B")
+        tileUp.setValue("0", "B")
+        tileSpeed.setValue("0.0", "MB/S")
+        tileDown.resetBars()
+        tileUp.resetBars()
+        tileSpeed.resetBars()
+        exitNodeCard.resetSpark()
+    }
+
+    /** Splits a byte count into a scaled number and its unit for the tiles. */
+    private fun scaleBytes(bytes: Long): Pair<String, String> = when {
+        bytes < 1_024L -> bytes.toString() to "B"
+        bytes < 1_048_576L -> (bytes / 1_024L).toString() to "KB"
+        bytes < 1_073_741_824L -> String.format(java.util.Locale.US, "%.1f", bytes / 1_048_576.0) to "MB"
+        else -> String.format(java.util.Locale.US, "%.2f", bytes / 1_073_741_824.0) to "GB"
+    }
+
+    /** Pushes the latest traffic sample into the three home-screen tiles. */
+    private fun renderHomeMetrics() {
+        val (downValue, downUnit) = scaleBytes(trafficRx)
+        val (upValue, upUnit) = scaleBytes(trafficTx)
+        tileDown.setValue(downValue, downUnit)
+        tileUp.setValue(upValue, upUnit)
+        val combined = trafficSpeedRx + trafficSpeedTx
+        val mbPerSecond = combined / 1_048_576.0
+        tileSpeed.setValue(String.format(java.util.Locale.US, "%.1f", mbPerSecond), "MB/S")
+        // Bars are relative: 4 MB/s saturates the sparkline, which is a sane
+        // ceiling for a mobile tunnel and keeps small samples visible.
+        tileDown.push((trafficSpeedRx / 1_048_576.0 / 4.0).toFloat().coerceIn(0.04f, 1f))
+        tileUp.push((trafficSpeedTx / 1_048_576.0 / 4.0).toFloat().coerceIn(0.04f, 1f))
+        tileSpeed.push((mbPerSecond / 4.0).toFloat().coerceIn(0.04f, 1f))
+        exitNodeCard.pushSample((mbPerSecond / 4.0).toFloat().coerceIn(0.04f, 1f))
+    }
+
+    private fun setModeEnabled(enabled: Boolean) {
+        transportRail.isEnabled = enabled
+    }
+
+    private fun isTunnelActive(): Boolean = visualState == OrbitDialView.State.CONNECTED ||
+        visualState == OrbitDialView.State.DEGRADED
+
 
     private fun configureSystemBars() {
         window.statusBarColor = CANVAS
@@ -2844,52 +2844,24 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun createToggleRow(title: String, subtitle: String, checked: Boolean, onToggle: (Boolean) -> Unit): LinearLayout {
-        val texts = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(label(title, 16f, INK, TypefaceStyle.MEDIUM))
-            addView(label(subtitle, 13f, MUTED), LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(2) })
-        }
-        var isOn = checked
-        val thumbInset = dp(3)
-        val track = LinearLayout(this).apply {
-            val trackWidth = dp(48)
-            val trackHeight = dp(28)
-            layoutParams = LinearLayout.LayoutParams(trackWidth, trackHeight)
-            background = roundedBackground(if (isOn) primary else SURFACE_VARIANT, 14, if (isOn) primary else DIVIDER)
-            gravity = Gravity.CENTER_VERTICAL
-            isClickable = true
-            isFocusable = true
-            val thumbSize = dp(22)
-            val thumb = View(this@MainActivity).apply {
-                layoutParams = LinearLayout.LayoutParams(thumbSize, thumbSize)
-                background = roundedBackground(Color.WHITE, 11, Color.WHITE)
-                translationX = if (isOn) (trackWidth - thumbSize - thumbInset).toFloat() else thumbInset.toFloat()
-            }
-            addView(thumb)
-            setOnClickListener {
-                isOn = !isOn
-                onToggle(isOn)
-                val targetX = if (isOn) (trackWidth - thumbSize - thumbInset).toFloat() else thumbInset.toFloat()
-                thumb.animate()
-                    .translationX(targetX)
-                    .setDuration(160)
-                    .setInterpolator(PathInterpolator(0.2f, 0f, 0f, 1f))
-                    .start()
-                background = roundedBackground(if (isOn) primary else SURFACE_VARIANT, 14, if (isOn) primary else DIVIDER)
-            }
-        }
-        return LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(18), 0, dp(18), 0)
-            background = roundedBackground(SURFACE_VARIANT, 18, DIVIDER)
-            addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(track)
-        }
-    }
+    /**
+     * Toggle row. Now an [OrbitToggleRow] — a sculpted card with a neon track
+     * instead of the old flat grey pill. The return type stays LinearLayout so
+     * every existing call site is unchanged.
+     */
+    private fun createToggleRow(title: String, subtitle: String, checked: Boolean, onToggle: (Boolean) -> Unit): LinearLayout =
+        OrbitToggleRow(this, palette, title, subtitle, checked, onToggle)
+
+    /** Section caption with a neon tick, for the settings pages. */
+    private fun sectionLabel(text: String): View = OrbitSectionHeader(this, palette, text)
+
+    /** A sculpted navigation row: title on the left, current value on the right. */
+    private fun navRow(
+        title: String,
+        value: String? = null,
+        iconRes: Int? = null,
+        onClick: () -> Unit,
+    ): OrbitSettingsRow = OrbitSettingsRow(this, palette, title, value, iconRes = iconRes, onClick = onClick)
 
     private fun logLevel(): LogLevel = preferences()
         .getString(LOG_LEVEL, LogLevel.INFO.coreName)
@@ -3106,321 +3078,5 @@ private class ChevronView(context: Context, private val color: Int) : View(conte
         val arm = resources.displayMetrics.density * 4f
         canvas.drawLine(middleX - arm, middleY - arm / 2, middleX, middleY + arm / 2, paint)
         canvas.drawLine(middleX, middleY + arm / 2, middleX + arm, middleY - arm / 2, paint)
-    }
-}
-
-
-private class ConnectionControl(
-    context: Context,
-    private val primary: Int,
-    private val primaryContainer: Int,
-    private val connected: Int,
-    private val connectedContainer: Int,
-) : View(context) {
-    enum class State { DISCONNECTED, CONNECTING, CONNECTED, DEGRADED, FAILED }
-
-    var state: State = State.DISCONNECTED
-        set(value) {
-            field = value
-            contentDescription = when (value) {
-                State.DISCONNECTED, State.FAILED -> "Connect"
-                State.CONNECTING -> "Connecting"
-                State.CONNECTED, State.DEGRADED -> "Disconnect"
-            }
-            if (value == State.CONNECTING || value == State.CONNECTED || value == State.DEGRADED) startConnectingAnimation() else stopConnectingAnimation()
-            animate().cancel()
-            animate().scaleX(0.9f).scaleY(0.9f).setDuration(90).withEndAction {
-                animate().scaleX(1f).scaleY(1f).setDuration(180).start()
-            }.start()
-            invalidate()
-        }
-
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val arcBounds = RectF()
-    private val density = resources.displayMetrics.density
-    private var progress = 0f
-    private var pulse = 0f
-    private var connectingAnimator: ValueAnimator? = null
-
-    init {
-        isClickable = true
-        isFocusable = true
-        isFocusableInTouchMode = false
-        contentDescription = "Connect"
-        setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-    }
-
-    override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: android.graphics.Rect?) {
-        super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
-        invalidate()
-    }
-
-    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
-            performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-            performClick()
-            return true
-        }
-        return super.onKeyDown(keyCode, event)
-    }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val desired = dp(238)
-        setMeasuredDimension(resolveSize(desired, widthMeasureSpec), resolveSize(desired, heightMeasureSpec))
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        val centerX = width / 2f
-        val centerY = height / 2f
-        val radius = dp(95).toFloat() + if (state == State.CONNECTING) dp(3) * pulse else 0f
-        val palette = when (state) {
-            State.DISCONNECTED, State.CONNECTING -> Palette(primaryContainer, primary)
-            State.CONNECTED -> Palette(connectedContainer, connected)
-            State.DEGRADED -> Palette(DEGRADED_CONTAINER, DEGRADED)
-            State.FAILED -> Palette(ERROR_CONTAINER, ERROR)
-        }
-
-        paint.style = Paint.Style.FILL
-        paint.color = palette.container
-        val active = state == State.CONNECTED || state == State.DEGRADED
-        val shadowAlpha = if (active) 0x88 else 0x44
-        val shadowColor = (shadowAlpha shl 24) or (if (active) palette.accent and 0xFFFFFF else 0x000000)
-        paint.setShadowLayer(dp(if (active) 18 else 12).toFloat(), 0f, 0f, shadowColor)
-        canvas.drawCircle(centerX, centerY, radius, paint)
-        paint.clearShadowLayer()
-
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = dp(if (isFocused) 4 else if (state == State.DISCONNECTED) 1 else 2).toFloat()
-        paint.color = palette.accent
-        canvas.drawCircle(centerX, centerY, radius, paint)
-        if (isFocused) {
-            paint.strokeWidth = dp(2).toFloat()
-            canvas.drawCircle(centerX, centerY, radius + dp(8), paint)
-        }
-
-        val iconRadius = dp(31).toFloat()
-        arcBounds.set(centerX - iconRadius, centerY - iconRadius, centerX + iconRadius, centerY + iconRadius)
-        paint.strokeWidth = dp(3).toFloat()
-        paint.strokeCap = Paint.Cap.ROUND
-        canvas.drawArc(arcBounds, 330f, 240f, false, paint)
-        canvas.drawLine(centerX, centerY - dp(34), centerX, centerY - dp(8), paint)
-        paint.strokeCap = Paint.Cap.BUTT
-
-        if (state == State.CONNECTING) {
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = dp(3).toFloat()
-            canvas.drawArc(
-                RectF(
-                    centerX - radius - dp(7),
-                    centerY - radius - dp(7),
-                    centerX + radius + dp(7),
-                    centerY + radius + dp(7),
-                ),
-                progress * 360f,
-                78f + pulse * 42f,
-                false,
-                paint,
-            )
-        } else if (state == State.CONNECTED || state == State.DEGRADED) {
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = dp(2 + (pulse * 2f).roundToInt()).toFloat()
-            canvas.drawCircle(centerX, centerY, radius + dp(5) + pulse * dp(5), paint)
-        }
-
-
-    }
-
-    override fun onTouchEvent(event: MotionEvent): Boolean = when (event.actionMasked) {
-        MotionEvent.ACTION_DOWN -> {
-            animate().scaleX(0.97f).scaleY(0.97f).setDuration(90).start()
-            true
-        }
-        MotionEvent.ACTION_UP -> {
-            animate().scaleX(1f).scaleY(1f).setDuration(180).start()
-            performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-            performClick()
-            true
-        }
-        MotionEvent.ACTION_CANCEL -> {
-            animate().scaleX(1f).scaleY(1f).setDuration(180).start()
-            true
-        }
-        else -> super.onTouchEvent(event)
-    }
-
-    override fun performClick(): Boolean {
-        super.performClick()
-        return true
-    }
-
-    override fun onDetachedFromWindow() {
-        stopConnectingAnimation()
-        super.onDetachedFromWindow()
-    }
-
-    private fun startConnectingAnimation() {
-        if (connectingAnimator != null) return
-        connectingAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = if (state == State.CONNECTED || state == State.DEGRADED) 1_600 else 1_050
-            repeatCount = ValueAnimator.INFINITE
-            addUpdateListener {
-                progress = it.animatedFraction
-                pulse = if (progress < 0.5f) progress * 2f else (1f - progress) * 2f
-                invalidate()
-            }
-            start()
-        }
-    }
-
-    private fun stopConnectingAnimation() {
-        connectingAnimator?.cancel()
-        connectingAnimator = null
-        progress = 0f
-        pulse = 0f
-    }
-
-    private fun dp(value: Int): Int = (value * density).roundToInt()
-
-    private fun preferences() = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-
-    private data class Palette(val container: Int, val accent: Int)
-
-    private companion object {
-        const val ERROR = 0xFFFFB4AB.toInt()
-        const val ERROR_CONTAINER = 0xFF4A1E1C.toInt()
-        const val CONNECTED_BRIGHT = 0xFF8FFFB5.toInt()
-        const val CONNECTED_BRIGHT_CONTAINER = 0xFF176B3B.toInt()
-        const val DEGRADED = 0xFFFFD180.toInt()
-        const val DEGRADED_CONTAINER = 0xFF5A4300.toInt()
-    }
-}
-
-private class LatencyGraphView(context: Context) : View(context) {
-    private val maxPoints = 20
-    private val points = mutableListOf<Float>()
-    private var currentLabel = "Latency unavailable"
-    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = resources.displayMetrics.density * 2f
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-        color = 0xFFA4D8BB.toInt()
-    }
-    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-        color = 0x30A4D8BB.toInt()
-    }
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFFE8F1EA.toInt()
-        textSize = resources.displayMetrics.density * 13f
-        typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
-    }
-    private val mutedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFFB9C6BB.toInt()
-        textSize = resources.displayMetrics.density * 11f
-    }
-
-    fun setColors(accent: Int, ink: Int, muted: Int) {
-        linePaint.color = accent
-        fillPaint.color = (accent and 0x00FFFFFF) or 0x30000000
-        textPaint.color = ink
-        mutedPaint.color = muted
-        invalidate()
-    }
-    private val density = resources.displayMetrics.density
-    private val path = android.graphics.Path()
-    private var graphOffset = 0f
-    private var graphAnimator: ValueAnimator? = null
-
-    fun addPoint(ms: Float) {
-        points.add(ms)
-        if (points.size > maxPoints) points.removeAt(0)
-        currentLabel = "${ms.toInt()} ms"
-        animateGraph()
-    }
-
-    fun setLabel(text: String) {
-        currentLabel = text
-        invalidate()
-    }
-
-    private fun animateGraph() {
-        graphAnimator?.cancel()
-        graphAnimator = ValueAnimator.ofFloat(0f, -density * 3f, 0f).apply {
-            duration = 280
-            interpolator = DecelerateInterpolator()
-            addUpdateListener {
-                graphOffset = it.animatedValue as Float
-                invalidate()
-            }
-            start()
-        }
-    }
-
-    fun reset() {
-        points.clear()
-        currentLabel = "Latency unavailable"
-        graphAnimator?.cancel()
-        graphAnimator = null
-        graphOffset = 0f
-        invalidate()
-    }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val desiredW = resolveSize((180 * density).toInt(), widthMeasureSpec)
-        val desiredH = resolveSize((56 * density).toInt(), heightMeasureSpec)
-        setMeasuredDimension(desiredW, desiredH)
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        val w = width.toFloat()
-        val h = height.toFloat()
-        val padX = density * 4f
-        val padTop = density * 20f
-        val padBottom = density * 4f
-        val graphH = h - padTop - padBottom
-
-        textPaint.textAlign = Paint.Align.CENTER
-        canvas.drawText(currentLabel, w / 2f, padTop - density * 2f, textPaint)
-
-        if (points.isEmpty()) return
-
-        canvas.save()
-        canvas.translate(0f, graphOffset)
-
-        val maxVal = points.max().coerceAtLeast(10f)
-        val stepX = (w - padX * 2) / (maxPoints - 1).coerceAtLeast(1)
-
-        if (points.size == 1) {
-            val x = padX
-            val y = padTop + graphH * (1f - points[0] / maxVal)
-            canvas.drawCircle(x, y, density * 3f, linePaint.apply { style = Paint.Style.FILL })
-            linePaint.style = Paint.Style.STROKE
-            canvas.restore()
-            return
-        }
-
-        path.reset()
-        for (i in points.indices) {
-            val x = padX + i * stepX
-            val y = padTop + graphH * (1f - points[i] / maxVal)
-            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
-        }
-        canvas.drawPath(path, linePaint)
-
-        val fillPath = android.graphics.Path(path)
-        val lastX = padX + (points.size - 1) * stepX
-        fillPath.lineTo(lastX, padTop + graphH)
-        fillPath.lineTo(padX, padTop + graphH)
-        fillPath.close()
-        canvas.drawPath(fillPath, fillPaint)
-        canvas.restore()
-    }
-
-    override fun onDetachedFromWindow() {
-        graphAnimator?.cancel()
-        super.onDetachedFromWindow()
     }
 }
