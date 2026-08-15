@@ -11,6 +11,8 @@
 [![Android](https://img.shields.io/badge/Android-8.0%2B-3A4FB0?style=for-the-badge&logo=android&logoColor=white)](https://github.com/mbm110/MSN-GUARD)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-6c5ce7?style=for-the-badge)](LICENSE)
 
+**فارسی** · [English](README.en.md)
+
 </div>
 
 ---
@@ -192,10 +194,10 @@ cargo install cargo-ndk
 
 این پروژه تحت [GNU AGPL-3.0](LICENSE) منتشر شده است. کتابخانه‌های وندورشده مجوز خودشان را دارند:
 
-- [quiche](https://github.com/cloudflare/quiche) برای QUIC و HTTP/3 با مجوز BSD-2-Clause
-- [badvpn](https://github.com/ambrop72/badvpn) برای tun2socks با مجوز BSD-3-Clause
-- [lwIP](https://savannah.nongnu.org/projects/lwip/) به‌عنوان پشتهٔ TCP/IP با مجوز BSD-3-Clause
-- [Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core) به‌عنوان هستهٔ تونل با مجوز GPL-3.0
+- کتابخانهٔ [quiche](https://github.com/cloudflare/quiche) برای QUIC و HTTP/3 با مجوز BSD-2-Clause
+- پروژهٔ [badvpn](https://github.com/ambrop72/badvpn) برای tun2socks با مجوز BSD-3-Clause
+- پشتهٔ [lwIP](https://savannah.nongnu.org/projects/lwip/) به‌عنوان TCP/IP با مجوز BSD-3-Clause
+- هستهٔ تونل [Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core) با مجوز GPL-3.0
 
 ---
 
