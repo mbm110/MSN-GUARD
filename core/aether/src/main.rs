@@ -1303,11 +1303,17 @@ async fn run_masque(
                 known.push((assigned, "organization"));
             }
         }
-        if let Some(assigned) = assigned_masque_peer(&identity) {
-            if seen.insert(assigned) {
-                known.push((assigned, "account"));
-            }
-        }
+        // Last working gateway first, ahead of the account endpoint.
+        //
+        // Device evidence from the first successful MASQUE connection: the
+        // account-assigned 162.159.198.2 answered `:status 200` when probed from
+        // a clean host but timed out from the carrier, and 162.159.198.1 carried
+        // the session. Dialling the account peer first therefore costs a full
+        // verify timeout on every subsequent connect while the address already
+        // known to work on *this* network waits behind it.
+        //
+        // A gateway that worked here a moment ago is better evidence than one the
+        // API named, so it leads.
         if options.endpoint_discovery == EndpointDiscovery::Cache {
             if let Some(cached) = lastconn::load(&lastconn_path) {
                 if let Ok(peer) = cached.peer.parse::<SocketAddr>() {
@@ -1316,6 +1322,13 @@ async fn run_masque(
                     }
                 }
             }
+        }
+        if let Some(assigned) = assigned_masque_peer(&identity) {
+            if seen.insert(assigned) {
+                known.push((assigned, "account"));
+            }
+        }
+        if options.endpoint_discovery == EndpointDiscovery::Cache {
             for gateway in cached_masque_gateways(options) {
                 if seen.insert(gateway) {
                     known.push((gateway, "cached"));

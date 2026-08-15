@@ -1674,7 +1674,7 @@ class MainActivity : Activity() {
             preferences().edit().putBoolean(WIREGUARD_DATA_CHECK, !wireGuardDataCheck()).apply()
             updateTunnelControlButton(verificationButton, "WireGuard verification · ${if (wireGuardDataCheck()) "Strict" else "Fast"} ›")
         }
-        content.addView(label("AETHER 1.5", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+        content.addView(label("VPN CORE", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(28) })
         addControl("DNS resolvers · ${dnsSummary()} ›") { editDnsServers() }
