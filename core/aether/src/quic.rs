@@ -203,6 +203,8 @@ pub async fn run(
     let mut ready_fired = false;
     let mut validate_deadline: Option<Instant> = None;
     let mut validate_successes: u32 = 0;
+    // Device packets discarded while the tunnel was still being accepted.
+    let mut predelivery_drops: u64 = 0;
 
     let init_sock = bind_udp_fast(bind_addr_for(&peer)).await?;
     let local = init_sock.local_addr()?;
@@ -331,15 +333,34 @@ pub async fn run(
             pkt = internals.outbound_rx.recv(), if outbound_open => {
                 match pkt {
                     Some(ip_packet) => {
-                        if let Some(sid) = req_stream {
-                            match masque::encode_ip_datagram(sid, &ip_packet) {
+                        // Only carry device traffic once the edge has accepted the
+                        // CONNECT-IP request. Before that the packets are
+                        // undeliverable *and* actively harmful:
+                        //
+                        // Android brings the TUN up before the tunnel exists, so by
+                        // the time this connection is dialled the kernel already
+                        // holds seconds of the whole device's traffic. The instant
+                        // `req_stream` became Some, that entire backlog used to be
+                        // encoded into QUIC DATAGRAMs on a brand-new connection
+                        // whose congestion window is still at its initial value —
+                        // starving the very CONNECT-IP request whose response we
+                        // are waiting for. Field log: the same gateway answered a
+                        // 2-second pre-flight verify, then the real tunnel sat for
+                        // the full 30s startup timeout and only connected on the
+                        // retry, when the backlog had already been drained.
+                        //
+                        // Keep draining the channel so the TUN reader never blocks;
+                        // just do not hand the packets to QUIC yet.
+                        match (req_stream, ready_fired) {
+                            (Some(sid), true) => match masque::encode_ip_datagram(sid, &ip_packet) {
                                 Ok(framed) => {
                                     if let Err(e) = conn.dgram_send(&framed) {
                                         log::trace!("dgram_send: {e}");
                                     }
                                 }
                                 Err(e) => log::trace!("encap: {e}"),
-                            }
+                            },
+                            _ => predelivery_drops += 1,
                         }
                     }
                     None => {
@@ -386,6 +407,14 @@ pub async fn run(
         if connect_ip_ok && !data_check && !ready_fired {
             ready_fired = true;
             crate::ffi::mark_ready();
+            if predelivery_drops > 0 {
+                log_or_debug(
+                    quiet,
+                    format!(
+                        "[*] dropped {predelivery_drops} device packet(s) queued before the edge accepted CONNECT-IP"
+                    ),
+                );
+            }
             if let Some(tx) = ready_tx.take() {
                 let _ = tx.send(());
             }
@@ -404,6 +433,14 @@ pub async fn run(
                 ready_fired = true;
                 validate_deadline = None;
                 crate::ffi::mark_ready();
+                if predelivery_drops > 0 {
+                    log_or_debug(
+                        quiet,
+                        format!(
+                            "[*] dropped {predelivery_drops} device packet(s) queued before data-plane validation"
+                        ),
+                    );
+                }
                 if let Some(tx) = ready_tx.take() {
                     let _ = tx.send(());
                 }
@@ -797,6 +834,9 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
                             if h.name() == b":status" {
                                 if h.value() == b"200" {
                                     if !data_check {
+                                        // Hand the session back before leaving.
+                                        // See `close_verify` for why this matters.
+                                        close_verify(&mut conn, &sock).await;
                                         return Ok(start.elapsed());
                                     }
                                     connect_ip_ok = true;
@@ -841,6 +881,7 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
                             if let Ok(Some(_)) = masque::decode_ip_datagram(&dgram_buf[..n], sid) {
                                 probe_successes += 1;
                                 if probe_successes >= DATA_PROBE_REQUIRED_SUCCESSES {
+                                    close_verify(&mut conn, &sock).await;
                                     return Ok(start.elapsed());
                                 }
                                 if let Ok(framed) = masque::encode_ip_datagram(sid, &probe_packet) {
@@ -868,6 +909,25 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
 
 fn remaining(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
+}
+
+/// End a verify connection politely instead of just dropping the socket.
+///
+/// `verify_masque` proves a gateway will serve CONNECT-IP, then the caller dials
+/// the *same* gateway again for the real tunnel. Both connections present the
+/// same client certificate, and CONNECT-IP assigns the client an IP address per
+/// session — so an abandoned verify session is not free. Without a
+/// CONNECTION_CLOSE the edge cannot know we are gone and keeps that session (and
+/// its address assignment) alive until its own idle timeout, which is the same
+/// order of magnitude as the dead air seen in the field log between a successful
+/// verify and a tunnel that never received its `:status 200`.
+///
+/// Sending CONNECTION_CLOSE costs one datagram and removes that whole class of
+/// failure. Errors are ignored on purpose: we are leaving either way, and the
+/// verdict for the caller has already been decided.
+async fn close_verify(conn: &mut quiche::Connection, sock: &UdpSocket) {
+    let _ = conn.close(true, 0x00, b"verify-done");
+    let _ = flush_connected(conn, sock).await;
 }
 
 async fn flush_connected(conn: &mut quiche::Connection, sock: &UdpSocket) -> Result<()> {

@@ -1198,12 +1198,27 @@ fn masque_reconnect_delay() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// How long to wait for a dialled gateway to accept CONNECT-IP before giving up
+/// on it and reconnecting.
+///
+/// Measured, not guessed. This peer has already answered a pre-flight verify
+/// inside `quick_verify_masque_peer`, whose own budget is 5 seconds; in the field
+/// logs the verify that precedes a healthy tunnel completes in about 2 seconds,
+/// and the tunnel that follows it reports `:status 200` in about the same time.
+/// So a gateway that has said yes once and then stays silent for more than ~10
+/// seconds is not slow, it is stuck.
+///
+/// The old 30-second budget turned that stall into 30 seconds of dead air
+/// followed by a reconnect that succeeded on the first try — 40 seconds to
+/// connect instead of 8. Ten seconds keeps a genuinely slow-but-working edge
+/// while making the retry, which is the thing that actually works, arrive
+/// three times sooner.
 fn masque_startup_timeout() -> std::time::Duration {
     let secs = std::env::var("AETHER_MASQUE_STARTUP_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(30);
+        .unwrap_or(10);
     std::time::Duration::from_secs(secs)
 }
 
