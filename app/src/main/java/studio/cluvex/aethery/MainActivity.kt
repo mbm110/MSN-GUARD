@@ -520,7 +520,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(3) })
 
-        val chipLine = LinearLayout(this).apply {
+        val chipLine = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             chipLatency.setTextColor(Sculpt.withAlpha(MUTED, 0.95f))
@@ -534,7 +534,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(7) })
 
-        val tiles = LinearLayout(this).apply {
+        val tiles = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
             addView(tileDown, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(9) })
             addView(tileUp, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(0); rightMargin = dp(9) })
