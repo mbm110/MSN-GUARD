@@ -904,6 +904,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     private fun stopTunnel(notify: Boolean = true, teardownService: Boolean = true) {
         stopRequested.set(true)
+        // Clear the session stamp here, not in sendStatus: the reconnect path and
+        // onDestroy both call stopTunnel(notify = false), so relying on the
+        // DISCONNECTED broadcast left connectedSince set and the next session's
+        // timer resumed the old elapsed time instead of restarting at zero.
+        connectedSince = 0L
         // Disarm the escalation ladder before anything else: a pending timer that
         // fires after teardown would resurrect Psiphon on a dead TUN.
         ladderActive.set(false)

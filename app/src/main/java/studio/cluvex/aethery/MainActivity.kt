@@ -410,6 +410,7 @@ class MainActivity : Activity() {
             // must not be reported as a degraded tunnel.
             val result: Pair<String, Float?> = pingAnyEndpoint() ?: ("Ping unavailable" to null)
             runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
                 pingInFlight = false
                 if (request == latencyRequest && isTunnelActive()) {
                     chipLatency.text = result.second?.let { "Latency ${it.toInt()} ms" } ?: "Latency n/a"
@@ -578,6 +579,7 @@ class MainActivity : Activity() {
                 error("IP unavailable")
             }
             runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
                 ipRefreshInFlight = false
                 if (ipRefreshPending) {
                     ipRefreshPending = false
@@ -1329,7 +1331,11 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(8) })
         // PERF moved here off the home screen: a once-a-year knob does not earn
         // a quarter of the first thing the user sees.
-        content.addView(navRow("Performance", perfProfile().label) { choosePerfProfile() }, LinearLayout.LayoutParams(
+        lateinit var perfRow: OrbitSettingsRow
+        perfRow = navRow("Performance", perfProfile().label) {
+            choosePerfProfile { perfRow.setValue(perfProfile().label) }
+        }
+        content.addView(perfRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
@@ -1443,7 +1449,10 @@ class MainActivity : Activity() {
                 ).apply { topMargin = dp(9) })
             }
         content.addView(sectionLabel("CONNECTION SHAPING"))
-        addControl("Obfuscation", obfuscationProfile().label) { chooseObfuscation() }
+        lateinit var obfRow: OrbitSettingsRow
+        obfRow = addControl("Obfuscation", obfuscationProfile().label) {
+            chooseObfuscation { obfRow.setValue(obfuscationProfile().label) }
+        }
         addControl("Advanced obfuscation", advancedObfuscationSummary()) { editAdvancedObfuscation() }
         lateinit var retryRow: OrbitSettingsRow
         retryRow = addControl("WireGuard retries", if (retryObfuscationProfiles()) "On" else "Off") {
@@ -1458,7 +1467,10 @@ class MainActivity : Activity() {
         content.addView(sectionLabel("TROUBLESHOOTING"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        addControl("TLS fingerprint", tlsCurvePreset().label) { chooseTlsCurvePreset() }
+        lateinit var tlsRow: OrbitSettingsRow
+        tlsRow = addControl("TLS fingerprint", tlsCurvePreset().label) {
+            chooseTlsCurvePreset { tlsRow.setValue(tlsCurvePreset().label) }
+        }
         lateinit var verificationRow: OrbitSettingsRow
         verificationRow = addControl("WireGuard verification", if (wireGuardDataCheck()) "Strict" else "Fast") {
             preferences().edit().putBoolean(WIREGUARD_DATA_CHECK, !wireGuardDataCheck()).apply()
@@ -1480,8 +1492,11 @@ class MainActivity : Activity() {
         content.addView(sectionLabel("ANTI-DPI"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        addControl("TLS fragmentation", if (h2Fragmentation() == H2Fragmentation.ON) "On" else "Off") {
-            chooseH2Fragmentation()
+        lateinit var fragRow: OrbitSettingsRow
+        fragRow = addControl("TLS fragmentation", if (h2Fragmentation() == H2Fragmentation.ON) "On" else "Off") {
+            chooseH2Fragmentation {
+                fragRow.setValue(if (h2Fragmentation() == H2Fragmentation.ON) "On" else "Off")
+            }
         }
         scroll.addView(content)
         page.addView(scroll)
@@ -1519,7 +1534,7 @@ class MainActivity : Activity() {
             .start()
     }
 
-    private fun chooseObfuscation() {
+    private fun chooseObfuscation(after: (() -> Unit)? = null) {
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
         val sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1554,6 +1569,7 @@ class MainActivity : Activity() {
                 setOnClickListener {
                     preferences().edit().putString(OBFUSCATION_PROFILE, profile.coreName).apply()
                     options.forEach { (item, option) -> setSelectionState(option, item == profile, animate = true) }
+                    after?.invoke()
                 }
             }
             val option = SelectionOption(row, title, indicator, 18)
@@ -1576,7 +1592,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun chooseTlsCurvePreset() = showChoiceSheet(
+    private fun chooseTlsCurvePreset(after: (() -> Unit)? = null) = showChoiceSheet(
         title = "TLS fingerprint",
         subtitle = "Choose TLS curve ordering for QUIC connections",
         options = TlsCurvePreset.entries.toList(),
@@ -1585,9 +1601,10 @@ class MainActivity : Activity() {
         description = { it.description },
     ) { chosen ->
         preferences().edit().putString(TLS_CURVE_PRESET, chosen.coreName).apply()
+        after?.invoke()
     }
 
-    private fun choosePerfProfile() = showChoiceSheet(
+    private fun choosePerfProfile(after: (() -> Unit)? = null) = showChoiceSheet(
         title = "Performance",
         subtitle = "Scale scan concurrency and buffers to match your hardware",
         options = PerfProfile.entries.toList(),
@@ -1596,9 +1613,10 @@ class MainActivity : Activity() {
         description = { it.description },
     ) { chosen ->
         preferences().edit().putString(PERF_PROFILE, chosen.coreName).apply()
+        after?.invoke()
     }
 
-    private fun chooseH2Fragmentation() = showChoiceSheet(
+    private fun chooseH2Fragmentation(after: (() -> Unit)? = null) = showChoiceSheet(
         title = "TLS fragmentation",
         subtitle = "Fragment the TLS ClientHello to look like ordinary HTTPS traffic",
         options = H2Fragmentation.entries.toList(),
@@ -1607,6 +1625,7 @@ class MainActivity : Activity() {
         description = { it.description },
     ) { chosen ->
         preferences().edit().putString(H2_FRAGMENTATION, chosen.coreName).apply()
+        after?.invoke()
     }
 
     private fun chooseLogLevel() = showChoiceSheet(
@@ -1822,6 +1841,8 @@ class MainActivity : Activity() {
         description: (T) -> String,
         onSelected: (T) -> Unit,
     ) {
+        // `after` is invoked by the caller's onSelected lambda; see chooseObfuscation
+        // and friends, which pass a refresh for the row that opened the sheet.
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
         val sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2327,7 +2348,7 @@ class MainActivity : Activity() {
         cachedUserApps?.let(onLoaded) ?: Thread {
             val apps = installedUserApps()
             cachedUserApps = apps
-            runOnUiThread { onLoaded(apps) }
+            runOnUiThread { if (!isFinishing && !isDestroyed) onLoaded(apps) }
         }.start()
     }
 
