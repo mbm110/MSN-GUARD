@@ -51,7 +51,6 @@ import android.widget.TextView
 import com.google.android.material.color.DynamicColors
 import java.io.File
 import java.net.HttpURLConnection
-import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.URL
@@ -70,7 +69,6 @@ class MainActivity : Activity() {
     private lateinit var ipRefreshIcon: ImageView
     private lateinit var modeSelector: LinearLayout
     private lateinit var modeValue: TextView
-    private lateinit var connectionTypeValue: TextView
     private lateinit var logSelector: LinearLayout
     private lateinit var perfSelector: LinearLayout
     private lateinit var scannerSelector: LinearLayout
@@ -99,8 +97,6 @@ class MainActivity : Activity() {
     private var showingMode = false
     private var settingsPage: View? = null
     private var tunnelControlsPage: View? = null
-    private var zeroTrustPage: View? = null
-    private var zeroTrustControlButton: TextView? = null
     private var logsPage: View? = null
     private var scannerPage: View? = null
     private var modePage: View? = null
@@ -220,7 +216,6 @@ class MainActivity : Activity() {
         selectedProtocol = savedProtocol()
         modeValue = label(selectedProtocol.label, 16f, INK, TypefaceStyle.MEDIUM)
         modeSelector = createModeSelector()
-        connectionTypeValue = label(connectionType().label, 16f, INK, TypefaceStyle.MEDIUM)
         logSelector = createLogSelector()
         perfSelector = createPerfSelector()
         scanValue = label(scanSummary(), 14f, INK, TypefaceStyle.MEDIUM)
@@ -635,7 +630,7 @@ class MainActivity : Activity() {
 
     private fun openTunnelConnection(url: String): HttpURLConnection {
         // OURS, deliberately kept over upstream's
-        // `connectionType() == PROXY && NativeCore.isRunning()`.
+        // `PROXY mode && NativeCore.isRunning()` (proxy mode has since been removed).
         //
         // In Psiphon VPN mode the service calls addDisallowedApplication(packageName),
         // so our own process is excluded from the TUN and its traffic leaves over
@@ -1255,82 +1250,6 @@ class MainActivity : Activity() {
         return SelectionOption(row, title, indicator, 18).also { setSelectionState(it, selected, animate = false) }
     }
 
-    private fun showConnectionTypeSheet() {
-        if (visualState == ConnectionControl.State.CONNECTING ||
-            visualState == ConnectionControl.State.CONNECTED ||
-            TunnelStatus.isActive()
-        ) return
-
-        val dialog = Dialog(this).apply {
-            requestWindowFeature(Window.FEATURE_NO_TITLE)
-            setCanceledOnTouchOutside(true)
-        }
-        val sheet = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(24), dp(24), dp(24))
-            background = roundedBackground(SURFACE, 28, SURFACE)
-        }
-        sheet.addView(label("Connection type", 22f, INK, TypefaceStyle.MEDIUM))
-        sheet.addView(label("Choose device-wide VPN or local SOCKS5 proxy", 14f, MUTED), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(4); bottomMargin = dp(20) })
-        ConnectionType.entries.forEachIndexed { index, type ->
-            sheet.addView(createConnectionTypeOption(type, dialog), LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(76),
-            ).apply { if (index > 0) topMargin = dp(10) })
-        }
-        val container = FrameLayout(this).apply {
-            setPadding(dp(16), 0, dp(16), dp(16))
-            addView(sheet, FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ))
-        }
-        dialog.setContentView(container)
-        dialog.show()
-        dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setDimAmount(0.62f)
-            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
-            setGravity(Gravity.BOTTOM)
-        }
-    }
-
-    private fun createConnectionTypeOption(type: ConnectionType, dialog: Dialog): LinearLayout {
-        val selected = type == connectionType()
-        return LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(18), 0, dp(18), 0)
-            background = roundedBackground(
-                if (selected) primaryContainer else SURFACE_VARIANT,
-                18,
-                if (selected) primary else SURFACE_VARIANT,
-            )
-            contentDescription = "Use ${type.label} connection type"
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                preferences().edit().putString(CONNECTION_TYPE, type.name).apply()
-                connectionTypeValue.text = type.label
-                dialog.dismiss()
-                if (showingSettings) openSettingsScreen(animate = false)
-            }
-            val texts = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
-            texts.addView(label(type.label, 16f, INK, TypefaceStyle.MEDIUM))
-            texts.addView(label(type.description, 13f, MUTED), LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(2) })
-            addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            if (selected) addView(label("CURRENT", 11f, primary, TypefaceStyle.MEDIUM).apply {
-                letterSpacing = 0.08f
-            })
-        }
-    }
-
     private fun openModeScreen() {
         if (visualState == ConnectionControl.State.CONNECTING ||
             visualState == ConnectionControl.State.CONNECTED ||
@@ -1459,16 +1378,10 @@ class MainActivity : Activity() {
                 setPadding(dp(4), 0, 0, 0)
             })
         }
-        content.addView(label("CONNECTION TYPE", 12f, MUTED).apply { letterSpacing = 0.1f })
-        content.addView(createSettingsButton("${connectionType().label} ›") { showConnectionTypeSheet() }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(56),
-        ).apply { topMargin = dp(8) })
-
         content.addView(label("KILL SWITCH", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(24) })
+        ))
         lateinit var killSwitchRow: LinearLayout
         killSwitchRow = createToggleRow("Kill switch", "Block all traffic if the tunnel drops", killSwitchEnabled()) {
             preferences().edit().putBoolean(KILL_SWITCH, it).apply()
@@ -1482,17 +1395,10 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(24) })
-        val lanShareRow = createToggleRow(
-            "Share on LAN",
-            "Let other devices on this Wi-Fi use the SOCKS5 proxy",
-            lanSharingEnabled(),
-        ) {
-            preferences().edit().putBoolean(LAN_SHARING, it).apply()
-        }
-        content.addView(lanShareRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(72),
-        ).apply { topMargin = dp(8) })
+        // "Share on LAN" is gone with proxy mode: it only ever widened the SOCKS
+        // bind from 127.0.0.1 to 0.0.0.0, and in VPN mode no SOCKS listener is
+        // exposed at all. lanSharingEnabled() survives as a private helper
+        // because lanBypassEnabled() still migrates the old value forward.
         val lanBypassRow = createToggleRow(
             "Bypass LAN",
             "Keep local network devices reachable while VPN is connected",
@@ -1513,40 +1419,6 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(52),
         ).apply { topMargin = dp(10) })
-
-        content.addView(label("CORE SOCKS PORT", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(24) })
-        val portField = EditText(this).apply {
-            setText(socksPort().toString())
-            setTextColor(INK)
-            setHintTextColor(MUTED)
-            textSize = 16f
-            inputType = InputType.TYPE_CLASS_NUMBER
-            setSingleLine(true)
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(18), 0, dp(12), 0)
-            background = roundedBackground(SURFACE_VARIANT, 16, SURFACE_VARIANT)
-            contentDescription = "Core SOCKS port"
-        }
-        content.addView(LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            addView(portField, LinearLayout.LayoutParams(0, dp(56), 1f))
-            addView(createSettingsButton("Apply", backgroundOverride = primary, textColorOverride = primaryContainer) {
-                applySocksPort(portField)
-            }, LinearLayout.LayoutParams(
-                dp(96),
-                dp(56),
-            ).apply { leftMargin = dp(10) })
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        content.addView(label("Used by Aether's local SOCKS listener; Android VPN/TUN routes do not use this port.", 12f, MUTED), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(6) })
 
         content.addView(label("NATIVE SPLIT TUNNELING", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1674,12 +1546,19 @@ class MainActivity : Activity() {
             preferences().edit().putBoolean(WIREGUARD_DATA_CHECK, !wireGuardDataCheck()).apply()
             updateTunnelControlButton(verificationButton, "WireGuard verification · ${if (wireGuardDataCheck()) "Strict" else "Fast"} ›")
         }
-        content.addView(label("VPN CORE", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(28) })
-        addControl("DNS resolvers · ${dnsSummary()} ›") { editDnsServers() }
-        addControl("Destination routing · ${routingSummary()} ›") { editRoutingRules() }
-        zeroTrustControlButton = addControl("Zero Trust · ${zeroTrustSummary()} ›") { openZeroTrustScreen() }
+        // The "VPN CORE" section is gone. It held DNS resolvers, Destination
+        // routing, and Zero Trust — all three are proxy-mode features:
+        //
+        //   * DNS resolvers   -> socks.rs::resolver_addresses(), and socks::serve
+        //                        never runs in VPN mode (tun::bridge takes its
+        //                        place). The device's real resolvers come from
+        //                        applyDns() on the Builder.
+        //   * Dest. routing   -> RuleSet::from_env(), read only from socks.rs.
+        //   * Zero Trust      -> Cloudflare organization accounts, unused here.
+        //
+        // The underlying prefs and the core's env bridge are untouched, so the
+        // knobs still exist for the CLI; they are simply no longer surfaced as
+        // settings that silently do nothing on this device.
         content.addView(label("ANTI-DPI", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(28) })
@@ -1722,7 +1601,6 @@ class MainActivity : Activity() {
     private fun closeTunnelControlsScreen(animate: Boolean = true) {
         val page = tunnelControlsPage ?: return
         tunnelControlsPage = null
-        zeroTrustControlButton = null
         if (!animate) {
             pageHost.removeView(page)
             return
@@ -1992,46 +1870,6 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun editDnsServers() {
-        val field = settingsField(
-            preferences().getString(DNS_SERVERS, "").orEmpty(),
-            "1.1.1.1, 9.9.9.9",
-        )
-        showTextSettingsSheet(
-            "DNS resolvers",
-            "IP addresses, optionally with ports. Blank uses Cloudflare defaults.",
-            listOf("RESOLVERS" to field),
-        ) { values ->
-            preferences().edit().putString(DNS_SERVERS, values[0]).apply()
-        }
-    }
-
-    private fun editRoutingRules() {
-        val block = settingsField(
-            preferences().getString(ROUTE_BLOCK, "").orEmpty(),
-            "ads.example\nkeyword:tracker\nport:25",
-            multiline = true,
-        ).apply { maxLines = 5 }
-        val direct = settingsField(
-            preferences().getString(ROUTE_DIRECT, "").orEmpty(),
-            "private\nexample.com\n8.6.112.0/24",
-            multiline = true,
-        ).apply { maxLines = 5 }
-        showTextSettingsSheet(
-            "Destination routing",
-            "Proxy mode only. Add a CIDR directly, such as 8.6.112.0/24.",
-            listOf("BLOCK" to block, "BYPASS TUNNEL / CIDR" to direct),
-            validator = { values ->
-                values.mapIndexedNotNull { index, rules -> invalidCidrRule(rules)?.let { index to it } }.firstOrNull()
-            },
-        ) { values ->
-            preferences().edit()
-                .putString(ROUTE_BLOCK, values[0])
-                .putString(ROUTE_DIRECT, values[1])
-                .apply()
-        }
-    }
-
     private fun editAdvancedObfuscation() {
         val jc = settingsField(preferences().getString(OBFUSCATION_JC, "").orEmpty(), "0–10").apply {
             inputType = InputType.TYPE_CLASS_NUMBER
@@ -2067,150 +1905,6 @@ class MainActivity : Activity() {
                     .forEach { (key, value) -> if (value.isBlank()) remove(key) else putString(key, value) }
             }.apply()
         }
-    }
-
-    private fun invalidCidrRule(rules: String): String? = rules.lineSequence()
-        .map(String::trim)
-        .firstOrNull { rule ->
-            val value = when {
-                rule.startsWith("cidr:", ignoreCase = true) -> rule.substringAfter(':').trim()
-                rule.startsWith("ip:", ignoreCase = true) -> rule.substringAfter(':').trim()
-                rule.startsWith("regex:", ignoreCase = true) || rule.startsWith("regexp:", ignoreCase = true) -> return@firstOrNull false
-                else -> rule
-            }
-            if ('/' !in value) return@firstOrNull false
-            val (address, prefix) = value.split('/', limit = 2)
-            if (!address.matches(Regex("[0-9A-Fa-f:.]+"))) return@firstOrNull true
-            val bytes = runCatching { InetAddress.getByName(address).address.size }.getOrNull() ?: return@firstOrNull true
-            prefix.toIntOrNull()?.let { it !in 0..if (bytes == 4) 32 else 128 } ?: true
-        }
-        ?.let { "Invalid CIDR: $it" }
-
-    private fun openZeroTrustScreen() {
-        zeroTrustPage?.let(pageHost::removeView)
-        val team = settingsField(SecureStore.getSecret(this, ZERO_TRUST_TEAM), "team name")
-        val email = settingsField(SecureStore.getSecret(this, ZERO_TRUST_EMAIL), "you@example.com")
-        val code = settingsField("", "email code")
-        val clientId = settingsField(SecureStore.getSecret(this, ZERO_TRUST_CLIENT_ID), "service token client ID")
-        val clientSecret = settingsField(SecureStore.getSecret(this, ZERO_TRUST_CLIENT_SECRET), "service token secret", secure = true)
-        val token = settingsField(SecureStore.getSecret(this, ZERO_TRUST_TOKEN), "Access JWT", secure = true)
-        val status = label("", 13f, MUTED)
-        val page = FrameLayout(this).apply {
-            setBackgroundColor(CANVAS)
-            isClickable = true
-        }
-        val scroll = ScrollView(this).apply {
-            isVerticalScrollBarEnabled = false
-            overScrollMode = View.OVER_SCROLL_NEVER
-        }
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(16), dp(24), dp(24))
-        }
-        content.addView(LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            addView(createHeaderBackButton { closeZeroTrustScreen() }, LinearLayout.LayoutParams(dp(48), dp(56)))
-            addView(label("Zero Trust", 22f, INK, TypefaceStyle.MEDIUM))
-        })
-        content.addView(label("Use email OTP, a service token, or an existing Access JWT.", 14f, MUTED), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(12) })
-        listOf(
-            "TEAM" to team,
-            "EMAIL" to email,
-            "ONE-TIME CODE" to code,
-            "SERVICE CLIENT ID" to clientId,
-            "SERVICE SECRET" to clientSecret,
-            "ACCESS JWT" to token,
-        ).forEach { (name, field) ->
-            content.addView(label(name, 11f, MUTED).apply { letterSpacing = 0.08f }, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(10); bottomMargin = dp(6) })
-            content.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)))
-        }
-        content.addView(createToggleRow(
-            "Gateway filtering",
-            "Route HTTP/S through the organization gateway in VPN and Proxy modes",
-            preferences().getBoolean(ZERO_TRUST_GATEWAY, false),
-        ) { preferences().edit().putBoolean(ZERO_TRUST_GATEWAY, it).apply() }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(72),
-        ).apply { topMargin = dp(14) })
-        content.addView(status, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(12) })
-        val authButtons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        authButtons.addView(createSettingsButton("Send code") {
-            SecureStore.putSecret(this, ZERO_TRUST_TEAM, team.text.toString().trim())
-            SecureStore.putSecret(this, ZERO_TRUST_EMAIL, email.text.toString().trim())
-            status.text = "Requesting code\u2026"
-            Thread {
-                val result = runCatching { NativeCore.requestEmailCode(team.text.toString(), email.text.toString()) }
-                runOnUiThread {
-                    status.setTextColor(if (result.isSuccess) connected else ERROR)
-                    status.text = result.fold({ "Code sent. Check your email." }, { it.message ?: "Could not send code" })
-                }
-            }.start()
-        }, LinearLayout.LayoutParams(0, dp(52), 1f))
-        authButtons.addView(createSettingsButton("Verify") {
-            status.text = "Verifying\u2026"
-            Thread {
-                val result = runCatching { NativeCore.confirmEmailCode(code.text.toString()) }
-                runOnUiThread {
-                    result.onSuccess {
-                        token.setText(it)
-                        SecureStore.putSecret(this, ZERO_TRUST_TOKEN, it)
-                    }
-                    status.setTextColor(if (result.isSuccess) connected else ERROR)
-                    status.text = result.fold({ "Verified. Access token saved." }, { it.message ?: "Code rejected" })
-                }
-            }.start()
-        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
-        content.addView(authButtons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(12) })
-        val saveButtons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        saveButtons.addView(createSettingsButton("Clear") {
-            SecureStore.removeSecret(this, ZERO_TRUST_TEAM)
-            SecureStore.removeSecret(this, ZERO_TRUST_EMAIL)
-            SecureStore.removeSecret(this, ZERO_TRUST_CLIENT_ID)
-            SecureStore.removeSecret(this, ZERO_TRUST_CLIENT_SECRET)
-            SecureStore.removeSecret(this, ZERO_TRUST_TOKEN)
-            preferences().edit().remove(ZERO_TRUST_GATEWAY).apply()
-            zeroTrustControlButton?.text = "Zero Trust · ${zeroTrustSummary()} ›"
-            closeZeroTrustScreen()
-        }, LinearLayout.LayoutParams(0, dp(52), 1f))
-        saveButtons.addView(createSettingsButton("Save", backgroundOverride = primary, textColorOverride = primaryContainer) {
-            if (team.text.toString().isBlank()) {
-                team.error = "Team is required"
-                return@createSettingsButton
-            }
-            SecureStore.putSecret(this, ZERO_TRUST_TEAM, team.text.toString().trim())
-            SecureStore.putSecret(this, ZERO_TRUST_EMAIL, email.text.toString().trim())
-            SecureStore.putSecret(this, ZERO_TRUST_CLIENT_ID, clientId.text.toString().trim())
-            SecureStore.putSecret(this, ZERO_TRUST_CLIENT_SECRET, clientSecret.text.toString().trim())
-            SecureStore.putSecret(this, ZERO_TRUST_TOKEN, token.text.toString().trim())
-            zeroTrustControlButton?.text = "Zero Trust · ${zeroTrustSummary()} ›"
-            closeZeroTrustScreen()
-        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
-        content.addView(saveButtons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply {
-            topMargin = dp(10)
-            bottomMargin = dp(8)
-        })
-        scroll.addView(content)
-        page.addView(scroll, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT,
-        ))
-        page.setOnApplyWindowInsetsListener { _, insets ->
-            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24))
-            insets
-        }
-        zeroTrustPage = page
-        pageHost.addView(page)
-        page.requestApplyInsets()
-        animatePageOpen(page)
-    }
-
-    private fun closeZeroTrustScreen() {
-        zeroTrustPage?.let { animatePageClose(it) { zeroTrustPage = null } }
     }
 
     private fun <T> showChoiceSheet(
@@ -2743,7 +2437,6 @@ class MainActivity : Activity() {
             splitTunnelPage != null -> closeSplitTunnelScreen()
             themePage != null -> closeThemeScreen()
             trafficMonitorPage != null -> closeTrafficMonitorScreen()
-            zeroTrustPage != null -> closeZeroTrustScreen()
             tunnelControlsPage != null -> closeTunnelControlsScreen()
             showingLogs -> closeLogsScreen()
             showingScanner -> closeScannerScreen()
@@ -2790,10 +2483,8 @@ class MainActivity : Activity() {
         }
 
         val config = configJson()
-        if (connectionType() == ConnectionType.PROXY) {
-            connect(config)
-            return
-        }
+        // VPN mode is the only mode, so Android's VPN consent is always required
+        // before the service may build a TUN.
         val permissionIntent = VpnService.prepare(this)
         if (permissionIntent == null) connect(config) else {
             pendingConfig = config
@@ -2805,8 +2496,7 @@ class MainActivity : Activity() {
         showConnecting()
         startForegroundService(Intent(this, MsnGuardVpnService::class.java)
             .setAction(MsnGuardVpnService.ACTION_CONNECT)
-            .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config)
-            .putExtra(MsnGuardVpnService.EXTRA_VPN_MODE, connectionType() == ConnectionType.VPN))
+            .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config))
     }
 
     private fun configJson(): String = CoreConfig.json(this, selectedProtocol.coreName)
@@ -3020,11 +2710,6 @@ class MainActivity : Activity() {
     }
 
 
-    private fun connectionType(): ConnectionType = preferences()
-        .getString(CONNECTION_TYPE, ConnectionType.VPN.name)
-        ?.let { name -> ConnectionType.entries.firstOrNull { it.name == name } }
-        ?: ConnectionType.VPN
-
     private fun defaultScan(): ScanTarget {
         val name = getSharedPreferences(SETTINGS, MODE_PRIVATE).getString(DEFAULT_SCAN, ScanTarget.IPV4.coreName)
         return ScanTarget.entries.firstOrNull { it.coreName == name } ?: ScanTarget.IPV4
@@ -3234,20 +2919,15 @@ class MainActivity : Activity() {
         ?.let { name -> H2Fragmentation.entries.firstOrNull { it.coreName == name } }
         ?: H2Fragmentation.OFF
 
-    private fun dnsSummary(): String =
-        preferences().getString(DNS_SERVERS, "")?.takeIf { it.isNotBlank() } ?: "Automatic"
-
-    private fun routingSummary(): String =
-        if (
-            preferences().getString(ROUTE_BLOCK, "").isNullOrBlank() &&
-            preferences().getString(ROUTE_DIRECT, "").isNullOrBlank()
-        ) "Off" else "Custom"
-
-    private fun zeroTrustSummary(): String =
-        SecureStore.getSecret(this, ZERO_TRUST_TEAM).takeIf { it.isNotBlank() } ?: "Off"
-
-    private fun socksPort(): Int = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        .getInt(DEFAULT_SOCKS_PORT, DEFAULT_SOCKS_PORT_VALUE)
+    /**
+     * Psiphon's local SOCKS port, fixed.
+     *
+     * Still needed by openTunnelConnection(): in Psiphon VPN mode tun2socks and
+     * the health check both dial this listener. No longer user-configurable —
+     * the TUN is created before Psiphon starts, so the port must be known up
+     * front.
+     */
+    private fun socksPort(): Int = CoreConfig.SOCKS_PORT
 
     private fun splitTunnelSummary(): String {
         val settings = SplitTunnelSettings(this)
@@ -3257,17 +2937,6 @@ class MainActivity : Activity() {
             SplitTunnelSettings.Mode.INCLUDE -> "Only $count selected app${if (count == 1) "" else "s"}"
             SplitTunnelSettings.Mode.EXCLUDE -> "Exclude $count selected app${if (count == 1) "" else "s"}"
         }
-    }
-
-    private fun applySocksPort(field: EditText) {
-        val port = field.text.toString().toIntOrNull()
-        if (port == null || port !in 1..65535) {
-            field.error = "Enter a port from 1 to 65535"
-            return
-        }
-        getSharedPreferences(SETTINGS, MODE_PRIVATE).edit().putInt(DEFAULT_SOCKS_PORT, port).apply()
-        field.error = null
-        field.clearFocus()
     }
 
     private enum class Protocol(
@@ -3280,11 +2949,6 @@ class MainActivity : Activity() {
         WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel"),
         WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel"),
         PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel"),
-    }
-
-    private enum class ConnectionType(val label: String, val description: String) {
-        VPN("VPN", "Routes device traffic through Android VPN"),
-        PROXY("Proxy", "Starts local SOCKS5 at 127.0.0.1:${DEFAULT_SOCKS_PORT_VALUE}"),
     }
 
     private enum class ScanTarget(
@@ -3407,7 +3071,6 @@ class MainActivity : Activity() {
         const val IP_FETCH_ATTEMPTS = 3
         const val IP_RETRY_DELAY_MS = 300L
         const val SETTINGS = "settings"
-        const val CONNECTION_TYPE = "connection_type"
         const val DEFAULT_SCAN = "default_scan"
         const val DEFAULT_SCAN_MODE = "default_scan_mode"
         const val ENDPOINT_DISCOVERY = "endpoint_discovery"
@@ -3429,17 +3092,6 @@ class MainActivity : Activity() {
         const val LOG_LEVEL = "log_level"
         const val PERF_PROFILE = "perf_profile"
         const val H2_FRAGMENTATION = "h2_fragmentation"
-        const val DNS_SERVERS = "dns_servers"
-        const val ROUTE_BLOCK = "route_block"
-        const val ROUTE_DIRECT = "route_direct"
-        const val ZERO_TRUST_TEAM = "zero_trust_team"
-        const val ZERO_TRUST_EMAIL = "zero_trust_email"
-        const val ZERO_TRUST_CLIENT_ID = "zero_trust_client_id"
-        const val ZERO_TRUST_CLIENT_SECRET = "zero_trust_client_secret"
-        const val ZERO_TRUST_TOKEN = "zero_trust_token"
-        const val ZERO_TRUST_GATEWAY = "zero_trust_gateway"
-        const val DEFAULT_SOCKS_PORT = "default_socks_port"
-        const val DEFAULT_SOCKS_PORT_VALUE = 1819
         const val FALLBACK_CANVAS = 0xFF101411.toInt()
         const val FALLBACK_SURFACE = 0xFF171C18.toInt()
         const val FALLBACK_SURFACE_VARIANT = 0xFF222A24.toInt()

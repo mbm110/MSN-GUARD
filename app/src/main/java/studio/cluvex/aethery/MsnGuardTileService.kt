@@ -60,16 +60,16 @@ class MsnGuardTileService : TileService() {
             }
             tile.updateTile()
         } else {
-            // Connect - need VPN permission first
-            val connectionType = connectionType()
-            if (connectionType == ConnectionType.PROXY) {
-                // Proxy mode doesn't need VPN permission
+            // Connect. VPN mode is the only mode, so Android's VPN consent is
+            // always required before the service may build a TUN.
+            val permissionIntent = VpnService.prepare(this)
+            if (permissionIntent == null) {
+                // Already have permission
                 val config = configJson()
                 startForegroundService(
                     Intent(this, MsnGuardVpnService::class.java)
                         .setAction(MsnGuardVpnService.ACTION_CONNECT)
                         .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config)
-                        .putExtra(MsnGuardVpnService.EXTRA_VPN_MODE, false)
                 )
                 tile.state = Tile.STATE_ACTIVE
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -77,46 +77,19 @@ class MsnGuardTileService : TileService() {
                 }
                 tile.updateTile()
             } else {
-                // VPN mode - need permission
-                val permissionIntent = VpnService.prepare(this)
-                if (permissionIntent == null) {
-                    // Already have permission
-                    val config = configJson()
-                    startForegroundService(
-                        Intent(this, MsnGuardVpnService::class.java)
-                            .setAction(MsnGuardVpnService.ACTION_CONNECT)
-                            .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config)
-                            .putExtra(MsnGuardVpnService.EXTRA_VPN_MODE, true)
-                    )
-                    tile.state = Tile.STATE_ACTIVE
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        tile.subtitle = getString(R.string.vpn_connecting)
-                    }
-                    tile.updateTile()
-                } else {
-                    // Need to ask for permission - can't start activity from here
-                    Log.w(LOG_TAG, "VPN permission required, cannot start from tile")
-                }
+                // Need to ask for permission - can't start activity from here
+                Log.w(LOG_TAG, "VPN permission required, cannot start from tile")
             }
         }
     }
 
     private fun configJson(): String = CoreConfig.json(this)
 
-    private fun connectionType(): ConnectionType {
-        val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        val name = prefs.getString(CONNECTION_TYPE, ConnectionType.VPN.name) ?: ConnectionType.VPN.name
-        return ConnectionType.entries.find { it.name == name } ?: ConnectionType.VPN
-    }
-
     private val selectedProtocolcoreName: String
         get() = getSharedPreferences(SETTINGS, MODE_PRIVATE)
             .getString(DEFAULT_PROTOCOL, Protocol.MASQUE.coreName)
             ?.let { name -> Protocol.entries.find { it.coreName == name } }
             ?.coreName ?: Protocol.MASQUE.coreName
-
-    private fun socksPort(): Int = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        .getInt(DEFAULT_SOCKS_PORT, DEFAULT_SOCKS_PORT_VALUE)
 
     private fun defaultScan(): ScanTarget {
         val name = getSharedPreferences(SETTINGS, MODE_PRIVATE).getString(DEFAULT_SCAN, ScanTarget.IPV4.coreName)
@@ -159,9 +132,6 @@ class MsnGuardTileService : TileService() {
     private fun wireGuardDataCheck(): Boolean = getSharedPreferences(SETTINGS, MODE_PRIVATE)
         .getBoolean(WIREGUARD_DATA_CHECK, true)
 
-    private fun lanSharingEnabled(): Boolean = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        .getBoolean(LAN_SHARING, false)
-
     private fun logLevel(): String = getSharedPreferences(SETTINGS, MODE_PRIVATE)
         .getString(LOG_LEVEL, "info") ?: "info"
 
@@ -176,7 +146,6 @@ class MsnGuardTileService : TileService() {
 
         // From MainActivity
         const val SETTINGS = "settings"
-        const val CONNECTION_TYPE = "connection_type"
         const val DEFAULT_SCAN = "default_scan"
         const val DEFAULT_SCAN_MODE = "default_scan_mode"
         const val ENDPOINT_DISCOVERY = "endpoint_discovery"
@@ -186,18 +155,10 @@ class MsnGuardTileService : TileService() {
         const val RETRY_OBFUSCATION = "retry_obfuscation_profiles"
         const val TLS_CURVE_PRESET = "tls_curve_preset"
         const val WIREGUARD_DATA_CHECK = "wireguard_data_check"
-        const val LAN_SHARING = "lan_sharing"
         const val LOG_LEVEL = "log_level"
         const val PERF_PROFILE = "perf_profile"
         const val H2_FRAGMENTATION = "h2_fragmentation"
-        const val DEFAULT_SOCKS_PORT = "default_socks_port"
-        const val DEFAULT_SOCKS_PORT_VALUE = 1819
         const val DEFAULT_PROTOCOL = "default_protocol"
-
-        enum class ConnectionType(val label: String, val description: String) {
-            VPN("VPN", "Routes device traffic through Android VPN"),
-            PROXY("Proxy", "Starts local SOCKS5 at 127.0.0.1:1819"),
-        }
 
         enum class Protocol(
             val label: String,

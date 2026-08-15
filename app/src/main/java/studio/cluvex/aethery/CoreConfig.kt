@@ -5,6 +5,16 @@ import org.json.JSONObject
 import java.io.File
 
 object CoreConfig {
+    /**
+     * The one SOCKS port the app uses, everywhere.
+     *
+     * Was user-configurable, which served no purpose once proxy mode was removed:
+     * in VPN mode nothing binds this port except Psiphon's own Go controller, and
+     * the TUN is created *before* Psiphon starts, so the port has to be known up
+     * front anyway. Hardcoding it removes a setting that could only break things.
+     */
+    const val SOCKS_PORT = 1819
+
     fun json(context: Context, protocol: String? = null): String {
         val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
         fun text(key: String, fallback: String = "") =
@@ -17,12 +27,17 @@ object CoreConfig {
             putOpt("i2", text("obfuscation_i2").ifBlank { null })
         }
 
-        val proxy = text("connection_type", "VPN") == "PROXY"
-        val lan = prefs.getBoolean("lan_sharing", false)
         return JSONObject().apply {
             put("config_path", File(context.filesDir, "aether.toml").absolutePath)
             put("protocol", protocol ?: text("default_protocol", "masque"))
-            put("listen", "${if (proxy && lan) "0.0.0.0" else "127.0.0.1"}:${prefs.getInt("default_socks_port", 1819)}")
+            // The app is VPN-mode only: the whole device is tunnelled and there is
+            // no user-facing proxy any more. `listen` is still sent because the
+            // core requires the field, but in VPN mode no SOCKS listener is ever
+            // bound from it — MASQUE/WireGuard/WARP-on-WARP take the `tun_fd`
+            // branch in main.rs, and Psiphon owns this port itself via
+            // LocalSocksProxyPort. Fixed at 1819 so the TUN can be pre-created
+            // before Psiphon starts.
+            put("listen", "127.0.0.1:$SOCKS_PORT")
             put("scan_mode", text("default_scan_mode", "balanced"))
             put("ip_scan", text("default_scan", "v4"))
             put("endpoint_cache_path", File(context.filesDir, "masque-gateway-cache.json").absolutePath)
