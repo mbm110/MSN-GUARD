@@ -1,0 +1,23 @@
+<!-- Monochrome layer for Android 13+ themed icons.
+     The launcher paints this with the user's wallpaper colours and applies the
+     same mask as the other layers, so the glyph must sit inside the guaranteed
+     safe zone: the centre 66dp of a 108dp canvas.
+
+     Source path is authored in a 24x24 viewport (shared with the status-bar
+     icon), so it is scaled by 66/24 = 2.75 and offset by (108-66)/2 = 21. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:translateX="21"
+        android:translateY="21"
+        android:scaleX="2.75"
+        android:scaleY="2.75">
+        <path
+            android:fillColor="#FFFFFF"
+            android:fillType="evenOdd"
+            android:pathData="M12,2 L4,5 v6 c0,5.55 3.84,10.74 8,12 c4.16,-1.26 8,-6.45 8,-12 V5 L12,2 z M7,8 h2.2 L12,12.5 L14.8,8 H17 v8 h-2 v-5 L12.8,14.5 h-1.6 L9,11 v5 H7 V8 z" />
+    </group>
+</vector>

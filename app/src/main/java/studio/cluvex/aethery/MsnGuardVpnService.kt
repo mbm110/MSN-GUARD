@@ -778,7 +778,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
                     ConnectionLog.record("Creating TUN interface BEFORE Psiphon starts")
                     tun = Builder()
-                        .setSession("MSN-VPN")
+                        .setSession("MSN-GUARD")
                         .setMtu(Tun2SocksManager.VPN_INTERFACE_MTU)
                         .addAddress(address.ipAddress, address.prefixLength)
                         .addRoute("0.0.0.0", 0)
@@ -832,7 +832,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 }
                 ConnectionLog.record("Creating Android VPN interface")
                 tun = Builder()
-                    .setSession("MSN-VPN")
+                    .setSession("MSN-GUARD")
                     .setMtu(1280)
                     // applyTunnelAddresses replaces the hardcoded /32 + /128
                     // pair: v0.8.0 identities can carry a real prefix length,
@@ -926,7 +926,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         try {
             tun?.close()
             tun = Builder()
-                .setSession("MSN-VPN — Kill Switch")
+                .setSession("MSN-GUARD — Kill Switch")
                 .setMtu(1280)
                 .addAddress("100.64.0.1", 32)
                 .addRoute("0.0.0.0", 0)

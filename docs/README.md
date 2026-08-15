@@ -1,7 +1,18 @@
-# Aethery documentation
+# مستندات MSN-GUARD
 
-- [Architecture](architecture.md): Android VPN, JNI, and Aether-core boundaries.
-- [Build guide](build.md): local debug APK builds for supported ABIs.
-- [Release guide](release.md): manual Gitea Actions draft releases.
+- [معماری](architecture.md) — مرزهای لایهٔ اندروید، پل JNI و هستهٔ Rust.
+- [راهنمای ساخت](build.md) — ساخت محلی APK دیباگ برای معماری‌های پشتیبانی‌شده.
 
-Project overview, download links, contribution rules, and security reporting remain in the repository root.
+معرفی پروژه، لینک دانلود، قواعد مشارکت و گزارش امنیتی در [README اصلی](../README.md) آمده است.
+
+## دارایی‌های برند
+
+| فایل | کاربرد |
+|---|---|
+| `logo.png` | لوگوی اصلی ۱۰۲۴×۱۰۲۴ — منبع همهٔ آیکون‌ها |
+| `logo-512.png` | نسخهٔ ۵۱۲×۵۱۲ برای استفاده در فروشگاه و README |
+
+آیکون اپلیکیشن از همین لوگو ساخته می‌شود. لایه‌های adaptive icon در
+`app/src/main/res/drawable-nodpi/msnguard_icon_fg.png` و `msnguard_icon_bg.png`
+قرار دارند و اندازه‌گیری‌شده‌اند تا حلقهٔ نئون بیرونی (شعاع ۳۳۴ از ۵۱۲) داخل
+محدودهٔ تضمین‌شدهٔ ۳۴۱ باقی بماند و هیچ ماسکی آن را نبُرد.

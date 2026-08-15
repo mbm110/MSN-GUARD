@@ -1,4 +1,10 @@
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@drawable/ic_launcher_background" />
-    <foreground android:drawable="@drawable/msnguard_icon_inset" />
+    <!-- Background is a flat plate in the artwork's own border tone, so the
+         foreground's outer edge is invisible whatever mask the launcher applies. -->
+    <background android:drawable="@drawable/msnguard_icon_bg" />
+    <!-- Foreground is the full artwork. Measured: the outer neon ring sits at
+         r=334/512, inside the r=341 circle every mask is guaranteed to keep;
+         only the PCB corners and the decorative squircle frame get trimmed. -->
+    <foreground android:drawable="@drawable/msnguard_icon_fg" />
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
 </adaptive-icon>

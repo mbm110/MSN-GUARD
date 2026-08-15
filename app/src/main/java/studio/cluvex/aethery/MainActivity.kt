@@ -12,7 +12,6 @@ import android.content.pm.PackageManager
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.PorterDuff
 import android.graphics.RectF
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
@@ -105,7 +104,6 @@ class MainActivity : Activity() {
     private var splitTunnelSummaryButton: TextView? = null
     private var splitTunnelDraftMode: SplitTunnelSettings.Mode? = null
     private var splitTunnelDraftPackages: MutableSet<String>? = null
-    private var headerLogo: ImageView? = null
     private var themePage: View? = null
     private var trafficMonitorPage: View? = null
     private var trafficSpeedValue: TextView? = null
@@ -426,20 +424,9 @@ class MainActivity : Activity() {
 
     private fun createHeader(): LinearLayout = LinearLayout(this).apply {
         gravity = Gravity.CENTER_VERTICAL
-        addView(ImageView(this@MainActivity).apply {
-            // Keep upstream's headerLogo reference (the new theme engine retints
-            // it on appearance changes) but our own logo asset.
-            headerLogo = this
-            setImageResource(R.drawable.msnguard_logo)
-            contentDescription = getString(R.string.app_name)
-            scaleType = ScaleType.CENTER_INSIDE
-            adjustViewBounds = true
-            scaleX = 1.20f
-            scaleY = 1.20f
-            if (palette.theme != AppAppearance.Theme.FOREST) {
-                setColorFilter(primary, PorterDuff.Mode.SRC_IN)
-            }
-        }, LinearLayout.LayoutParams(dp(36), dp(40)))
+        // No mark in the header. The brand lives on the launcher icon and the
+        // opening splash; repeating it above a single connect button was upstream
+        // furniture, not information.
         addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
         addView(ImageView(this@MainActivity).apply {
             setImageResource(R.drawable.ic_settings)

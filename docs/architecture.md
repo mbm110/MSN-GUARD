@@ -1,41 +1,54 @@
-# Architecture
+# معماری
 
-Aethery is a native Android client around retained Aether v1.6.0 core sources. Android code owns the user interface, VPN lifecycle, and platform integration; Aether owns route discovery, destination rules, Zero Trust enrolment, and tunnel transport. The retained core is marked vendored for GitHub language statistics and still builds into `libaether.so` for each Android ABI.
+MSN-GUARD از دو لایهٔ مستقل ساخته شده است: یک **هستهٔ شبکهٔ Rust** که پروتکل‌های تونل را پیاده می‌کند، و یک **لایهٔ Kotlin** که چرخهٔ حیات VPN اندروید، رابط کاربری و یکپارچگی با پلتفرم را در دست دارد. مرز بین این دو یک پل JNI است.
 
 ```text
 MainActivity
-    │ configuration and connection state
+    │  پیکربندی و وضعیت اتصال
     ▼
-AetherVpnService ── Android VpnService / TUN interface
+MsnGuardVpnService ── VpnService اندروید / اینترفیس TUN
     │
     ▼
 NativeCore (Kotlin) ── JNI ── aether_jni (C++) ── libaether.so (Rust)
 ```
 
-## Android layer
+## لایهٔ اندروید
 
-- `MainActivity` presents connection controls, protocol selection, diagnostics, and connection status. While visible, it reconciles UI state with `NativeCore.isRunning()`.
-- `AetherVpnService` creates the Android TUN interface, runs as a foreground service, and owns connect/disconnect lifecycle.
-- `AetherTileService` exposes an Android Quick Settings tile for connect/disconnect with last saved settings.
-- The service reports `connecting`, `connected`, `failed`, and `disconnected` status broadcasts to the UI and refreshes the Quick Tile.
-- Native terminal exit logs its reason and updates UI/tile state instead of leaving stale Connected state.
-- Connection is shown as connected only after `NativeCore.isReady()` reports tunnel readiness.
+- `MainActivity` کنترل اتصال، انتخاب پروتکل، تشخیص و وضعیت اتصال را نمایش می‌دهد. تا زمانی که روی صفحه است، وضعیت رابط را با `NativeCore.isRunning()` هم‌گام نگه می‌دارد.
+- `MsnGuardVpnService` اینترفیس TUN را می‌سازد، به‌عنوان foreground service اجرا می‌شود و مالک چرخهٔ اتصال/قطع است. نردبان Psiphon هم اینجا مدیریت می‌شود.
+- `MsnGuardTileService` کاشی تنظیمات سریع اندروید را با آخرین تنظیمات ذخیره‌شده در اختیار می‌گذارد.
+- `Tun2SocksManager` فرایند بومی tun2socks و پل udpgw را مدیریت می‌کند.
+- سرویس وضعیت‌های `connecting`، `connected`، `failed` و `disconnected` را broadcast می‌کند و کاشی را تازه می‌کند.
+- خروج هستهٔ بومی دلیلش را لاگ می‌کند و وضعیت رابط/کاشی را اصلاح می‌کند تا حالت Connected کهنه باقی نماند.
+- اتصال تنها زمانی «متصل» نمایش داده می‌شود که `NativeCore.isReady()` آمادگی تونل را تأیید کند.
 
-## Native bridge
+## حالت اجرا: فقط VPN
 
-`NativeCore` loads two shared libraries:
+برنامه فقط در حالت VPN کار می‌کند. حالت پروکسی (که SOCKS محلی را برای اپ‌های تنظیم‌شده باز می‌کرد) کاملاً حذف شده است، چون هدف تونل کردن کل دستگاه است. نتیجه‌اش:
 
-- `libaether.so`: Aether Rust core, prebuilt for each Android ABI.
-- `libaether_jni.so`: C++ JNI bridge compiled by CMake.
+- هستهٔ Rust در این مسیر فقط `tun::bridge` را اجرا می‌کند؛ `socks::serve` هرگز فراخوانی نمی‌شود.
+- پورت SOCKS روی `127.0.0.1:1819` ثابت است (`CoreConfig.SOCKS_PORT`) و قابل تغییر نیست — چیزی بیرونی به آن بایند نمی‌شود.
+- بخش‌های تنظیمات مربوط به DNS resolvers، Destination routing و Zero Trust حذف شده‌اند، چون همه فقط در مسیر پروکسی معنا داشتند.
 
-The bridge passes configuration and TUN file descriptor to Aether. It also registers `VpnService.protect()` as a socket protector, preventing core transport sockets from being routed back into the VPN TUN interface.
+## پل بومی
 
-## ABI layout
+`NativeCore` دو کتابخانهٔ اشتراکی بار می‌کند:
 
-Gradle builds per-ABI APKs. Before an Android build, the matching core library must exist at:
+- `libaether.so` — هستهٔ Rust، کامپایل‌شده برای هر ABI اندروید.
+- `libaether_jni.so` — پل C++ که با CMake ساخته می‌شود.
+
+پل، پیکربندی و توصیف‌گر فایل TUN را به هسته می‌دهد. همچنین `VpnService.protect()` را به‌عنوان محافظ سوکت ثبت می‌کند تا سوکت‌های ترابری هسته دوباره به داخل TUN مسیریابی نشوند و حلقه نسازند.
+
+## پردازش بسته
+
+پشتهٔ `badvpn tun2socks` همراه با `lwIP` در `app/src/main/cpp/badvpn` وندور شده است و TCP را در فضای کاربر ترمینیت می‌کند. دیتاگرام‌های UDP و QUIC از این پشته عبور نمی‌کنند؛ آن‌ها از طریق `udpgw` روی `127.0.0.1:7300` با ظرفیت ۱۲۸ اتصال همزمان منتقل می‌شوند.
+
+## چیدمان ABI
+
+Gradle برای هر ABI یک APK می‌سازد. پیش از ساخت اندروید، کتابخانهٔ هستهٔ متناظر باید در این مسیر موجود باشد:
 
 ```text
 app/src/main/jniLibs/<abi>/libaether.so
 ```
 
-Supported ABIs are `arm64-v8a` and `armeabi-v7a`.
+معماری‌های پشتیبانی‌شده: `arm64-v8a` و `armeabi-v7a`. اسکریپت `core/build-android.sh` این کار را انجام می‌دهد و Gradle خودش آن را صدا می‌زند.

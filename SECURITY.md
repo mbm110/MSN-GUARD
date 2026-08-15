@@ -1,28 +1,34 @@
-# Security Policy
+# سیاست امنیتی
 
-## Supported versions
+## نسخه‌های پشتیبانی‌شده
 
-| Version | Supported |
-| --- | --- |
-| 0.1.x | Yes |
-| Earlier versions | No |
+| نسخه | پشتیبانی |
+|---|---|
+| 1.0.x | بله |
+| نسخه‌های قدیمی‌تر | خیر |
 
-## Reporting a vulnerability
+## گزارش آسیب‌پذیری
 
-Please report vulnerabilities privately through [Gitea Security Advisories](https://git.diastom.xyz/ZethRise/Aethery/security/advisories/new).
+آسیب‌پذیری‌ها را به‌صورت خصوصی از طریق [GitHub Security Advisories](https://github.com/mbm110/MSN-GUARD/security/advisories/new) گزارش کنید.
 
-Include:
+موارد زیر را ذکر کنید:
 
-- affected Aethery version and device ABI;
-- Android version and device/emulator model;
-- impact and realistic attack scenario;
-- minimal reproduction steps or a proof of concept;
-- whether the issue belongs to Aethery's Android layer or the [Aether core](https://github.com/CluvexStudio/Aether).
+- نسخهٔ MSN-GUARD و معماری دستگاه (ABI)؛
+- نسخهٔ اندروید و مدل دستگاه یا امولاتور؛
+- تأثیر واقعی و سناریوی حملهٔ عملی؛
+- حداقل مراحل بازتولید یا یک proof of concept؛
+- اینکه مسئله به لایهٔ اندروید مربوط است یا به هستهٔ Rust.
 
-Do **not** include private keys, real provisioning identities, personal traffic captures, access tokens, or unredacted scan logs.
+کلید خصوصی، هویت واقعی provisioning، ضبط ترافیک شخصی، توکن دسترسی یا لاگ اسکن بدون سانسور را **ارسال نکنید**.
 
-We will acknowledge a valid report, assess impact, and coordinate disclosure before publishing details. Please avoid public issues until a fix or mitigation is available.
+گزارش معتبر تأیید می‌شود، تأثیرش ارزیابی و پیش از انتشار جزئیات، افشا هماهنگ می‌شود. تا زمانی که اصلاحیه یا راهکار کاهش خطر آماده نشده، از مطرح کردن مسئله در issue عمومی خودداری کنید.
 
-## Scope
+## دامنه
 
-Aethery owns Android UI, JNI, VPN/TUN integration, packaging, and release workflow behavior. Route discovery, protocol behavior, and tunnel implementation may belong to Aether; reports affecting that core may be transferred or reproduced upstream with your consent.
+این مخزن مالک همهٔ اجزای برنامه است: رابط اندروید، پل JNI، یکپارچگی VPN/TUN، هستهٔ شبکهٔ Rust، بسته‌بندی و گردش‌کار انتشار.
+
+کتابخانه‌های وندورشده (`core/quiche`، `app/src/main/cpp/badvpn`) بالادست خودشان را دارند. آسیب‌پذیری در آن‌ها با رضایت شما به پروژهٔ بالادست ارجاع داده می‌شود، اما اگر پیکربندی ما آن را قابل بهره‌برداری کرده باشد، اصلاح در همین مخزن انجام می‌شود.
+
+## آنچه در مخزن نیست
+
+هیچ اعتبارنامه، کلید امضا یا توکنی در این مخزن نگهداری نمی‌شود. گواهی دستگاه MASQUE در زمان اجرا روی خود دستگاه صادر و ذخیره می‌شود و هرگز commit نمی‌شود.

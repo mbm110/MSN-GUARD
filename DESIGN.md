@@ -1,13 +1,14 @@
-# Aethery Android design contract
+# MSN-GUARD Android design contract
 
 ## Intent
 
-Aethery should feel like a calm, trustworthy dark Android system tool. The home screen is a
+MSN-GUARD should feel like a calm, trustworthy dark Android system tool. The home screen is a
 single-purpose connection console: the connection state is visible at a glance, the main
-action is physically obvious, and protocol choice stays one tap away.
+action is physically obvious, and live connection facts (exit IP, country, data, duration)
+are readable without scrolling.
 
-This is Aethery's own visual system. SlipNet is only an interaction reference; do not copy
-its code, wording, logo, or branding.
+This is MSN-GUARD's own visual system. Any third-party app is an interaction reference only;
+do not copy its code, wording, logo, or branding.
 
 ## Foundations
 
@@ -26,12 +27,13 @@ its code, wording, logo, or branding.
 
 ## Home screen
 
-- Keep the app identity quiet at the top; never add a fake dashboard or decorative cards.
+- Keep the top of the screen quiet: no logo, no wordmark, no decorative cards. The brand
+  lives on the launcher icon and the opening splash, not above the connect button.
 - Put the circular connection control at the visual centre. It is the only large, filled
   control on the screen and has a minimum 176dp target.
 - Place the selected connection status immediately below the circle.
-- Put one outlined, full-width mode selector beneath the status. It opens a bottom-anchored
-  modal sheet with two large choice rows and is disabled while a tunnel is active.
+- The app is VPN-mode only; there is no mode selector. The protocol picker is the single
+  outlined, full-width control beneath the status, and it is disabled while a tunnel is active.
 - Use real connection wording only: `Not connected`, `Connecting`, `Connected`, and
   `Connection failed`. Do not claim protection before the core reports it is running.
 - The control uses the primary colour while idle or connecting, brighter green while connected,
@@ -50,7 +52,7 @@ its code, wording, logo, or branding.
 
 ## Guardrails
 
-- No copied SlipNet assets, names, code, screenshots, or branding.
+- No copied third-party assets, names, code, screenshots, or branding.
 - No gradients, neon, oversized text, fake statistics, or nested-card dashboards.
 - No extra UI libraries for this first screen. Add Jetpack Compose or Material dependencies
   only when the app grows enough screens to justify that migration.

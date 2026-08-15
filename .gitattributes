@@ -1,2 +1,31 @@
+# GitHub language statistics.
+#
+# Goal: the bar should describe the code we actually wrote — the Rust tunnel core
+# and the Kotlin Android client — not the third-party C we vendored to build it.
+#
+# Vendored (excluded from the stats):
+#   core/quiche              Cloudflare's QUIC/HTTP-3 library (4.5 MB of Rust)
+#   app/src/main/cpp/badvpn  badvpn tun2socks + lwIP TCP/IP stack (3.1 MB of C)
+#
+# Ours (counted):
+#   core/aether/src          the MSN-GUARD Rust core
+#   app/src/main/java        the MSN-GUARD Kotlin client
+#   app/src/main/cpp/*.cpp   our JNI bridge
 
-core/** linguist-vendored
+core/quiche/** linguist-vendored
+app/src/main/cpp/badvpn/** linguist-vendored
+
+# Generated protocol/parser sources inside the vendored tree.
+*.y linguist-generated
+*.l linguist-generated
+
+# Documentation should not be counted as code.
+docs/** linguist-documentation
+*.md linguist-documentation
+
+# Keep text files normalised.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.apk binary
+*.so binary

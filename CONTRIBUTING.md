@@ -1,51 +1,51 @@
-# Contributing to Aethery
+# مشارکت در MSN-GUARD
 
-Thanks for improving Aethery. This project is an Android client around the [Aether core](https://github.com/CluvexStudio/Aether); keep changes scoped to the client unless the core itself is the right place for the fix.
+از اینکه می‌خواهید MSN-GUARD را بهتر کنید ممنون. این پروژه یک کلاینت VPN اندروید با هستهٔ Rust است؛ هر دو لایه در همین مخزن نگهداری می‌شوند.
 
-## Before opening an issue
+## پیش از ثبت issue
 
-1. Update to the latest draft or published build.
-2. Check [open issues](https://git.diastom.xyz/ZethRise/Aethery/issues) for duplicates.
-3. Use the bug or feature form. Include protocol, Android version, device ABI, and a redacted connection log for connection reports.
-4. Never post keys, provisioning identities, private endpoints, full IP scans, or traffic captures in a public issue.
+1. به آخرین بیلد به‌روزرسانی کنید.
+2. [issue های باز](https://github.com/mbm110/MSN-GUARD/issues) را برای تکراری‌نبودن بررسی کنید.
+3. برای گزارش اتصال، پروتکل، نسخهٔ اندروید، معماری دستگاه و لاگ اتصال سانسورشده را ذکر کنید.
+4. هرگز کلید، هویت provisioning، endpoint خصوصی، اسکن کامل IP یا ضبط ترافیک را در issue عمومی نگذارید.
 
-## Development setup
+## آماده‌سازی محیط توسعه
 
-Install Android Studio, SDK 36, NDK `26.3.11579264`, CMake `3.22.1`, JDK 17, Rust stable, and `cargo-ndk`. See the [build guide](README.md#build-from-source) for an arm64 command.
+Android Studio، SDK 36، NDK `26.3.11579264`، CMake `3.22.1`، JDK 17، Rust stable و `cargo-ndk` را نصب کنید. جزئیات در [راهنمای ساخت](docs/build.md).
 
-The Android app loads `libaether.so` from `app/src/main/jniLibs/<abi>/`. Build or copy the matching Aether core library before running the app for that ABI.
+## قواعد تغییر
 
-## Change guidelines
+اینها از اشتباهات واقعی این پروژه بیرون آمده‌اند، نه از سلیقه:
 
-- Keep Android UI changes native and dependency-light unless a dependency is clearly necessary.
-- Preserve Android VPN safety: core transport sockets must stay protected from the TUN interface.
-- Do not show **Connected** until the core reports actual tunnel readiness.
-- Keep protocol-specific behavior in the Aether core when it is shared with other clients.
-- Add actionable logs, but redact sensitive material by default.
-- Keep release assets ABI-specific and named exactly as documented.
+- **شاهد بیاورید.** هر تغییر رفتار شبکه باید با لاگ، اندازه‌گیری یا خروجی probe پشتیبانی شود. ترتیب گیت‌وی‌ها، انتخاب پروتکل و بودجهٔ زمانی در این پروژه همه اندازه‌گیری‌شده‌اند؛ آن‌ها را بر اساس حدس عوض نکنید.
+- **ایمنی VPN را حفظ کنید.** سوکت‌های ترابری هسته باید با `VpnService.protect()` از TUN محافظت شوند. بستهٔ خود برنامه باید در `addDisallowedApplication` بماند وگرنه حلقهٔ مسیریابی می‌سازد.
+- تا وقتی هسته آمادگی واقعی تونل را اعلام نکرده، **Connected** نشان ندهید.
+- رابط کاربری بومی و کم‌وابستگی بماند مگر وابستگی واقعاً لازم باشد.
+- لاگ قابل اقدام اضافه کنید، اما مواد حساس را به‌صورت پیش‌فرض سانسور کنید.
+- حالت پروکسی حذف شده است. کدی که SOCKS را برای مصرف بیرونی باز کند اضافه نکنید؛ هدف پروژه تونل کل دستگاه است.
 
-## Pull requests
+## Pull request
 
-1. Start from the latest `master` branch.
-2. Keep each pull request focused on one problem.
-3. Explain the user-visible change and test coverage in the description.
-4. Run the relevant Gradle build before requesting review.
-5. Include screenshots for UI changes and redacted logs for connection changes.
+1. از آخرین `master` شروع کنید.
+2. هر PR روی یک مسئله متمرکز باشد.
+3. تغییر قابل‌مشاهده برای کاربر و پوشش تست را در توضیحات شرح دهید.
+4. پیش از درخواست بازبینی، بیلد Gradle مربوطه را اجرا کنید.
+5. برای تغییرات رابط، اسکرین‌شات و برای تغییرات اتصال، لاگ سانسورشده بگذارید.
 
-## Commit style
+## سبک commit
 
-Use short imperative subjects, for example:
+موضوع کوتاه و امری:
 
 ```text
 fix: keep settings back button below status bar
 feat: add armv7 debug release build
-docs: explain Aether core boundary
+docs: explain the Rust core boundary
 ```
 
-## Code of conduct
+## آیین رفتار
 
-Be respectful, specific, and constructive. Reports and reviews should focus on behavior and evidence, never on individuals.
+محترم، مشخص و سازنده باشید. گزارش و بازبینی روی رفتار و شاهد تمرکز کند، نه روی افراد.
 
-## Security reports
+## گزارش امنیتی
 
-Security issues follow [SECURITY.md](SECURITY.md), not public issues.
+مسائل امنیتی از [SECURITY.md](SECURITY.md) پیروی می‌کنند، نه issue عمومی.

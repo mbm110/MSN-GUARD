@@ -1,10 +1,10 @@
 <resources>
-    <string name="app_name">MSN-VPN</string>
-    <string name="vpn_channel_name">MSN-VPN</string>
-    <string name="vpn_notification">MSN-VPN is running</string>
+    <string name="app_name">MSN-GUARD</string>
+    <string name="vpn_channel_name">MSN-GUARD</string>
+    <string name="vpn_notification">MSN-GUARD is running</string>
 
     <!-- Quick Tile strings -->
-    <string name="vpn_tile_label">MSN-VPN</string>
+    <string name="vpn_tile_label">MSN-GUARD</string>
     <string name="vpn_connected">Connected</string>
     <string name="vpn_disconnected">Disconnected</string>
     <string name="vpn_connecting">Connecting…</string>

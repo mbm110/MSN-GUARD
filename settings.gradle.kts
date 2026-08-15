@@ -17,6 +17,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Aethery"
+rootProject.name = "MSN-GUARD"
 include(":app")
 

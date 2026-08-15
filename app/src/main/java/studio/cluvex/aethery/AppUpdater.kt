@@ -142,7 +142,7 @@ class AppUpdater(private val activity: Activity) {
 
     private fun downloadApk(release: Release): File {
         val safeAssetName = File(release.assetName).name.filter { it.isLetterOrDigit() || it in ".-_" }
-        val sanitizedName = if (safeAssetName.endsWith(".apk")) safeAssetName else "Aethery-${release.version}.apk"
+        val sanitizedName = if (safeAssetName.endsWith(".apk")) safeAssetName else "MSN-GUARD-${release.version}.apk"
         val updatesDir = File(activity.cacheDir, "updates").apply { mkdirs() }
         val target = File(updatesDir, sanitizedName).apply { delete() }
 
