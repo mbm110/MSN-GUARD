@@ -2,7 +2,6 @@ package studio.cluvex.aethery
 
 import android.animation.ValueAnimator
 import android.content.Context
-import android.graphics.Color
 import android.graphics.Typeface
 import android.text.TextUtils
 import android.view.Gravity
@@ -17,8 +16,8 @@ import kotlin.math.roundToInt
 
 /**
  * Reusable Orbit surfaces. Everything here is deliberately view-based and hand
- * built: the app ships no Compose runtime and no Material components beyond the
- * dynamic-colour helper, and a 49MB APK is already mostly native libraries.
+ * built: the app ships no Compose runtime and no Material components, and a 49MB
+ * APK is already mostly native libraries.
  */
 
 private fun Context.px(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
@@ -45,14 +44,17 @@ private fun Context.orbitLabel(
 /**
  * One at-a-glance counter with a sparkline floor.
  *
- * Value and unit are separate views so the unit can stay small and muted while
- * the number stays large — a single formatted string would scale both together.
+ * Each tile owns its own accent — mint for DOWN, violet for UP, amber for SPEED,
+ * exactly as the approved mock. All three used to share `palette.primary`, which
+ * is why every bar row looked identical and flat. The caption takes the accent
+ * too, and the bars fade from the accent to a neighbouring hue across the row.
  */
 class MetricTile(
     context: Context,
     private val palette: AppAppearance.Palette,
     keyText: String,
     private val accent: Int,
+    private val accentSecondary: Int = accent,
     onClick: () -> Unit,
 ) : LinearLayout(context) {
 
@@ -65,21 +67,22 @@ class MetricTile(
         val fill = Sculpt.blend(palette.surface, palette.ink, 0.03f)
         background = Sculpt.sculptedRipple(
             resources.displayMetrics.density, fill, 20, accent,
-            accent = Sculpt.withAlpha(accent, 0.20f),
+            accent = Sculpt.withAlpha(accent, 0.18f),
         )
         setPadding(context.px(13), context.px(11), context.px(13), 0)
         isClickable = true
         isFocusable = true
         setOnClickListener { onClick() }
 
-        addView(context.orbitLabel(keyText, 8.5f, Sculpt.withAlpha(palette.muted, 0.95f), medium = true, spacing = 0.13f))
+        // Caption in the tile's own accent: the mock coloured .k per tile.
+        addView(context.orbitLabel(keyText, 8.5f, Sculpt.withAlpha(accent, 0.92f), medium = true, spacing = 0.13f))
 
         val row = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.BOTTOM
         }
         valueView = context.orbitLabel("0", 21f, palette.ink, medium = true, mono = true)
-        unitView = context.orbitLabel("B", 9f, Sculpt.withAlpha(palette.muted, 0.9f), medium = true, spacing = 0.08f)
+        unitView = context.orbitLabel("B", 9f, Sculpt.withAlpha(palette.faint, 0.95f), medium = true, spacing = 0.08f)
         row.addView(valueView)
         row.addView(unitView, LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -90,10 +93,10 @@ class MetricTile(
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = context.px(1) })
 
-        bars = MicroBarsView(context, accent).apply { seed() }
+        bars = MicroBarsView(context, accent, accentSecondary).apply { seed() }
         addView(bars, LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            context.px(15),
+            context.px(16),
         ).apply { topMargin = context.px(5); bottomMargin = context.px(9) })
     }
 
@@ -117,7 +120,9 @@ class MetricTile(
  *
  * The thumb is a sibling view positioned by translationX rather than a
  * background on the selected cell, so the movement is animatable and the cells
- * themselves stay dumb text views.
+ * stay dumb text views. Each cell now also gets its own sculpted press state —
+ * tapping WireGuard on the home screen used to give no visual feedback at all
+ * because the cells were bare TextViews with no background.
  */
 class TransportRail(
     context: Context,
@@ -131,28 +136,56 @@ class TransportRail(
     private var selectedIndex = 0
     private var thumbAnimator: ValueAnimator? = null
 
+    /** Width of one segment, derived from the padded content box. */
+    private val cellWidth: Float
+        get() {
+            val inner = width - paddingLeft - paddingRight
+            if (inner <= 0) return 0f
+            return inner.toFloat() / labels.size.coerceAtLeast(1)
+        }
+
     init {
-        val fill = Sculpt.darken(palette.surface, 0.16f)
+        val fill = Sculpt.darken(palette.surface, 0.30f)
         background = Sculpt.recessedBackground(resources.displayMetrics.density, fill, 999)
         setPadding(context.px(5), context.px(5), context.px(5), context.px(5))
 
         thumb = View(context).apply {
             background = Sculpt.sculptedBackground(
                 resources.displayMetrics.density,
-                Sculpt.blend(palette.surface, palette.primary, 0.14f),
+                Sculpt.blend(palette.surface, palette.primary, 0.16f),
                 999,
-                Sculpt.withAlpha(palette.primary, 0.42f),
+                Sculpt.withAlpha(palette.primary, 0.45f),
             )
         }
-        addView(thumb, LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT).apply {
-            topMargin = context.px(5)
-            bottomMargin = context.px(5)
-            leftMargin = context.px(5)
-        })
+        // No margins here: the FrameLayout padding already insets children. The
+        // previous version added another 5dp on three sides on top of the
+        // padding, which is why the lit thumb sat short and offset from the cell
+        // it was supposed to be under.
+        addView(thumb, LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT))
 
         val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
         labels.forEachIndexed { index, text ->
-            val cell = context.orbitLabel(text, 10.5f, palette.muted, medium = true, spacing = 0.05f).apply {
+            val cell = object : TextView(context) {
+                // Pressing a rail cell sinks it, the same as every other button.
+                override fun setPressed(pressed: Boolean) {
+                    super.setPressed(pressed)
+                    background = if (pressed) {
+                        Sculpt.sculptedBackground(
+                            resources.displayMetrics.density,
+                            Sculpt.darken(palette.surface, 0.18f),
+                            999,
+                            pressed = true,
+                        )
+                    } else {
+                        null
+                    }
+                }
+            }.apply {
+                this.text = text
+                textSize = 10.5f
+                setTextColor(palette.faint)
+                letterSpacing = 0.05f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
                 gravity = Gravity.CENTER
                 setSingleLine(true)
                 ellipsize = TextUtils.TruncateAt.END
@@ -176,21 +209,22 @@ class TransportRail(
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        val cellWidth = ((w - context.px(10)) / labels.size.coerceAtLeast(1))
-        thumb.layoutParams = (thumb.layoutParams as LayoutParams).apply { width = cellWidth }
+        val width = cellWidth.roundToInt()
+        if (width <= 0) return
+        thumb.layoutParams = (thumb.layoutParams as LayoutParams).apply { this.width = width }
         thumb.requestLayout()
-        thumb.translationX = (selectedIndex * cellWidth).toFloat()
+        thumb.translationX = selectedIndex * cellWidth
     }
 
     fun select(index: Int, animate: Boolean) {
         if (index !in labels.indices) return
         selectedIndex = index
         cells.forEachIndexed { i, cell ->
-            cell.setTextColor(if (i == index) Sculpt.lighten(palette.primary, 0.35f) else palette.muted)
+            cell.setTextColor(if (i == index) palette.ink else palette.faint)
         }
-        val cellWidth = ((width - context.px(10)) / labels.size.coerceAtLeast(1)).toFloat()
-        if (cellWidth <= 0f) return
-        val target = index * cellWidth
+        val slot = cellWidth
+        if (slot <= 0f) return
+        val target = index * slot
         thumbAnimator?.cancel()
         if (!animate) {
             thumb.translationX = target

@@ -39,7 +39,6 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
-import com.google.android.material.color.DynamicColors
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
@@ -60,6 +59,7 @@ class MainActivity : Activity() {
     private lateinit var exitNodeCard: ExitNodeCard
     private lateinit var transportRail: TransportRail
     private lateinit var actionBar: OrbitActionBar
+    private lateinit var footerWave: OrbitFooterWave
     private lateinit var statusLed: View
     private lateinit var mainRoot: FrameLayout
     private lateinit var pageHost: FrameLayout
@@ -103,7 +103,6 @@ class MainActivity : Activity() {
     private var splitTunnelSummaryButton: OrbitSettingsRow? = null
     private var splitTunnelDraftMode: SplitTunnelSettings.Mode? = null
     private var splitTunnelDraftPackages: MutableSet<String>? = null
-    private var themePage: View? = null
     private var trafficMonitorPage: View? = null
     private var trafficSpeedValue: TextView? = null
     private var trafficSessionValue: TextView? = null
@@ -117,6 +116,25 @@ class MainActivity : Activity() {
     @Volatile private var cachedUserApps: List<ApplicationInfo>? = null
     private var latencyRequest = 0
     @Volatile private var pingInFlight = false
+    /**
+     * Connection verification. STATUS_CONNECTED from the service only means
+     * "the transport handshake finished" — on MCI/Hamrah-e-Aval a WireGuard
+     * handshake can complete while no payload ever crosses, which is how the UI
+     * ended up showing Connected with byte-level counters and no reachable
+     * sites. Nothing calls itself Connected until [verifyDataPlane] has pulled a
+     * real HTTP response through the tunnel.
+     */
+    private var verifyRequest = 0
+    @Volatile private var verifyInFlight = false
+    /** Consecutive failed health checks while nominally connected. */
+    private var pingFailureStreak = 0
+    /**
+     * Set when we tore a tunnel down ourselves because it never passed traffic.
+     * The teardown makes the service broadcast DISCONNECTED, which would repaint
+     * the screen as a plain "Not connected" and hide the real reason — this flag
+     * makes the receiver keep the failure message on screen.
+     */
+    private var suppressNextDisconnectedPaint = false
     private var ipRequest = 0
     @Volatile private var ipRefreshInFlight = false
     @Volatile private var ipRefreshPending = false
@@ -128,7 +146,6 @@ class MainActivity : Activity() {
         }
     }
     private lateinit var palette: AppAppearance.Palette
-    private var lastNightMode = false
     private val CANVAS get() = palette.canvas
     private val SURFACE get() = palette.surface
     private val SURFACE_VARIANT get() = palette.surfaceVariant
@@ -158,18 +175,34 @@ class MainActivity : Activity() {
                 MsnGuardVpnService.STATUS_CONNECTING -> showConnecting(intent.getStringExtra(MsnGuardVpnService.EXTRA_DETAIL))
                 MsnGuardVpnService.STATUS_STARTING -> showStarting()
                 MsnGuardVpnService.STATUS_SCANNING -> showScanning()
-                MsnGuardVpnService.STATUS_CONNECTED -> showConnected()
+                // NOT showConnected(). The service's CONNECTED only means the
+                // transport handshake finished; it is not proof that payload
+                // crosses. beginVerification() proves it before the UI claims it.
+                MsnGuardVpnService.STATUS_CONNECTED -> beginVerification()
                 MsnGuardVpnService.STATUS_FAILED -> showFailure(intent.getStringExtra(MsnGuardVpnService.EXTRA_DETAIL))
-                MsnGuardVpnService.STATUS_DISCONNECTED -> showDisconnected()
+                MsnGuardVpnService.STATUS_DISCONNECTED -> {
+                    // Our own verification teardown produces this broadcast. Keep
+                    // the "no traffic passes" message instead of overwriting it
+                    // with a generic "Not connected".
+                    if (suppressNextDisconnectedPaint) {
+                        suppressNextDisconnectedPaint = false
+                        setModeEnabled(true)
+                    } else {
+                        showDisconnected()
+                    }
+                }
             }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        DynamicColors.applyToActivityIfAvailable(this)
+        // No DynamicColors. The approved Orbit palette is fixed, and letting the
+        // OS inject Material You colours repainted theme-derived surfaces (ripple
+        // tints, dialog backgrounds) in the phone's wallpaper hues, which is
+        // exactly the multi-palette behaviour that was removed with the theme
+        // picker.
         super.onCreate(savedInstanceState)
         palette = AppAppearance.load(this)
-        lastNightMode = AppAppearance.isNight(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             OnBackInvokedCallback { handleBack() }.also { callback ->
                 predictiveBackCallback = callback
@@ -205,9 +238,18 @@ class MainActivity : Activity() {
         }
         selectedProtocol = savedProtocol()
         chipProtocol.text = selectedProtocol.label.uppercase()
-        tileDown = MetricTile(this, palette, "↓ DOWN", primary) { openTrafficMonitorScreen() }
-        tileUp = MetricTile(this, palette, "↑ UP", primary) { openTrafficMonitorScreen() }
-        tileSpeed = MetricTile(this, palette, "SPEED", primary) { openTrafficMonitorScreen() }
+        // One accent per tile, as in the approved mock: download mint, upload
+        // violet, speed amber. They were all `primary` before, which is why every
+        // sparkline looked identical.
+        tileDown = MetricTile(this, palette, "↓ DOWN", palette.mint, Sculpt.lighten(palette.mint, 0.30f)) {
+            openTrafficMonitorScreen()
+        }
+        tileUp = MetricTile(this, palette, "↑ UP", palette.violet, Sculpt.lighten(palette.violet, 0.30f)) {
+            openTrafficMonitorScreen()
+        }
+        tileSpeed = MetricTile(this, palette, "SPEED", palette.amber, Sculpt.lighten(palette.amber, 0.30f)) {
+            openTrafficMonitorScreen()
+        }
         exitNodeCard = ExitNodeCard(this, palette) { refreshPublicIp() }
         transportRail = TransportRail(this, palette, Protocol.entries.map { railLabel(it) }) { index ->
             updateConnectionMode(Protocol.entries[index])
@@ -218,6 +260,11 @@ class MainActivity : Activity() {
             OrbitActionBar.Entry("SPLIT", OrbitActionBar.Glyph.SPLIT) { openSplitTunnelScreen() },
             OrbitActionBar.Entry("SCAN MODE", OrbitActionBar.Glyph.SCAN) { openScannerScreen() },
         ))
+        // The dead space under the action bar looked like a rendering bug. It is
+        // now a thin signal trace that idles flat and grey, and ripples in the
+        // connected accent once traffic is flowing. One 48-point path repainted at
+        // 20fps only while connected — no bitmaps, no extra APK weight.
+        footerWave = OrbitFooterWave(this, palette, "SECURED BY MSN-GUARD")
         statusLed = View(this).apply {
             background = Sculpt.sculptedBackground(
                 resources.displayMetrics.density,
@@ -236,11 +283,17 @@ class MainActivity : Activity() {
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
             isFillViewport = true
+            // The dial paints its halo and pulse rings outside its own bounds, so
+            // every ancestor in the chain has to stop clipping — one clipping
+            // parent anywhere above the view is enough to cut the glow off.
+            clipChildren = false
+            clipToPadding = false
             addView(console, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ))
         }
+        mainRoot.clipChildren = false
         mainRoot.addView(consoleScroll, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -328,10 +381,6 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (palette.theme.followsSystem && lastNightMode != AppAppearance.isNight(this)) {
-            recreate()
-            return
-        }
         renderStatus()
         appUpdater.resumeInstallIfPermitted()
     }
@@ -414,9 +463,25 @@ class MainActivity : Activity() {
                 pingInFlight = false
                 if (request == latencyRequest && isTunnelActive()) {
                     chipLatency.text = result.second?.let { "Latency ${it.toInt()} ms" } ?: "Latency n/a"
-                    result.second?.let {
+                    val reachable = result.second
+                    if (reachable != null) {
+                        pingFailureStreak = 0
                         if (visualState == OrbitDialView.State.DEGRADED) showConnected(restored = true)
-                    } ?: showDegraded()
+                    } else {
+                        // A session that stops passing traffic is a dead tunnel,
+                        // not a cosmetic "degraded" badge. Show degraded for the
+                        // first misses (a carrier hiccup recovers), then stop
+                        // pretending and tear it down.
+                        pingFailureStreak++
+                        if (pingFailureStreak >= MAX_PING_FAILURES) {
+                            ConnectionLog.record(
+                                "Tunnel stopped passing traffic ($pingFailureStreak consecutive failed probes) — dropping it"
+                            )
+                            failFakeConnection()
+                            return@runOnUiThread
+                        }
+                        showDegraded()
+                    }
                     updateNotificationHealth(ping = result.first)
                 }
             }
@@ -449,6 +514,84 @@ class MainActivity : Activity() {
             attempt.getOrNull()?.let { return it }
         }
         return null
+    }
+
+    /**
+     * Gate between "the transport says it is up" and "the UI says Connected".
+     *
+     * Why this exists: on Hamrah-e-Aval a WireGuard handshake completes but no
+     * payload ever crosses. The service broadcast CONNECTED, the dial went green,
+     * and the counters sat at a few bytes while Telegram and every site stayed
+     * dark — a connection that is connected to nothing. A handshake is not a data
+     * plane, so it is not allowed to paint Connected on its own.
+     *
+     * The gate is a real HTTP fetch pulled through the tunnel, retried for up to
+     * [VERIFY_TIMEOUT_MS]. Pass → Connected. Fail → tear the tunnel down and say
+     * so, instead of leaving the user on a dead green dial. Protocol-agnostic on
+     * purpose: it verifies bytes, so it covers WireGuard, MASQUE, WoW and
+     * Psiphon without per-protocol special cases.
+     */
+    private fun beginVerification() {
+        // Already verified and live: a Psiphon rotation re-broadcasts CONNECTED
+        // mid-session and must not restart the whole gate.
+        if (visualState == OrbitDialView.State.CONNECTED) return
+        if (verifyInFlight) return
+        verifyInFlight = true
+        val request = ++verifyRequest
+        showVerifying()
+        Thread {
+            val deadline = System.currentTimeMillis() + VERIFY_TIMEOUT_MS
+            var proof: Pair<String, Float>? = null
+            var attempts = 0
+            while (System.currentTimeMillis() < deadline && request == verifyRequest) {
+                attempts++
+                proof = pingAnyEndpoint()
+                if (proof != null) break
+                // The tunnel may still be settling (routes, DNS, lwIP warm-up),
+                // so retry rather than failing on the first miss.
+                Thread.sleep(VERIFY_RETRY_DELAY_MS)
+            }
+            val verified = proof
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                verifyInFlight = false
+                if (request != verifyRequest) return@runOnUiThread
+                if (verified != null) {
+                    ConnectionLog.record("Data plane verified in $attempts probe(s) — ${verified.first}")
+                    showConnected()
+                    chipLatency.text = "Latency ${verified.second.toInt()} ms"
+                } else {
+                    ConnectionLog.record(
+                        "Data plane never came up after $attempts probe(s) — handshake succeeded but no traffic passes"
+                    )
+                    failFakeConnection()
+                }
+            }
+        }.start()
+    }
+
+    /** Cancels an in-flight verification (user disconnect, real failure, stop). */
+    private fun cancelVerification() {
+        verifyRequest++
+        verifyInFlight = false
+    }
+
+    /**
+     * A handshake-only tunnel: tear it down and report it honestly.
+     *
+     * Leaving it running would keep the TUN installed and silently blackhole the
+     * whole device, which is worse than being disconnected.
+     */
+    private fun failFakeConnection() {
+        suppressNextDisconnectedPaint = true
+        startService(Intent(this, MsnGuardVpnService::class.java)
+            .setAction(MsnGuardVpnService.ACTION_DISCONNECT))
+        showFailure("Tunnel handshake succeeded but no traffic passes — try another protocol")
+    }
+
+    /** The state between handshake and proof. Keeps the dial in its CONNECTING look. */
+    private fun showVerifying() {
+        showConnectionProgress("Verifying", "Checking that traffic really passes")
     }
 
     private fun createHeader(): LinearLayout = LinearLayout(this).apply {
@@ -506,11 +649,19 @@ class MainActivity : Activity() {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_HORIZONTAL
         setPadding(dp(20), 0, dp(20), dp(20))
+        // The dial's halo and its two pulse rings are drawn outside its own 266dp
+        // box, on purpose, exactly as the mock's `inset:-24px` / `scale(1.32)` do.
+        // With the default clipChildren=true Android cut them off at the box edge,
+        // which is why the glow looked amputated at the bottom and the heartbeat
+        // seemed to burst out of an invisible frame. Both flags are required:
+        // clipChildren for the ring, clipToPadding for the 20dp side padding.
+        clipChildren = false
+        clipToPadding = false
 
         addView(orbitDial, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
+        ).apply { topMargin = dp(26) })
 
         addView(connectionTitle, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -560,6 +711,13 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
         ).apply { topMargin = dp(10) })
+
+        // Fills the gap that used to sit between the action bar and the bottom
+        // inset. Weight is one Path; it only animates while connected.
+        addView(footerWave, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(52),
+        ).apply { topMargin = dp(8) })
     }
 
     private fun refreshPublicIp() {
@@ -1353,15 +1511,6 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
 
-        content.addView(sectionLabel("APPEARANCE"), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(26) })
-        content.addView(navRow("Theme", AppAppearance.current(this).label) { openThemeScreen() }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
-
         content.addView(sectionLabel("ABOUT"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1372,7 +1521,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
-        content.addView(navRow("Source on GitHub", iconRes = R.drawable.ic_forgejo) {
+        content.addView(navRow("Source on GitHub", iconRes = R.drawable.ic_github) {
             openLink("https://github.com/mbm110/MSN-GUARD")
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2372,7 +2521,6 @@ class MainActivity : Activity() {
         when {
             splitTunnelAppsPage != null -> closeSplitTunnelAppsScreen()
             splitTunnelPage != null -> closeSplitTunnelScreen()
-            themePage != null -> closeThemeScreen()
             trafficMonitorPage != null -> closeTrafficMonitorScreen()
             tunnelControlsPage != null -> closeTunnelControlsScreen()
             showingLogs -> closeLogsScreen()
@@ -2464,6 +2612,7 @@ class MainActivity : Activity() {
         connectionTitle.setTextColor(primary)
         connectionTitle.text = title
         connectionDetail.text = detail
+        footerWave.setLit(false)
         setModeEnabled(false)
     }
 
@@ -2471,9 +2620,11 @@ class MainActivity : Activity() {
         visualState = OrbitDialView.State.CONNECTED
         orbitDial.state = visualState
         renderStatusLed()
+        pingFailureStreak = 0
         connectionTitle.setTextColor(connected)
         connectionTitle.text = "Connected"
         connectionDetail.text = if (restored) "${selectedProtocol.label} tunnel recovered" else "${selectedProtocol.label} tunnel is active"
+        footerWave.setLit(true)
         chipLatency.text = "Latency …"
         startSessionTimer(restored)
         setModeEnabled(false)
@@ -2492,11 +2643,13 @@ class MainActivity : Activity() {
         connectionTitle.setTextColor(0xFFFFD180.toInt())
         connectionTitle.text = "Connection degraded"
         connectionDetail.text = "Tunnel is active; HTTP health check failed"
+        footerWave.setLit(false)
         chipLatency.text = "Latency n/a"
     }
 
     private fun showFailure(detail: String? = null) {
         latencyRequest++
+        cancelVerification()
         chipLatency.text = "Latency —"
         visualState = OrbitDialView.State.FAILED
         orbitDial.state = visualState
@@ -2504,12 +2657,14 @@ class MainActivity : Activity() {
         stopSessionTimer()
         connectionTitle.setTextColor(ERROR)
         connectionTitle.text = "Connection failed"
+        footerWave.setLit(false)
         connectionDetail.text = detail ?: "Check the server and try again"
         setModeEnabled(true)
     }
 
     private fun showDisconnected(detail: String = "Tap the dial to connect") {
         latencyRequest++
+        cancelVerification()
         stopAutoPing()
         chipLatency.text = "Latency —"
         visualState = OrbitDialView.State.DISCONNECTED
@@ -2519,6 +2674,7 @@ class MainActivity : Activity() {
         resetMetrics()
         connectionTitle.setTextColor(INK)
         connectionTitle.text = "Not connected"
+        footerWave.setLit(false)
         connectionDetail.text = detail
         setModeEnabled(true)
         refreshPublicIp()
@@ -2557,7 +2713,7 @@ class MainActivity : Activity() {
     private fun resetMetrics() {
         tileDown.setValue("0", "B")
         tileUp.setValue("0", "B")
-        tileSpeed.setValue("0.0", "MB/S")
+        tileSpeed.setValue("0", "KB/S")
         tileDown.resetBars()
         tileUp.resetBars()
         tileSpeed.resetBars()
@@ -2579,14 +2735,25 @@ class MainActivity : Activity() {
         tileDown.setValue(downValue, downUnit)
         tileUp.setValue(upValue, upUnit)
         val combined = trafficSpeedRx + trafficSpeedTx
-        val mbPerSecond = combined / 1_048_576.0
-        tileSpeed.setValue(String.format(java.util.Locale.US, "%.1f", mbPerSecond), "MB/S")
-        // Bars are relative: 4 MB/s saturates the sparkline, which is a sane
-        // ceiling for a mobile tunnel and keeps small samples visible.
-        tileDown.push((trafficSpeedRx / 1_048_576.0 / 4.0).toFloat().coerceIn(0.04f, 1f))
-        tileUp.push((trafficSpeedTx / 1_048_576.0 / 4.0).toFloat().coerceIn(0.04f, 1f))
-        tileSpeed.push((mbPerSecond / 4.0).toFloat().coerceIn(0.04f, 1f))
-        exitNodeCard.pushSample((mbPerSecond / 4.0).toFloat().coerceIn(0.04f, 1f))
+        // Speed is shown in KB/s, not MB/s. On Iranian mobile carriers a normal
+        // session sits in the tens or low hundreds of KB/s, and "%.1f MB/S"
+        // rendered every one of those as a flat 0.0 — the tile looked broken on a
+        // working tunnel. KB/s keeps two useful digits at real speeds and only
+        // switches to MB/s once there is a whole megabyte to show.
+        val kbPerSecond = combined / 1_024.0
+        if (kbPerSecond >= 1_024.0) {
+            tileSpeed.setValue(String.format(java.util.Locale.US, "%.1f", kbPerSecond / 1_024.0), "MB/S")
+        } else {
+            tileSpeed.setValue(String.format(java.util.Locale.US, "%.0f", kbPerSecond), "KB/S")
+        }
+        // Bars are relative to a 512 KB/s ceiling — a realistic mobile-tunnel
+        // full scale. The old 4 MB/s ceiling squashed every real sample into the
+        // bottom 5% of the sparkline, so the bars never visibly moved.
+        val ceiling = 512.0
+        tileDown.push((trafficSpeedRx / 1_024.0 / ceiling).toFloat().coerceIn(0.04f, 1f))
+        tileUp.push((trafficSpeedTx / 1_024.0 / ceiling).toFloat().coerceIn(0.04f, 1f))
+        tileSpeed.push((kbPerSecond / ceiling).toFloat().coerceIn(0.04f, 1f))
+        exitNodeCard.pushSample((kbPerSecond / ceiling).toFloat().coerceIn(0.04f, 1f))
     }
 
     private fun setModeEnabled(enabled: Boolean) {
@@ -2786,78 +2953,6 @@ class MainActivity : Activity() {
         return Protocol.entries.firstOrNull { it.coreName == name && it.androidAvailable } ?: Protocol.MASQUE
     }
 
-    private fun openThemeScreen() {
-        themePage?.let(pageHost::removeView)
-        val page = FrameLayout(this).apply {
-            setBackgroundColor(CANVAS)
-            isClickable = true
-        }
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(16), dp(24), dp(24))
-        }
-        content.addView(LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            addView(createHeaderBackButton { closeThemeScreen() }, LinearLayout.LayoutParams(dp(48), dp(56)))
-            addView(label("Theme", 22f, INK, TypefaceStyle.MEDIUM))
-        })
-        content.addView(label("Dynamic follows the phone's light or dark theme. The other palettes stay until you change them.", 14f, MUTED), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(20) })
-        val current = AppAppearance.current(this)
-        AppAppearance.Theme.entries.forEachIndexed { index, theme ->
-            val selected = theme == current
-            content.addView(LinearLayout(this).apply {
-                gravity = Gravity.CENTER_VERTICAL
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(dp(18), 0, dp(18), 0)
-                background = roundedBackground(
-                    if (selected) primaryContainer else SURFACE_VARIANT,
-                    18,
-                    if (selected) primary else SURFACE_VARIANT,
-                )
-                isClickable = true
-                isFocusable = true
-                highlightOnFocus(18, if (selected) primaryContainer else SURFACE_VARIANT, if (selected) primary else DIVIDER)
-                setOnClickListener {
-                    if (theme != current) {
-                        AppAppearance.save(this@MainActivity, theme)
-                        recreate()
-                    } else {
-                        closeThemeScreen()
-                    }
-                }
-                val texts = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
-                texts.addView(label(theme.label, 16f, INK, TypefaceStyle.MEDIUM))
-                texts.addView(label(theme.description, 13f, MUTED), LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(2) })
-                addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                if (selected) addView(label("CURRENT", 11f, primary, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f })
-            }, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(76),
-            ).apply { topMargin = if (index == 0) 0 else dp(10) })
-        }
-        page.addView(content, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT,
-        ))
-        page.setOnApplyWindowInsetsListener { _, insets ->
-            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24))
-            insets
-        }
-        themePage = page
-        pageHost.addView(page)
-        page.requestApplyInsets()
-        animatePageOpen(page)
-    }
-
-    private fun closeThemeScreen() {
-        themePage?.let { animatePageClose(it) { themePage = null } }
-    }
 
     private fun View.highlightOnFocus(radius: Int, fill: Int, stroke: Int) {
         onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
@@ -3027,6 +3122,20 @@ class MainActivity : Activity() {
         const val LOG_CLOSE_ANIMATION_MS = 160L
         const val PING_TIMEOUT_MS = 5_000
         /**
+         * How long a freshly handshaken tunnel gets to prove it passes traffic.
+         * 18s covers a slow MASQUE gateway pick and Psiphon's own warm-up while
+         * still failing fast enough that the user is not staring at a dead dial.
+         */
+        const val VERIFY_TIMEOUT_MS = 18_000L
+        const val VERIFY_RETRY_DELAY_MS = 1_200L
+        /**
+         * Consecutive failed health checks tolerated on an established session
+         * before the tunnel is declared dead and torn down. Three misses at the
+         * 5s auto-ping interval ≈ 15s of genuinely no reachable endpoint, which
+         * a transient carrier hiccup does not survive but a blackholed tunnel does.
+         */
+        const val MAX_PING_FAILURES = 3
+        /**
          * Health-check endpoints, tried in order until one answers.
          *
          * Google stays first — it is reachable from Iran and returns an empty
@@ -3038,6 +3147,11 @@ class MainActivity : Activity() {
             "https://www.google.com/generate_204",
             "https://cp.cloudflare.com/generate_204",
             "https://www.gstatic.com/generate_204",
+            // DNS-free last resort. Every entry above needs a working resolver,
+            // so a tunnel that carries packets but has broken DNS would look
+            // completely dead and get torn down by the verification gate. A raw
+            // IP literal proves the data plane on its own.
+            "https://1.1.1.1/cdn-cgi/trace",
         )
         val IP_INFO_URLS = arrayOf(
             "https://www.cloudflare.com/cdn-cgi/trace",

@@ -1,23 +1,52 @@
+<!--
+  The XML theme now carries the same Orbit values as AppAppearance.ORBIT.
+
+  It used to hold the old green-grey palette (#A4D8BB on #101411) while the Kotlin
+  UI drew the approved dark-glass + neon look. Anything the framework paints for
+  us — the pre-inflate splash window, AlertDialogs, edit-text handles, ripple
+  defaults — used those stale colours, so the app flashed a different green on
+  launch and dialogs came up in a palette that no longer exists anywhere else.
+
+  Parent is DarkActionBar-free *Dark*, not DayNight: the layout is designed for a
+  dark canvas only, and DayNight let a phone in light mode hand the dialogs white
+  surfaces with near-white text on them.
+-->
 <resources>
-    <style name="Theme.MsnGuard" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Theme.MsnGuard" parent="Theme.Material3.Dark.NoActionBar">
         <item name="android:fontFamily">sans</item>
-        <item name="colorPrimary">#A4D8BB</item>
-        <item name="colorOnPrimary">#07351E</item>
-        <item name="colorSurface">#101411</item>
-        <item name="colorOnSurface">#E2E7E2</item>
-        <item name="colorSurfaceVariant">#252B27</item>
-        <item name="colorOnSurfaceVariant">#C2C9C2</item>
-        <item name="android:navigationBarColor">#101411</item>
-        <item name="android:statusBarColor">#101411</item>
+        <!-- mint / neon accents, straight from the approved mock -->
+        <item name="colorPrimary">#4FE3C1</item>
+        <item name="colorOnPrimary">#04070B</item>
+        <item name="colorSecondary">#9B8CFF</item>
+        <item name="colorError">#FF6B7F</item>
+        <!-- void / raised / recessed surfaces -->
+        <item name="android:colorBackground">#04070B</item>
+        <item name="colorSurface">#0B1116</item>
+        <item name="colorOnSurface">#EAF6F3</item>
+        <item name="colorSurfaceVariant">#111A20</item>
+        <item name="colorOnSurfaceVariant">#9DB0B5</item>
+        <item name="colorOutline">#1C2429</item>
+        <item name="android:navigationBarColor">#04070B</item>
+        <item name="android:statusBarColor">#04070B</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
         <item name="materialAlertDialogTheme">@style/ThemeOverlay.MsnGuard.AlertDialog</item>
    </style>
 
-    <style name="Theme.MsnGuard.Starting" parent="Theme.MsnGuard" />
+    <!--
+      The window the system shows before onCreate finishes. Same void background
+      as the canvas, so launching the app does not flash a lighter panel before
+      the Orbit console appears.
+    -->
+    <style name="Theme.MsnGuard.Starting" parent="Theme.MsnGuard">
+        <item name="android:windowBackground">#04070B</item>
+   </style>
 
     <style name="ThemeOverlay.MsnGuard.AlertDialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
         <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.MsnGuard.Dialog</item>
+        <item name="colorSurface">#0B1116</item>
+        <item name="colorOnSurface">#EAF6F3</item>
+        <item name="colorPrimary">#4FE3C1</item>
    </style>
 
     <style name="ShapeAppearance.MsnGuard.Dialog" parent="ShapeAppearance.Material3.MediumComponent">

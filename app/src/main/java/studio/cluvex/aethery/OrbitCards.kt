@@ -15,11 +15,15 @@ import android.widget.TextView
 import kotlin.math.roundToInt
 
 /**
- * Exit-node card: flag, IP readout, location line, refresh affordance.
+ * Exit-node card: flag, IP readout, location line, live trace.
  *
  * The IP text is monospace with a fixed max width so a 39-character IPv6
  * literal cannot push the card taller or shove the transport rail off screen.
  * Shortening is delegated to [IpFormatter]; this view only picks a font step.
+ *
+ * The trailing graphic is a [SparkLineView] — a 1.6dp green polyline with a soft
+ * fill, as in the approved mock. It used to be [MicroBarsView], which drew thick
+ * columns and looked nothing like the preview.
  */
 class ExitNodeCard(
     context: Context,
@@ -31,7 +35,7 @@ class ExitNodeCard(
     private val keyView: TextView
     private val ipView: TextView
     private val locView: TextView
-    private val spark: MicroBarsView
+    private val spark: SparkLineView
 
     private fun px(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
@@ -59,7 +63,7 @@ class ExitNodeCard(
         gravity = Gravity.CENTER_VERTICAL
         val fill = Sculpt.blend(palette.surface, palette.ink, 0.03f)
         background = Sculpt.sculptedRipple(
-            resources.displayMetrics.density, fill, 20, palette.primary,
+            resources.displayMetrics.density, fill, 22, palette.primary,
             accent = Sculpt.withAlpha(palette.ink, 0.09f),
         )
         setPadding(px(13), px(11), px(15), px(11))
@@ -76,20 +80,20 @@ class ExitNodeCard(
             gravity = Gravity.CENTER
             background = Sculpt.sculptedBackground(
                 resources.displayMetrics.density,
-                Sculpt.darken(palette.surface, 0.10f),
-                12,
+                Sculpt.darken(palette.surface, 0.12f),
+                14,
                 Sculpt.withAlpha(palette.ink, 0.10f),
             )
         }
         addView(flagView, LayoutParams(px(42), px(42)))
 
         val column = LinearLayout(context).apply { orientation = VERTICAL }
-        keyView = text("EXIT NODE", 8.5f, Sculpt.withAlpha(palette.muted, 0.95f), medium = true, spacing = 0.13f)
+        keyView = text("EXIT NODE", 8.5f, Sculpt.withAlpha(palette.faint, 0.95f), medium = true, spacing = 0.14f)
         ipView = text("not tunnelled", 15f, palette.ink, medium = true, mono = true).apply {
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
         }
-        locView = text("tap to refresh", 10.5f, Sculpt.withAlpha(palette.muted, 0.9f))
+        locView = text("tap to refresh", 10.5f, Sculpt.withAlpha(palette.faint, 0.9f))
         column.addView(keyView)
         column.addView(ipView, LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -103,8 +107,8 @@ class ExitNodeCard(
             leftMargin = px(12)
         })
 
-        spark = MicroBarsView(context, palette.primary).apply { seed() }
-        addView(spark, LayoutParams(px(40), px(20)))
+        spark = SparkLineView(context, palette.mint).apply { seed() }
+        addView(spark, LayoutParams(px(52), px(24)))
     }
 
     /**
@@ -155,8 +159,9 @@ class ExitNodeCard(
 /**
  * Bottom action bar: LOG / SPLIT / SCAN MODE.
  *
- * Each entry is a sculpted pill with a vector glyph above its caption. Kept as
- * one class so the three buttons cannot drift apart visually.
+ * Each entry is a sculpted pill with a vector glyph above its caption, and each
+ * one sinks on press (the inner shadow moves to the top edge) rather than only
+ * flashing a ripple.
  */
 class OrbitActionBar(
     context: Context,
@@ -172,11 +177,26 @@ class OrbitActionBar(
 
     init {
         orientation = HORIZONTAL
+        val density = resources.displayMetrics.density
+        val fill = Sculpt.blend(palette.surface, palette.ink, 0.025f)
         entries.forEachIndexed { index, entry ->
-            val cell = FrameLayout(context).apply {
-                val fill = Sculpt.blend(palette.surface, palette.ink, 0.025f)
-                background = Sculpt.sculptedRipple(
-                    resources.displayMetrics.density, fill, 18, palette.primary,
+            val cell = object : FrameLayout(context) {
+                override fun setPressed(pressed: Boolean) {
+                    super.setPressed(pressed)
+                    background = Sculpt.sculptedBackground(
+                        density,
+                        if (pressed) Sculpt.darken(fill, 0.10f) else fill,
+                        18,
+                        accent = Sculpt.withAlpha(
+                            if (pressed) palette.primary else palette.ink,
+                            if (pressed) 0.35f else 0.085f,
+                        ),
+                        pressed = pressed,
+                    )
+                }
+            }.apply {
+                background = Sculpt.sculptedBackground(
+                    density, fill, 18,
                     accent = Sculpt.withAlpha(palette.ink, 0.085f),
                 )
                 isClickable = true

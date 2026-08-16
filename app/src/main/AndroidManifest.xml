@@ -24,6 +24,8 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:theme="@style/Theme.MsnGuard.Starting">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
