@@ -240,7 +240,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val EXTRA_NOTIFICATION_PING = "notification_ping"
         /** Exit address measured by the core from inside the tunnel. */
         const val EXTRA_EXIT_IP = "exit_ip"
-        const val EXTRA_EXIT_COUNTRY = "exit_country"
         const val STATUS_CONNECTING = "connecting"
         const val STATUS_STARTING = "starting"
         const val STATUS_SCANNING = "scanning"
@@ -751,13 +750,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // reports the carrier's IP, not the tunnel's.
                 "exit_ip" -> {
                     val ip = event.getString("ip")
-                    val country = event.optString("country", "")
                     if (ip.isNotBlank()) {
                         currentVpnIp = ip
-                        ConnectionLog.record(
-                            "Tunnel exit $ip" + if (country.isNotBlank()) " ($country)" else ""
-                        )
-                        sendExitIp(ip, country)
+                        ConnectionLog.record("Tunnel exit $ip")
+                        // The country is resolved by the UI from this address; the
+                        // core cannot tell one from inside the tunnel.
+                        sendExitIp(ip)
                         getSystemService(NotificationManager::class.java)
                             .notify(NOTIFICATION_ID, notification(currentTx, currentRx))
                     }
@@ -1051,12 +1049,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             .putExtra(EXTRA_TRAFFIC_MONTH_RX, monthRx))
     }
 
-    /** Broadcasts the core-measured exit address to the UI. */
-    private fun sendExitIp(ip: String, country: String) {
+    /**
+     * Broadcasts the core-measured exit address to the UI.
+     *
+     * Address only. The country is a geolocation question, which the UI answers
+     * over whatever link it has — the answer for a given address is the same
+     * either way, so it does not need to be asked from inside the tunnel.
+     */
+    private fun sendExitIp(ip: String) {
         sendBroadcast(Intent(ACTION_STATUS)
             .setPackage(packageName)
-            .putExtra(EXTRA_EXIT_IP, ip)
-            .putExtra(EXTRA_EXIT_COUNTRY, country))
+            .putExtra(EXTRA_EXIT_IP, ip))
     }
 
     private fun formatBytes(bytes: Long): String = when {

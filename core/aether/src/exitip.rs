@@ -1,4 +1,4 @@
-//! Reads the tunnel's own exit IP and country, using DNS carried *inside* the
+//! Reads the tunnel's own exit IP, using a DNS query carried *inside* the
 //! tunnel.
 //!
 //! Why this exists. The app used to fetch its exit IP over HTTPS from
@@ -6,9 +6,8 @@
 //! not by accident: `applySplitTunneling()` calls
 //! `addDisallowedApplication(packageName)` to stop a routing loop, so our own
 //! process is deliberately kept off the TUN. Its HTTP request therefore leaves
-//! over the carrier link and reports the carrier's IP — Iran — while the browser,
-//! which *is* on the TUN, exits in another country. The header showed one country
-//! and reality was another.
+//! over the carrier link and reports the carrier's IP, while the browser, which
+//! *is* on the TUN, exits somewhere else entirely.
 //!
 //! The exclusion cannot be dropped: on the native path the core provisions its
 //! identity with plain unprotected sockets after `establish()`, and routing those
@@ -20,15 +19,33 @@
 //! available. DNS is, because a query is a single UDP datagram we can build by
 //! hand and push through the same channel as any other packet:
 //!
-//!   1. `whoami.cloudflare TXT CH` at 1.1.1.1 answers with the source address
-//!      the resolver saw, i.e. the tunnel's exit IP.
-//!   2. `<reversed-octets>.origin.asn.cymru.com TXT` maps that address to
-//!      `"ASN | prefix | CC | registry | date"`, giving the country without a
-//!      geo-IP HTTP API.
+//!   `whoami.cloudflare TXT CH` at 1.1.1.1 answers with the source address the
+//!   resolver saw, i.e. the address the tunnel egresses from.
 //!
-//! Both were verified answering from an uncensored host before this was written.
-//! Two datagrams, no TCP, no netstack, and every byte crosses the tunnel — so
-//! what it reports is what the tunnel really is.
+//! # What this module deliberately does NOT do
+//!
+//! It does not resolve the country. An earlier version asked
+//! `<reversed>.origin.asn.cymru.com`, which was wrong in a way that looked
+//! plausible: Cymru answers from the **RIR registration** record, not from a
+//! geolocation database. Every Cloudflare range is registered to ARIN in the US,
+//! so a WARP exit of `104.28.214.161` came back `US` while every geolocation
+//! service places that exact address in Tehran:
+//!
+//! ```text
+//! 104.28.214.161  cymru/RIR = US   (13335 | 104.28.214.0/24 | US | arin)
+//! 104.28.214.161  geo       = IR   Tehran
+//! ```
+//!
+//! Neighbouring addresses in the same /24 geolocate to PT, CA, GB, CO and AR, so
+//! the registration country cannot approximate the geolocation even loosely —
+//! Cloudflare anycast assigns egress addresses per user, not per region.
+//!
+//! Getting the geolocation needs a geo-IP database, and no such thing is exposed
+//! over DNS. But the lookup does not need to happen in here: once the exit
+//! address is known, asking "which country is 104.28.214.161 in" gives the same
+//! answer no matter which link carries the question. So the address is measured
+//! here, where it must be, and the app resolves the country over whatever link it
+//! has. See `MainActivity.fetchCountryFor`.
 //!
 //! Everything here is bounds-checked and allocation-light: the parsers run on
 //! bytes that arrived from the network, so a malformed reply must return `None`
@@ -36,30 +53,18 @@
 
 use std::net::Ipv4Addr;
 
-/// UDP port 53, the only destination these probes use.
+/// UDP port 53, the only destination this probe uses.
 const DNS_PORT: u16 = 53;
-/// Resolver queried inside the tunnel. Answers both lookups.
+/// Resolver queried inside the tunnel.
 const RESOLVER: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
 const QTYPE_TXT: u16 = 16;
-const QCLASS_IN: u16 = 1;
 /// Chaos class. `whoami.cloudflare` is only answered in CH, not IN.
 const QCLASS_CH: u16 = 3;
 
 const WHOAMI_NAME: &str = "whoami.cloudflare";
-const CYMRU_SUFFIX: &str = "origin.asn.cymru.com";
-
-/// Which lookup a reply belongs to.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Stage {
-    /// Asking the resolver what our address looks like from outside.
-    Whoami,
-    /// Asking Team Cymru which country that address belongs to.
-    Country,
-}
 
 /// One outstanding DNS probe: what we asked, and how to recognise the answer.
 pub struct Probe {
-    pub stage: Stage,
     /// IPv4 packet, ready to hand to the tunnel.
     pub packet: Vec<u8>,
     /// Source port we chose, used to match the reply back to this probe.
@@ -67,37 +72,22 @@ pub struct Probe {
     /// DNS transaction id, checked so an off-path reply cannot answer for us.
     pub id: u16,
     name: String,
-    qclass: u16,
 }
 
 impl Probe {
-    /// Builds the "what is my address" probe.
+    /// Builds the "what is my address" probe, sourced from the tunnel's own v4.
     pub fn whoami(src: Ipv4Addr) -> Probe {
-        Probe::build(Stage::Whoami, src, WHOAMI_NAME.to_string(), QCLASS_CH)
-    }
-
-    /// Builds the "which country is `ip` in" probe.
-    ///
-    /// Cymru keys on reversed octets, the same convention as reverse DNS.
-    pub fn country(src: Ipv4Addr, ip: Ipv4Addr) -> Probe {
-        let o = ip.octets();
-        let name = format!("{}.{}.{}.{}.{CYMRU_SUFFIX}", o[3], o[2], o[1], o[0]);
-        Probe::build(Stage::Country, src, name, QCLASS_IN)
-    }
-
-    fn build(stage: Stage, src: Ipv4Addr, name: String, qclass: u16) -> Probe {
         let id: u16 = rand::random();
         // Ephemeral range, chosen at random so a reply is hard to guess at.
         let sport: u16 = 20_000 + (rand::random::<u16>() % 40_000);
-        let query = build_query(id, &name, QTYPE_TXT, qclass);
+        let name = WHOAMI_NAME.to_string();
+        let query = build_query(id, &name, QTYPE_TXT, QCLASS_CH);
         let packet = build_udp_ipv4(src, RESOLVER, sport, DNS_PORT, &query);
         Probe {
-            stage,
             packet,
             sport,
             id,
             name,
-            qclass,
         }
     }
 
@@ -111,38 +101,14 @@ impl Probe {
         let Some(payload) = udp_payload(packet, RESOLVER, DNS_PORT, self.sport) else {
             return false;
         };
-        question_matches(payload, self.id, &self.name, QTYPE_TXT, self.qclass)
+        question_matches(payload, self.id, &self.name, QTYPE_TXT, QCLASS_CH)
     }
 
-    /// Extracts the answer from a reply already accepted by [Probe::matches].
-    pub fn read(&self, packet: &[u8]) -> Option<Answer> {
+    /// Extracts the exit address from a reply already accepted by [Probe::matches].
+    pub fn read(&self, packet: &[u8]) -> Option<Ipv4Addr> {
         let payload = udp_payload(packet, RESOLVER, DNS_PORT, self.sport)?;
-        let txt = first_txt_record(payload)?;
-        match self.stage {
-            Stage::Whoami => txt.trim().parse().ok().map(Answer::Ip),
-            Stage::Country => country_from_cymru(&txt).map(Answer::Country),
-        }
+        first_txt_record(payload)?.trim().parse().ok()
     }
-}
-
-/// Result of a single probe.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Answer {
-    Ip(Ipv4Addr),
-    Country(String),
-}
-
-/// Parses the country code out of a Cymru TXT answer.
-///
-/// Shape is `"ASN | prefix | CC | registry | date"`. Only field 2 is wanted, and
-/// only when it looks like a country code — Cymru returns `NA` or an empty field
-/// for unallocated space, which must not reach the UI as a flag.
-fn country_from_cymru(txt: &str) -> Option<String> {
-    let field = txt.split('|').nth(2)?.trim();
-    if field.len() != 2 || !field.bytes().all(|b| b.is_ascii_alphabetic()) {
-        return None;
-    }
-    Some(field.to_ascii_uppercase())
 }
 
 /// Builds a DNS query message.
@@ -334,9 +300,9 @@ fn skip_name(buf: &[u8], mut pos: usize) -> Option<usize> {
 
 /// Concatenated character-strings of the first TXT record in the answer section.
 ///
-/// TXT rdata is a sequence of length-prefixed strings; Cymru splits its answer
-/// across several when it exceeds 255 bytes, so they are joined rather than
-/// taking only the first.
+/// TXT rdata is a sequence of length-prefixed strings, and a resolver is free to
+/// split one answer across several, so they are joined rather than taking only
+/// the first.
 fn first_txt_record(msg: &[u8]) -> Option<String> {
     if msg.len() < 12 {
         return None;
@@ -429,30 +395,18 @@ mod tests {
         let probe = Probe::whoami(Ipv4Addr::new(10, 0, 0, 2));
         let reply = txt_reply(probe.id, WHOAMI_NAME, QCLASS_CH, probe.sport, "203.0.113.7");
         assert!(probe.matches(&reply));
-        assert_eq!(
-            probe.read(&reply),
-            Some(Answer::Ip(Ipv4Addr::new(203, 0, 113, 7)))
-        );
+        assert_eq!(probe.read(&reply), Some(Ipv4Addr::new(203, 0, 113, 7)));
     }
 
     #[test]
-    fn the_cymru_reply_yields_the_country_code() {
-        let probe = Probe::country(Ipv4Addr::new(10, 0, 0, 2), Ipv4Addr::new(203, 0, 113, 7));
-        let reply = txt_reply(
-            probe.id,
-            "7.113.0.203.origin.asn.cymru.com",
-            QCLASS_IN,
-            probe.sport,
-            "13335 | 203.0.113.0/24 | DE | ripencc | 2010-01-01",
-        );
-        assert!(probe.matches(&reply));
-        assert_eq!(probe.read(&reply), Some(Answer::Country("DE".to_string())));
-    }
-
-    #[test]
-    fn the_country_probe_reverses_the_octets() {
-        let probe = Probe::country(Ipv4Addr::new(10, 0, 0, 2), Ipv4Addr::new(1, 2, 3, 4));
-        assert_eq!(probe.name, format!("4.3.2.1.{CYMRU_SUFFIX}"));
+    fn a_reply_that_is_not_an_address_is_rejected() {
+        // The resolver answering with anything but a bare address must not be
+        // coerced into one.
+        let probe = Probe::whoami(Ipv4Addr::new(10, 0, 0, 2));
+        for body in ["not an ip", "", "1.2.3", "1.2.3.4.5", "2001:db8::1"] {
+            let reply = txt_reply(probe.id, WHOAMI_NAME, QCLASS_CH, probe.sport, body);
+            assert_eq!(probe.read(&reply), None, "{body:?} must not parse as v4");
+        }
     }
 
     #[test]
@@ -485,7 +439,7 @@ mod tests {
     fn a_reply_in_the_wrong_class_is_rejected() {
         // whoami.cloudflare only answers in CH; an IN reply is not our answer.
         let probe = Probe::whoami(Ipv4Addr::new(10, 0, 0, 2));
-        let reply = txt_reply(probe.id, WHOAMI_NAME, QCLASS_IN, probe.sport, "203.0.113.7");
+        let reply = txt_reply(probe.id, WHOAMI_NAME, 1, probe.sport, "203.0.113.7");
         assert!(!probe.matches(&reply));
     }
 
@@ -521,18 +475,6 @@ mod tests {
     }
 
     #[test]
-    fn a_garbled_cymru_answer_is_not_a_country() {
-        assert_eq!(country_from_cymru("13335 | 1.2.3.0/24 | DE | x | y"), Some("DE".into()));
-        // Unallocated space: no usable country field.
-        assert_eq!(country_from_cymru("NA | | | |"), None);
-        assert_eq!(country_from_cymru("only one field"), None);
-        assert_eq!(country_from_cymru(""), None);
-        // A too-long or non-alphabetic field is not a country code.
-        assert_eq!(country_from_cymru("1 | 2 | GERMANY | x"), None);
-        assert_eq!(country_from_cymru("1 | 2 | 12 | x"), None);
-    }
-
-    #[test]
     fn the_probe_packet_is_a_well_formed_udp_datagram() {
         let probe = Probe::whoami(Ipv4Addr::new(10, 0, 0, 2));
         let pkt = &probe.packet;
@@ -556,7 +498,7 @@ mod tests {
 
     #[test]
     fn a_multi_string_txt_record_is_joined() {
-        // Cymru splits answers over 255 bytes into several character-strings.
+        // A resolver may split one TXT answer into several character-strings.
         let mut msg = Vec::new();
         msg.extend_from_slice(&0x1234u16.to_be_bytes());
         msg.extend_from_slice(&[0x81, 0x80]);
@@ -565,9 +507,9 @@ mod tests {
         msg.extend_from_slice(&[0, 0, 0, 0]);
         msg.push(0); // root name
         msg.extend_from_slice(&QTYPE_TXT.to_be_bytes());
-        msg.extend_from_slice(&QCLASS_IN.to_be_bytes());
+        msg.extend_from_slice(&QCLASS_CH.to_be_bytes());
         msg.extend_from_slice(&60u32.to_be_bytes());
-        let parts: [&str; 2] = ["13335 | 1.2.3.0/24 ", "| DE | ripencc"];
+        let parts: [&str; 2] = ["203.0.", "113.7"];
         let rdlen: usize = parts.iter().map(|p| 1 + p.len()).sum();
         msg.extend_from_slice(&(rdlen as u16).to_be_bytes());
         for part in parts {
@@ -575,7 +517,6 @@ mod tests {
             msg.extend_from_slice(part.as_bytes());
         }
         let joined = first_txt_record(&msg).expect("a TXT record should parse");
-        assert_eq!(joined, "13335 | 1.2.3.0/24 | DE | ripencc");
-        assert_eq!(country_from_cymru(&joined), Some("DE".into()));
+        assert_eq!(joined, "203.0.113.7");
     }
 }

@@ -150,6 +150,8 @@ class MainActivity : Activity() {
      */
     private var coreExitIp = ""
     private var coreExitCountry = ""
+    /** Generation counter for country lookups, so a stale one cannot repaint. */
+    private var countryRequest = 0
     private val statusHandler = Handler(Looper.getMainLooper())
     private val statusPoll = object : Runnable {
         override fun run() {
@@ -177,14 +179,16 @@ class MainActivity : Activity() {
             // return: in native TUN mode our own HTTP request bypasses the tunnel.
             intent.getStringExtra(MsnGuardVpnService.EXTRA_EXIT_IP)?.let { ip ->
                 if (ip.isNotBlank()) {
-                    val country = intent.getStringExtra(MsnGuardVpnService.EXTRA_EXIT_COUNTRY) ?: ""
                     coreExitIp = ip
-                    coreExitCountry = country
-                    // A later refinement (country arriving after the address) must
-                    // not be undone by an in-flight HTTP lookup finishing late.
+                    coreExitCountry = ""
+                    // An in-flight HTTP lookup must not overwrite this with the
+                    // carrier's address when it finishes late.
                     ipRequest++
-                    exitNodeCard.render(ip, country, isTunnelActive())
+                    exitNodeCard.render(ip, null, isTunnelActive())
                     if (isTunnelActive()) updateNotificationHealth(ip = ip)
+                    // The country is a property of the address, not of the link the
+                    // question travels over, so it can be asked over the carrier.
+                    resolveExitCountry(ip)
                 }
                 return
             }
@@ -927,7 +931,13 @@ class MainActivity : Activity() {
         // request from this process could add is more accurate.
         if (coreExitIp.isNotBlank()) {
             ipRequest++
-            exitNodeCard.render(coreExitIp, coreExitCountry, isTunnelActive())
+            exitNodeCard.render(
+                coreExitIp,
+                coreExitCountry.takeIf { it.isNotBlank() },
+                isTunnelActive(),
+            )
+            // A tap on the card with the country still missing should retry it.
+            if (coreExitCountry.isBlank()) resolveExitCountry(coreExitIp)
             return
         }
         // Native TUN mode and no measurement yet: our own request would leave over
@@ -1078,6 +1088,61 @@ class MainActivity : Activity() {
     private fun clearCoreExitIp() {
         coreExitIp = ""
         coreExitCountry = ""
+        countryRequest++
+    }
+
+    /**
+     * Resolves which country [ip] is in, and repaints the card when it lands.
+     *
+     * Why this is a separate HTTP call rather than part of the core's in-tunnel
+     * measurement: the core can only ask DNS, and DNS exposes the RIR
+     * *registration* country, not a geolocation. Those disagree badly here —
+     * 104.28.214.161 is registered to ARIN in the US and geolocates to Tehran,
+     * and its neighbours in the same /24 sit in PT, CA, GB and CO — because
+     * Cloudflare hands out anycast egress addresses per user, not per region.
+     *
+     * Unlike the address itself, this question is safe to ask over any link: the
+     * answer is a property of [ip], not of the route the query takes. Both
+     * endpoints are Cloudflare-fronted, so they are reachable from Iran, and both
+     * were verified returning IR for the two addresses above.
+     */
+    private fun resolveExitCountry(ip: String) {
+        val request = ++countryRequest
+        Thread {
+            val country = runCatching { fetchCountryFor(ip) }.getOrNull()
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                // A newer measurement (or a disconnect) superseded this lookup.
+                if (request != countryRequest || coreExitIp != ip) return@runOnUiThread
+                if (country.isNullOrBlank()) return@runOnUiThread
+                coreExitCountry = country
+                exitNodeCard.render(ip, country, isTunnelActive())
+            }
+        }.start()
+    }
+
+    /** Two-letter country code for [ip], or null when no endpoint answers. */
+    private fun fetchCountryFor(ip: String): String? {
+        for (template in COUNTRY_LOOKUP_URLS) {
+            try {
+                val connection = (URL(template.format(ip)).openConnection() as HttpURLConnection)
+                    .apply {
+                        connectTimeout = IP_TIMEOUT_MS
+                        readTimeout = IP_TIMEOUT_MS
+                        requestMethod = "GET"
+                    }
+                try {
+                    if (connection.responseCode !in 200..299) continue
+                    val body = connection.inputStream.bufferedReader().use { it.readText() }
+                    COUNTRY_CODE_JSON.find(body)?.groupValues?.get(1)?.let { return it.uppercase() }
+                } finally {
+                    connection.disconnect()
+                }
+            } catch (_: Throwable) {
+                // Try the next endpoint.
+            }
+        }
+        return null
     }
 
     // The four main-screen selector rows (MODE / LOG / PERF / SCAN) are gone.
@@ -3433,6 +3498,20 @@ class MainActivity : Activity() {
             "https://api.ipify.org",
         )
         val IP_ADDRESS = Regex("^[0-9A-Fa-f:.]+$")
+        /**
+         * Geolocation endpoints for an address the core measured. `%s` is the IP.
+         *
+         * Both are HTTPS, keyless and Cloudflare-fronted (so reachable from Iran),
+         * and both were verified from an uncensored host returning IR for
+         * 104.28.214.161 and 104.28.214.167 — the real WARP exits that a
+         * registration-based lookup wrongly called US.
+         */
+        val COUNTRY_LOOKUP_URLS = arrayOf(
+            "https://get.geojs.io/v1/ip/country/%s.json",
+            "https://ipwho.is/%s?fields=country_code",
+        )
+        /** Matches `"country":"IR"` and `"country_code":"IR"` alike. */
+        val COUNTRY_CODE_JSON = Regex("\"country(?:_code)?\"\\s*:\\s*\"([A-Za-z]{2})\"")
         const val IP_TIMEOUT_MS = 5_000
         const val IP_FETCH_ATTEMPTS = 3
         const val IP_RETRY_DELAY_MS = 300L

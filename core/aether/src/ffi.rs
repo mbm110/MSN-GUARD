@@ -27,11 +27,14 @@ pub enum Event {
     /// The tunnel's own exit address, measured from inside the tunnel.
     ///
     /// Separate from `Status` because it arrives later than "connected" and can
-    /// arrive more than once (a reconnect re-measures). `country` is a two-letter
-    /// code, or empty when the address resolved but its country did not.
+    /// arrive more than once (a reconnect re-measures).
+    ///
+    /// No country field: the core cannot determine one. DNS exposes the RIR
+    /// registration (US for all of Cloudflare) but not a geolocation database,
+    /// and those disagree — 104.28.214.161 is registered to ARIN/US and
+    /// geolocates to Tehran. The app resolves the country from this address.
     ExitIp {
         ip: String,
-        country: String,
     },
     Log {
         message: String,
@@ -81,8 +84,8 @@ pub(crate) fn emit_traffic(tx: u64, rx: u64) {
     emit_event(Event::Traffic { tx, rx });
 }
 
-pub(crate) fn emit_exit_ip(ip: String, country: String) {
-    emit_event(Event::ExitIp { ip, country });
+pub(crate) fn emit_exit_ip(ip: String) {
+    emit_event(Event::ExitIp { ip });
 }
 
 #[derive(Deserialize)]

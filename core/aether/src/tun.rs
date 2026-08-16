@@ -22,7 +22,7 @@ mod exitprobe {
     use std::net::Ipv4Addr;
     use std::time::{Duration, Instant};
 
-    use crate::exitip::{Answer, Probe, Stage};
+    use crate::exitip::Probe;
 
     /// Wait after the first byte crosses before asking. Sending the probe the
     /// instant the bridge starts races the handshake settling, and a lost first
@@ -39,8 +39,6 @@ mod exitprobe {
         Idle,
         /// A probe is outstanding.
         Waiting { probe: Probe, attempts: u32, next: Instant },
-        /// Address known, country still unknown.
-        HaveIp(Ipv4Addr),
         /// Nothing more to do — answered, or out of attempts.
         Done,
     }
@@ -50,7 +48,6 @@ mod exitprobe {
         state: State,
         /// When the bridge may first send a probe.
         start_after: Option<Instant>,
-        ip: Option<Ipv4Addr>,
     }
 
     impl ExitProbe {
@@ -59,7 +56,6 @@ mod exitprobe {
                 local_ipv4,
                 state: State::Idle,
                 start_after: None,
-                ip: None,
             }
         }
 
@@ -102,30 +98,14 @@ mod exitprobe {
                         return None;
                     }
                     if *attempts >= MAX_ATTEMPTS {
-                        log::debug!(
-                            "[exitip] no answer for the {:?} lookup after {attempts} tries",
-                            probe.stage
-                        );
-                        // An address without a country is still worth reporting.
-                        if let Some(ip) = self.ip {
-                            crate::ffi::emit_exit_ip(ip.to_string(), String::new());
-                        }
+                        log::debug!("[exitip] no answer after {attempts} tries");
+                        let _ = probe;
                         self.state = State::Done;
                         return None;
                     }
                     *attempts += 1;
                     *next = now + RETRY_GAP;
                     Some(probe.packet.clone())
-                }
-                State::HaveIp(ip) => {
-                    let probe = Probe::country(self.local_ipv4, *ip);
-                    let packet = probe.packet.clone();
-                    self.state = State::Waiting {
-                        probe,
-                        attempts: 1,
-                        next: now + RETRY_GAP,
-                    };
-                    Some(packet)
                 }
                 State::Done => None,
             }
@@ -143,27 +123,19 @@ mod exitprobe {
             if !probe.matches(packet) {
                 return false;
             }
-            let stage = probe.stage;
-            let answer = probe.read(packet);
-            match (stage, answer) {
-                (Stage::Whoami, Some(Answer::Ip(ip))) => {
+            match probe.read(packet) {
+                Some(ip) => {
                     log::info!("[exitip] tunnel exits at {ip}");
-                    self.ip = Some(ip);
-                    self.state = State::HaveIp(ip);
-                    // Report immediately: the address is the useful part, and the
-                    // country is a refinement that may never arrive.
-                    crate::ffi::emit_exit_ip(ip.to_string(), String::new());
-                }
-                (Stage::Country, Some(Answer::Country(cc))) => {
-                    if let Some(ip) = self.ip {
-                        log::info!("[exitip] exit {ip} is in {cc}");
-                        crate::ffi::emit_exit_ip(ip.to_string(), cc);
-                    }
+                    // The country is NOT resolved here. Cymru answers from the RIR
+                    // registration, which is US for every Cloudflare range no
+                    // matter where the exit really is; the app resolves the real
+                    // geolocation from this address instead.
+                    crate::ffi::emit_exit_ip(ip.to_string());
                     self.state = State::Done;
                 }
-                // A reply that matched the question but held nothing usable. Let
-                // the retry path have another go rather than trusting it.
-                _ => {
+                // Matched our question but held nothing usable. Let the retry path
+                // have another go rather than trusting it.
+                None => {
                     let _ = now;
                 }
             }
