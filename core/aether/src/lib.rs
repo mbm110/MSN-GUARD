@@ -6,6 +6,7 @@ mod config;
 mod consts;
 mod dns;
 pub mod error;
+mod exitip;
 pub(crate) mod ffi;
 mod fragment;
 mod lastconn;

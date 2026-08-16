@@ -12,6 +12,166 @@ use tokio::sync::mpsc;
 use crate::error::{AetherError, Result};
 use crate::ffi;
 
+/// Drives the exit-IP measurement while the bridge runs.
+///
+/// Split out of [bridge] so the packet loop stays readable and so the state
+/// machine can be unit-tested without a TUN fd. It owns no I/O: [bridge] asks it
+/// for a packet to send and shows it every inbound packet.
+#[cfg(unix)]
+mod exitprobe {
+    use std::net::Ipv4Addr;
+    use std::time::{Duration, Instant};
+
+    use crate::exitip::{Answer, Probe, Stage};
+
+    /// Wait after the first byte crosses before asking. Sending the probe the
+    /// instant the bridge starts races the handshake settling, and a lost first
+    /// datagram costs a whole retry interval.
+    const FIRST_DELAY: Duration = Duration::from_millis(1_200);
+    /// Gap between retries of an unanswered probe.
+    const RETRY_GAP: Duration = Duration::from_secs(3);
+    /// Attempts per stage before giving up. DNS over a fresh tunnel can lose a
+    /// datagram or two; four tries is ~12s, well short of annoying.
+    const MAX_ATTEMPTS: u32 = 4;
+
+    enum State {
+        /// Waiting for the tunnel to carry something before probing.
+        Idle,
+        /// A probe is outstanding.
+        Waiting { probe: Probe, attempts: u32, next: Instant },
+        /// Address known, country still unknown.
+        HaveIp(Ipv4Addr),
+        /// Nothing more to do — answered, or out of attempts.
+        Done,
+    }
+
+    pub struct ExitProbe {
+        local_ipv4: Ipv4Addr,
+        state: State,
+        /// When the bridge may first send a probe.
+        start_after: Option<Instant>,
+        ip: Option<Ipv4Addr>,
+    }
+
+    impl ExitProbe {
+        pub fn new(local_ipv4: Ipv4Addr) -> ExitProbe {
+            ExitProbe {
+                local_ipv4,
+                state: State::Idle,
+                start_after: None,
+                ip: None,
+            }
+        }
+
+        /// Called once traffic has been seen, to arm the first probe.
+        pub fn arm(&mut self, now: Instant) {
+            if self.start_after.is_none() {
+                self.start_after = Some(now + FIRST_DELAY);
+            }
+        }
+
+        /// A packet to write into the tunnel now, if any is due.
+        pub fn due(&mut self, now: Instant) -> Option<Vec<u8>> {
+            // An unmeasurable local address (the identity had no usable v4) means
+            // a reply could never come back to us; skip rather than send noise.
+            if self.local_ipv4.is_unspecified() {
+                self.state = State::Done;
+                return None;
+            }
+            match &mut self.state {
+                State::Idle => {
+                    let ready = self.start_after.is_some_and(|at| now >= at);
+                    if !ready {
+                        return None;
+                    }
+                    let probe = Probe::whoami(self.local_ipv4);
+                    let packet = probe.packet.clone();
+                    self.state = State::Waiting {
+                        probe,
+                        attempts: 1,
+                        next: now + RETRY_GAP,
+                    };
+                    Some(packet)
+                }
+                State::Waiting {
+                    probe,
+                    attempts,
+                    next,
+                } => {
+                    if now < *next {
+                        return None;
+                    }
+                    if *attempts >= MAX_ATTEMPTS {
+                        log::debug!(
+                            "[exitip] no answer for the {:?} lookup after {attempts} tries",
+                            probe.stage
+                        );
+                        // An address without a country is still worth reporting.
+                        if let Some(ip) = self.ip {
+                            crate::ffi::emit_exit_ip(ip.to_string(), String::new());
+                        }
+                        self.state = State::Done;
+                        return None;
+                    }
+                    *attempts += 1;
+                    *next = now + RETRY_GAP;
+                    Some(probe.packet.clone())
+                }
+                State::HaveIp(ip) => {
+                    let probe = Probe::country(self.local_ipv4, *ip);
+                    let packet = probe.packet.clone();
+                    self.state = State::Waiting {
+                        probe,
+                        attempts: 1,
+                        next: now + RETRY_GAP,
+                    };
+                    Some(packet)
+                }
+                State::Done => None,
+            }
+        }
+
+        /// Shows an inbound packet to the state machine.
+        ///
+        /// Returns true when the packet was one of our replies, in which case the
+        /// caller must NOT forward it to Android: the app never sent this query,
+        /// so its resolver would have no matching request outstanding.
+        pub fn consume(&mut self, packet: &[u8], now: Instant) -> bool {
+            let State::Waiting { probe, .. } = &self.state else {
+                return false;
+            };
+            if !probe.matches(packet) {
+                return false;
+            }
+            let stage = probe.stage;
+            let answer = probe.read(packet);
+            match (stage, answer) {
+                (Stage::Whoami, Some(Answer::Ip(ip))) => {
+                    log::info!("[exitip] tunnel exits at {ip}");
+                    self.ip = Some(ip);
+                    self.state = State::HaveIp(ip);
+                    // Report immediately: the address is the useful part, and the
+                    // country is a refinement that may never arrive.
+                    crate::ffi::emit_exit_ip(ip.to_string(), String::new());
+                }
+                (Stage::Country, Some(Answer::Country(cc))) => {
+                    if let Some(ip) = self.ip {
+                        log::info!("[exitip] exit {ip} is in {cc}");
+                        crate::ffi::emit_exit_ip(ip.to_string(), cc);
+                    }
+                    self.state = State::Done;
+                }
+                // A reply that matched the question but held nothing usable. Let
+                // the retry path have another go rather than trusting it.
+                _ => {
+                    let _ = now;
+                }
+            }
+            true
+        }
+    }
+}
+
 /// IPv4/IPv6 + TCP header overhead subtracted from the proven inner MTU.
 ///
 /// IPv6 headers are 20 bytes larger than IPv4, so using the v6 figure for both
@@ -150,9 +310,13 @@ fn recompute_tcp_checksum(packet: &mut [u8], ip_header_len: usize, version: u8) 
 }
 
 /// Bridges Android's packet TUN file descriptor with Aether's raw-IP tunnel.
+///
+/// `local_ipv4` is the tunnel's own inner address, used as the source of the
+/// exit-IP probes. Pass [Ipv4Addr::UNSPECIFIED] to disable that measurement.
 #[cfg(unix)]
 pub async fn bridge(
     tun_fd: i32,
+    local_ipv4: std::net::Ipv4Addr,
     mut inbound_rx: mpsc::Receiver<Vec<u8>>,
     outbound_tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
@@ -177,12 +341,24 @@ pub async fn bridge(
     // How many SYNs had their MSS lowered since the last report. Only logged, but
     // it is the one number that says whether the clamp is doing anything.
     let mut clamped_syns = 0u64;
+    // Measures the exit IP from inside the tunnel. See [exitprobe].
+    let mut exit_probe = exitprobe::ExitProbe::new(local_ipv4);
+    // Wakes the loop so a due probe is sent even while the tunnel is silent —
+    // otherwise `select!` could block in recv() past the probe's schedule.
+    let mut probe_tick = tokio::time::interval(std::time::Duration::from_millis(400));
+    probe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
             tunnel_packet = inbound_rx.recv() => match tunnel_packet {
                 Some(mut packet) => {
                     rx_total += packet.len() as u64;
+                    // Our own DNS replies must be swallowed: Android never asked
+                    // these questions, so handing them up would be an unsolicited
+                    // datagram to a resolver with no matching request.
+                    if exit_probe.consume(&packet, std::time::Instant::now()) {
+                        continue;
+                    }
                     // Inbound SYN-ACK: the server's advertised MSS must be
                     // clamped too, or the download half still stalls.
                     if clamp_tcp_mss(&mut packet, crate::wireguard::inner_mtu_hint()) {
@@ -198,6 +374,8 @@ pub async fn bridge(
                     return Ok(());
                 }
                 tx_total += length as u64;
+                // Real traffic is moving, so the tunnel is worth measuring.
+                exit_probe.arm(std::time::Instant::now());
                 let mut outbound = packet[..length].to_vec();
                 // Outbound SYN: cap what we ask the peer to send us.
                 if clamp_tcp_mss(&mut outbound, crate::wireguard::inner_mtu_hint()) {
@@ -206,6 +384,16 @@ pub async fn bridge(
                 outbound_tx.send(outbound).await
                     .map_err(|_| AetherError::Other("tunnel outbound channel closed".into()))?;
             },
+            _ = probe_tick.tick() => {},
+        }
+
+        // Sent outside the select! arms so it happens on every wake-up, whichever
+        // arm fired. A send failure means the tunnel is gone and the next loop
+        // iteration will surface that properly.
+        if let Some(probe) = exit_probe.due(std::time::Instant::now()) {
+            if outbound_tx.send(probe).await.is_err() {
+                return Err(AetherError::Other("tunnel outbound channel closed".into()));
+            }
         }
 
         if last_report.elapsed() >= std::time::Duration::from_millis(1000) {
@@ -276,6 +464,7 @@ async fn write_packet(tun: &AsyncFd<File>, packet: &[u8]) -> io::Result<()> {
 #[cfg(not(unix))]
 pub async fn bridge(
     _tun_fd: i32,
+    _local_ipv4: std::net::Ipv4Addr,
     _inbound_rx: mpsc::Receiver<Vec<u8>>,
     _outbound_tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
@@ -403,5 +592,84 @@ mod tests {
         assert!(clamp_tcp_mss(&mut pkt, 1000));
         assert_eq!(mss_at(&pkt, 2), 1000 - IP_TCP_OVERHEAD as u16);
         assert!(tcp_checksum_valid(&pkt));
+    }
+
+    mod exit_probe {
+        use super::super::exitprobe::ExitProbe;
+        use std::net::Ipv4Addr;
+        use std::time::{Duration, Instant};
+
+        const LOCAL: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+
+        #[test]
+        fn nothing_is_sent_before_traffic_has_been_seen() {
+            let mut probe = ExitProbe::new(LOCAL);
+            let now = Instant::now();
+            // Even far in the future: without arm() there is nothing to measure.
+            assert!(probe.due(now + Duration::from_secs(60)).is_none());
+        }
+
+        #[test]
+        fn the_first_probe_waits_for_the_settle_delay() {
+            let mut probe = ExitProbe::new(LOCAL);
+            let t0 = Instant::now();
+            probe.arm(t0);
+            assert!(
+                probe.due(t0 + Duration::from_millis(200)).is_none(),
+                "must not fire immediately after traffic starts"
+            );
+            let packet = probe
+                .due(t0 + Duration::from_millis(1_500))
+                .expect("a probe should be due once the delay has passed");
+            // A well-formed UDP datagram to port 53.
+            assert_eq!(packet[0] >> 4, 4);
+            assert_eq!(packet[9], 17);
+            assert_eq!(u16::from_be_bytes([packet[22], packet[23]]), 53);
+        }
+
+        #[test]
+        fn an_unanswered_probe_is_retried_then_abandoned() {
+            let mut probe = ExitProbe::new(LOCAL);
+            let t0 = Instant::now();
+            probe.arm(t0);
+            let mut now = t0 + Duration::from_millis(1_500);
+            assert!(probe.due(now).is_some(), "first attempt");
+
+            let mut sent = 1;
+            for _ in 0..10 {
+                now += Duration::from_secs(4);
+                if probe.due(now).is_some() {
+                    sent += 1;
+                }
+            }
+            // Four attempts total, then it stops rather than probing forever.
+            assert_eq!(sent, 4, "should stop after the attempt limit");
+            assert!(probe.due(now + Duration::from_secs(60)).is_none());
+        }
+
+        #[test]
+        fn an_unspecified_local_address_disables_the_measurement() {
+            let mut probe = ExitProbe::new(Ipv4Addr::UNSPECIFIED);
+            let t0 = Instant::now();
+            probe.arm(t0);
+            assert!(probe.due(t0 + Duration::from_secs(5)).is_none());
+        }
+
+        #[test]
+        fn ordinary_inbound_traffic_is_passed_through() {
+            let mut probe = ExitProbe::new(LOCAL);
+            let t0 = Instant::now();
+            probe.arm(t0);
+            let _ = probe.due(t0 + Duration::from_millis(1_500));
+
+            // A TCP packet, and a short/garbage packet: none are ours, so the
+            // bridge must still forward them.
+            let mut tcp = vec![0u8; 40];
+            tcp[0] = 0x45;
+            tcp[9] = 6;
+            assert!(!probe.consume(&tcp, t0));
+            assert!(!probe.consume(&[], t0));
+            assert!(!probe.consume(&[0x45, 0x00], t0));
+        }
     }
 }

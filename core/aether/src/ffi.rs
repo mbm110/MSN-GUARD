@@ -24,6 +24,15 @@ pub enum Event {
         tx: u64,
         rx: u64,
     },
+    /// The tunnel's own exit address, measured from inside the tunnel.
+    ///
+    /// Separate from `Status` because it arrives later than "connected" and can
+    /// arrive more than once (a reconnect re-measures). `country` is a two-letter
+    /// code, or empty when the address resolved but its country did not.
+    ExitIp {
+        ip: String,
+        country: String,
+    },
     Log {
         message: String,
     },
@@ -70,6 +79,10 @@ pub(crate) fn emit_status(status: impl ToString, detail: Option<String>) {
 
 pub(crate) fn emit_traffic(tx: u64, rx: u64) {
     emit_event(Event::Traffic { tx, rx });
+}
+
+pub(crate) fn emit_exit_ip(ip: String, country: String) {
+    emit_event(Event::ExitIp { ip, country });
 }
 
 #[derive(Deserialize)]

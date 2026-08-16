@@ -1531,7 +1531,12 @@ async fn run_masque_tunnel(
     let local_task = if let Some(fd) = options.tun_fd {
         tokio::spawn(async move { while addr_rx.recv().await.is_some() {} });
         log::info!("[+] Android TUN bridge active");
-        tokio::spawn(tun::bridge(fd, inbound_rx, outbound_tx))
+        tokio::spawn(tun::bridge(
+            fd,
+            parse_local_v4(&identity.ipv4),
+            inbound_rx,
+            outbound_tx,
+        ))
     } else {
         let stack = netstack::spawn(
             &identity.ipv4,
@@ -2091,7 +2096,7 @@ async fn run_wireguard_tunnel(
     let mut http_task = None;
     let local_task = if let Some(fd) = options.tun_fd {
         log::info!("[+] Android TUN bridge active");
-        tokio::spawn(tun::bridge(fd, inbound_rx, outbound_tx))
+        tokio::spawn(tun::bridge(fd, ipv4, inbound_rx, outbound_tx))
     } else {
         let stack = netstack::spawn(
             &identity.ipv4,
@@ -2412,7 +2417,8 @@ async fn run_warp_in_warp(
                 .await
                 .map_err(|e| AetherError::Other(format!("[inner] {e}")))
         });
-        let local_task = tokio::spawn(tun::bridge(fd, inbound_rx, outbound_tx));
+        let local_task =
+            tokio::spawn(tun::bridge(fd, secondary_ipv4, inbound_rx, outbound_tx));
         (inner_exit, local_task)
     } else {
         let (inner_stack, inner_exit) = establish_wg(
@@ -2961,11 +2967,22 @@ mod tests {
 
     #[test]
     fn identity_rejection_is_distinguished_from_transport_failure() {
-        assert!(is_identity_rejection(&AetherError::Masque(
+        // 400 is NOT an identity verdict, and this is the whole point of the
+        // function: every non-gateway Cloudflare address answers 400 regardless
+        // of what is sent, including requests with no client certificate at all.
+        // Counting it as an identity rejection is what produced spurious
+        // "re-register the WARP device" advice while the certificate was fine.
+        // This assertion had it backwards and never ran — the test profile did
+        // not compile, so nothing caught the contradiction with is_identity_rejection.
+        assert!(!is_identity_rejection(&AetherError::Masque(
             "h2 connect-ip status 400".to_string()
         )));
         assert!(is_identity_rejection(&AetherError::Masque(
             "h2 connect-ip status 403".to_string()
+        )));
+        // 401 is the other genuine verdict on the identity.
+        assert!(is_identity_rejection(&AetherError::Masque(
+            "h2 connect-ip status 401".to_string()
         )));
         // 5xx is the edge failing, not our certificate.
         assert!(!is_identity_rejection(&AetherError::Masque(
@@ -2977,16 +2994,21 @@ mod tests {
         assert!(!is_identity_rejection(&AetherError::Tls(
             "h2 tls handshake: Connection reset by peer".to_string()
         )));
-        // The HTTP/3 path words it without the "h2" prefix; it must count too,
-        // otherwise a 4xx over QUIC looks like a transport failure and the run
-        // keeps dialling peers that will all refuse the same certificate.
+        // The HTTP/3 path words it without the "h2" prefix; a real verdict there
+        // must still count, otherwise a 403 over QUIC looks like a transport
+        // failure and the run keeps dialling peers that all refuse the same
+        // certificate.
         assert!(is_identity_rejection(&AetherError::Other(
-            "connect-ip status 400".to_string()
+            "connect-ip status 403".to_string()
         )));
     }
 
     #[test]
-    fn h2_connect_request_is_an_extended_connect() {
+    // Same property as the test above, over the L4 CONNECT SNI and the default
+    // authority/path rather than the cloudflareaccess.com pair. Renamed because
+    // two tests shared one name, which is a hard compile error in the test
+    // profile — the whole crate's tests could not build.
+    fn h2_connect_request_over_l4_sni_is_an_extended_connect() {
         let cfg = masque_h2::H2TunnelConfig {
             peer: "162.159.196.1:443".parse().unwrap(),
             sni: consts::L4_CONNECT_SNI.to_string(),

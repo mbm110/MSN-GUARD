@@ -116,9 +116,27 @@ class ExitNodeCard(
      * @param countryCode two-letter code, or null/blank when unknown
      * @param tunnelled true when the tunnel is up, which changes the caption
      */
-    fun render(address: String, countryCode: String?, tunnelled: Boolean) {
+    fun render(
+        address: String,
+        countryCode: String?,
+        tunnelled: Boolean,
+        measuring: Boolean = false,
+    ) {
         keyView.text = if (tunnelled) "EXIT NODE" else "YOUR IP"
         if (address.isBlank() || address == UNAVAILABLE) {
+            // On the native path the exit address comes from the core, measured
+            // inside the tunnel, and arrives a second or two after connect. Saying
+            // "unavailable, tap to retry" there invites the user to retry
+            // something that is simply not finished — and tapping cannot speed it
+            // up, because this process has no route into the tunnel.
+            if (measuring) {
+                ipView.text = MEASURING
+                ipView.textSize = 13f
+                locView.text = "reading from inside the tunnel"
+                flagView.text = "\uD83C\uDF10"
+                contentDescription = "Measuring the tunnel exit address"
+                return
+            }
             ipView.text = UNAVAILABLE
             ipView.textSize = 15f
             locView.text = "tap to retry"
@@ -153,6 +171,7 @@ class ExitNodeCard(
 
     private companion object {
         const val UNAVAILABLE = "IP unavailable"
+        const val MEASURING = "measuring…"
     }
 }
 

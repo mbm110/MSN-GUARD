@@ -138,6 +138,18 @@ class MainActivity : Activity() {
     private var ipRequest = 0
     @Volatile private var ipRefreshInFlight = false
     @Volatile private var ipRefreshPending = false
+    /**
+     * Exit address as measured by the core from inside the tunnel, and its
+     * country. Empty until the core reports one.
+     *
+     * This is the trustworthy number. [fetchPublicIp] runs in our own process,
+     * which `applySplitTunneling()` deliberately keeps off the TUN via
+     * `addDisallowedApplication(packageName)`, so its HTTP request exits over the
+     * carrier and returns the carrier's address — Iran — while the tunnel really
+     * exits elsewhere. Once this is set, the HTTP result is ignored.
+     */
+    private var coreExitIp = ""
+    private var coreExitCountry = ""
     private val statusHandler = Handler(Looper.getMainLooper())
     private val statusPoll = object : Runnable {
         override fun run() {
@@ -160,6 +172,22 @@ class MainActivity : Activity() {
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            // The core measured the exit address from inside the tunnel. It wins
+            // over anything fetchPublicIp() could produce, so handle it first and
+            // return: in native TUN mode our own HTTP request bypasses the tunnel.
+            intent.getStringExtra(MsnGuardVpnService.EXTRA_EXIT_IP)?.let { ip ->
+                if (ip.isNotBlank()) {
+                    val country = intent.getStringExtra(MsnGuardVpnService.EXTRA_EXIT_COUNTRY) ?: ""
+                    coreExitIp = ip
+                    coreExitCountry = country
+                    // A later refinement (country arriving after the address) must
+                    // not be undone by an in-flight HTTP lookup finishing late.
+                    ipRequest++
+                    exitNodeCard.render(ip, country, isTunnelActive())
+                    if (isTunnelActive()) updateNotificationHealth(ip = ip)
+                }
+                return
+            }
             if (intent.hasExtra(MsnGuardVpnService.EXTRA_TRAFFIC_TX)) {
                 trafficTx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_TX, 0)
                 trafficRx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_RX, 0)
@@ -895,6 +923,24 @@ class MainActivity : Activity() {
     }
 
     private fun refreshPublicIp() {
+        // The core already told us, from inside the tunnel. Nothing an HTTP
+        // request from this process could add is more accurate.
+        if (coreExitIp.isNotBlank()) {
+            ipRequest++
+            exitNodeCard.render(coreExitIp, coreExitCountry, isTunnelActive())
+            return
+        }
+        // Native TUN mode and no measurement yet: our own request would leave over
+        // the carrier link and paint the carrier's country. Wait for the core
+        // instead of showing a number we know to be wrong.
+        if (TunnelStatus.isActive() &&
+            TunnelStatus.isNativeTunMode &&
+            !Tun2SocksManager.isRunning
+        ) {
+            ipRequest++
+            exitNodeCard.render("", null, isTunnelActive(), measuring = true)
+            return
+        }
         if (ipRefreshInFlight) {
             ipRefreshPending = true
             return
@@ -1020,6 +1066,18 @@ class MainActivity : Activity() {
                 ip?.let { putExtra(MsnGuardVpnService.EXTRA_NOTIFICATION_IP, it) }
                 ping?.let { putExtra(MsnGuardVpnService.EXTRA_NOTIFICATION_PING, it) }
             })
+    }
+
+    /**
+     * Forgets the core's exit measurement, so the next tunnel measures afresh.
+     *
+     * Called on failure and disconnect. Without this a reconnect through a
+     * different endpoint would keep showing the previous exit until the new
+     * measurement lands, which is the same class of lie this change removes.
+     */
+    private fun clearCoreExitIp() {
+        coreExitIp = ""
+        coreExitCountry = ""
     }
 
     // The four main-screen selector rows (MODE / LOG / PERF / SCAN) are gone.
@@ -2837,6 +2895,9 @@ class MainActivity : Activity() {
     private fun showFailure(detail: String? = null) {
         latencyRequest++
         cancelVerification()
+        // Belongs to the tunnel that just died; keeping it would show a stale exit
+        // next to a failure message.
+        clearCoreExitIp()
         chipLatency.text = "Latency —"
         visualState = OrbitDialView.State.FAILED
         orbitDial.state = visualState
@@ -2852,6 +2913,7 @@ class MainActivity : Activity() {
     private fun showDisconnected(detail: String = "Tap the dial to connect") {
         latencyRequest++
         cancelVerification()
+        clearCoreExitIp()
         stopAutoPing()
         chipLatency.text = "Latency —"
         visualState = OrbitDialView.State.DISCONNECTED

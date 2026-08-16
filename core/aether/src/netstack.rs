@@ -1161,6 +1161,10 @@ mod tests {
             next_id: 0,
             next_port: 40000,
             data_in_tx: mpsc::channel(1).0,
+            // Accept mode is off in this test; the field was added to the struct
+            // later and the initializer was never updated, which broke `cargo
+            // test` compilation for the whole crate.
+            accept_tx: None,
         };
 
         for _ in 0..10 {

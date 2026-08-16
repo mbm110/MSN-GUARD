@@ -238,6 +238,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val EXTRA_TRAFFIC_MONTH_RX = "traffic_month_rx"
         const val EXTRA_NOTIFICATION_IP = "notification_ip"
         const val EXTRA_NOTIFICATION_PING = "notification_ping"
+        /** Exit address measured by the core from inside the tunnel. */
+        const val EXTRA_EXIT_IP = "exit_ip"
+        const val EXTRA_EXIT_COUNTRY = "exit_country"
         const val STATUS_CONNECTING = "connecting"
         const val STATUS_STARTING = "starting"
         const val STATUS_SCANNING = "scanning"
@@ -742,6 +745,23 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     currentRx = rx
                     updateTrafficNotification(tx, rx)
                 }
+                // The core measured the exit address from inside the tunnel. This
+                // is the authoritative source: the app's own HTTP lookup leaves
+                // over the carrier link (we are excluded from our own TUN) and so
+                // reports the carrier's IP, not the tunnel's.
+                "exit_ip" -> {
+                    val ip = event.getString("ip")
+                    val country = event.optString("country", "")
+                    if (ip.isNotBlank()) {
+                        currentVpnIp = ip
+                        ConnectionLog.record(
+                            "Tunnel exit $ip" + if (country.isNotBlank()) " ($country)" else ""
+                        )
+                        sendExitIp(ip, country)
+                        getSystemService(NotificationManager::class.java)
+                            .notify(NOTIFICATION_ID, notification(currentTx, currentRx))
+                    }
+                }
                 "log" -> {
                     val message = event.getString("message")
                     ConnectionLog.record(message)
@@ -1029,6 +1049,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             .putExtra(EXTRA_TRAFFIC_SPEED_RX, currentSpeedRx)
             .putExtra(EXTRA_TRAFFIC_MONTH_TX, monthTx)
             .putExtra(EXTRA_TRAFFIC_MONTH_RX, monthRx))
+    }
+
+    /** Broadcasts the core-measured exit address to the UI. */
+    private fun sendExitIp(ip: String, country: String) {
+        sendBroadcast(Intent(ACTION_STATUS)
+            .setPackage(packageName)
+            .putExtra(EXTRA_EXIT_IP, ip)
+            .putExtra(EXTRA_EXIT_COUNTRY, country))
     }
 
     private fun formatBytes(bytes: Long): String = when {
