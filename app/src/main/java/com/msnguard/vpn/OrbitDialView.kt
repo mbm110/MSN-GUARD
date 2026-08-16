@@ -1,4 +1,4 @@
-package studio.cluvex.aethery
+package com.msnguard.vpn
 
 import android.animation.ValueAnimator
 import android.content.Context

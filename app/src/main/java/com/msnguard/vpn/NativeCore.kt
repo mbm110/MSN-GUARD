@@ -1,4 +1,4 @@
-package studio.cluvex.aethery
+package com.msnguard.vpn
 
 import org.json.JSONObject
 

@@ -1,4 +1,4 @@
-package studio.cluvex.aethery
+package com.msnguard.vpn
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -222,11 +222,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     companion object {
         const val LOG_TAG = "MsnGuardVpnService"
-        const val ACTION_CONNECT = "studio.cluvex.aethery.CONNECT"
-        const val ACTION_DISCONNECT = "studio.cluvex.aethery.DISCONNECT"
-        const val ACTION_RECONNECT = "studio.cluvex.aethery.RECONNECT"
-        const val ACTION_NOTIFICATION_HEALTH = "studio.cluvex.aethery.NOTIFICATION_HEALTH"
-        const val ACTION_STATUS = "studio.cluvex.aethery.STATUS"
+        const val ACTION_CONNECT = "com.msnguard.vpn.CONNECT"
+        const val ACTION_DISCONNECT = "com.msnguard.vpn.DISCONNECT"
+        const val ACTION_RECONNECT = "com.msnguard.vpn.RECONNECT"
+        const val ACTION_NOTIFICATION_HEALTH = "com.msnguard.vpn.NOTIFICATION_HEALTH"
+        const val ACTION_STATUS = "com.msnguard.vpn.STATUS"
         const val EXTRA_CONFIG = "config"
         const val EXTRA_STATUS = "status"
         const val EXTRA_DETAIL = "detail"

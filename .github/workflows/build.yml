@@ -37,6 +37,13 @@ jobs:
       # The release keystore lives only in repo secrets. Without it we fall back
       # to a debug build, so a fork or a PR from someone without secret access
       # still gets a working APK instead of a hard failure.
+      #
+      # The AETHERY_* secret names are deliberately NOT renamed alongside the
+      # package rename. They are GitHub secret keys, never shipped in the APK,
+      # and renaming them means re-entering the keystore in repo settings — one
+      # typo there and releases get signed with a different key, which is the
+      # single thing that would force every user to uninstall. Cosmetics are not
+      # worth that risk; the same applies to the -PaetheryKeystore property.
       - name: Restore release keystore
         id: keystore
         env:

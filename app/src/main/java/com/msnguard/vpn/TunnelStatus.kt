@@ -1,4 +1,4 @@
-package studio.cluvex.aethery
+package com.msnguard.vpn
 
 /**
  * Single source of truth for "is a tunnel carrying traffic right now".

@@ -19,17 +19,17 @@ kotlin {
 }
 
 android {
-    namespace = "studio.cluvex.aethery"
+    namespace = "com.msnguard.vpn"
     compileSdk = 36
     buildToolsVersion = "36.0.0"
     ndkVersion = "26.3.11579264"
 
     defaultConfig {
-        applicationId = "studio.cluvex.aethery"
+        applicationId = "com.msnguard.vpn"
         minSdk = 26
         targetSdk = 36
-        versionCode = 23
-        versionName = "1.0.1"
+        versionCode = 24
+        versionName = "1.1.0"
 
     }
 

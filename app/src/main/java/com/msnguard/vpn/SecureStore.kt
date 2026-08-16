@@ -1,4 +1,4 @@
-package studio.cluvex.aethery
+package com.msnguard.vpn
 
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
@@ -12,7 +12,10 @@ import javax.crypto.spec.GCMParameterSpec
 
 object SecureStore {
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
-    private const val KEY_ALIAS = "aethery_credential_key"
+    // Renaming this is safe precisely because the package changed: AndroidKeyStore
+    // is scoped per app UID, so com.msnguard.vpn starts with an empty keystore and
+    // the alias is generated fresh on first use. There is nothing to migrate.
+    private const val KEY_ALIAS = "msnguard_credential_key"
     private const val PREFS_NAME = "secure_settings"
     private const val GCM_IV_LENGTH = 12
     private const val GCM_TAG_LENGTH = 128

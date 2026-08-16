@@ -1,4 +1,4 @@
-package studio.cluvex.aethery
+package com.msnguard.vpn
 
 /**
  * Fits an IP address into a fixed-width readout without breaking the layout.

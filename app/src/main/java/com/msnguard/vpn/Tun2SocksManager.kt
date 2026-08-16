@@ -1,4 +1,4 @@
-package studio.cluvex.aethery
+package com.msnguard.vpn
 
 import android.os.ParcelFileDescriptor
 import ca.psiphon.Tun2SocksJniLoader
@@ -184,7 +184,7 @@ object Tun2SocksManager {
 
         try {
             Tun2SocksJniLoader.initializeLogger(
-                "studio.cluvex.aethery.Tun2SocksManager",
+                "com.msnguard.vpn.Tun2SocksManager",
                 "logTun2Socks",
             )
         } catch (e: Throwable) {
