@@ -120,12 +120,21 @@ class OrbitDialView(
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        // Exactly the mock's 266dp dial box (ring radius 133dp). The pulse rings
-        // grow to 1.32x and the halo spills 24dp, i.e. both deliberately paint
-        // OUTSIDE this box — so every ancestor sets clipChildren=false (see
-        // createConnectionConsole). Measuring the box bigger to "fit" the pulse is
-        // what shrank the dial below the approved size in the first place.
-        val desired = dp(RING_DP * 2)
+        // The measured box is the RING plus [BLEED_DP], not the ring alone.
+        //
+        // This is the actual cause of the dial being cropped on all four sides,
+        // and clipChildren=false on the ancestors could never have fixed it: this
+        // view runs with LAYER_TYPE_SOFTWARE, so Android allocates an offscreen
+        // bitmap exactly the size of the VIEW and every pixel outside it is
+        // discarded before any parent gets a say. The ring is 133dp but the halo
+        // reaches 164dp and a ripple reaches 175dp — 31dp and 43dp past the old
+        // 266dp box, in every direction. That is precisely what the screenshot
+        // shows: flat-shaved arcs left, right, top and bottom.
+        //
+        // So the canvas grows and the ring does not: RING_DP stays at the approved
+        // 133dp, and BLEED_DP adds the room the outer layers need. The dial keeps
+        // its size; only the invisible drawing surface around it gets bigger.
+        val desired = dp((RING_DP + BLEED_DP) * 2)
         val size = resolveSize(desired, widthMeasureSpec)
             .coerceAtMost(resolveSize(desired, heightMeasureSpec))
         // Always square: a non-square canvas would put the ring off-centre.
@@ -137,12 +146,18 @@ class OrbitDialView(
         val cx = width / 2f
         val cy = height / 2f
         val half = minOf(width, height) / 2f
-        // Fixed 133dp ring, exactly as the mock. The old code used a fraction of
-        // the half-extent, which silently scaled the entire dial (ring, core,
-        // ticks, timer) down by ~16% versus the approved preview and made it read
-        // as cramped. Only fall back to the half-extent on a screen too small to
-        // hold the real thing.
-        val ring = minOf(dp(RING_DP).toFloat(), half)
+        // Fixed 133dp ring, exactly as the mock — the view is now measured
+        // 133+BLEED wide, so the ring sits inside its own canvas with room to
+        // spare and the halo/ripples have somewhere to go.
+        //
+        // The fallback matters on small screens: when the width forces the view
+        // below the desired size, the ring shrinks to keep the bleed proportional
+        // instead of letting the outer layers get shaved again. half * the ring's
+        // share of the full box is the largest ring that still fits its own glow.
+        val ring = minOf(
+            dp(RING_DP).toFloat(),
+            half * RING_DP / (RING_DP + BLEED_DP).toFloat(),
+        )
         val accent = accentFor(state)
         val active = state == State.CONNECTED || state == State.DEGRADED
 
@@ -553,7 +568,7 @@ class OrbitDialView(
 
     private fun dp(value: Int): Int = (value * density).roundToInt()
 
-    private companion object {
+    companion object {
         const val TICK_COUNT = 60
         /** Ticks lit when connected — 44 of 60, as in the mock. */
         const val TICK_LIT = 44
@@ -561,6 +576,17 @@ class OrbitDialView(
         const val RIPPLE_GROWTH = 0.32f
         /** Ring radius in dp. The mock's dial is a 266dp box, so r = 133dp. */
         const val RING_DP = 133
+        /**
+         * Extra radius the view is measured with, beyond the ring, so the layers
+         * that deliberately paint outside the ring have canvas to land on.
+         *
+         * Budget: a ripple reaches ring * (1 + RIPPLE_GROWTH) = 175.6dp, i.e.
+         * 42.6dp past the ring, and that is the widest thing drawn. 46dp gives it
+         * a ~3dp margin so the outermost ripple's 1.5dp stroke and the halo's
+         * feathered edge both land fully inside the bitmap. Do not lower this
+         * below 43 or the pulse gets shaved on all four sides again.
+         */
+        const val BLEED_DP = 46
         /** Core radius as a fraction of the ring: 99dp core / 133dp ring. */
         const val CORE_RATIO = 0.744f
     }

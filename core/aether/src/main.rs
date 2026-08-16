@@ -2037,7 +2037,23 @@ async fn run_wireguard_tunnel(
         .map_err(|_| AetherError::Other("invalid ipv4".into()))?;
 
     log::info!("[*] validating WireGuard tunnel with {peer} (handshake + data-plane) before exposing socks5...");
-    let validation_rtt = wireguard::verify_endpoint(
+    // verify_endpoint_keep_session, not verify_endpoint: the session that proved
+    // the data plane is the one that goes on to carry traffic.
+    //
+    // This is the WireGuard fake-Connected bug at the transport layer. The old
+    // code validated with verify_endpoint (which drops its socket), then built the
+    // live tunnel with WgTunnel::new(), which binds a *fresh* UDP socket on a
+    // fresh source port and performs a fresh handshake that nothing checks. On
+    // Hamrah-e-Aval the first flow gets through and the second does not — the
+    // carrier treats the new 5-tuple differently — so validation passed, the core
+    // reported connected, and the live socket carried nothing. MASQUE and Psiphon
+    // were unaffected because neither rebuilds its transport after validating,
+    // which is exactly why only WireGuard showed the fake connect.
+    //
+    // run_gool already did it this way (see the WoW path); WireGuard was the
+    // outlier. Reusing the proven session also skips a second handshake, so
+    // connect is marginally faster.
+    let (validation_rtt, session) = wireguard::verify_endpoint_keep_session(
         peer,
         private_key,
         peer_public,
@@ -2059,25 +2075,18 @@ async fn run_wireguard_tunnel(
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
     let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
 
-    // Keep validation separate from the live transport. Reusing the verifier's
-    // socket reported ready before the Android TUN had a working data path.
-    let tunnel = wireguard::WgTunnel::new(
-        wireguard::WgConfig {
-            local_private_key: private_key,
-            peer_public_key: peer_public,
-            peer_endpoint: peer,
-            local_ipv4: ipv4,
-            local_ipv6: ipv6,
-            client_id: identity.client_id,
-            preshared_key: None,
-            persistent_keepalive: Some(wg_keepalive_secs()),
-            aethernoize: std::sync::Arc::new(aethernoize),
-        },
+    // The original concern behind splitting these — "reusing the verifier's socket
+    // reported ready before the Android TUN had a working data path" — was a
+    // mark_ready() ordering problem, not a socket problem, and mark_ready now
+    // fires after the bridge is spawned (below).
+    let tunnel = wireguard::WgTunnel::from_established(
+        session,
+        std::sync::Arc::new(aethernoize),
         inbound_tx,
-    )
-    .await?;
+        ipv4,
+    );
+    let _ = ipv6;
     log::info!("[+] WireGuard endpoint validated in {validation_rtt:?}; live transport ready");
-    crate::ffi::mark_ready();
 
     let mut http_task = None;
     let local_task = if let Some(fd) = options.tun_fd {
@@ -2097,6 +2106,21 @@ async fn run_wireguard_tunnel(
             socks::serve(listen, stack).await
         })
     };
+
+    // mark_ready() emits "connected" to the app, so it must not fire until a data
+    // path actually exists. It used to fire straight after validation, above —
+    // before the TUN bridge was spawned — so the validated throwaway session was
+    // reported as the live tunnel. On Hamrah-e-Aval that is a lie: validation
+    // succeeds on its own socket, then WgTunnel::new() opens a *different* UDP
+    // socket from a different source port for the real transport, and the carrier
+    // does not let that second flow through. The app got "connected" for a tunnel
+    // whose live socket never carried anything.
+    //
+    // Announcing after the bridge exists does not prove payload crosses — nothing
+    // at this layer can, which is why the app runs its own verification gate — but
+    // it does stop the core claiming ready for a session that has no data path at
+    // all.
+    crate::ffi::mark_ready();
 
     let tunnel_result = tunnel.run(outbound_rx).await;
     if let Some(task) = &http_task {

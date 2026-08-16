@@ -532,12 +532,22 @@ class MainActivity : Activity() {
      * Psiphon without per-protocol special cases.
      */
     private fun beginVerification() {
-        // Already verified and live: a Psiphon rotation re-broadcasts CONNECTED
-        // mid-session and must not restart the whole gate.
-        if (visualState == OrbitDialView.State.CONNECTED) return
+        // Already verified and live: a Psiphon rotation and the native core's own
+        // reconnect loop both re-broadcast CONNECTED mid-session, and neither must
+        // restart the whole gate. DEGRADED counts as live — the auto-ping owns
+        // recovery from there.
+        if (visualState == OrbitDialView.State.CONNECTED ||
+            visualState == OrbitDialView.State.DEGRADED
+        ) return
         if (verifyInFlight) return
         verifyInFlight = true
         val request = ++verifyRequest
+        // Byte counter at the moment the transport claimed to be up. The probe
+        // below cannot see the tunnel in native mode (see pingAnyEndpoint: our
+        // package is disallowed on the TUN, so the request leaves over the
+        // carrier link), but this counter is emitted by the core from inside the
+        // TUN bridge and therefore cannot be faked by the carrier.
+        val rxAtStart = trafficRx
         showVerifying()
         Thread {
             val deadline = System.currentTimeMillis() + VERIFY_TIMEOUT_MS
@@ -557,17 +567,48 @@ class MainActivity : Activity() {
                 verifyInFlight = false
                 if (request != verifyRequest) return@runOnUiThread
                 if (verified != null) {
-                    ConnectionLog.record("Data plane verified in $attempts probe(s) — ${verified.first}")
+                    ConnectionLog.record("Reachability probe passed in $attempts attempt(s) — ${verified.first}")
                     showConnected()
                     chipLatency.text = "Latency ${verified.second.toInt()} ms"
+                    // Second opinion, from inside the tunnel. A probe that rode
+                    // the carrier link proves nothing about the TUN, so if the
+                    // core has still not moved a single byte after the settle
+                    // window, do not leave the user on a confident green dial.
+                    watchForTunnelBytes(request, rxAtStart)
                 } else {
                     ConnectionLog.record(
-                        "Data plane never came up after $attempts probe(s) — handshake succeeded but no traffic passes"
+                        "No reachability after $attempts probe(s) — treating the tunnel as dead"
                     )
                     failFakeConnection()
                 }
             }
         }.start()
+    }
+
+    /**
+     * Watches the core's own byte counters after the UI has gone green.
+     *
+     * The counters come from [core] tun.rs, which increments them as packets
+     * cross the TUN fd — the one number on this screen that is measured inside
+     * the tunnel. If it has not budged [BYTE_WATCH_MS] after connect, the tunnel
+     * is carrying nothing regardless of what the handshake said, and the dial
+     * drops to DEGRADED with a message that says so. It is not torn down: the
+     * core's own 10s stale-timeout owns teardown, and killing a tunnel that is
+     * merely idle would be worse than labelling it.
+     */
+    private fun watchForTunnelBytes(request: Int, rxAtStart: Long) {
+        sessionHandler.postDelayed({
+            if (isFinishing || isDestroyed) return@postDelayed
+            if (request != verifyRequest) return@postDelayed
+            if (visualState != OrbitDialView.State.CONNECTED) return@postDelayed
+            if (trafficRx > rxAtStart) return@postDelayed
+            ConnectionLog.record("Tunnel moved no bytes in ${BYTE_WATCH_MS / 1000}s — reporting degraded")
+            visualState = OrbitDialView.State.DEGRADED
+            orbitDial.state = OrbitDialView.State.DEGRADED
+            connectionTitle.setTextColor(palette.amber)
+            connectionDetail.text = "Tunnel is up but no traffic is passing"
+            renderStatusLed()
+        }, BYTE_WATCH_MS)
     }
 
     /** Cancels an in-flight verification (user disconnect, real failure, stop). */
@@ -661,7 +702,19 @@ class MainActivity : Activity() {
         addView(orbitDial, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(26) })
+        ).apply {
+            topMargin = dp(26)
+            // Cancel the console's 20dp side padding for this one child.
+            //
+            // The dial now measures (RING + BLEED) * 2 = 358dp so its glow has
+            // canvas to land on. A 1080x2400 phone is 392dp wide, and the console
+            // padding leaves 352dp — which would clamp the view and shrink the
+            // ring below the approved 133dp. Negative margins give the dial the
+            // full width back, so the ring keeps its size and the bleed still
+            // fits. clipToPadding=false (set above) is what lets it draw there.
+            leftMargin = -dp(20)
+            rightMargin = -dp(20)
+        })
 
         addView(connectionTitle, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -803,9 +856,22 @@ class MainActivity : Activity() {
         // says "Connection degraded" while the tunnel is carrying traffic fine.
         //
         // So: use the proxy only when a proxy is really there. In native VPN mode
-        // go direct — the request rides the TUN like any other app's traffic, and
-        // because our process is only excluded in the Psiphon path this still
-        // measures the tunnel, not the carrier link.
+        // go direct.
+        //
+        // LIMIT OF THIS PROBE — read before trusting it. applySplitTunneling()
+        // calls addDisallowedApplication(packageName) on the native path too, so
+        // this request leaves over the CARRIER link, not the tunnel. It therefore
+        // proves the phone has internet; it does not prove the tunnel carries
+        // anything. That is exactly how a WireGuard session with a completed
+        // handshake and a dead data plane still passed the gate.
+        //
+        // The exclusion cannot simply be dropped: on the native path the core
+        // provisions its identity (account.rs, plain reqwest, unprotected
+        // sockets) *after* establish(), so those calls would be routed into a TUN
+        // whose tunnel does not exist yet and connect would deadlock.
+        //
+        // So the honest signal is elsewhere: watchForTunnelBytes() reads the byte
+        // counters the core emits from inside the TUN bridge. Keep both.
         val useSocksProxy = TunnelStatus.isActive() &&
             // tun2socks is up, which only happens in Psiphon VPN mode, and it
             // implies a live SOCKS listener on this port. Otherwise the Rust core
@@ -3128,6 +3194,13 @@ class MainActivity : Activity() {
          */
         const val VERIFY_TIMEOUT_MS = 18_000L
         const val VERIFY_RETRY_DELAY_MS = 1_200L
+        /**
+         * Grace period after the dial goes green before the core's own byte
+         * counters are checked. 12s is past the point where a working tunnel has
+         * carried something (DNS alone does it) but short enough that the user
+         * is not left trusting a dead tunnel. See watchForTunnelBytes.
+         */
+        const val BYTE_WATCH_MS = 12_000L
         /**
          * Consecutive failed health checks tolerated on an established session
          * before the tunnel is declared dead and torn down. Three misses at the
