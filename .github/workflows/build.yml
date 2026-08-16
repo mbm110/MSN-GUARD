@@ -34,14 +34,72 @@ jobs:
       - name: Make scripts executable
         run: chmod +x ./gradlew ./core/build-android.sh
 
-      - name: Build debug APK
+      # The release keystore lives only in repo secrets. Without it we fall back
+      # to a debug build, so a fork or a PR from someone without secret access
+      # still gets a working APK instead of a hard failure.
+      - name: Restore release keystore
+        id: keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.AETHERY_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > msn-guard-release.jks
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build signed release APK
+        if: steps.keystore.outputs.present == 'true'
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
+          AETHERY_KEYSTORE_PASSWORD: ${{ secrets.AETHERY_KEYSTORE_PASSWORD }}
+          AETHERY_KEY_PASSWORD: ${{ secrets.AETHERY_KEY_PASSWORD }}
+          AETHERY_KEY_ALIAS: ${{ secrets.AETHERY_KEY_ALIAS }}
+        run: |
+          ./gradlew assembleRelease \
+            -PtargetAbi=arm64-v8a,armeabi-v7a \
+            -PaetheryKeystore=msn-guard-release.jks \
+            --no-daemon
+
+      - name: Build debug APK (no signing secrets available)
+        if: steps.keystore.outputs.present != 'true'
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
         run: ./gradlew assembleDebug -PtargetAbi=arm64-v8a,armeabi-v7a --no-daemon
 
+      # versionName drives the artifact and release-asset filenames so a
+      # downloaded APK is self-identifying.
+      - name: Read version
+        id: ver
+        run: |
+          V=$(grep -m1 'versionName' app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
+          echo "name=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Stage APKs
+        run: |
+          mkdir -p out
+          V="${{ steps.ver.outputs.name }}"
+          for f in app/build/outputs/apk/*/*.apk; do
+            [ -e "$f" ] || continue
+            case "$f" in
+              *arm64-v8a*)   ABI=arm64-v8a ;;
+              *armeabi-v7a*) ABI=armeabi-v7a ;;
+              *)             ABI=universal ;;
+            esac
+            cp "$f" "out/MSN-GUARD-v$V-$ABI.apk"
+          done
+          (cd out && sha256sum *.apk > SHA256SUMS.txt)
+          ls -la out
+
+      - name: Delete stale keystore
+        if: always()
+        run: rm -f msn-guard-release.jks
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: MSN-GUARD
-          path: app/build/outputs/apk/debug/*.apk
+          path: out/*

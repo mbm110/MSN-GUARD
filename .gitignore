@@ -7,6 +7,19 @@ local.properties
 # AI-generated local artifacts
 .artifacts/
 
+# Signing material and local release helper scripts (never publish)
+*.jks
+*.keystore
+keystore.env
+apk-signer.py
+fetch-apk.sh
+fetch-art.sh
+release-info.sh
+releases-list.sh
+repo-info.sh
+ci-status.sh
+set-secrets.py
+
 # Android and Gradle output
 build/
 app/build/
