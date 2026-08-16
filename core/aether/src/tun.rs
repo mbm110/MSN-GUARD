@@ -12,6 +12,143 @@ use tokio::sync::mpsc;
 use crate::error::{AetherError, Result};
 use crate::ffi;
 
+/// IPv4/IPv6 + TCP header overhead subtracted from the proven inner MTU.
+///
+/// IPv6 headers are 20 bytes larger than IPv4, so using the v6 figure for both
+/// costs 20 bytes on v4 and is never wrong. TCP options (timestamps, SACK) live
+/// inside the MSS the peer offers, so they need no allowance here.
+const IP_TCP_OVERHEAD: usize = 40 + 20;
+
+/// Rewrites the TCP MSS option in a SYN so the peer never sends us a segment
+/// bigger than the tunnel proved it can carry.
+///
+/// Why this exists: on Hamrah-e-Aval a WireGuard endpoint completes a handshake,
+/// passes small packets, and silently drops full-size ones. Nothing surfaces —
+/// no ICMP "fragmentation needed", no RST — so TCP keeps retransmitting a
+/// segment that can never arrive. Every site and Telegram hang while the
+/// counters show a trickle: exactly the "connected but nothing loads" report.
+///
+/// Clamping MSS on the SYN and SYN-ACK is the standard fix for a path that
+/// cannot do PMTU discovery, and it is what makes such an endpoint usable
+/// instead of merely diagnosed. Applied to both directions because the
+/// asymmetric case (we advertise small, the server advertises large) still
+/// leaves the inbound half broken.
+fn clamp_tcp_mss(packet: &mut [u8], max_inner: usize) -> bool {
+    if packet.is_empty() {
+        return false;
+    }
+    let version = packet[0] >> 4;
+    let (ip_header_len, protocol) = match version {
+        4 => {
+            if packet.len() < 20 {
+                return false;
+            }
+            (((packet[0] & 0x0f) as usize) * 4, packet[9])
+        }
+        6 => {
+            if packet.len() < 40 {
+                return false;
+            }
+            // Only a bare TCP next-header is handled; extension headers are rare
+            // here and skipping them is safer than mis-parsing them.
+            (40usize, packet[6])
+        }
+        _ => return false,
+    };
+    if protocol != 6 || packet.len() < ip_header_len + 20 {
+        return false;
+    }
+
+    // Offsets are absolute into `packet` throughout: taking a `&mut` subslice for
+    // the TCP header would keep that borrow alive across the checksum rewrite,
+    // which needs the whole packet (the pseudo-header covers the IP addresses).
+    let tcp = ip_header_len;
+    // SYN must be set; anything else carries no MSS option.
+    if packet[tcp + 13] & 0x02 == 0 {
+        return false;
+    }
+    let data_offset = ((packet[tcp + 12] >> 4) as usize) * 4;
+    if data_offset < 20 || packet.len() < tcp + data_offset {
+        return false;
+    }
+
+    let target = max_inner.saturating_sub(IP_TCP_OVERHEAD);
+    if target == 0 || target > u16::MAX as usize {
+        return false;
+    }
+    let target = target as u16;
+
+    let options_end = tcp + data_offset;
+    let mut i = tcp + 20;
+    while i + 1 < options_end {
+        match packet[i] {
+            0 => break,  // end of options
+            1 => i += 1, // no-op
+            2 => {
+                if packet[i + 1] != 4 || i + 4 > options_end {
+                    return false;
+                }
+                let current = u16::from_be_bytes([packet[i + 2], packet[i + 3]]);
+                if current <= target {
+                    return false;
+                }
+                packet[i + 2..i + 4].copy_from_slice(&target.to_be_bytes());
+                // The TCP checksum covers the options, so it must be redone.
+                // Recomputing from scratch is simpler than an incremental update
+                // and this runs once per connection, not per packet.
+                recompute_tcp_checksum(packet, ip_header_len, version);
+                return true;
+            }
+            _ => {
+                let len = packet[i + 1] as usize;
+                if len < 2 {
+                    return false;
+                }
+                i += len;
+            }
+        }
+    }
+    false
+}
+
+fn ones_complement_sum(bytes: &[u8], mut sum: u32) -> u32 {
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        sum += u16::from_be_bytes([bytes[i], bytes[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < bytes.len() {
+        sum += (bytes[i] as u32) << 8;
+    }
+    sum
+}
+
+fn fold_checksum(mut sum: u32) -> u16 {
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+fn recompute_tcp_checksum(packet: &mut [u8], ip_header_len: usize, version: u8) {
+    let tcp_len = packet.len() - ip_header_len;
+    packet[ip_header_len + 16..ip_header_len + 18].copy_from_slice(&[0, 0]);
+
+    let mut sum = 0u32;
+    // Pseudo-header: source and destination addresses, protocol, TCP length.
+    if version == 4 {
+        sum = ones_complement_sum(&packet[12..20], sum);
+    } else {
+        sum = ones_complement_sum(&packet[8..40], sum);
+    }
+    sum += 6u32; // protocol
+    sum += tcp_len as u32;
+    sum = ones_complement_sum(&packet[ip_header_len..], sum);
+
+    let checksum = fold_checksum(sum);
+    packet[ip_header_len + 16..ip_header_len + 18].copy_from_slice(&checksum.to_be_bytes());
+}
+
 /// Bridges Android's packet TUN file descriptor with Aether's raw-IP tunnel.
 #[cfg(unix)]
 pub async fn bridge(
@@ -37,12 +174,20 @@ pub async fn bridge(
     let mut rx_total = 0u64;
     let mut tx_total = 0u64;
     let mut last_report = std::time::Instant::now();
+    // How many SYNs had their MSS lowered since the last report. Only logged, but
+    // it is the one number that says whether the clamp is doing anything.
+    let mut clamped_syns = 0u64;
 
     loop {
         tokio::select! {
             tunnel_packet = inbound_rx.recv() => match tunnel_packet {
-                Some(packet) => {
+                Some(mut packet) => {
                     rx_total += packet.len() as u64;
+                    // Inbound SYN-ACK: the server's advertised MSS must be
+                    // clamped too, or the download half still stalls.
+                    if clamp_tcp_mss(&mut packet, crate::wireguard::inner_mtu_hint()) {
+                        clamped_syns += 1;
+                    }
                     write_packet(&tun, &packet).await?;
                 },
                 None => return Ok(()),
@@ -53,13 +198,25 @@ pub async fn bridge(
                     return Ok(());
                 }
                 tx_total += length as u64;
-                outbound_tx.send(packet[..length].to_vec()).await
+                let mut outbound = packet[..length].to_vec();
+                // Outbound SYN: cap what we ask the peer to send us.
+                if clamp_tcp_mss(&mut outbound, crate::wireguard::inner_mtu_hint()) {
+                    clamped_syns += 1;
+                }
+                outbound_tx.send(outbound).await
                     .map_err(|_| AetherError::Other("tunnel outbound channel closed".into()))?;
             },
         }
 
         if last_report.elapsed() >= std::time::Duration::from_millis(1000) {
             ffi::emit_traffic(tx_total, rx_total);
+            if clamped_syns > 0 {
+                log::debug!(
+                    "[tun] clamped MSS on {clamped_syns} SYN(s) to fit a {}-byte inner MTU",
+                    crate::wireguard::inner_mtu_hint()
+                );
+                clamped_syns = 0;
+            }
             last_report = std::time::Instant::now();
         }
     }
@@ -125,4 +282,126 @@ pub async fn bridge(
     Err(AetherError::Other(
         "TUN mode requires a Unix platform".into(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal IPv4 TCP SYN whose option area holds `leading_nops` NOPs and then
+    /// an MSS option of `mss`. 28 bytes of TCP header leaves room for both.
+    fn syn_with_mss_padded(mss: u16, leading_nops: usize) -> Vec<u8> {
+        assert!(leading_nops <= 4, "options area is 8 bytes");
+        let mut pkt = vec![0u8; 20 + 28];
+        pkt[0] = 0x45;
+        let total = pkt.len() as u16;
+        pkt[2..4].copy_from_slice(&total.to_be_bytes());
+        pkt[8] = 64;
+        pkt[9] = 6; // TCP
+        pkt[12..16].copy_from_slice(&[10, 0, 0, 2]);
+        pkt[16..20].copy_from_slice(&[1, 1, 1, 1]);
+        pkt[20..22].copy_from_slice(&40000u16.to_be_bytes());
+        pkt[22..24].copy_from_slice(&443u16.to_be_bytes());
+        pkt[32] = 7 << 4; // data offset 28 bytes => 8 bytes of options
+        pkt[33] = 0x02; // SYN
+        for nop in 0..leading_nops {
+            pkt[40 + nop] = 1;
+        }
+        let mut i = 40 + leading_nops;
+        pkt[i] = 2; // MSS kind
+        pkt[i + 1] = 4; // MSS length
+        pkt[i + 2..i + 4].copy_from_slice(&mss.to_be_bytes());
+        i += 4;
+        // Anything left in the options area is explicit end-of-options.
+        while i < 48 {
+            pkt[i] = 0;
+            i += 1;
+        }
+        // A correct checksum to begin with, so a rewrite can be checked against it.
+        recompute_tcp_checksum(&mut pkt, 20, 4);
+        pkt
+    }
+
+    fn syn_with_mss(mss: u16) -> Vec<u8> {
+        syn_with_mss_padded(mss, 0)
+    }
+
+    /// MSS value of a packet built by [syn_with_mss_padded].
+    fn mss_at(pkt: &[u8], leading_nops: usize) -> u16 {
+        let off = 20 + 20 + leading_nops + 2;
+        u16::from_be_bytes([pkt[off], pkt[off + 1]])
+    }
+
+    fn mss_of(pkt: &[u8]) -> u16 {
+        mss_at(pkt, 0)
+    }
+
+    /// True when the TCP checksum in `pkt` verifies. A wrong checksum makes the
+    /// peer drop the SYN silently — the same symptom as the bug being fixed.
+    fn tcp_checksum_valid(pkt: &[u8]) -> bool {
+        let ip_header_len = ((pkt[0] & 0x0f) as usize) * 4;
+        let tcp_len = pkt.len() - ip_header_len;
+        let mut sum = ones_complement_sum(&pkt[12..20], 0);
+        sum += 6u32;
+        sum += tcp_len as u32;
+        sum = ones_complement_sum(&pkt[ip_header_len..], sum);
+        fold_checksum(sum) == 0
+    }
+
+    #[test]
+    fn an_oversized_mss_is_clamped_to_the_proven_inner_mtu() {
+        let mut pkt = syn_with_mss(1460);
+        assert!(clamp_tcp_mss(&mut pkt, 1200));
+        assert_eq!(mss_of(&pkt), 1200 - IP_TCP_OVERHEAD as u16);
+    }
+
+    #[test]
+    fn an_mss_that_already_fits_is_left_alone() {
+        let mut pkt = syn_with_mss(500);
+        assert!(!clamp_tcp_mss(&mut pkt, 1200));
+        assert_eq!(mss_of(&pkt), 500, "a fitting MSS must not be rewritten");
+    }
+
+    #[test]
+    fn the_tcp_checksum_is_valid_after_clamping() {
+        let mut pkt = syn_with_mss(1460);
+        assert!(tcp_checksum_valid(&pkt), "fixture must start out valid");
+        assert!(clamp_tcp_mss(&mut pkt, 800));
+        assert!(
+            tcp_checksum_valid(&pkt),
+            "rewriting the MSS must leave a verifiable checksum"
+        );
+    }
+
+    #[test]
+    fn packets_without_a_syn_mss_option_are_untouched() {
+        // Plain ACK: same shape, SYN bit clear.
+        let mut ack = syn_with_mss(1460);
+        ack[33] = 0x10;
+        assert!(!clamp_tcp_mss(&mut ack, 1200));
+
+        // UDP, not TCP.
+        let mut udp = syn_with_mss(1460);
+        udp[9] = 17;
+        assert!(!clamp_tcp_mss(&mut udp, 1200));
+
+        // Truncated and empty input must not panic.
+        let mut empty: [u8; 0] = [];
+        assert!(!clamp_tcp_mss(&mut empty, 1200));
+        let mut short = [0x45u8, 0x00, 0x00];
+        assert!(!clamp_tcp_mss(&mut short, 1200));
+        // Unknown IP version.
+        let mut bogus = [0x75u8, 0x00, 0x00, 0x00];
+        assert!(!clamp_tcp_mss(&mut bogus, 1200));
+    }
+
+    #[test]
+    fn options_before_the_mss_option_are_skipped() {
+        // Two NOPs of padding before the MSS option, as real stacks emit.
+        let mut pkt = syn_with_mss_padded(1460, 2);
+        assert_eq!(mss_at(&pkt, 2), 1460);
+        assert!(clamp_tcp_mss(&mut pkt, 1000));
+        assert_eq!(mss_at(&pkt, 2), 1000 - IP_TCP_OVERHEAD as u16);
+        assert!(tcp_checksum_valid(&pkt));
+    }
 }

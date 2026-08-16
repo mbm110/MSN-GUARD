@@ -536,6 +536,35 @@ class MainActivity : Activity() {
      * purpose: it verifies bytes, so it covers WireGuard, MASQUE, WoW and
      * Psiphon without per-protocol special cases.
      */
+    /**
+     * Waits for the core's own byte counters to move, which is the only signal
+     * on this screen that is measured *inside* the tunnel.
+     *
+     * Needed because in native TUN mode our own package is excluded from the VPN
+     * (otherwise the core's control sockets would route into their own tunnel),
+     * so an HTTP probe from this process leaves over the carrier link and
+     * succeeds even when the tunnel carries nothing. That is exactly how a dead
+     * Hamrah-e-Aval WireGuard session produced "Reachability probe passed in 1
+     * attempt — 479 ms" followed by zero bytes. A probe that cannot enter the
+     * tunnel cannot be evidence about the tunnel.
+     *
+     * Returns true as soon as [trafficRx] exceeds [rxAtStart].
+     */
+    private fun awaitTunnelBytes(request: Int, rxAtStart: Long, deadline: Long): Boolean {
+        // Not "> 0": the core's own WireGuard health probe sends a small DNS query
+        // every few seconds and its reply crosses the TUN, so a completely dead
+        // tunnel still drips a few hundred bytes. That drip is what made the
+        // counters show a trickle while nothing loaded. Requiring
+        // [VERIFY_MIN_RX_BYTES] puts the bar above the probe traffic and below
+        // anything a real app does on connect.
+        val target = rxAtStart + VERIFY_MIN_RX_BYTES
+        while (System.currentTimeMillis() < deadline && request == verifyRequest) {
+            if (trafficRx >= target) return true
+            Thread.sleep(VERIFY_RETRY_DELAY_MS)
+        }
+        return trafficRx >= target
+    }
+
     private fun beginVerification() {
         // Already verified and live: a Psiphon rotation and the native core's own
         // reconnect loop both re-broadcast CONNECTED mid-session, and neither must
@@ -556,6 +585,38 @@ class MainActivity : Activity() {
         showVerifying()
         Thread {
             val deadline = System.currentTimeMillis() + VERIFY_TIMEOUT_MS
+            // In native TUN mode the HTTP probe rides the carrier link, not the
+            // tunnel, so it proves nothing. Gate on in-tunnel bytes instead and
+            // use the probe only for the latency figure afterwards.
+            val nativeMode = TunnelStatus.isNativeTunMode
+            if (nativeMode) {
+                val moved = awaitTunnelBytes(request, rxAtStart, deadline)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    verifyInFlight = false
+                    if (request != verifyRequest) return@runOnUiThread
+                    if (moved) {
+                        ConnectionLog.record("Tunnel is passing traffic — verified from inside the tunnel")
+                        showConnected()
+                        // Latency is cosmetic, so a failure here must not undo a
+                        // verification that already succeeded on real bytes.
+                        Thread {
+                            val probe = pingAnyEndpoint()
+                            runOnUiThread {
+                                if (isFinishing || isDestroyed) return@runOnUiThread
+                                if (request != verifyRequest) return@runOnUiThread
+                                probe?.let { chipLatency.text = "Latency ${it.second.toInt()} ms" }
+                            }
+                        }.start()
+                    } else {
+                        ConnectionLog.record(
+                            "Tunnel moved no bytes in ${VERIFY_TIMEOUT_MS / 1000}s — handshake succeeded but nothing passes"
+                        )
+                        failFakeConnection()
+                    }
+                }
+                return@Thread
+            }
             var proof: Pair<String, Float>? = null
             var attempts = 0
             while (System.currentTimeMillis() < deadline && request == verifyRequest) {
@@ -3261,6 +3322,15 @@ class MainActivity : Activity() {
          * is not left trusting a dead tunnel. See watchForTunnelBytes.
          */
         const val BYTE_WATCH_MS = 12_000L
+        /**
+         * Bytes that must cross the TUN before a native tunnel counts as verified.
+         *
+         * Above the core's own keepalive/health-probe traffic (a DNS query every
+         * three seconds, tens of bytes a round) and far below what loading any
+         * real page moves, so it separates "the tunnel is alive" from "the
+         * tunnel is only talking to itself".
+         */
+        const val VERIFY_MIN_RX_BYTES = 4_096L
         /**
          * Breathing room kept between the console's bottom edge and the viewport
          * when [fitConsoleToViewport] sizes the dial. Without it the action bar

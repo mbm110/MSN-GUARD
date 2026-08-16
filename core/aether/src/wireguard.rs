@@ -465,6 +465,135 @@ async fn send_dataplane_probe(
 const DATAPLANE_REQUIRED_SUCCESSES: u32 = 2;
 const DATAPLANE_PROBE_GAP: Duration = Duration::from_millis(600);
 
+/// Inner packet sizes tried during validation, largest first.
+///
+/// The small DNS probe proves *a* path exists. It does not prove the path can
+/// carry a full-size packet, and on Hamrah-e-Aval those are different facts: a
+/// ~70-byte probe round-trips while a 1200-byte one is dropped silently. So
+/// validation passed, the core reported connected, and every real TLS flow died
+/// — a TLS ClientHello is near the top of this ladder, not the bottom.
+///
+/// The largest size that round-trips becomes the inner MTU hint, which the TUN
+/// bridge uses to clamp TCP MSS. That is what turns "detected as broken" into
+/// "works anyway": an endpoint that only carries 800-byte packets is still a
+/// usable tunnel once we stop trying to push 1280-byte ones through it.
+const PROBE_LADDER: &[usize] = &[1200, 1000, 800, 576];
+
+/// Per-size budget during the ladder walk. Two sends fit in this window.
+///
+/// Sized so the whole ladder plus the small-probe stage fits inside
+/// `wg_tunnel_validate_timeout()`; otherwise the deadline would cut the walk
+/// short and every endpoint would end up on the floor clamp regardless of what
+/// it can really carry.
+const LADDER_STEP_BUDGET: Duration = Duration::from_millis(1_200);
+
+/// Inner MTU proven to cross the live tunnel, published for the TUN bridge.
+///
+/// Written once per successful validation, read by [crate::tun::bridge] to size
+/// its MSS clamp. Conservative default so a path we never measured still gets a
+/// clamp rather than none.
+pub static INNER_MTU_HINT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(1200);
+
+/// Largest inner packet proven to cross the tunnel, in bytes.
+pub fn inner_mtu_hint() -> usize {
+    INNER_MTU_HINT.load(Ordering::Relaxed)
+}
+
+/// ICMP echo id/seq for the full-size probe, so a reply can be recognised.
+const LARGE_PROBE_ID: u16 = 0x4d47;
+
+fn icmp_checksum(body: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i = 0;
+    while i + 1 < body.len() {
+        sum += u16::from_be_bytes([body[i], body[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < body.len() {
+        sum += (body[i] as u32) << 8;
+    }
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// A full-size ICMP echo to 8.8.8.8, padded to `total_len` bytes of IPv4 packet.
+///
+/// ICMP rather than another DNS query: an echo reply comes back the same size
+/// it went out, so one round-trip tests a full-size packet in *both*
+/// directions. A padded DNS query only tests the outbound leg.
+fn build_large_probe(src: Ipv4Addr, total_len: usize) -> Vec<u8> {
+    let total_len = total_len.max(60);
+    let payload_len = total_len - 20 - 8;
+    let mut icmp = Vec::with_capacity(8 + payload_len);
+    icmp.push(8); // echo request
+    icmp.push(0);
+    icmp.extend_from_slice(&[0x00, 0x00]); // checksum placeholder
+    icmp.extend_from_slice(&LARGE_PROBE_ID.to_be_bytes());
+    icmp.extend_from_slice(&1u16.to_be_bytes());
+    // Deterministic filler: a fixed pattern keeps the packet incompressible
+    // enough to be realistic without making the probe itself random.
+    for i in 0..payload_len {
+        icmp.push((i % 251) as u8);
+    }
+    let csum = icmp_checksum(&icmp);
+    icmp[2..4].copy_from_slice(&csum.to_be_bytes());
+
+    let mut pkt = Vec::with_capacity(total_len);
+    pkt.push(0x45);
+    pkt.push(0x00);
+    pkt.extend_from_slice(&(total_len as u16).to_be_bytes());
+    let id: u16 = rand::random();
+    pkt.extend_from_slice(&id.to_be_bytes());
+    // Do not fragment: if the path cannot take this size we want it dropped,
+    // not quietly split into pieces that hide the problem.
+    pkt.extend_from_slice(&[0x40, 0x00]);
+    pkt.push(64);
+    pkt.push(1); // ICMP
+    pkt.extend_from_slice(&[0x00, 0x00]);
+    pkt.extend_from_slice(&src.octets());
+    pkt.extend_from_slice(&Ipv4Addr::new(8, 8, 8, 8).octets());
+    let csum = ipv4_checksum(&pkt[0..20]);
+    pkt[10..12].copy_from_slice(&csum.to_be_bytes());
+    pkt.extend_from_slice(&icmp);
+    pkt
+}
+
+/// True when `pkt` is the echo reply to [build_large_probe].
+fn is_large_probe_reply(pkt: &[u8]) -> bool {
+    if pkt.len() < 28 {
+        return false;
+    }
+    if pkt[0] >> 4 != 4 || pkt[9] != 1 {
+        return false;
+    }
+    let ihl = ((pkt[0] & 0x0f) as usize) * 4;
+    if pkt.len() < ihl + 8 {
+        return false;
+    }
+    let icmp = &pkt[ihl..];
+    // type 0 = echo reply, and the id must be ours.
+    icmp[0] == 0 && u16::from_be_bytes([icmp[4], icmp[5]]) == LARGE_PROBE_ID
+}
+
+/// Proves the tunnel can carry traffic, and measures how big a packet it takes.
+///
+/// Stage 1 (small): a DNS query to 8.8.8.8, [DATAPLANE_REQUIRED_SUCCESSES]
+/// round-trips. Proves the crypto and the path work at all.
+///
+/// Stage 2 (ladder): ICMP echoes down [PROBE_LADDER], largest first, until one
+/// comes back. This is the stage that catches the Hamrah-e-Aval failure, where
+/// stage 1 passes and a full-size packet does not: the carrier lets the small
+/// UDP flow through and drops big encapsulated ones, so a handshake plus a small
+/// probe looked like a working tunnel while Telegram and every site stayed dark.
+///
+/// Rather than rejecting such an endpoint, the largest size that *did* cross is
+/// published as [inner_mtu_hint] and the tunnel is kept. The bridge then clamps
+/// MSS to it, so TCP never offers more than the path proved it can take. Only an
+/// endpoint where even the smallest rung fails is rejected — at that point
+/// nothing useful can cross and another endpoint is the right answer.
 async fn verify_dataplane(
     sock: &UdpSocket,
     tunn: &mut Tunn,
@@ -473,19 +602,37 @@ async fn verify_dataplane(
     start: Instant,
     deadline: Instant,
 ) -> Result<Duration> {
-    let probe = build_dataplane_probe(local_ipv4);
+    let small_probe = build_dataplane_probe(local_ipv4);
     let mut out_buf = vec![0u8; MAX_PACKET];
     let mut recv_buf = vec![0u8; MAX_PACKET];
     let mut tmp_buf = vec![0u8; MAX_PACKET];
 
     let mut successes: u32 = 0;
+    // Stage 2 starts only after stage 1 is satisfied, so a large probe is never
+    // blamed for a path that was broken for every packet size.
+    let mut rung: Option<usize> = None;
+    let mut large_probe: Vec<u8> = Vec::new();
+    let mut rung_deadline = deadline;
     let mut last_probe_at = Instant::now();
-    send_dataplane_probe(sock, tunn, client_id, &probe, &mut out_buf).await?;
+    send_dataplane_probe(sock, tunn, client_id, &small_probe, &mut out_buf).await?;
     let mut resend_at = last_probe_at + Duration::from_millis(700);
 
     loop {
         let now = Instant::now();
         if now >= deadline {
+            if rung.is_some() {
+                // Small packets crossed; no rung of the ladder did inside the
+                // budget. Keep the tunnel on the most conservative clamp we have
+                // rather than throwing away a path that demonstrably passes
+                // packets — the app's own verification still has the final say.
+                let floor = *PROBE_LADDER.last().unwrap_or(&576);
+                INNER_MTU_HINT.store(floor, Ordering::Relaxed);
+                log::warn!(
+                    "[wg] small probes passed but no rung of the size ladder round-tripped; \
+                     clamping inner MTU to {floor} and keeping the tunnel"
+                );
+                return Ok(start.elapsed());
+            }
             log::debug!(
                 "[wg] dataplane verify timed out ({}/{} confirmations)",
                 successes,
@@ -493,13 +640,35 @@ async fn verify_dataplane(
             );
             return Err(AetherError::Other("dataplane timeout".into()));
         }
+
+        // Current rung ran out of time: step down to the next smaller size.
+        if rung.is_some() && now >= rung_deadline {
+            let next = rung.map(|i| i + 1).unwrap_or(0);
+            if let Some(&size) = PROBE_LADDER.get(next) {
+                log::debug!("[wg] no round-trip at rung {next}; trying {size} bytes");
+                rung = Some(next);
+                large_probe = build_large_probe(local_ipv4, size);
+                rung_deadline = now + LADDER_STEP_BUDGET;
+                let _ =
+                    send_dataplane_probe(sock, tunn, client_id, &large_probe, &mut out_buf).await;
+                last_probe_at = now;
+                resend_at = now + Duration::from_millis(700);
+                continue;
+            }
+            // Ladder exhausted: fall through to the shared deadline arm above,
+            // which keeps the tunnel on the floor clamp.
+            rung_deadline = deadline;
+        }
+
         if now >= resend_at {
-            let _ = send_dataplane_probe(sock, tunn, client_id, &probe, &mut out_buf).await;
+            let probe: &[u8] = if rung.is_some() { &large_probe } else { &small_probe };
+            let _ = send_dataplane_probe(sock, tunn, client_id, probe, &mut out_buf).await;
             last_probe_at = now;
             resend_at = now + Duration::from_millis(700);
         }
         let wait = deadline
             .saturating_duration_since(now)
+            .min(rung_deadline.saturating_duration_since(now))
             .min(resend_at.saturating_duration_since(now));
 
         tokio::select! {
@@ -507,19 +676,52 @@ async fn verify_dataplane(
                 let n = r?;
                 strip_client_id(&mut recv_buf[..n]);
                 match tunn.decapsulate(None, &recv_buf[..n], &mut tmp_buf) {
-                    TunnResult::WriteToTunnelV4(_, _) | TunnResult::WriteToTunnelV6(_, _) => {
+                    TunnResult::WriteToTunnelV4(pkt, _) | TunnResult::WriteToTunnelV6(pkt, _) => {
+                        if let Some(index) = rung {
+                            // Only the echo reply counts here. Anything else is
+                            // unrelated traffic and must not be mistaken for
+                            // proof that a full-size packet crossed.
+                            if !is_large_probe_reply(pkt) {
+                                continue;
+                            }
+                            let size = PROBE_LADDER[index];
+                            INNER_MTU_HINT.store(size, Ordering::Relaxed);
+                            let elapsed = start.elapsed();
+                            if index == 0 {
+                                log::debug!(
+                                    "[wg] dataplane ok in {elapsed:?} (full-size {size}-byte \
+                                     round-trip)"
+                                );
+                            } else {
+                                log::warn!(
+                                    "[wg] path carries {size}-byte packets but not {}; inner MTU \
+                                     clamped to {size}",
+                                    PROBE_LADDER[0]
+                                );
+                            }
+                            return Ok(elapsed);
+                        }
+
                         successes += 1;
                         log::debug!(
                             "[wg] dataplane round-trip {}/{} confirmed in {:?}",
                             successes, DATAPLANE_REQUIRED_SUCCESSES, start.elapsed()
                         );
-                        if successes >= DATAPLANE_REQUIRED_SUCCESSES {
-                            let elapsed = start.elapsed();
-                            log::debug!("[wg] dataplane ok in {:?}", elapsed);
-                            return Ok(elapsed);
-                        }
                         let next_at = Instant::now().max(last_probe_at + DATAPLANE_PROBE_GAP);
-                        let _ = send_dataplane_probe(sock, tunn, client_id, &probe, &mut out_buf).await;
+                        if successes >= DATAPLANE_REQUIRED_SUCCESSES {
+                            let size = PROBE_LADDER[0];
+                            rung = Some(0);
+                            large_probe = build_large_probe(local_ipv4, size);
+                            rung_deadline = next_at + LADDER_STEP_BUDGET;
+                            log::debug!("[wg] small probes confirmed; testing {size} bytes");
+                            let _ = send_dataplane_probe(
+                                sock, tunn, client_id, &large_probe, &mut out_buf,
+                            ).await;
+                        } else {
+                            let _ = send_dataplane_probe(
+                                sock, tunn, client_id, &small_probe, &mut out_buf,
+                            ).await;
+                        }
                         last_probe_at = next_at;
                         resend_at = next_at + Duration::from_millis(700);
                     }
@@ -799,6 +1001,63 @@ mod tests {
     fn the_documented_zero_trust_wireguard_ingress_range_is_scanned() {
         assert!(WG_PREFIXES_V4.contains(&"162.159.193.0/24"));
         assert!(WG_PREFIXES_V6.contains(&"2606:4700:100::/48"));
+    }
+
+    #[test]
+    fn the_size_ladder_walks_down_from_a_full_size_packet() {
+        assert_eq!(PROBE_LADDER.first(), Some(&1200));
+        for pair in PROBE_LADDER.windows(2) {
+            assert!(
+                pair[0] > pair[1],
+                "the ladder must descend so the first success is the largest"
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_size_probe_is_exactly_the_requested_length() {
+        let src = "172.16.0.2".parse().unwrap();
+        for &size in PROBE_LADDER {
+            let pkt = build_large_probe(src, size);
+            assert_eq!(pkt.len(), size, "probe for {size} came out {}", pkt.len());
+            // Total-length field must agree with the real length, or the peer
+            // drops it and the rung looks blocked when it is merely malformed.
+            assert_eq!(u16::from_be_bytes([pkt[2], pkt[3]]) as usize, size);
+            assert_eq!(pkt[9], 1, "must be ICMP");
+            // Don't-fragment, so a too-big packet is dropped rather than split.
+            assert_eq!(pkt[6] & 0x40, 0x40);
+        }
+    }
+
+    #[test]
+    fn the_probe_ipv4_checksum_is_valid() {
+        let pkt = build_large_probe("172.16.0.2".parse().unwrap(), 1200);
+        // Summing a correct header including its checksum yields zero.
+        assert_eq!(ipv4_checksum(&pkt[0..20]), 0);
+    }
+
+    #[test]
+    fn an_echo_reply_to_our_probe_is_recognised() {
+        let mut reply = build_large_probe("172.16.0.2".parse().unwrap(), 1200);
+        reply[20] = 0; // echo request -> echo reply
+        assert!(is_large_probe_reply(&reply));
+    }
+
+    #[test]
+    fn unrelated_traffic_is_not_mistaken_for_a_probe_reply() {
+        let src = "172.16.0.2".parse().unwrap();
+        // Our own outgoing request is not a reply.
+        assert!(!is_large_probe_reply(&build_large_probe(src, 1200)));
+        // A reply carrying someone else's echo id is not ours.
+        let mut foreign = build_large_probe(src, 1200);
+        foreign[20] = 0;
+        foreign[24] = 0x00;
+        foreign[25] = 0x01;
+        assert!(!is_large_probe_reply(&foreign));
+        // A UDP packet, i.e. the small DNS probe's reply, must not count.
+        assert!(!is_large_probe_reply(&build_dataplane_probe(src)));
+        assert!(!is_large_probe_reply(&[]));
+        assert!(!is_large_probe_reply(&[0x45, 0x00]));
     }
 
     #[test]
