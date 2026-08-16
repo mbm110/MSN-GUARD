@@ -17,6 +17,7 @@ import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -119,22 +120,41 @@ class OrbitDialView(
         State.FAILED -> palette.danger
     }
 
+    /**
+     * Uniform shrink factor for the whole dial, bleed included.
+     *
+     * The console asks for this when its natural height would overflow the
+     * viewport: shrinking the dial is how the screen stops scrolling. Because
+     * the factor scales the measured box AND the ring together, the ratio
+     * between them is untouched, so the halo and ripples keep exactly the
+     * proportional room they have at 1.0 and cannot be cropped by shrinking.
+     */
+    var sizeScale: Float = 1f
+        set(value) {
+            val clamped = value.coerceIn(MIN_SIZE_SCALE, 1f)
+            if (field != clamped) {
+                field = clamped
+                requestLayout()
+            }
+        }
+
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         // The measured box is the RING plus [BLEED_DP], not the ring alone.
         //
-        // This is the actual cause of the dial being cropped on all four sides,
-        // and clipChildren=false on the ancestors could never have fixed it: this
-        // view runs with LAYER_TYPE_SOFTWARE, so Android allocates an offscreen
-        // bitmap exactly the size of the VIEW and every pixel outside it is
-        // discarded before any parent gets a say. The ring is 133dp but the halo
-        // reaches 164dp and a ripple reaches 175dp — 31dp and 43dp past the old
-        // 266dp box, in every direction. That is precisely what the screenshot
-        // shows: flat-shaved arcs left, right, top and bottom.
+        // This is the actual cause of the dial having been cropped on all four
+        // sides, and clipChildren=false on the ancestors could never have fixed
+        // it: this view runs with LAYER_TYPE_SOFTWARE, so Android allocates an
+        // offscreen bitmap exactly the size of the VIEW and every pixel outside
+        // it is discarded before any parent gets a say. The halo reaches
+        // HALO_OUTSET+HALO_PULSE past the ring and a ripple reaches
+        // ring*RIPPLE_GROWTH past it, in every direction — with a box of exactly
+        // 2*ring all of that got shaved flat.
         //
-        // So the canvas grows and the ring does not: RING_DP stays at the approved
-        // 133dp, and BLEED_DP adds the room the outer layers need. The dial keeps
-        // its size; only the invisible drawing surface around it gets bigger.
-        val desired = dp((RING_DP + BLEED_DP) * 2)
+        // So the canvas is always ring + bleed, and BLEED_DP is derived from
+        // those two reaches rather than guessed. Shrinking goes through
+        // [sizeScale], which scales box and ring by the same factor, so the
+        // bleed can never be squeezed out from under the glow.
+        val desired = dp(((RING_DP + BLEED_DP) * 2 * sizeScale).roundToInt())
         val size = resolveSize(desired, widthMeasureSpec)
             .coerceAtMost(resolveSize(desired, heightMeasureSpec))
         // Always square: a non-square canvas would put the ring off-centre.
@@ -146,30 +166,35 @@ class OrbitDialView(
         val cx = width / 2f
         val cy = height / 2f
         val half = minOf(width, height) / 2f
-        // Fixed 133dp ring, exactly as the mock — the view is now measured
-        // 133+BLEED wide, so the ring sits inside its own canvas with room to
-        // spare and the halo/ripples have somewhere to go.
+        // The ring is RING_DP scaled by [sizeScale], and the view was measured
+        // (RING_DP + BLEED_DP) * sizeScale, so the glow always has its full
+        // proportional room.
         //
-        // The fallback matters on small screens: when the width forces the view
-        // below the desired size, the ring shrinks to keep the bleed proportional
-        // instead of letting the outer layers get shaved again. half * the ring's
-        // share of the full box is the largest ring that still fits its own glow.
+        // The second term is the safety net: if a parent hands this view LESS
+        // than it asked for (a narrow screen, an exact-size spec), the ring
+        // shrinks to the largest value that still leaves the bleed intact rather
+        // than letting the outer layers get shaved. Never remove it — it is the
+        // difference between a smaller dial and a cropped one.
         val ring = minOf(
-            dp(RING_DP).toFloat(),
+            dp(RING_DP) * sizeScale,
             half * RING_DP / (RING_DP + BLEED_DP).toFloat(),
         )
+        // Every inner offset below is authored against RING_DP, so they follow
+        // the ring by this factor instead of staying at a fixed dp and throwing
+        // the proportions off whenever the dial shrinks.
+        val geo = ring / dp(RING_DP)
         val accent = accentFor(state)
         val active = state == State.CONNECTED || state == State.DEGRADED
 
         if (active) {
-            drawHalo(canvas, cx, cy, ring, accent)
+            drawHalo(canvas, cx, cy, ring, accent, geo)
             drawRipples(canvas, cx, cy, ring, accent)
         }
-        drawRings(canvas, cx, cy, ring)
-        drawTicks(canvas, cx, cy, ring, accent)
-        drawArc(canvas, cx, cy, ring, accent)
+        drawRings(canvas, cx, cy, ring, geo)
+        drawTicks(canvas, cx, cy, ring, accent, geo)
+        drawArc(canvas, cx, cy, ring, accent, geo)
         drawCore(canvas, cx, cy, ring, accent, active)
-        drawContents(canvas, cx, cy, ring, accent, active)
+        drawContents(canvas, cx, cy, ring, accent, active, geo)
     }
 
     /**
@@ -179,8 +204,8 @@ class OrbitDialView(
      * dial box, so it is *meant* to spill past the ring. Clamping it was what
      * flattened the glow on the bottom edge.
      */
-    private fun drawHalo(canvas: Canvas, cx: Float, cy: Float, ring: Float, accent: Int) {
-        val radius = ring + dp(24) + pulse * dp(7)
+    private fun drawHalo(canvas: Canvas, cx: Float, cy: Float, ring: Float, accent: Int, geo: Float) {
+        val radius = ring + dp(HALO_OUTSET_DP) * geo + pulse * dp(HALO_PULSE_DP) * geo
         paint.style = Paint.Style.FILL
         paint.shader = RadialGradient(
             cx, cy, radius,
@@ -207,7 +232,7 @@ class OrbitDialView(
         }
     }
 
-    private fun drawRings(canvas: Canvas, cx: Float, cy: Float, ring: Float) {
+    private fun drawRings(canvas: Canvas, cx: Float, cy: Float, ring: Float, geo: Float) {
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = 1f * density
         paint.color = Sculpt.withAlpha(palette.ink, 0.055f)
@@ -215,7 +240,7 @@ class OrbitDialView(
 
         // Slowly rotating dashed ring, drawn as short arcs rather than a
         // DashPathEffect so the rotation is exact and cheap.
-        val inner = ring - dp(20)
+        val inner = ring - dp(20) * geo
         paint.color = Sculpt.withAlpha(palette.ink, 0.07f)
         bounds.set(cx - inner, cy - inner, cx + inner, cy + inner)
         val spin = loopFraction * 12f
@@ -235,14 +260,14 @@ class OrbitDialView(
      * 3-tick chasing comet, which is why it read as busier and less clean than
      * the preview.
      */
-    private fun drawTicks(canvas: Canvas, cx: Float, cy: Float, ring: Float, accent: Int) {
+    private fun drawTicks(canvas: Canvas, cx: Float, cy: Float, ring: Float, accent: Int, geo: Float) {
         val litCount = when (state) {
             State.CONNECTED, State.DEGRADED -> (TICK_LIT * tickReveal).roundToInt()
             else -> 0
         }
         paint.style = Paint.Style.STROKE
         paint.strokeCap = Paint.Cap.ROUND
-        val length = dp(7).toFloat()
+        val length = dp(7) * geo
         for (i in 0 until TICK_COUNT) {
             // -90° so tick 0 sits at the top and the gauge fills clockwise.
             val rad = Math.toRadians((i * (360.0 / TICK_COUNT)) - 90.0)
@@ -280,8 +305,8 @@ class OrbitDialView(
         paint.strokeCap = Paint.Cap.BUTT
     }
 
-    private fun drawArc(canvas: Canvas, cx: Float, cy: Float, ring: Float, accent: Int) {
-        val r = ring - dp(13)
+    private fun drawArc(canvas: Canvas, cx: Float, cy: Float, ring: Float, accent: Int, geo: Float) {
+        val r = ring - dp(13) * geo
         bounds.set(cx - r, cy - r, cx + r, cy + r)
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = 2.5f * density
@@ -404,29 +429,37 @@ class OrbitDialView(
         }
     }
 
-    private fun drawContents(canvas: Canvas, cx: Float, cy: Float, ring: Float, accent: Int, active: Boolean) {
+    private fun drawContents(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        ring: Float,
+        accent: Int,
+        active: Boolean,
+        geo: Float,
+    ) {
         if (active && timerText.isNotEmpty()) {
             textPaint.typeface = monoTypeface
             textPaint.textAlign = Paint.Align.CENTER
-            textPaint.textSize = 26f * density
+            textPaint.textSize = 26f * density * geo
             textPaint.color = Sculpt.lighten(accent, 0.55f)
-            textPaint.setShadowLayer(dp(14).toFloat(), 0f, 0f, Sculpt.withAlpha(accent, 0.5f))
-            canvas.drawText(timerText, cx, cy + 7f * density, textPaint)
+            textPaint.setShadowLayer(dp(14) * geo, 0f, 0f, Sculpt.withAlpha(accent, 0.5f))
+            canvas.drawText(timerText, cx, cy + 7f * density * geo, textPaint)
             textPaint.clearShadowLayer()
 
             textPaint.typeface = labelTypeface
-            textPaint.textSize = 9f * density
+            textPaint.textSize = 9f * density * geo
             textPaint.letterSpacing = 0.19f
             textPaint.color = Sculpt.withAlpha(palette.faint, 0.95f)
-            canvas.drawText("SESSION", cx, cy + 27f * density, textPaint)
+            canvas.drawText("SESSION", cx, cy + 27f * density * geo, textPaint)
             textPaint.letterSpacing = 0f
             return
         }
 
         // Shield glyph + call to action.
-        val shieldTop = cy - dp(30).toFloat()
-        val shieldW = dp(30).toFloat()
-        val shieldH = dp(34).toFloat()
+        val shieldTop = cy - dp(30) * geo
+        val shieldW = dp(30) * geo
+        val shieldH = dp(34) * geo
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = 2f * density
         paint.strokeJoin = Paint.Join.ROUND
@@ -464,7 +497,7 @@ class OrbitDialView(
 
         textPaint.typeface = labelTypeface
         textPaint.textAlign = Paint.Align.CENTER
-        textPaint.textSize = 10.5f * density
+        textPaint.textSize = 10.5f * density * geo
         textPaint.letterSpacing = 0.19f
         textPaint.color = when (state) {
             State.CONNECTING -> palette.amber
@@ -476,7 +509,7 @@ class OrbitDialView(
             State.FAILED -> "RETRY"
             else -> "TAP TO CONNECT"
         }
-        canvas.drawText(cta, cx, cy + dp(26).toFloat(), textPaint)
+        canvas.drawText(cta, cx, cy + dp(26) * geo, textPaint)
         textPaint.letterSpacing = 0f
     }
 
@@ -574,19 +607,50 @@ class OrbitDialView(
         const val TICK_LIT = 44
         /** How far a ripple grows past the ring (mock: scale(1) → scale(1.32)). */
         const val RIPPLE_GROWTH = 0.32f
-        /** Ring radius in dp. The mock's dial is a 266dp box, so r = 133dp. */
-        const val RING_DP = 133
+        /**
+         * Ring radius in dp.
+         *
+         * The mock drew a 266dp box (r = 133dp). That made the whole console
+         * 840dp tall on a 1080x2400 phone, ~70dp more than the viewport, so the
+         * main screen scrolled and part of the action bar sat below the fold.
+         * 112dp is the largest ring that lets the full column fit without
+         * scrolling while keeping the dial the dominant element on the screen.
+         */
+        const val RING_DP = 112
+        /** How far past the ring the halo's outer edge sits, at rest. */
+        const val HALO_OUTSET_DP = 24
+        /** Extra reach the halo gains at the top of its breath. */
+        const val HALO_PULSE_DP = 7
+        /**
+         * Slack so a feathered edge or a stroke's outer half never lands on the
+         * last row of pixels. 4dp covers the ripple's 1.5px stroke and the
+         * tick shadow at any density.
+         */
+        const val BLEED_MARGIN_DP = 4
         /**
          * Extra radius the view is measured with, beyond the ring, so the layers
          * that deliberately paint outside the ring have canvas to land on.
          *
-         * Budget: a ripple reaches ring * (1 + RIPPLE_GROWTH) = 175.6dp, i.e.
-         * 42.6dp past the ring, and that is the widest thing drawn. 46dp gives it
-         * a ~3dp margin so the outermost ripple's 1.5dp stroke and the halo's
-         * feathered edge both land fully inside the bitmap. Do not lower this
-         * below 43 or the pulse gets shaved on all four sides again.
+         * DERIVED, not hand-tuned: this used to be a magic 46 that had to be
+         * re-checked by hand every time the ring changed, and getting it wrong is
+         * exactly what shaved the glow flat on all four sides. Now it is computed
+         * from the two things that actually paint outside the ring —
+         *
+         *   - a ripple, reaching ring * RIPPLE_GROWTH past the ring
+         *   - the halo, reaching HALO_OUTSET + HALO_PULSE past the ring
+         *
+         * — so changing RING_DP alone can never crop the dial again.
          */
-        const val BLEED_DP = 46
+        val BLEED_DP: Int = ceil(
+            maxOf(RING_DP * RIPPLE_GROWTH, (HALO_OUTSET_DP + HALO_PULSE_DP).toFloat())
+        ).toInt() + BLEED_MARGIN_DP
+        /**
+         * Floor for [sizeScale]. Below this the dial stops reading as the primary
+         * control, so a screen too short even for the shrunk dial is allowed to
+         * scroll instead — scrolling is recoverable, an unreachable connect
+         * button is not.
+         */
+        const val MIN_SIZE_SCALE = 0.78f
         /** Core radius as a fraction of the ring: 99dp core / 133dp ring. */
         const val CORE_RATIO = 0.744f
     }

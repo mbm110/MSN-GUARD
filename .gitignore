@@ -57,3 +57,4 @@ key.properties
 keystore.jks
 keystore.env
 *.env
+make-release.py

@@ -276,13 +276,17 @@ class MainActivity : Activity() {
         mainRoot = FrameLayout(this).apply { setBackgroundColor(CANVAS) }
         val header = createHeader()
         val console = createConnectionConsole()
-        // The console scrolls: on a 5" phone the dial plus three metric rows plus
-        // the rail exceeds the viewport, and clipping the connect button would be
-        // the single worst failure this screen could have.
+        // The console can still scroll, but it is meant not to need it: the dial
+        // shrinks first (see [fitConsoleToViewport]) and scrolling is only the
+        // last resort on a screen too short even for the smallest dial. Clipping
+        // the connect button would be the single worst failure this screen could
+        // have, so the ScrollView stays as the safety net.
         val consoleScroll = ScrollView(this).apply {
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
-            isFillViewport = true
+            // Deliberately NOT isFillViewport: see [fitConsoleToViewport], which
+            // needs the console's real measured height to know how much room is
+            // free.
             // The dial paints its halo and pulse rings outside its own bounds, so
             // every ancestor in the chain has to stop clipping — one clipping
             // parent anywhere above the view is enough to cut the glow off.
@@ -298,6 +302,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         ).apply { topMargin = dp(52) })
+        fitConsoleToViewport(consoleScroll, console)
         mainRoot.addView(header, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -686,6 +691,62 @@ class MainActivity : Activity() {
         )
     }
 
+    /**
+     * Shrink the dial until the console fits the viewport, instead of scrolling.
+     *
+     * The main screen used to scroll on a 1080x2400 phone: the column measured
+     * taller than the space between the header and the navigation bar, so the
+     * action bar sat partly below the fold and the user had to drag the screen
+     * to reach it. A one-tap-connect app must not hide its controls.
+     *
+     * The fix scales the dial, which is by far the tallest element, rather than
+     * squeezing the cards or the type — those are already at their minimum
+     * legible size. The scale is applied to the dial's whole measured box (ring
+     * AND bleed together), so no amount of shrinking can crop the halo or the
+     * pulse rings: that was the previous bug and it must not come back.
+     *
+     * Runs on every layout pass because the viewport changes with rotation,
+     * multi-window, and the inset listener firing after the first measure. It is
+     * idempotent: [OrbitDialView.sizeScale] ignores a value it already has, so a
+     * settled layout costs one comparison and no relayout.
+     */
+    private fun fitConsoleToViewport(scroll: ScrollView, console: LinearLayout) {
+        // isFillViewport must stay false for this to work. With it on, a console
+        // shorter than the viewport is stretched to the viewport height, so
+        // console.height would read "exactly fits" no matter how much room is
+        // actually free and the dial could never grow back after a rotation.
+        scroll.isFillViewport = false
+        scroll.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            val viewport = scroll.height
+            val natural = console.height
+            val dialBox = orbitDial.height
+            if (viewport <= 0 || natural <= 0 || dialBox <= 0) return@addOnLayoutChangeListener
+
+            // Signed: > 0 means the column overflows, < 0 means room to spare.
+            // The dial is the only element that scales, so the whole delta has to
+            // come out of (or go into) its box.
+            val delta = natural - viewport - dp(FIT_SLACK_DP)
+            val current = orbitDial.sizeScale
+            // Clamped to the SAME range the setter enforces. If the target were
+            // left below the floor, current would sit clamped at the floor while
+            // target stayed lower, and the two would never agree — an endless
+            // relayout loop on a screen too short to satisfy.
+            val target = (current * (dialBox - delta).toFloat() / dialBox)
+                .coerceIn(OrbitDialView.MIN_SIZE_SCALE, 1f)
+
+            // Tolerance, not equality: two adjacent float values would otherwise
+            // keep re-triggering layout and the screen would dither forever.
+            // 0.004 of the dial is well under one pixel at any density.
+            if (kotlin.math.abs(target - current) > 0.004f) {
+                // Posted, not applied inline: this runs inside a layout pass, and
+                // requestLayout() from there is either dropped or logged as
+                // "improperly called during layout" depending on the Android
+                // version. The post lands it on the next frame instead.
+                orbitDial.post { orbitDial.sizeScale = target }
+            }
+        }
+    }
+
     private fun createConnectionConsole(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_HORIZONTAL
@@ -703,13 +764,12 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply {
-            topMargin = dp(26)
+            topMargin = dp(14)
             // Cancel the console's 20dp side padding for this one child.
             //
-            // The dial now measures (RING + BLEED) * 2 = 358dp so its glow has
-            // canvas to land on. A 1080x2400 phone is 392dp wide, and the console
-            // padding leaves 352dp — which would clamp the view and shrink the
-            // ring below the approved 133dp. Negative margins give the dial the
+            // The dial measures (RING + BLEED) * 2 so its glow has canvas to land
+            // on. The console's own padding would clamp that box and force the
+            // ring below its intended size; negative margins give the dial the
             // full width back, so the ring keeps its size and the bleed still
             // fits. clipToPadding=false (set above) is what lets it draw there.
             leftMargin = -dp(20)
@@ -748,7 +808,7 @@ class MainActivity : Activity() {
         addView(tiles, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(18) })
+        ).apply { topMargin = dp(14) })
 
         addView(exitNodeCard, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -769,7 +829,7 @@ class MainActivity : Activity() {
         // inset. Weight is one Path; it only animates while connected.
         addView(footerWave, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(52),
+            dp(44),
         ).apply { topMargin = dp(8) })
     }
 
@@ -3201,6 +3261,13 @@ class MainActivity : Activity() {
          * is not left trusting a dead tunnel. See watchForTunnelBytes.
          */
         const val BYTE_WATCH_MS = 12_000L
+        /**
+         * Breathing room kept between the console's bottom edge and the viewport
+         * when [fitConsoleToViewport] sizes the dial. Without it the action bar
+         * ends up flush against the navigation bar, which reads as clipped even
+         * though it is fully on screen.
+         */
+        const val FIT_SLACK_DP = 6
         /**
          * Consecutive failed health checks tolerated on an established session
          * before the tunnel is declared dead and torn down. Three misses at the
