@@ -21,7 +21,7 @@ The flag syntax looks like this:
 ```
 ./aether --bind 127.0.0.1:1819 -4 --masque --turbo --noize firewall
 ./aether --wg --scan balanced --keepalive 25
-./aether --gool --wg-peer 162.159.192.1:2408 --dual
+./aether --gool --wg-peer <address>:2408 --dual
 ```
 
 Run `./aether --help` to see the full list. The most common ones:
@@ -170,7 +170,7 @@ Scanning takes time, and if you connect from the same network often, rescanning 
 The next time you start Aether, if a saved gateway exists, it asks:
 
 ```
-Last working gateway: 162.159.198.1:443 (profile 'firewall')
+Last working gateway: <address>:443 (profile 'firewall')
 Reconnect to it now without rescanning? [Y/n]:
 ```
 

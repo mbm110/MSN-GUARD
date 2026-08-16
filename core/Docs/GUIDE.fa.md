@@ -21,7 +21,7 @@ Aether رو می‌شه سه‌جوری کنترل کرد، و می‌تونی �
 ```
 ./aether --bind 127.0.0.1:1819 -4 --masque --turbo --noize firewall
 ./aether --wg --scan balanced --keepalive 25
-./aether --gool --wg-peer 162.159.192.1:2408 --dual
+./aether --gool --wg-peer <address>:2408 --dual
 ```
 
 با `./aether --help` می‌تونی کل لیست رو ببینی. رایج‌ترین‌هاش:
@@ -172,7 +172,7 @@ AETHER_MASQUE_H2_FRAGMENT_SIZE=8-24 AETHER_MASQUE_H2_FRAGMENT_DELAY=5-15 ./targe
 دفعه‌ی بعد که Aether رو اجرا کنی، اگه یه گیت‌وی ذخیره‌شده باشه، ازت می‌پرسه:
 
 ```
-Last working gateway: 162.159.198.1:443 (profile 'firewall')
+Last working gateway: <address>:443 (profile 'firewall')
 Reconnect to it now without rescanning? [Y/n]:
 ```
 

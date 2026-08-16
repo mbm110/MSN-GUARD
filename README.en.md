@@ -23,7 +23,9 @@ MSN-GUARD is a native Android VPN client that moves every packet leaving the dev
 
 The codebase splits cleanly in two. A **Rust network core** implements the transports and negotiates with upstream gateways. A **Kotlin layer** owns the Android VPN lifecycle, the interface, and platform plumbing. There is no relay server in the middle and nothing of ours between you and the exit — the handset speaks directly to the upstream gateway.
 
-The thing that separates this from a generic VPN app: it was built for Iranian mobile networks, and essentially every protocol decision in it came out of **measurement against MCI, Irancell and Samantel**, not from a spec document and not from a guess. Where the measured answer contradicted the documented one, the measurement won. Several of those findings are written up below, because they are the interesting part.
+The thing that separates this from a generic VPN app: it was built for Iranian mobile networks, and essentially every protocol decision in it came out of **measurement against real hostile carriers**, not from a spec document and not from a guess. Where the measured answer contradicted the documented one, the measurement won — repeatedly, and in ways that were not obvious in advance.
+
+> **A note on what this document does not say.** The connection strategy — handshake parameters, gateway selection, ladder ordering, timing budgets, the specific values that make a session survive an active filter — is the result of a long and expensive measurement campaign against live carriers. Those details are deliberately not published here. This README describes *what* the client does and *why* it is shaped the way it is; it does not hand over a working recipe. Circumvention advantages have a shelf life measured by how quickly they can be copied, and the useful ones stay unwritten.
 
 ---
 
@@ -31,15 +33,16 @@ The thing that separates this from a generic VPN app: it was built for Iranian m
 
 | | |
 |---|---|
-| Device-wide tunnel | `VpnService` + TUN at MTU 1500; every app covered with zero per-app configuration |
+| Device-wide tunnel | `VpnService` + TUN; every app covered with zero per-app configuration |
 | Four transports | MASQUE over HTTP/3, WireGuard, WARP-on-WARP, Psiphon |
 | One-tap connect | A single button. Gateway selection, negotiation and recovery are automatic |
-| Real UDP and QUIC | Datagrams bridged through `udpgw`, so video, gaming and voice calls actually work |
+| Real UDP and QUIC | Datagrams bridged in userspace, so video, gaming and voice calls actually work |
 | Live status | Exit IP with country flag, data usage, session timer, streaming log |
 | Quick Settings tile | Connect and disconnect without opening the app |
 | Split tunnelling | Choose which apps stay outside the tunnel |
 | Kill switch | If the tunnel drops, the network drops with it — no plaintext leak |
 | DNS enforcement | Public resolvers only; carrier DNS is excluded outright |
+| Verified connect | The dial only reports success once traffic has actually moved |
 
 ---
 
@@ -50,7 +53,7 @@ The path an outbound packet takes, from app to internet:
 1. The app writes an outbound packet.
 2. It arrives on the Android TUN interface.
 3. `tun2socks` with `lwIP` terminates it in userspace.
-4. It is handed to the local SOCKS listener on `127.0.0.1:1819`.
+4. It is handed to a local SOCKS listener bound to loopback.
 5. The Rust core encrypts and encapsulates it.
 6. It leaves for the upstream gateway, and from there to the internet.
 
@@ -61,7 +64,7 @@ Three layers of code make that path:
 | File | Responsibility |
 |---|---|
 | `MainActivity` | Interface, connection console, settings |
-| `MsnGuardVpnService` | VPN lifecycle, TUN construction, Psiphon ladder |
+| `MsnGuardVpnService` | VPN lifecycle, TUN construction, transport supervision |
 | `MsnGuardTileService` | Quick Settings tile |
 | `Tun2SocksManager` | Native tun2socks process supervision |
 
@@ -70,7 +73,7 @@ Three layers of code make that path:
 | File | Responsibility |
 |---|---|
 | `prober.rs` | Gateway discovery and ranking |
-| `account.rs` | Device enrolment, MASQUE credential issuance |
+| `account.rs` | Device enrolment and credential issuance |
 | `quic.rs` | QUIC and HTTP/3 transport |
 | `masque.rs` | CONNECT-IP encapsulation |
 | `wireguard.rs` | Noise handshake and WireGuard transport |
@@ -78,7 +81,7 @@ Three layers of code make that path:
 
 **C — packet processing**
 
-`badvpn tun2socks` with `lwIP` terminates TCP in userspace; `udpgw` shuttles UDP and QUIC datagrams over `127.0.0.1:7300`.
+`badvpn tun2socks` with `lwIP` terminates TCP in userspace; a companion datagram bridge shuttles UDP and QUIC flows across loopback.
 
 ---
 
@@ -88,16 +91,20 @@ Three layers of code make that path:
 
 `CONNECT-IP` over QUIC, built on [quiche](https://github.com/cloudflare/quiche). On the wire this is indistinguishable from an ordinary HTTPS session, which is the entire point: there is no custom protocol fingerprint for a DPI box to key on.
 
-Four findings from building this, each of which cost real debugging time and each of which is documented in the source:
+Four things are worth saying about building it, without saying how:
 
-- The pseudo-header must be `:protocol = cf-connect-ip`. The standards-registered value `connect-ip` returns `403`. This is not written down anywhere public — it came out of bisecting header sets against a live edge.
-- **HTTP/2 is not viable for this, at all.** Cloudflare does not advertise `SETTINGS_ENABLE_CONNECT_PROTOCOL` on HTTP/2, so extended CONNECT is rejected with `400` before you get to negotiate anything. HTTP/3 is the only path. An HTTP/2 fallback here isn't a degraded mode, it's dead code.
-- The seed gateway order is measured, not alphabetical. Of eight known addresses only `162.159.198.2` and `162.159.198.1` return `200`; `162.159.196.1`, `195.1` and `192.1` refuse the QUIC handshake outright.
-- The assigned gateway must be read from the MASQUE key-enrolment response, not from WireGuard registration. They differ, and using the wrong one gets you a working handshake into a gateway that will not carry your traffic.
+- The pseudo-header value the edge actually accepts is **not** the one registered in the standard. The registered value is refused outright. Finding the variant that works meant bisecting header sets against a live edge, and it is not documented anywhere public.
+- **HTTP/2 is not viable for this, at all.** The h2 path never offers the capability the transport depends on, so the negotiation dies before it begins. HTTP/3 is the only route. An HTTP/2 fallback here isn't a degraded mode, it's dead code.
+- The seed gateway order is measured, not alphabetical. Most published addresses refuse the handshake; only a small minority will carry traffic, and that ranking is compiled into the build rather than discovered at runtime.
+- The gateway you must use comes from one particular enrolment response — and there is a second response that looks equally authoritative and is wrong. Using the wrong one gets you a clean handshake into a gateway that will never carry your packets, which is a genuinely difficult failure to read from logs.
+
+A short, fixed startup budget governs the whole sequence. A gateway that answers once and then goes quiet is not slow, it is stuck; reconnecting beats waiting, and the client does not wait.
 
 ### WireGuard
 
 Direct transport with a full Noise handshake, for networks that haven't closed UDP. Where it works it's the fastest option available, and it's tried accordingly.
+
+One hard-won rule governs this path: the socket that passed validation is the socket that carries traffic. Validating a tunnel and then rebuilding it is not equivalent, because a carrier can admit one flow and drop the next one that looks identical. The client no longer does that, and this is what separates a real WireGuard connection from one that merely handshakes.
 
 ### WARP-on-WARP
 
@@ -105,33 +112,31 @@ A WireGuard tunnel nested inside another WireGuard tunnel. Useful when the outer
 
 ### Psiphon, and the three-rung ladder
 
-The rungs are ordered by **measured time-to-connect on a hostile carrier**, which is not the order Psiphon's own defaults would give you:
+Psiphon is driven through a three-rung ladder ordered by **measured time-to-connect on a hostile carrier**. That ordering is not the one Psiphon's own defaults would give you, and the difference is not marginal.
 
-| Rung | Strategy | Budget | Why it sits there |
-|---|---|---|---|
-| A | Domain-fronted CDN cover | 60s | The only path that works on MCI, because it targets a CDN edge rather than a Psiphon server IP |
-| B | All protocols, direct | 45s | Fast winner on a carrier that isn't blocking; Samantel connected via QUIC-OSSH in seconds |
-| C | In-proxy / user relay | 75s | Last resort — residential addresses that aren't on the carrier's blocklist |
+The reason is a measurement, and it is the part worth understanding even without the specifics. On the worst carrier tested, every direct dial fails **at the TCP layer**. No RST, no TLS alert, no handshake failure — the packets simply never arrive, because the operator has null-routed the relevant server addresses. Any strategy that presents a blockable server address is therefore dead on arrival, no matter how much budget you give it. Only a small fraction of the vendor's embedded server list supports the class of strategy that survives this, so the default ordering spends its entire budget dialling addresses that will never answer.
 
-Here is what makes rung A first. On MCI, every direct dial fails **at the TCP layer**. No RST, no TLS alert, no handshake failure — the packets simply do not arrive, because the carrier has null-routed Psiphon's server IPs. Of the 430 server entries Psiphon ships in its embedded list, exactly 5 advertise the FRONTED-MEEK protocol. That ratio is why domain fronting is tried first instead of last: the default ordering spends its entire budget dialling addresses that will never answer. The winning rung is persisted per SIM, so after one successful connection each device starts from the rung that actually works on its own network.
+The ladder is arranged accordingly, each rung has its own time budget, and the rung that wins is remembered per SIM so that each device starts from whatever actually works on its own network. The rung strategies, their order and their budgets are intentionally left undocumented.
 
 ---
 
 ## Engineering notes that matter
 
-**The routing loop.** The Psiphon process has to stay outside the tunnel, or its own traffic re-enters the TUN and loops. `addDisallowedApplication` on our own package is the fix. This one presents as a mysterious total stall rather than an error, so it's worth knowing about before you go looking for it in the transport code.
+**The routing loop.** The tunnel process has to stay outside its own tunnel, or its traffic re-enters the TUN and loops. The app's own package is excluded from the interface it creates. This one presents as a mysterious total stall rather than an error, so it's worth knowing about before you go looking for it in the transport code.
 
-**UDP and QUIC.** lwIP terminates TCP only. Datagrams cross through `udpgw` on `127.0.0.1:7300` with a 128-connection ceiling. Skip this and QUIC, online gaming and most voice calls break while TCP browsing looks fine — a failure mode that is easy to misdiagnose as a slow tunnel.
+**UDP and QUIC.** lwIP terminates TCP only. Datagrams cross a separate userspace bridge with a bounded connection ceiling. Skip this and QUIC, online gaming and most voice calls break while TCP browsing looks fine — a failure mode that is easy to misdiagnose as a slow tunnel.
 
-**MTU.** Pinned at 1500. Anything smaller fragmented packets and cost measurable throughput on the MASQUE path.
+**MTU.** Pinned. The value was chosen by measurement: smaller settings fragmented packets and cost real throughput on the MASQUE path.
 
-**SOCKS port.** Fixed at `127.0.0.1:1819`, not configurable. In VPN mode nothing external binds it, so exposing a setting would only have created a way to break the app.
+**SOCKS port.** A fixed loopback port, not configurable. In VPN mode nothing external binds it, so exposing a setting would only have created a way to break the app.
 
-**Pre-tunnel packet backlog.** Android brings the TUN up before a tunnel exists, so device traffic queues behind it for several seconds. The old behaviour flushed that entire backlog into a brand-new QUIC connection the moment the CONNECT-IP stream opened — while the congestion window was still at its initial value. The `:status 200` response then had to compete with the flood for window space, and starved. Those packets are now dropped until the tunnel is confirmed, and the count is reported in the log. This was worth about 25 seconds of connect latency.
+**Pre-tunnel packet backlog.** Android brings the TUN up before a tunnel exists, so device traffic queues behind it for several seconds. The old behaviour flushed that entire backlog into a brand-new connection the moment the stream opened, while the congestion window was still at its initial value — and the handshake response then had to compete with the flood for window space, and starved. Those packets are now dropped until the tunnel is confirmed, and the count is reported in the log. This was the single largest connect-latency win in the project.
 
-**Identity rejection.** Only `401` and `403` count as identity rejection. `400` means the request was malformed. Conflating them threw away perfectly good enrolments and triggered pointless re-registration.
+**Identity rejection.** Only genuine authentication failures invalidate an enrolment. A malformed-request status means exactly that and nothing more. Conflating the two threw away perfectly good enrolments and triggered pointless re-registration.
 
-**Addressing.** TUN on `10.0.0.1/8`, router at `10.0.0.2`, DNS forced to public resolvers with carrier DNS excluded.
+**Honest connection state.** The interface does not trust a handshake. After a transport reports success the client watches the byte counters coming from inside the packet bridge, and if nothing has actually moved within a short window the dial degrades and says so. A carrier can fake a handshake; it cannot fake payload crossing the tunnel.
+
+**Addressing.** The TUN sits on a private range with DNS forced to public resolvers and carrier DNS excluded.
 
 ---
 
@@ -185,7 +190,9 @@ Repository language statistics are corrected via `.gitattributes`: `core/quiche`
 
 Do not open public issues for security problems affecting the tunnel, credentials or user traffic. Private reporting instructions are in [SECURITY.md](SECURITY.md).
 
-No credentials, keys or tokens are stored in this repository. The MASQUE device certificate is issued and stored on the handset at runtime.
+No credentials, keys or tokens are stored in this repository. Device credentials are issued and stored on the handset at runtime.
+
+Requests for the specific connection parameters, gateway rankings or ladder configuration will not be answered, in issues or anywhere else. Publishing them shortens the life of the thing they unblock, for every user of it.
 
 ---
 

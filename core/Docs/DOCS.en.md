@@ -89,7 +89,7 @@ data check before the proxy opens.
 Skip the scan when you already know a good address:
 
 ```sh
-aether --peer 162.159.196.1:443
+aether --peer <address>:443
 ```
 
 The last working endpoint is saved, and `--quick-reconnect` reuses it without a
