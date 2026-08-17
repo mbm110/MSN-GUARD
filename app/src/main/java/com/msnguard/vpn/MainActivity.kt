@@ -642,8 +642,17 @@ class MainActivity : Activity() {
         // counters show a trickle while nothing loaded. Requiring
         // [VERIFY_MIN_RX_BYTES] puts the bar above the probe traffic and below
         // anything a real app does on connect.
-        val target = rxAtStart + VERIFY_MIN_RX_BYTES
+        var base = rxAtStart
+        var target = base + VERIFY_MIN_RX_BYTES
         while (System.currentTimeMillis() < deadline && request == verifyRequest) {
+            // The counter going backwards means the core started a fresh tunnel
+            // (its totals are per-tunnel locals) — its own reconnect loop can do
+            // that mid-verification. Re-baseline instead of waiting out the
+            // deadline against a target the new counter can never reach.
+            if (trafficRx < base) {
+                base = trafficRx
+                target = base + VERIFY_MIN_RX_BYTES
+            }
             if (trafficRx >= target) return true
             Thread.sleep(VERIFY_RETRY_DELAY_MS)
         }
@@ -2940,6 +2949,15 @@ class MainActivity : Activity() {
     }
 
     private fun connect(config: String) {
+        // Clear our mirrors of the core's per-tunnel byte counters before the new
+        // tunnel starts. The service broadcasts a zero sample too, but the
+        // verification baseline must not depend on that broadcast having been
+        // delivered first, and the receiver is only registered while this screen
+        // is started.
+        trafficTx = 0
+        trafficRx = 0
+        trafficSpeedTx = 0
+        trafficSpeedRx = 0
         showConnecting()
         startForegroundService(Intent(this, MsnGuardVpnService::class.java)
             .setAction(MsnGuardVpnService.ACTION_CONNECT)

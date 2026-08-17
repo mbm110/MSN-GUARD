@@ -812,6 +812,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         currentProtocol = config.substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
         currentVpnIp = ""
         currentPing = ""
+        // Every new tunnel makes the core start counting bytes from zero again
+        // (rx_total/tx_total are locals inside tun::bridge). Anything here that
+        // still holds the previous session's totals would then be compared
+        // against a counter that just went backwards, so it all has to be reset
+        // together, before the first sample of the new session arrives.
+        resetSessionTraffic()
         stopRequested.set(false)
         vpnModeActive.set(true)
         startAsForeground()
@@ -1036,6 +1042,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     private fun updateTrafficNotification(tx: Long, rx: Long) {
         val now = SystemClock.elapsedRealtime()
+        // The core's counters are per-tunnel locals, and the core reconnects on
+        // its own (the MASQUE and WireGuard reconnect loops both re-enter
+        // `tun::bridge`) without the service being told. When that happens the
+        // numbers arriving here go backwards, and every derived figure below —
+        // the speed delta and the monthly delta — would compute a large negative
+        // or absurd value from a mismatched baseline. Rebase instead of trying to
+        // subtract across the discontinuity.
+        if (tx < prevTx || rx < prevRx || tx < accountedTx || rx < accountedRx) {
+            prevTx = 0
+            prevRx = 0
+            accountedTx = 0
+            accountedRx = 0
+            prevSpeedSampleMs = 0
+            currentSpeedTx = 0
+            currentSpeedRx = 0
+        }
         if (now - lastTrafficSampleMs < 900) return
 
         val elapsed = now - prevSpeedSampleMs
@@ -1082,15 +1104,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * re-derive the same string is waste in its own right.
      */
     private fun recordMonthlyTraffic(tx: Long, rx: Long): Pair<Long, Long> {
-        val month = currentMonthKey()
-        if (monthKey != month) {
-            // First sample of this process, or the month rolled over mid-session.
-            val prefs = getSharedPreferences(TRAFFIC_PREFS, MODE_PRIVATE)
-            val stored = prefs.getString(TRAFFIC_MONTH, null)
-            monthTxTotal = if (stored == month) prefs.getLong(TRAFFIC_TX, 0) else 0
-            monthRxTotal = if (stored == month) prefs.getLong(TRAFFIC_RX, 0) else 0
-            monthKey = month
-        }
+        // First sample of this process, or the month rolled over mid-session.
+        loadMonthlyTotals()
         monthTxTotal += tx
         monthRxTotal += rx
         return monthTxTotal to monthRxTotal
@@ -1098,6 +1113,67 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     private fun currentMonthKey(): String =
         java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.US).format(java.util.Date())
+
+    /** Loads the persisted monthly totals into memory, once per month key. */
+    private fun loadMonthlyTotals() {
+        val month = currentMonthKey()
+        if (monthKey == month) return
+        val prefs = getSharedPreferences(TRAFFIC_PREFS, MODE_PRIVATE)
+        val stored = prefs.getString(TRAFFIC_MONTH, null)
+        monthTxTotal = if (stored == month) prefs.getLong(TRAFFIC_TX, 0) else 0
+        monthRxTotal = if (stored == month) prefs.getLong(TRAFFIC_RX, 0) else 0
+        monthKey = month
+    }
+
+    /**
+     * Clears everything that describes the *current session's* traffic.
+     *
+     * Called at the start of every tunnel. The core's counters are locals inside
+     * `tun::bridge`, so each new tunnel restarts them at zero; every mirror of
+     * them here has to restart too.
+     *
+     * This is what the connect/disconnect/connect failure came down to. The
+     * activity's verification gate takes `rxAtStart = trafficRx` when the
+     * transport reports CONNECTED and then waits for `trafficRx` to reach
+     * `rxAtStart + VERIFY_MIN_RX_BYTES`. `trafficRx` is fed straight from
+     * `currentRx` here, and neither was ever reset, so on the second connect of
+     * a process the gate demanded that a counter starting from zero exceed the
+     * *previous* session's final total. It never could, so verification always
+     * timed out after 18s and the UI reported "handshake succeeded but nothing
+     * passes" for a tunnel that was working. Force-stopping the app made the
+     * first connect succeed again because fresh fields start at zero — which is
+     * exactly the workaround that was being used.
+     *
+     * The monthly totals are deliberately NOT cleared: they are cumulative
+     * across sessions. Only the per-session deltas reset, and `accountedTx/Rx`
+     * going to zero is what keeps the monthly accounting correct — the next
+     * sample's delta is measured from zero, matching the core's fresh counter.
+     */
+    private fun resetSessionTraffic() {
+        // The month totals are read lazily on the first sample; make sure they are
+        // loaded before broadcasting, or a reset before any traffic would tell the
+        // UI the month total is zero and the traffic screen would blank out.
+        loadMonthlyTotals()
+        currentTx = 0
+        currentRx = 0
+        prevTx = 0
+        prevRx = 0
+        currentSpeedTx = 0
+        currentSpeedRx = 0
+        accountedTx = 0
+        accountedRx = 0
+        // Zeroed, not set to `now`: these are throttle stamps, and a fresh
+        // session should publish its first sample immediately rather than wait
+        // out a window inherited from the tunnel that just died.
+        prevSpeedSampleMs = 0
+        lastTrafficSampleMs = 0
+        lastNotificationUpdateMs = 0
+        // The UI keeps its own mirrors, and it cannot know the core restarted
+        // counting unless it is told. Without this broadcast the activity would
+        // hold the old totals until the first traffic sample of the new session,
+        // and the verification baseline is taken before that arrives.
+        sendTraffic(0, 0, monthTxTotal, monthRxTotal)
+    }
 
     /**
      * Writes the in-memory monthly totals to disk.
