@@ -70,12 +70,30 @@ class MainActivity : Activity() {
     private var visualState = OrbitDialView.State.DISCONNECTED
     private var receiverRegistered = false
     private var autoPingRunning = false
+    /**
+     * Whether the UI is in the foreground.
+     *
+     * Everything periodic on this screen — the session timer, the status poll,
+     * the auto-ping — exists to keep *visible* widgets truthful. While the app
+     * is backgrounded or the screen is off there is nothing to keep truthful,
+     * and on a phone that periodic work is the expensive part: each auto-ping is
+     * an HTTP request that pulls the radio out of its low-power state, and each
+     * timer tick denies the CPU a long idle window.
+     *
+     * The tunnel itself is unaffected. It lives in the service and the Rust
+     * core, which keep their own health checks running; this flag only gates
+     * work whose entire purpose is repainting a screen nobody is looking at.
+     */
+    private var uiForeground = false
     /** elapsedRealtime at the moment the tunnel came up; 0 when down. */
     private var sessionStartedAt = 0L
     private val sessionHandler = Handler(Looper.getMainLooper())
     private val sessionTicker = object : Runnable {
         override fun run() {
-            if (sessionStartedAt == 0L) return
+            // Backgrounded means the timer text is not on screen, so ticking it
+            // every second is work with no observer. The elapsed time is derived
+            // from `sessionStartedAt` on the next resume, so nothing drifts.
+            if (sessionStartedAt == 0L || !uiForeground) return
             orbitDial.timerText = formatUptime(android.os.SystemClock.elapsedRealtime() - sessionStartedAt)
             sessionHandler.postDelayed(this, 1_000L)
         }
@@ -83,7 +101,12 @@ class MainActivity : Activity() {
     private val autoPingHandler = Handler(Looper.getMainLooper())
     private val autoPingRunnable = object : Runnable {
         override fun run() {
-            if (isTunnelActive() && autoPingRunning) {
+            // The foreground check is what makes this cheap: a real HTTP request
+            // every 5s wakes the radio, and in the background nothing consumes
+            // the result. Liveness is not lost — the core's own health check
+            // (every 3s, 10s staleness limit) drops a dead tunnel regardless of
+            // whether this screen is up.
+            if (isTunnelActive() && autoPingRunning && uiForeground) {
                 pingConnection()
                 autoPingHandler.postDelayed(this, 5000L)
             }
@@ -155,6 +178,7 @@ class MainActivity : Activity() {
     private val statusHandler = Handler(Looper.getMainLooper())
     private val statusPoll = object : Runnable {
         override fun run() {
+            if (!uiForeground) return
             renderStatus()
             statusHandler.postDelayed(this, STATUS_POLL_MS)
         }
@@ -390,11 +414,9 @@ class MainActivity : Activity() {
             registerReceiver(statusReceiver, filter)
         }
         receiverRegistered = true
-        statusPoll.run()
     }
 
     override fun onStop() {
-        statusHandler.removeCallbacks(statusPoll)
         if (receiverRegistered) {
             unregisterReceiver(statusReceiver)
             receiverRegistered = false
@@ -418,8 +440,39 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        uiForeground = true
+        // Restart everything the pause stopped. Each of these is idempotent and
+        // cheap; the point is that the screen is correct the instant it appears
+        // rather than after one poll interval.
+        statusHandler.removeCallbacks(statusPoll)
+        statusPoll.run()
+        if (sessionStartedAt != 0L) {
+            sessionHandler.removeCallbacks(sessionTicker)
+            sessionHandler.post(sessionTicker)
+        }
+        if (isTunnelActive() && autoPingRunning) {
+            // Fire one immediately: the latency shown on screen was measured
+            // before the pause and may be minutes stale.
+            autoPingHandler.removeCallbacks(autoPingRunnable)
+            autoPingHandler.post(autoPingRunnable)
+        }
         renderStatus()
         appUpdater.resumeInstallIfPermitted()
+    }
+
+    /**
+     * Stops every periodic repaint while the screen is not visible.
+     *
+     * onPause rather than onStop deliberately: onStop does not fire for a screen
+     * merely dimmed or partially covered, and those are exactly the long idle
+     * stretches where a 1-second ticker and a 5-second HTTP probe cost the most.
+     */
+    override fun onPause() {
+        uiForeground = false
+        statusHandler.removeCallbacks(statusPoll)
+        sessionHandler.removeCallbacks(sessionTicker)
+        autoPingHandler.removeCallbacks(autoPingRunnable)
+        super.onPause()
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

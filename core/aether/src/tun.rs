@@ -59,6 +59,16 @@ mod exitprobe {
             }
         }
 
+        /// Whether this probe still needs the bridge to wake up on a timer.
+        ///
+        /// Once the measurement is finished the 400ms wake-up is pure battery
+        /// cost: it drags the loop (and so the CPU) out of sleep several times a
+        /// second for the entire life of the tunnel to ask a question that has
+        /// already been answered. The bridge stops ticking when this goes false.
+        pub fn needs_ticking(&self) -> bool {
+            !matches!(self.state, State::Done)
+        }
+
         /// Called once traffic has been seen, to arm the first probe.
         pub fn arm(&mut self, now: Instant) {
             if self.start_after.is_none() {
@@ -317,8 +327,16 @@ pub async fn bridge(
     let mut exit_probe = exitprobe::ExitProbe::new(local_ipv4);
     // Wakes the loop so a due probe is sent even while the tunnel is silent —
     // otherwise `select!` could block in recv() past the probe's schedule.
+    //
+    // This timer is only needed until the measurement finishes. Left running for
+    // the life of the tunnel it would wake the loop 2.5 times a second forever,
+    // which on a phone means the CPU never gets a long idle window — the single
+    // most expensive shape of background work there is. `probing` disables the
+    // arm the moment the probe is done, after which the loop sleeps until real
+    // traffic arrives.
     let mut probe_tick = tokio::time::interval(std::time::Duration::from_millis(400));
     probe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut probing = true;
 
     loop {
         tokio::select! {
@@ -328,7 +346,7 @@ pub async fn bridge(
                     // Our own DNS replies must be swallowed: Android never asked
                     // these questions, so handing them up would be an unsolicited
                     // datagram to a resolver with no matching request.
-                    if exit_probe.consume(&packet, std::time::Instant::now()) {
+                    if probing && exit_probe.consume(&packet, std::time::Instant::now()) {
                         continue;
                     }
                     // Inbound SYN-ACK: the server's advertised MSS must be
@@ -347,7 +365,9 @@ pub async fn bridge(
                 }
                 tx_total += length as u64;
                 // Real traffic is moving, so the tunnel is worth measuring.
-                exit_probe.arm(std::time::Instant::now());
+                if probing {
+                    exit_probe.arm(std::time::Instant::now());
+                }
                 let mut outbound = packet[..length].to_vec();
                 // Outbound SYN: cap what we ask the peer to send us.
                 if clamp_tcp_mss(&mut outbound, crate::wireguard::inner_mtu_hint()) {
@@ -356,16 +376,19 @@ pub async fn bridge(
                 outbound_tx.send(outbound).await
                     .map_err(|_| AetherError::Other("tunnel outbound channel closed".into()))?;
             },
-            _ = probe_tick.tick() => {},
+            _ = probe_tick.tick(), if probing => {},
         }
 
         // Sent outside the select! arms so it happens on every wake-up, whichever
         // arm fired. A send failure means the tunnel is gone and the next loop
         // iteration will surface that properly.
-        if let Some(probe) = exit_probe.due(std::time::Instant::now()) {
-            if outbound_tx.send(probe).await.is_err() {
-                return Err(AetherError::Other("tunnel outbound channel closed".into()));
+        if probing {
+            if let Some(probe) = exit_probe.due(std::time::Instant::now()) {
+                if outbound_tx.send(probe).await.is_err() {
+                    return Err(AetherError::Other("tunnel outbound channel closed".into()));
+                }
             }
+            probing = exit_probe.needs_ticking();
         }
 
         if last_report.elapsed() >= std::time::Duration::from_millis(1000) {
@@ -625,6 +648,37 @@ mod tests {
             let t0 = Instant::now();
             probe.arm(t0);
             assert!(probe.due(t0 + Duration::from_secs(5)).is_none());
+        }
+
+        #[test]
+        fn ticking_stops_once_there_is_nothing_left_to_measure() {
+            // The bridge only keeps its 400ms wake-up timer while this is true, so
+            // if it never goes false the tunnel never lets the CPU idle.
+            let mut probe = ExitProbe::new(LOCAL);
+            let t0 = Instant::now();
+            probe.arm(t0);
+            assert!(probe.needs_ticking(), "still measuring");
+
+            let mut now = t0 + Duration::from_millis(1_500);
+            assert!(probe.due(now).is_some());
+            for _ in 0..10 {
+                now += Duration::from_secs(4);
+                probe.due(now);
+            }
+            assert!(
+                !probe.needs_ticking(),
+                "a probe that ran out of attempts must release the timer"
+            );
+        }
+
+        #[test]
+        fn an_unmeasurable_address_releases_the_timer_immediately() {
+            let mut probe = ExitProbe::new(Ipv4Addr::UNSPECIFIED);
+            let t0 = Instant::now();
+            probe.arm(t0);
+            // due() is what discovers the address is unusable, so ask once.
+            assert!(probe.due(t0 + Duration::from_secs(5)).is_none());
+            assert!(!probe.needs_ticking());
         }
 
         #[test]

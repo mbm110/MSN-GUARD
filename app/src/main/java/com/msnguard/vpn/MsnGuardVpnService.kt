@@ -103,6 +103,24 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var currentSpeedRx = 0L
     private var accountedTx = 0L
     private var accountedRx = 0L
+    /**
+     * Monthly totals held in memory, flushed to disk on a timer.
+     *
+     * These used to be written through to SharedPreferences on every traffic
+     * sample, i.e. roughly once a second for the whole life of a tunnel. That is
+     * thousands of `apply()` calls an hour, each one a disk write behind the
+     * scenes — expensive on flash and on battery, to persist a counter nobody
+     * reads until the traffic screen is opened.
+     *
+     * Now the counters live here and reach disk every [TRAFFIC_FLUSH_MS] and on
+     * teardown. Worst case a hard process kill loses the last few seconds of
+     * accounting, which is not a number anything depends on being exact.
+     */
+    private var monthKey: String? = null
+    private var monthTxTotal = 0L
+    private var monthRxTotal = 0L
+    private var lastTrafficFlushMs = 0L
+    private var lastNotificationUpdateMs = 0L
     private var storedConfig: String? = null
     private var currentProtocol = "Tunnel"
     private var currentVpnIp = ""
@@ -252,6 +270,20 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val TRAFFIC_MONTH = "month"
         const val TRAFFIC_TX = "tx"
         const val TRAFFIC_RX = "rx"
+
+        /**
+         * How often the monthly traffic counters are written to disk while a
+         * tunnel is up. Teardown always flushes, so this only bounds what a hard
+         * process kill can lose.
+         */
+        private const val TRAFFIC_FLUSH_MS = 60_000L
+
+        /**
+         * How often the ongoing notification's byte counters are refreshed. The
+         * core reports traffic about once a second; repainting the shade that
+         * often is visually indistinguishable and measurably more expensive.
+         */
+        private const val NOTIFICATION_UPDATE_MS = 5_000L
 
         /**
          * elapsedRealtime at the moment the tunnel last reached CONNECTED, or 0
@@ -922,6 +954,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     private fun stopTunnel(notify: Boolean = true, teardownService: Boolean = true) {
         stopRequested.set(true)
+        // The traffic counters are only flushed to disk on a slow timer while
+        // running, so an ordinary disconnect must persist the remainder here or
+        // the last minute of the session would be lost from the monthly total.
+        flushMonthlyTraffic()
         // Clear the session stamp here, not in sendStatus: the reconnect path and
         // onDestroy both call stopTunnel(notify = false), so relying on the
         // DISCONNECTED broadcast left connectedSince set and the next session's
@@ -1019,23 +1055,63 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         accountedRx = rx
         sendTraffic(tx, rx, monthTx, monthRx)
 
-        getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, notification(tx, rx))
+        if (now - lastTrafficFlushMs >= TRAFFIC_FLUSH_MS) {
+            flushMonthlyTraffic()
+            lastTrafficFlushMs = now
+        }
+
+        // Rebuilding and posting the notification is not free: it crosses into
+        // system_server and re-lays out the shade row. At one update a second for
+        // hours that adds up, and the text only carries byte counters — nobody is
+        // reading them per-second from a collapsed notification. Every few seconds
+        // conveys the same thing.
+        if (now - lastNotificationUpdateMs >= NOTIFICATION_UPDATE_MS) {
+            getSystemService(NotificationManager::class.java)
+                .notify(NOTIFICATION_ID, notification(tx, rx))
+            lastNotificationUpdateMs = now
+        }
         lastTrafficSampleMs = now
     }
 
+    /**
+     * Adds this sample to the monthly totals, in memory.
+     *
+     * The disk write is deliberately not here — see [flushMonthlyTraffic] and the
+     * fields it persists. The date is also only formatted when the month is not
+     * already known, because building a SimpleDateFormat once a second to
+     * re-derive the same string is waste in its own right.
+     */
     private fun recordMonthlyTraffic(tx: Long, rx: Long): Pair<Long, Long> {
-        val month = java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.US).format(java.util.Date())
-        val prefs = getSharedPreferences(TRAFFIC_PREFS, MODE_PRIVATE)
-        val sameMonth = prefs.getString(TRAFFIC_MONTH, null) == month
-        val monthTx = (if (sameMonth) prefs.getLong(TRAFFIC_TX, 0) else 0) + tx
-        val monthRx = (if (sameMonth) prefs.getLong(TRAFFIC_RX, 0) else 0) + rx
-        prefs.edit()
+        val month = currentMonthKey()
+        if (monthKey != month) {
+            // First sample of this process, or the month rolled over mid-session.
+            val prefs = getSharedPreferences(TRAFFIC_PREFS, MODE_PRIVATE)
+            val stored = prefs.getString(TRAFFIC_MONTH, null)
+            monthTxTotal = if (stored == month) prefs.getLong(TRAFFIC_TX, 0) else 0
+            monthRxTotal = if (stored == month) prefs.getLong(TRAFFIC_RX, 0) else 0
+            monthKey = month
+        }
+        monthTxTotal += tx
+        monthRxTotal += rx
+        return monthTxTotal to monthRxTotal
+    }
+
+    private fun currentMonthKey(): String =
+        java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.US).format(java.util.Date())
+
+    /**
+     * Writes the in-memory monthly totals to disk.
+     *
+     * Called on a slow timer from the traffic path and unconditionally on
+     * teardown, so an ordinary disconnect always persists an exact figure.
+     */
+    private fun flushMonthlyTraffic() {
+        val month = monthKey ?: return
+        getSharedPreferences(TRAFFIC_PREFS, MODE_PRIVATE).edit()
             .putString(TRAFFIC_MONTH, month)
-            .putLong(TRAFFIC_TX, monthTx)
-            .putLong(TRAFFIC_RX, monthRx)
+            .putLong(TRAFFIC_TX, monthTxTotal)
+            .putLong(TRAFFIC_RX, monthRxTotal)
             .apply()
-        return monthTx to monthRx
     }
 
     private fun sendTraffic(tx: Long, rx: Long, monthTx: Long, monthRx: Long) {
