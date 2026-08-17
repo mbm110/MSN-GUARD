@@ -945,32 +945,6 @@ const MASQUE_H3_PROBE_LIMIT: usize = 12;
 /// was this pass grinding through 30 peers that could never work.
 const MASQUE_H2_PROBE_LIMIT: usize = 4;
 
-/// How many MASQUE gateways may be verified at the same time.
-///
-/// Three is deliberate. The list is ordered by evidence — the gateway that just
-/// carried a session on this network leads it — so a wide race mostly wastes
-/// handshakes on addresses that were never going to be chosen. Three is enough
-/// to hide one black-holed address behind a working one, which is the failure
-/// the field logs show: `162.159.198.2` swallowing a full verify timeout while
-/// `162.159.198.1` sat behind it in the queue.
-const MASQUE_RACE_WIDTH: usize = 3;
-
-/// Delay before each *additional* candidate in a wave touches the network.
-///
-/// This is the "Connection Attempt Delay" of RFC 8305 (Happy Eyeballs), which
-/// solves the same problem for A/AAAA and recommends 250ms. 300ms is used here
-/// because a QUIC handshake plus the connect-ip CONNECT costs about two round
-/// trips, and two round trips to a Cloudflare edge over Iranian mobile measured
-/// well under that. The consequence matters more than the number: on a healthy
-/// reconnect the leading gateway answers before the stagger expires, so the
-/// other two never send a single packet and racing costs nothing at all.
-const MASQUE_RACE_STAGGER: Duration = Duration::from_millis(300);
-
-/// How long the candidate at `position` in a wave waits before dialling.
-fn race_stagger(position: usize) -> Duration {
-    MASQUE_RACE_STAGGER * position as u32
-}
-
 /// MASQUE gateway candidates, in dial order. Used by both transports.
 ///
 /// This used to walk `consts::CDN_ANYCAST_POOL` — 104.16-104.28 and
@@ -1118,29 +1092,16 @@ async fn dial_masque_pass_from(
     options: &StartOptions,
     mut identity_rejections: u32,
 ) -> PassOutcome {
-    // Walk the list in waves of `MASQUE_RACE_WIDTH`, dialling the members of a
-    // wave concurrently with a stagger between them.
-    //
-    // Why waves rather than one wide race over the whole list: the candidate
-    // order carries real information — "last working" on this network leads,
-    // then the account-assigned peer, then cached, then the seed list. Racing
-    // everything at once throws that ordering away and puts load on gateways
-    // that would never have been reached. Racing three at a time keeps the
-    // ordering as the primary signal and uses concurrency only to stop one
-    // black-holed address from delaying the peer behind it.
-    //
-    // The number of gateways *verified* is unchanged from the serial version in
-    // the worst case, and lower in the common one: a wave is abandoned the
-    // moment one of its members is accepted.
-    for wave in candidates.chunks(MASQUE_RACE_WIDTH) {
-        match dial_masque_wave(identity, wave, options).await {
-            WaveOutcome::Connected(peer) => return PassOutcome::Connected(peer),
-            WaveOutcome::NoneUsable { identity_rejected } => {
-                identity_rejections += identity_rejected;
+    for (peer, source) in candidates {
+        match try_masque_peer(identity, *peer, source, options).await {
+            PeerOutcome::Accepted => return PassOutcome::Connected(*peer),
+            PeerOutcome::IdentityRejected => {
+                identity_rejections += 1;
                 if identity_rejections >= IDENTITY_REJECTED_LIMIT {
                     return PassOutcome::IdentityRejected(identity_rejections);
                 }
             }
+            PeerOutcome::Unreachable => {}
         }
     }
 
@@ -1149,76 +1110,6 @@ async fn dial_masque_pass_from(
     } else {
         PassOutcome::Exhausted
     }
-}
-
-/// What one wave of concurrent dials produced.
-enum WaveOutcome {
-    /// A gateway accepted. Every other dial in the wave has already been dropped.
-    Connected(SocketAddr),
-    /// No gateway in this wave accepted; carries how many refused the identity.
-    NoneUsable { identity_rejected: u32 },
-}
-
-/// Verify up to `MASQUE_RACE_WIDTH` gateways concurrently and take the first that
-/// accepts.
-///
-/// Three properties are load-bearing, and all three exist to keep this from
-/// costing anything after the connection is up:
-///
-///   * **Staggered start.** Candidate *n* waits `n * MASQUE_RACE_STAGGER` before
-///     its first packet. When the leading gateway is healthy — the normal case,
-///     because it is the one that just worked here — it wins inside the stagger
-///     and the others never open a socket.
-///   * **Losers are dropped, not left running.** Returning from this function
-///     drops the `FuturesUnordered`, which drops every unfinished verify future,
-///     which closes its UDP socket. Nothing survives into the data phase, so a
-///     race cannot leave a second half-open QUIC session competing for the radio
-///     or the carrier's NAT table.
-///   * **The winner's verify session is discarded too.** `quick_verify_masque_peer`
-///     already establishes a throwaway connection purely to answer "does this
-///     address serve connect-ip"; the tunnel is built afterwards by
-///     `run_masque_tunnel`. So the winner of the race is an *address*, not a live
-///     connection, and post-connect throughput is byte-for-byte what it was
-///     before this change.
-async fn dial_masque_wave(
-    identity: &account::Identity,
-    wave: &[(SocketAddr, &'static str)],
-    options: &StartOptions,
-) -> WaveOutcome {
-    // A single candidate is the overwhelmingly common case on reconnect (the
-    // "last working" gateway leads and usually answers). Keep it on the plain
-    // sequential path so the fast path grows no machinery at all.
-    if let [(peer, source)] = wave {
-        return match try_masque_peer(identity, *peer, source, options).await {
-            PeerOutcome::Accepted => WaveOutcome::Connected(*peer),
-            PeerOutcome::IdentityRejected => WaveOutcome::NoneUsable {
-                identity_rejected: 1,
-            },
-            PeerOutcome::Unreachable => WaveOutcome::NoneUsable {
-                identity_rejected: 0,
-            },
-        };
-    }
-
-    let mut attempts = futures::stream::FuturesUnordered::new();
-    for (position, (peer, source)) in wave.iter().enumerate() {
-        attempts.push(async move {
-            tokio::time::sleep(race_stagger(position)).await;
-            (*peer, try_masque_peer(identity, *peer, source, options).await)
-        });
-    }
-
-    let mut identity_rejected = 0u32;
-    while let Some((peer, outcome)) = futures::StreamExt::next(&mut attempts).await {
-        match outcome {
-            // Dropping `attempts` here cancels the other dials in flight.
-            PeerOutcome::Accepted => return WaveOutcome::Connected(peer),
-            PeerOutcome::IdentityRejected => identity_rejected += 1,
-            PeerOutcome::Unreachable => {}
-        }
-    }
-
-    WaveOutcome::NoneUsable { identity_rejected }
 }
 
 async fn try_known_masque_peer(
@@ -3150,87 +3041,5 @@ mod tests {
             request.headers().get("capsule-protocol").map(|v| v.as_bytes()),
             Some(b"?1".as_ref())
         );
-    }
-
-    /// The first candidate in a wave must not be delayed at all.
-    ///
-    /// This is the property that keeps racing from slowing down the common case:
-    /// the leading candidate is the gateway that last carried a session here, and
-    /// it has to hit the network exactly as early as it did when dialling was
-    /// serial.
-    #[test]
-    fn the_leading_candidate_of_a_wave_dials_immediately() {
-        assert_eq!(race_stagger(0), Duration::ZERO);
-    }
-
-    /// Later candidates are held back by a fixed step, so a healthy leader wins
-    /// before they ever open a socket.
-    #[test]
-    fn later_candidates_are_staggered_by_a_fixed_step() {
-        assert_eq!(race_stagger(1), MASQUE_RACE_STAGGER);
-        assert_eq!(race_stagger(2), MASQUE_RACE_STAGGER * 2);
-    }
-
-    /// Waving the list must preserve dial order and must not drop or duplicate a
-    /// candidate.
-    ///
-    /// The ordering is evidence, not decoration: "last working" leads, then the
-    /// account peer, then cached addresses. A chunking bug that reordered or lost
-    /// candidates would silently degrade connect time without failing anything.
-    #[test]
-    fn waves_cover_every_candidate_in_order() {
-        let candidates: Vec<u16> = (0..8).collect();
-        let waved: Vec<u16> = candidates
-            .chunks(MASQUE_RACE_WIDTH)
-            .flat_map(|wave| wave.iter().copied())
-            .collect();
-
-        assert_eq!(waved, candidates);
-    }
-
-    /// No wave may exceed the race width, and the leftover wave is allowed to be
-    /// smaller.
-    #[test]
-    fn waves_are_bounded_by_the_race_width() {
-        let candidates: Vec<u16> = (0..8).collect();
-        let widths: Vec<usize> = candidates
-            .chunks(MASQUE_RACE_WIDTH)
-            .map(|wave| wave.len())
-            .collect();
-
-        assert!(widths.iter().all(|w| *w <= MASQUE_RACE_WIDTH));
-        assert_eq!(widths, vec![3, 3, 2]);
-    }
-
-    /// A single-candidate wave keeps the sequential fast path.
-    ///
-    /// Guards the `if let [(peer, source)] = wave` branch in `dial_masque_wave`:
-    /// on a quick reconnect the candidate list is often exactly one address, and
-    /// that case must not pay for a `FuturesUnordered` or a stagger.
-    #[test]
-    fn a_lone_candidate_forms_a_single_element_wave() {
-        let candidates = ["162.159.198.1:443"];
-        let waves: Vec<usize> = candidates
-            .chunks(MASQUE_RACE_WIDTH)
-            .map(|wave| wave.len())
-            .collect();
-
-        assert_eq!(waves, vec![1]);
-    }
-
-    /// The worst-case number of gateways dialled is unchanged by racing.
-    ///
-    /// Racing changes *when* candidates are dialled, never how many. If this ever
-    /// stops holding, the change has started spending extra handshakes — the one
-    /// thing the racing work was required not to do.
-    #[test]
-    fn racing_does_not_increase_the_number_of_candidates_dialled() {
-        let candidates: Vec<u16> = (0..MASQUE_H3_PROBE_LIMIT as u16).collect();
-        let dialled: usize = candidates
-            .chunks(MASQUE_RACE_WIDTH)
-            .map(|wave| wave.len())
-            .sum();
-
-        assert_eq!(dialled, candidates.len());
     }
 }

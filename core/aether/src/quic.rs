@@ -784,7 +784,15 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
 
     loop {
         if Instant::now() >= deadline {
-            return Err(AetherError::Other("verify timeout".into()));
+            // Say where the timeout happened. A timeout during the handshake
+            // means UDP/443 to this address is being dropped; a timeout after the
+            // connect-ip request means the gateway completed TLS, read our
+            // certificate and then never answered the CONNECT. The old flat
+            // "verify timeout" could not tell those apart.
+            return Err(AetherError::Other(format!(
+                "verify timeout {}",
+                verify_stage(&conn, req_stream.is_some())
+            )));
         }
 
         let wait = match conn.timeout() {
@@ -900,15 +908,116 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
         flush_connected(&mut conn, &sock).await?;
 
         if conn.is_closed() {
-            return Err(AetherError::Other(
-                "closed before data-plane confirmation".into(),
-            ));
+            return Err(AetherError::Other(verify_close_reason(
+                &conn,
+                req_stream.is_some(),
+            )));
         }
     }
 }
 
 fn remaining(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
+}
+
+/// Names the TLS alert carried inside a QUIC CRYPTO_ERROR code.
+///
+/// RFC 9001 §4.8 maps a TLS alert onto transport error code `0x100 + alert`, so
+/// the alert number is the only part of a certificate rejection that reaches us.
+/// Naming them is what makes the log actionable, because they diagnose
+/// completely different problems: `certificate_expired` means the WARP device
+/// registration needs refreshing, `unknown_ca` means the peer is not the gateway
+/// we think it is, and `handshake_failure` usually means the ClientHello never
+/// arrived intact.
+fn tls_alert_name(alert: u64) -> Option<&'static str> {
+    Some(match alert {
+        40 => "handshake_failure",
+        42 => "bad_certificate",
+        43 => "unsupported_certificate",
+        44 => "certificate_revoked",
+        45 => "certificate_expired",
+        46 => "certificate_unknown",
+        47 => "illegal_parameter",
+        48 => "unknown_ca",
+        49 => "access_denied",
+        50 => "decode_error",
+        51 => "decrypt_error",
+        70 => "protocol_version",
+        71 => "insufficient_security",
+        80 => "internal_error",
+        86 => "inappropriate_fallback",
+        112 => "unrecognized_name",
+        116 => "certificate_required",
+        120 => "no_application_protocol",
+        _ => return None,
+    })
+}
+
+/// Render a `CONNECTION_CLOSE` in terms of what it says about the failure.
+fn describe_connection_error(err: &quiche::ConnectionError) -> String {
+    let mut text = if err.is_app {
+        format!("application error 0x{:x}", err.error_code)
+    } else if (0x100..=0x1ff).contains(&err.error_code) {
+        let alert = err.error_code - 0x100;
+        match tls_alert_name(alert) {
+            Some(name) => format!("TLS alert {alert} ({name})"),
+            None => format!("TLS alert {alert}"),
+        }
+    } else {
+        format!("transport error 0x{:x}", err.error_code)
+    };
+
+    let reason = String::from_utf8_lossy(&err.reason);
+    let reason = reason.trim();
+    if !reason.is_empty() {
+        text.push_str(": ");
+        text.push_str(reason);
+    }
+    text
+}
+
+/// How far the verify attempt got before it stopped.
+///
+/// The stage is the diagnostically valuable half. "Never established" means the
+/// QUIC handshake itself did not complete — UDP/443 to this address is being
+/// dropped or mangled. "After the connect-ip request" means QUIC and TLS both
+/// succeeded, the gateway read our client certificate, and it then refused or
+/// abandoned the CONNECT — a completely different problem with a completely
+/// different fix.
+fn verify_stage(conn: &quiche::Connection, connect_sent: bool) -> &'static str {
+    if !conn.is_established() {
+        "during the QUIC handshake"
+    } else if connect_sent {
+        "after the connect-ip request, before any :status"
+    } else {
+        "after the handshake, before the connect-ip request"
+    }
+}
+
+/// Why a verify connection closed, in a form worth putting in a field log.
+///
+/// Replaces the flat `closed before data-plane confirmation`, which collapsed
+/// every one of these causes into one sentence and so could not distinguish a
+/// rejected certificate from a blocked UDP path. Both appeared identically in the
+/// Iranian logs across a hundred consecutive gateways, which made the logs
+/// unusable for deciding what to fix.
+fn verify_close_reason(conn: &quiche::Connection, connect_sent: bool) -> String {
+    let stage = verify_stage(conn, connect_sent);
+
+    let cause = if let Some(err) = conn.peer_error() {
+        format!(
+            "gateway sent CONNECTION_CLOSE ({})",
+            describe_connection_error(err)
+        )
+    } else if let Some(err) = conn.local_error() {
+        format!("closed locally ({})", describe_connection_error(err))
+    } else if conn.is_timed_out() {
+        "idle timeout, no CONNECTION_CLOSE".to_string()
+    } else {
+        "no CONNECTION_CLOSE frame".to_string()
+    };
+
+    format!("closed {stage}: {cause}")
 }
 
 /// End a verify connection politely instead of just dropping the socket.
@@ -946,11 +1055,120 @@ async fn flush_connected(conn: &mut quiche::Connection, sock: &UdpSocket) -> Res
 
 #[cfg(test)]
 mod tests {
-    use super::data_check_enabled_for;
+    use super::{data_check_enabled_for, describe_connection_error, tls_alert_name};
 
     #[test]
     fn h3_data_validation_is_opt_in() {
         assert!(!data_check_enabled_for(None));
         assert!(data_check_enabled_for(Some("true")));
+    }
+
+    /// A CRYPTO_ERROR is decoded into the TLS alert it carries.
+    ///
+    /// This is the case the flat log message hid. `0x100 + 45` is
+    /// `certificate_expired` — the gateway telling us the WARP registration is
+    /// stale, which is a fix on our side and nothing to do with the network.
+    #[test]
+    fn a_crypto_error_names_the_tls_alert() {
+        let err = quiche::ConnectionError {
+            is_app: false,
+            error_code: 0x100 + 45,
+            reason: Vec::new(),
+        };
+
+        assert_eq!(
+            describe_connection_error(&err),
+            "TLS alert 45 (certificate_expired)"
+        );
+    }
+
+    /// An unnamed alert still reports its number rather than being swallowed.
+    #[test]
+    fn an_unknown_tls_alert_still_reports_its_number() {
+        let err = quiche::ConnectionError {
+            is_app: false,
+            error_code: 0x100 + 99,
+            reason: Vec::new(),
+        };
+
+        assert_eq!(describe_connection_error(&err), "TLS alert 99");
+    }
+
+    /// A non-crypto transport error is reported as a transport code, not
+    /// misdecoded as an alert.
+    ///
+    /// Guards the `0x100..=0x1ff` range check: `0x2` is PROTOCOL_VIOLATION and
+    /// must not be rendered as "TLS alert".
+    #[test]
+    fn a_transport_error_is_not_mistaken_for_a_tls_alert() {
+        let err = quiche::ConnectionError {
+            is_app: false,
+            error_code: 0x2,
+            reason: Vec::new(),
+        };
+
+        assert_eq!(describe_connection_error(&err), "transport error 0x2");
+    }
+
+    /// An application close is labelled as such.
+    ///
+    /// HTTP/3 error codes live in this space, so mislabelling them as transport
+    /// errors would point debugging at the wrong layer.
+    #[test]
+    fn an_application_error_is_labelled_as_application() {
+        let err = quiche::ConnectionError {
+            is_app: true,
+            error_code: 0x101,
+            reason: Vec::new(),
+        };
+
+        assert_eq!(describe_connection_error(&err), "application error 0x101");
+    }
+
+    /// The reason phrase from the CONNECTION_CLOSE is appended when present.
+    ///
+    /// Cloudflare puts human-readable text here; it is the most direct statement
+    /// of why a gateway refused us and was previously discarded entirely.
+    #[test]
+    fn the_reason_phrase_is_included_when_the_gateway_sends_one() {
+        let err = quiche::ConnectionError {
+            is_app: false,
+            error_code: 0x100 + 48,
+            reason: b"bad client cert".to_vec(),
+        };
+
+        assert_eq!(
+            describe_connection_error(&err),
+            "TLS alert 48 (unknown_ca): bad client cert"
+        );
+    }
+
+    /// An empty or whitespace-only reason must not leave a dangling separator.
+    #[test]
+    fn an_empty_reason_phrase_adds_nothing() {
+        let err = quiche::ConnectionError {
+            is_app: false,
+            error_code: 0x100 + 40,
+            reason: b"   ".to_vec(),
+        };
+
+        assert_eq!(
+            describe_connection_error(&err),
+            "TLS alert 40 (handshake_failure)"
+        );
+    }
+
+    /// The alerts that change what we would do about a failure are all named.
+    ///
+    /// Each of these implies a different action: refresh the registration, stop
+    /// trusting the peer, or look at whether the ClientHello survived the path.
+    #[test]
+    fn the_diagnostically_important_alerts_are_named() {
+        assert_eq!(tls_alert_name(45), Some("certificate_expired"));
+        assert_eq!(tls_alert_name(48), Some("unknown_ca"));
+        assert_eq!(tls_alert_name(40), Some("handshake_failure"));
+        assert_eq!(tls_alert_name(116), Some("certificate_required"));
+        assert_eq!(tls_alert_name(49), Some("access_denied"));
+        assert_eq!(tls_alert_name(200), None);
     }
 }
