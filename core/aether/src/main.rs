@@ -279,7 +279,8 @@ pub async fn start(options: StartOptions) -> Result<()> {
                 secondary.device_id,
                 secondary.ipv4
             );
-            run_gool(primary, secondary, options.listen, &options).await
+            let lastconn_path = gool_lastconn_path(&primary_path);
+            run_gool(primary, secondary, options.listen, lastconn_path, &options).await
         }
         Protocol::Psiphon => {
             let upstream = options.upstream_proxy.as_deref().unwrap_or("127.0.0.1:1080");
@@ -867,6 +868,18 @@ fn lastconn_path(config_path: &str) -> String {
     derive_sibling_path(config_path, "lastconn")
 }
 
+/// Where GOOL remembers its outer WARP endpoint.
+///
+/// Deliberately a different file from `lastconn_path`, even though both hold a
+/// WireGuard endpoint discovered with the same identity. Plain WireGuard stores
+/// the obfuscation profile that worked alongside the peer and varies it across
+/// retries, while GOOL's outer tunnel is always raised with the fixed `balanced`
+/// profile. Sharing one file would mean each protocol reading back a peer that
+/// was validated under settings the other never used.
+fn gool_lastconn_path(config_path: &str) -> String {
+    derive_sibling_path(config_path, "gool-lastconn")
+}
+
 fn core_log_path(config_path: &str) -> String {
     match Path::new(config_path).parent() {
         Some(dir) if !dir.as_os_str().is_empty() => {
@@ -925,6 +938,15 @@ fn masque_h2_ports(base: &[u16]) -> Vec<u16> {
 /// so once several unrelated gateways agree there is nothing left to discover by
 /// working through the rest of the list.
 const IDENTITY_REJECTED_LIMIT: u32 = 3;
+
+/// The obfuscation profile GOOL's outer WARP tunnel is raised with.
+///
+/// Fixed, unlike plain WireGuard which retries across a list of profiles. Named
+/// because three places have to agree on it: `establish_wg` when it raises the
+/// tunnel, the cached-peer verify that decides whether to skip the scan, and the
+/// value written into the cache file. If the verify used a different profile it
+/// would be answering a question about a connection nobody is going to make.
+const GOOL_OUTER_PROFILE: &str = "balanced";
 
 /// How many MASQUE gateways the HTTP/3 pass may try.
 ///
@@ -2184,7 +2206,7 @@ async fn establish_wg(
         .map_err(|_| AetherError::Other("invalid ipv4".into()))?;
 
     let profile = if obfuscate {
-        aethernoize_config("balanced")
+        aethernoize_config(GOOL_OUTER_PROFILE)
     } else {
         aethernoize::from_profile("off")
     };
@@ -2292,15 +2314,31 @@ async fn run_gool(
     primary: account::Identity,
     secondary: account::Identity,
     listen: SocketAddr,
+    lastconn_path: String,
     options: &StartOptions,
 ) -> Result<()> {
     let mut last_peer: Option<SocketAddr> = None;
     let mut consecutive_fails: u32 = 0;
     const MAX_CONSECUTIVE_FAILS: u32 = 2;
 
+    // The outer endpoint that worked last time this identity connected, from a
+    // previous run of the process.
+    //
+    // `last_peer` below only remembers within one run, so on Android — where the
+    // core starts from scratch on every connect — it is always `None` and every
+    // connect paid for a full scan. In the field that scan was 27 seconds, and it
+    // was 27 seconds on all five connects in one night's log because the cost is
+    // our own scan budget, not the network. MASQUE and plain WireGuard already
+    // cache their peer this way; GOOL was the only protocol that did not.
+    let mut cached_peer = if options.forced_peer.is_none() {
+        load_cached_gool_peer(&lastconn_path, &primary, options).await
+    } else {
+        None
+    };
+
     loop {
         let peer = if consecutive_fails < MAX_CONSECUTIVE_FAILS {
-            if let Some(p) = last_peer {
+            if let Some(p) = last_peer.or(cached_peer) {
                 Some(p)
             } else {
                 None
@@ -2311,6 +2349,9 @@ async fn run_gool(
                     "[-] outer endpoint {p} failed {consecutive_fails} times in a row; blacklisting and rescanning"
                 );
             }
+            // A blacklisted peer must not come back via the cache on the next
+            // iteration of this loop.
+            cached_peer = None;
             None
         };
 
@@ -2333,6 +2374,13 @@ async fn run_gool(
         };
 
         log::info!("[+] using cloudflare edge {peer} (outer)");
+        if options.forced_peer.is_none() {
+            // Saved before the tunnel is raised, not after: the outer endpoint has
+            // already passed a handshake and data-plane check by this point, and
+            // the call below only returns when the whole GOOL session ends. Waiting
+            // for that would mean never recording a peer that worked for hours.
+            lastconn::save(&lastconn_path, &peer.to_string(), GOOL_OUTER_PROFILE);
+        }
         last_peer = Some(peer);
 
         match run_warp_in_warp(primary.clone(), secondary.clone(), peer, listen, options).await {
@@ -2342,6 +2390,63 @@ async fn run_gool(
         consecutive_fails += 1;
 
         tokio::time::sleep(wg_reconnect_delay()).await;
+    }
+}
+
+/// Read back the last known-good outer endpoint and check it still works.
+///
+/// Verified rather than trusted. A cached address that has since been blocked
+/// would otherwise be handed straight to `run_warp_in_warp`, which fails, comes
+/// back through the loop, and only then scans — turning the shortcut into a
+/// delay. The verify shares the budget `run_wireguard` uses for the same job.
+async fn load_cached_gool_peer(
+    lastconn_path: &str,
+    primary: &account::Identity,
+    options: &StartOptions,
+) -> Option<SocketAddr> {
+    let cached = lastconn::load(lastconn_path)?;
+    let peer = cached.peer.parse::<SocketAddr>().ok()?;
+
+    if !want_quick_reconnect(&cached).await {
+        return None;
+    }
+
+    let private_key = primary.private_key_bytes().ok()?;
+    let peer_public = primary.peer_public_key_bytes().ok()?;
+    let ipv4: std::net::Ipv4Addr = primary.ipv4.parse().ok()?;
+
+    log::info!("[*] verifying cached outer WARP endpoint {peer} before reuse");
+    crate::ffi::record_log(format!("Checking last working gateway {peer}"));
+
+    // Must match how `run_warp_in_warp` actually raises the outer tunnel —
+    // `establish_wg(.., obfuscate = true, ..)` with the fixed `balanced` profile.
+    // Verifying under different obfuscation settings would prove nothing about
+    // the connection we are about to make.
+    let profile = aethernoize_config(GOOL_OUTER_PROFILE);
+
+    match wireguard::verify_endpoint(
+        peer,
+        private_key,
+        peer_public,
+        primary.client_id,
+        ipv4,
+        &profile,
+        options.wireguard_data_check,
+        std::time::Duration::from_secs(6),
+        None,
+    )
+    .await
+    {
+        Ok(rtt) => {
+            log::info!("[+] cached outer endpoint {peer} still works (rtt {rtt:?}); skipping scan");
+            crate::ffi::record_log(format!("Reusing gateway {peer} — scan skipped"));
+            Some(peer)
+        }
+        Err(e) => {
+            log::warn!("[-] cached outer endpoint {peer} no longer works ({e}); scanning fresh");
+            crate::ffi::record_log("Last gateway is gone; scanning for a new one");
+            None
+        }
     }
 }
 
@@ -2782,6 +2887,57 @@ mod tests {
         assert_eq!(address_host("172.16.0.2/32"), "172.16.0.2");
         assert_eq!(address_host("2606:4700:110:8877::2/128"), "2606:4700:110:8877::2");
         assert_eq!(address_host(""), "");
+    }
+
+    /// GOOL's endpoint cache is a separate file from plain WireGuard's.
+    ///
+    /// Both store an endpoint found with the same WARP identity, but WireGuard
+    /// records the obfuscation profile that worked and varies it across retries,
+    /// while GOOL's outer tunnel is always `balanced`. One shared file would let
+    /// each protocol reuse a peer the other validated under settings it never uses.
+    #[test]
+    fn gool_keeps_its_own_endpoint_cache() {
+        let config = "/data/user/0/app/files/aether.toml";
+
+        assert_eq!(
+            gool_lastconn_path(config),
+            "/data/user/0/app/files/aether-gool-lastconn.toml"
+        );
+        assert_ne!(gool_lastconn_path(config), lastconn_path(config));
+    }
+
+    /// The cache file must not be mistaken for an enrolled Zero Trust team.
+    ///
+    /// `enrolled_teams` lists every `<stem>-team-*.toml` sibling and filters out
+    /// bookkeeping files by suffix. A new sibling that slipped past that filter
+    /// would show up in the team picker as a team named after the cache.
+    #[test]
+    fn the_gool_cache_is_not_read_back_as_a_team() {
+        let team_config = "/data/user/0/app/files/aether-team-acme.toml";
+        let cache = gool_lastconn_path(team_config);
+
+        let name = cache.rsplit('/').next().unwrap();
+        let team = name
+            .strip_prefix("aether-team-")
+            .and_then(|rest| rest.strip_suffix(".toml"))
+            .expect("cache sits beside the team config");
+
+        assert!(team.ends_with("-lastconn"), "got {team}");
+    }
+
+    /// GOOL's outer tunnel stays obfuscated.
+    ///
+    /// The cached-peer verify and `establish_wg` both resolve this constant, so a
+    /// value naming no real profile would not desynchronise them — `from_profile`
+    /// falls through to `balanced` for anything unrecognised. What it *would* do
+    /// is silently disable obfuscation if it were ever set to `off` or `none`,
+    /// which on an Iranian carrier is the difference between a tunnel and a
+    /// blocked handshake. That is the case worth pinning.
+    #[test]
+    fn the_gool_outer_tunnel_stays_obfuscated() {
+        assert!(aethernoize::from_profile(GOOL_OUTER_PROFILE).is_enabled());
+        assert_ne!(GOOL_OUTER_PROFILE, "off");
+        assert_ne!(GOOL_OUTER_PROFILE, "none");
     }
 
     #[test]
