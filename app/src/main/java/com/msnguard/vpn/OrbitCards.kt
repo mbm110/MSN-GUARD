@@ -352,10 +352,14 @@ class ChainModeCard(
             ),
         )
         titleView.setTextColor(if (value) palette.ink else palette.muted)
-        // The cost is part of the label, not a footnote: chaining adds a hop and
-        // trades speed for a different exit address.
+        // What it changes, not a speed claim. Chaining measured slower than either
+        // layer alone on a clean network (0.23s vs 0.32s latency, same protocol
+        // both sides), but on a filtered carrier Psiphon alone is forced onto
+        // domain-fronted CDN paths whose latency is far worse — so inside WARP it
+        // can be the faster of the two. "Slower" was true of the lab and wrong in
+        // the field, so the label states the effect that always holds.
         subtitleView.text = if (value) {
-            "armed · two tunnels, slower, different exit IP"
+            "armed · two tunnels, different exit IP"
         } else {
             "for when neither exit IP is accepted"
         }

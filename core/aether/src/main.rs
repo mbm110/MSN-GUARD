@@ -641,12 +641,39 @@ fn derive_sibling_path(base: &str, suffix: &str) -> String {
     }
 }
 
+/// Whether a refused identity may be replaced by registering a fresh one.
+///
+/// On by default. `AETHER_REPROVISION=0` keeps the dead identity instead, which
+/// is what you want when debugging: the failure stays reproducible rather than
+/// being silently repaired on the next start.
+fn keep_saved_identity() -> bool {
+    !matches!(
+        std::env::var("AETHER_REPROVISION").as_deref(),
+        Ok("0") | Ok("off") | Ok("false")
+    )
+}
+
 async fn load_or_provision_warp(config_path: &str) -> Result<account::Identity> {
     if let Some(identity) = config::load(config_path)? {
         log::info!("[+] loaded existing warp identity from {config_path}");
+        // NOTE on coverage: `adopt_team_profile` only calls the account API when a
+        // Zero Trust team is configured, so on a personal WARP account a deleted
+        // device is not detected here — there is no other request on the connect
+        // path to learn it from. MASQUE has one (the key enrolment), WireGuard does
+        // not. Adding an unconditional /reg call would put a network round trip on
+        // every single connect, so this stays as-is deliberately; the MASQUE path
+        // and any team account do get the check.
         let identity = adopt_team_profile(identity).await;
-        config::save(config_path, &identity)?;
-        return Ok(identity);
+        if !identity.refused {
+            config::save(config_path, &identity)?;
+            return Ok(identity);
+        }
+        if !keep_saved_identity() {
+            return Ok(identity);
+        }
+        // Falling through re-registers. A refused identity cannot be repaired:
+        // it would hand back a tunnel that handshakes and carries nothing.
+        log::warn!("[*] registering a fresh wireguard account to replace the refused identity");
     }
 
     log::info!("[+] no warp identity found; provisioning dedicated wireguard account");
@@ -660,16 +687,44 @@ async fn load_or_provision_warp(config_path: &str) -> Result<account::Identity> 
 async fn load_or_provision_masque(config_path: &str) -> Result<account::Identity> {
     if let Some(identity) = config::load(config_path)? {
         log::info!("[+] loaded existing masque identity from {config_path}");
-        if identity.has_masque_credentials() {
+        let refused = if identity.has_masque_credentials() {
             let identity = adopt_team_profile(identity).await;
-            config::save(config_path, &identity)?;
-            return Ok(identity);
+            if !identity.refused {
+                config::save(config_path, &identity)?;
+                return Ok(identity);
+            }
+            identity
+        } else {
+            log::info!("[+] masque identity needs a certificate; enrolling masque key");
+            // This is the enrolment call, and on a personal (non-team) account it
+            // is the one place a refusal actually surfaces: `adopt_team_profile`
+            // only refreshes the profile when a Zero Trust team is configured, so
+            // without this branch a device deleted upstream would keep trying to
+            // enrol a key against an account that no longer exists.
+            match account::ensure_masque_enrolled(&identity).await {
+                Ok(enrollment) => {
+                    let identity = apply_masque_enrollment(identity, enrollment);
+                    config::save(config_path, &identity)?;
+                    return Ok(identity);
+                }
+                Err(AetherError::IdentityRefused(reason)) => {
+                    log::warn!("[-] the saved masque identity was refused: {reason}");
+                    crate::ffi::record_log(
+                        "The saved MASQUE registration was rejected; registering a fresh one",
+                    );
+                    account::Identity {
+                        refused: true,
+                        ..identity
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        };
+
+        if !keep_saved_identity() {
+            return Ok(refused);
         }
-        log::info!("[+] masque identity needs a certificate; enrolling masque key");
-        let enrollment = account::ensure_masque_enrolled(&identity).await?;
-        let identity = apply_masque_enrollment(identity, enrollment);
-        config::save(config_path, &identity)?;
-        return Ok(identity);
+        log::warn!("[*] registering a fresh masque account to replace the refused identity");
     }
 
     log::info!("[+] no masque identity found; provisioning dedicated masque account");
@@ -3028,6 +3083,7 @@ mod tests {
             organization: String::new(),
             gateway_proxy: String::new(),
             assigned_endpoint: "104.16.192.82".into(),
+            refused: false,
         };
         assert_eq!(
             assigned_masque_peer(&identity),
@@ -3102,6 +3158,7 @@ mod tests {
             gateway_proxy: String::new(),
             // What /reg hands back: a WireGuard endpoint on the website CDN.
             assigned_endpoint: "104.16.192.82".into(),
+            refused: false,
         };
 
         let enrolled = apply_masque_enrollment(

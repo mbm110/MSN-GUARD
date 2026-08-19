@@ -97,6 +97,9 @@ impl TryFrom<PersistedIdentity> for Identity {
             organization: p.organization,
             gateway_proxy: p.gateway_proxy,
             assigned_endpoint: p.assigned_endpoint,
+            // Always false on load: refusal is a fact about the last API answer,
+            // not something the saved file can know.
+            refused: false,
         })
     }
 }
@@ -266,7 +269,33 @@ mod tests {
             organization: "example-team".to_string(),
             gateway_proxy: "172.16.0.1:2480".to_string(),
             assigned_endpoint: "162.159.197.2".to_string(),
+            refused: false,
         }
+    }
+
+    /// A refused identity is never written back to disk.
+    ///
+    /// `config::save` persists no `refused` field, and `TryFrom<PersistedIdentity>`
+    /// always loads it false — so even if a refused identity were saved, the flag
+    /// could not survive a restart and force a needless re-registration.
+    #[test]
+    fn refusal_is_never_persisted() {
+        let dir = scratch("refusal");
+        let path = dir.join("aether.toml");
+        let path_str = path.to_str().unwrap();
+
+        let refused = Identity {
+            refused: true,
+            ..sample()
+        };
+        save(path_str, &refused).expect("save");
+
+        let loaded = load(path_str).expect("load").expect("identity");
+        assert!(
+            !loaded.refused,
+            "a saved identity must always come back as not-refused"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

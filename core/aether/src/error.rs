@@ -29,6 +29,21 @@ pub enum AetherError {
     #[error("api: {0}")]
     Api(String),
 
+    /// Cloudflare read the saved identity and said it no longer exists.
+    ///
+    /// Split out from [`Api`] because the two need opposite handling. An `Api`
+    /// error means "we could not ask" — a timeout, a 5xx, a flagged address — and
+    /// the right response is to keep the saved profile and carry on. This variant
+    /// means "we asked and the answer was no": 401, 404 or 410 on the device
+    /// endpoint. Retrying cannot help and neither can another gateway, because
+    /// the credentials themselves are dead. Only registering again fixes it.
+    ///
+    /// Worth having as a distinct case: a tunnel built on a dead identity still
+    /// completes its handshake and then carries no traffic, which is the hardest
+    /// failure to diagnose from the outside.
+    #[error("identity refused: {0}")]
+    IdentityRefused(String),
+
     #[error("cancelled")]
     Cancelled,
 

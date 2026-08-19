@@ -149,6 +149,13 @@ pub struct Identity {
     pub organization: String,
     pub gateway_proxy: String,
     pub assigned_endpoint: String,
+    /// True when Cloudflare told us this identity no longer exists.
+    ///
+    /// Never persisted — [`crate::config`] always loads it as false. It is a fact
+    /// about the answer we just got from the API, not a property of the saved
+    /// profile, and a stale "refused" on disk would force a pointless
+    /// re-registration on the next start.
+    pub refused: bool,
 }
 
 pub struct MasqueKeyPair {
@@ -255,6 +262,22 @@ fn worth_retrying(status: reqwest::StatusCode) -> bool {
         || status.is_server_error()
 }
 
+/// Whether a status means the identity itself is gone, not the request.
+///
+/// Only 401, 404 and 410 — the codes that answer "this device does not exist".
+/// Deliberately NOT 403: that is Cloudflare refusing the *address* (a flagged
+/// network), and the identity may be perfectly good from another link. Nothing
+/// [`worth_retrying`] belongs here either, which the tests pin across the whole
+/// 4xx/5xx range.
+fn refuses_identity(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED
+            | reqwest::StatusCode::NOT_FOUND
+            | reqwest::StatusCode::GONE
+    )
+}
+
 fn api_host() -> &'static str {
     consts::API_URL
         .trim_start_matches("https://")
@@ -322,11 +345,17 @@ async fn fallback_call(
         });
     }
 
-    Err(AetherError::Api(format!(
+    let described = format!(
         "{label} over {}: {}",
         response.route,
         describe_status(response.status, &response.body)
-    )))
+    );
+    // The camouflaged route reports a bare u16, so match the codes directly here
+    // rather than going through refuses_identity.
+    if matches!(response.status, 401 | 404 | 410) {
+        return Err(AetherError::IdentityRefused(described));
+    }
+    Err(AetherError::Api(described))
 }
 
 fn describe_status(status: u16, body: &str) -> String {
@@ -427,6 +456,14 @@ where
         }
 
         last_error = AetherError::Api(format!("{label}: {}", describe_rejection(status, &body)));
+
+        if refuses_identity(status) {
+            // Not retried and not softened: the answer will be the same next time.
+            return Err(AetherError::IdentityRefused(format!(
+                "{label}: {}",
+                describe_rejection(status, &body)
+            )));
+        }
 
         if !worth_retrying(status) {
             return Err(last_error);
@@ -582,9 +619,23 @@ pub async fn enroll_key(
             .await
             {
                 Ok(account) => Ok(account),
-                Err(secondary) => Err(AetherError::Api(format!(
-                    "key enrollment: direct route -> {primary}; camouflaged route -> {secondary}"
-                ))),
+                // Combining the two routes into one Api error used to erase the
+                // refusal. If either route got a definitive "this device is gone",
+                // that is the finding — the other route's transport failure is
+                // noise beside it, and flattening both into `Api` would send the
+                // caller back to retrying a dead identity.
+                Err(secondary) => {
+                    let combined = format!(
+                        "key enrollment: direct route -> {primary}; camouflaged route -> {secondary}"
+                    );
+                    if matches!(primary, AetherError::IdentityRefused(_))
+                        || matches!(secondary, AetherError::IdentityRefused(_))
+                    {
+                        Err(AetherError::IdentityRefused(combined))
+                    } else {
+                        Err(AetherError::Api(combined))
+                    }
+                }
             }
         }
     }
@@ -708,8 +759,31 @@ pub fn endpoint_from(reg: &AccountData) -> String {
 pub async fn refresh_profile(identity: Identity) -> Identity {
     let reg = match fetch_device(&identity.device_id, &identity.access_token).await {
         Ok(reg) => reg,
+        Err(AetherError::IdentityRefused(reason)) => {
+            // The account says this device is gone. Say so loudly: the tunnel
+            // built on it will still complete a handshake and then carry nothing,
+            // which reads as "connected but no internet" and is otherwise very
+            // hard to attribute.
+            log::warn!(
+                "[-] cloudflare no longer accepts the saved identity for device {}: {reason}",
+                identity.device_id
+            );
+            log::warn!(
+                "[-] the tunnel would handshake but carry no traffic until this identity is replaced"
+            );
+            crate::ffi::record_log(
+                "The saved WARP registration was rejected; registering a fresh one",
+            );
+            return Identity {
+                refused: true,
+                ..identity
+            };
+        }
         Err(error) => {
-            log::debug!("[!] could not refresh the device profile: {error}");
+            // We could not ask — timeout, 5xx, flagged address. The saved profile
+            // is still the best information available, so keep it.
+            log::warn!("[!] could not reach the account api to check the identity: {error}");
+            log::warn!("[!] carrying on with the saved profile; it may be out of date");
             return identity;
         }
     };
@@ -744,6 +818,8 @@ pub async fn refresh_profile(identity: Identity) -> Identity {
         organization,
         gateway_proxy,
         assigned_endpoint,
+        // The API answered, so whatever we thought before, this identity is live.
+        refused: false,
         ..identity
     }
 }
@@ -799,6 +875,7 @@ fn finish_provision(reg: AccountData, wg_private: [u8; 32]) -> Result<Identity> 
         organization,
         gateway_proxy,
         assigned_endpoint,
+        refused: false,
     })
 }
 
@@ -892,6 +969,14 @@ pub async fn ensure_masque_enrolled(identity: &Identity) -> Result<MasqueEnrollm
                 assigned_endpoint,
             })
         }
+        // A refusal must not be softened by the fallback below. The device is
+        // gone, so the certificate on disk — however fresh — belongs to an account
+        // that no longer exists, and keeping it produces exactly the failure this
+        // whole change is meant to surface: a tunnel that handshakes and carries
+        // nothing. Propagate it so the caller can re-register.
+        Err(AetherError::IdentityRefused(reason)) => {
+            Err(AetherError::IdentityRefused(reason))
+        }
         Err(error) if cert_still_usable(identity) => {
             log::warn!(
                 "[!] key enrollment failed ({error}); keeping the certificate already on disk"
@@ -974,6 +1059,80 @@ mod tests {
         assert!(masque_cert_expiring(now_unix() + 86_400));
     }
 
+    /// 401, 404 and 410 mean the device record is gone.
+    #[test]
+    fn the_codes_that_mean_the_identity_is_gone() {
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::GONE,
+        ] {
+            assert!(refuses_identity(status), "{status} means a dead identity");
+        }
+    }
+
+    /// 403 is the flagged-address case, and it is the one that must NOT trigger a
+    /// re-registration: on an Iranian carrier Cloudflare returns it for the
+    /// network, not the device. Treating it as a dead identity would throw away a
+    /// perfectly good registration on every connect from a flagged IP.
+    #[test]
+    fn a_flagged_network_is_not_mistaken_for_a_dead_identity() {
+        assert!(
+            !refuses_identity(reqwest::StatusCode::FORBIDDEN),
+            "403 is cloudflare refusing the address, the identity may be fine"
+        );
+        assert!(
+            !refuses_identity(reqwest::StatusCode::TOO_MANY_REQUESTS),
+            "429 is rate limiting, not a dead identity"
+        );
+    }
+
+    #[test]
+    fn a_server_or_transport_problem_is_not_a_dead_identity() {
+        for status in [
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            reqwest::StatusCode::BAD_GATEWAY,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            reqwest::StatusCode::GATEWAY_TIMEOUT,
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+        ] {
+            assert!(
+                !refuses_identity(status),
+                "{status} should be retried, not treated as a dead identity"
+            );
+        }
+    }
+
+    /// The two classifications must never overlap: retrying a dead identity wastes
+    /// five attempts, and re-registering on a retryable error throws away a good
+    /// account. Checked across the whole 4xx/5xx range rather than by example.
+    #[test]
+    fn anything_worth_retrying_is_never_called_a_dead_identity() {
+        for code in 400..600u16 {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            assert!(
+                !(worth_retrying(status) && refuses_identity(status)),
+                "{status} cannot be both retryable and a dead identity"
+            );
+        }
+    }
+
+    /// The camouflaged API route reports a bare `u16`, so it classifies the codes
+    /// itself. That duplicate list is the thing most likely to drift out of step
+    /// with `refuses_identity`, so pin them together.
+    #[test]
+    fn the_camouflaged_route_agrees_with_refuses_identity() {
+        for code in 400..600u16 {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            let fallback_says = matches!(code, 401 | 404 | 410);
+            assert_eq!(
+                fallback_says,
+                refuses_identity(status),
+                "the two refusal checks disagree about {code}"
+            );
+        }
+    }
+
     fn sample_identity(cert_issued_at: u64, with_cert: bool) -> Identity {
         Identity {
             device_id: "device".to_string(),
@@ -997,6 +1156,7 @@ mod tests {
             organization: String::new(),
             gateway_proxy: String::new(),
             assigned_endpoint: String::new(),
+            refused: false,
         }
     }
 
