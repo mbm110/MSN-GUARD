@@ -185,6 +185,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private var chainMode = false
 
+    /**
+     * True once an outer transport has been accepted and Psiphon started on it.
+     *
+     * Distinguishes "this rung failed, try the next" from "the transport carrying a
+     * live session just died". Before it is set, an outer leg ending is normal —
+     * [raiseOuterLeg] is walking the ladder. After it is set, the same event means
+     * the chain has lost its foundation and the UI must be told.
+     */
+    @Volatile
+    private var chainOuterCommitted = false
+
     // Evidence about how the tunnel was actually established, gathered from
     // Psiphon's own notices rather than inferred from which rung was active.
     private var activeTunnelProtocol = ""
@@ -358,8 +369,24 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
          */
         const val CHAIN_PROTOCOL_MARKER = "PSIPHON-OVER-WARP"
 
-        /** How long the outer WARP leg gets to publish its SOCKS listener. */
-        private const val CHAIN_OUTER_TIMEOUT_MS = 90_000L
+        /**
+         * How long to wait for a rejected outer leg to actually stop.
+         *
+         * `aether_stop` only raises a flag; the core's RUNNING guard clears when the
+         * tunnel task unwinds. Starting the next rung before then gets "Aether tunnel
+         * already running" and fails it for the wrong reason.
+         */
+        private const val OUTER_STOP_GRACE_MS = 6_000L
+
+        /**
+         * How long a freshly started outer rung has to raise the core's RUNNING flag.
+         *
+         * `startProxy` is spawned on its own thread, so for a moment after the call
+         * the core is legitimately not running yet. Without this grace the readiness
+         * loop would read that gap as "the rung died" and reject every transport
+         * instantly.
+         */
+        private const val OUTER_START_GRACE_MS = 3_000L
         const val NOTIFICATION_ID = 1
         const val TRAFFIC_PREFS = "traffic_stats"
         const val TRAFFIC_MONTH = "month"
@@ -959,11 +986,29 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     //
                     // So in chained mode the outer leg never reports CONNECTED.
                     // The chain's CONNECTED comes from onConnected(), once Psiphon
-                    // has a tunnel and tun2socks is routing. Failures still pass
-                    // through: if the outer leg dies the chain cannot work.
-                    if (chainMode && status == STATUS_CONNECTED) {
-                        ConnectionLog.record("Chain: outer leg is up; waiting for Psiphon")
-                        sendStatus(STATUS_CONNECTING, "Connecting Psiphon through WARP…")
+                    // has a tunnel and tun2socks is routing.
+                    //
+                    // "starting" is swallowed for the same reason: the ladder emits
+                    // one per rung it tries, and each would reset the UI to
+                    // "Starting" mid-attempt, hiding which transport is being
+                    // attempted. raiseOuterLeg() narrates the ladder itself.
+                    if (chainMode && (status == STATUS_CONNECTED || status == STATUS_STARTING)) {
+                        // Only meaningful once a rung has been accepted. While the
+                        // ladder is still walking, several rungs can each announce
+                        // themselves ready before being rejected.
+                        if (chainOuterCommitted && status == STATUS_CONNECTED) {
+                            ConnectionLog.record("Chain: outer leg is up; waiting for Psiphon")
+                            sendStatus(STATUS_CONNECTING, "Connecting Psiphon through WARP…")
+                        }
+                        return
+                    }
+                    // A rejected rung's teardown emits DISCONNECTED/FAILED. Before a
+                    // rung is accepted that is the ladder working as intended, not
+                    // the chain failing, and forwarding it would paint the dial red
+                    // between attempts.
+                    if (chainMode && !chainOuterCommitted &&
+                        (status == STATUS_DISCONNECTED || status == STATUS_FAILED)
+                    ) {
                         return
                     }
                     sendStatus(status, detail)
@@ -1038,9 +1083,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      *  1. TUN first, before either tunnel. Psiphon's NetworkMonitor treats tun0
      *     appearing as a network change and restarts the controller, which is the
      *     13-second restart loop the plain Psiphon path already works around.
-     *  2. The outer WARP leg next, and we must WAIT for its SOCKS listener. Psiphon
-     *     validates UpstreamProxyURL by dialling it; starting Psiphon first means
-     *     it dials a closed port and fails the whole rung.
+     *  2. The outer WARP leg next, and we must WAIT for it. Psiphon validates
+     *     UpstreamProxyURL by dialling it, so starting Psiphon against a proxy whose
+     *     tunnel is not up yet fails the whole rung.
      *  3. tun2socks last, on Psiphon's port, from onConnected() — the same as the
      *     plain path. Only then does device traffic have somewhere to go.
      *
@@ -1048,9 +1093,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * SOCKS on CHAIN_SOCKS_PORT instead of taking the device TUN. Its own sockets
      * are protected via the JNI protector, so the WARP leg leaves over the carrier
      * link rather than looping back into our own TUN.
+     *
+     * The outer leg walks [CoreConfig.CHAIN_OUTER_LADDER] — MASQUE, then WireGuard,
+     * then WoW — until one comes up, because which of them a carrier allows varies:
+     * Hamrah-e-Aval has never carried WireGuard, while other SIMs connect on it
+     * instantly. The winning rung is remembered per device, so the cost of finding
+     * it is paid once rather than on every connect.
      */
     private fun startChainTunnel() {
         chainMode = true
+        chainOuterCommitted = false
         psiphonVpnMode = true
         psiphonVpnActivated = false
         // chainMode is set first, so this reads the chained ladder and the chained
@@ -1082,36 +1134,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     .establish() ?: error("Android could not establish the VPN interface")
                 vpnModeActive.set(true)
 
-                // --- Outer leg: WARP, in SOCKS mode ---
-                val outerConfig = CoreConfig.chainOuterJson(this)
-                val outerName = outerConfig
-                    .substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
-                ConnectionLog.record("Chain leg 1/2: $outerName → SOCKS ${CoreConfig.CHAIN_SOCKS_PORT}")
-                sendStatus(STATUS_CONNECTING, "Connecting $outerName…")
-
                 NativeCore.attach(this)
-                NativeCore.prepare(outerConfig)
-                // startProxy blocks for the tunnel's life, so it gets its own
-                // thread. Failures land in the log and in NativeCore.lastError().
-                Thread({
-                    val result = NativeCore.startProxy(outerConfig)
-                    if (result != 0 && !stopRequested.get()) {
-                        val detail = NativeCore.lastError()
-                            .ifBlank { "Outer tunnel exited with code $result" }
-                        ConnectionLog.record("Chain: outer leg ended: $detail")
-                        sendStatus(STATUS_FAILED, detail)
-                    }
-                }, "chain-outer").start()
-
-                if (!awaitOuterProxy()) {
-                    error("The outer WARP tunnel did not come up in time")
-                }
+                val outer = raiseOuterLeg() ?: error(
+                    "No WARP transport could carry Psiphon on this network"
+                )
                 ConnectionLog.record("Chain: outer leg ready — starting Psiphon through it")
 
                 // --- Inner leg: Psiphon, dialling out through the outer SOCKS ---
                 activeSocksPort = CoreConfig.SOCKS_PORT
                 startPsiphonTunnel()
-                sendStatus(STATUS_CONNECTING, "Connecting Psiphon through $outerName…")
+                sendStatus(STATUS_CONNECTING, "Connecting Psiphon through $outer…")
             } catch (e: Exception) {
                 ConnectionLog.record("Chain start failed: ${e.message}")
                 sendStatus(STATUS_FAILED, e.message)
@@ -1125,30 +1157,182 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     /**
-     * Wait for the outer leg's SOCKS listener to accept a connection.
+     * Try each WARP transport in turn until one is carrying traffic.
      *
-     * Readiness is proven by connecting, not by NativeCore.isReady(): the listener
-     * is what Psiphon will dial, so the listener is what has to be up. isReady()
-     * reports the tunnel's own view and can lead the bind by a moment.
+     * Returns the label of the transport that came up, or null when none did.
+     *
+     * Starts from the rung that last worked on this device, then wraps, so every
+     * rung still gets a turn but the known-good one goes first. That matters more
+     * here than in the Psiphon ladder: a rung the carrier blocks outright does not
+     * fail fast — MASQUE keeps scanning gateways until its budget expires — so a
+     * wrong starting rung costs the user most of a minute.
+     *
+     * Each rung gets its own budget (see [chainOuterBudgetMs]) and the core is fully
+     * stopped between attempts: `aether_start_json` refuses to run twice
+     * concurrently (its RUNNING compare_exchange returns "already running"), so the
+     * next rung would fail instantly if the previous one were still unwinding.
      */
-    private fun awaitOuterProxy(): Boolean {
-        val deadline = SystemClock.elapsedRealtime() + CHAIN_OUTER_TIMEOUT_MS
+    private fun raiseOuterLeg(): String? {
+        val ladder = CoreConfig.CHAIN_OUTER_LADDER
+        val start = getSharedPreferences("settings", MODE_PRIVATE)
+            .getInt(CoreConfig.CHAIN_OUTER_PREF, 0)
+            .coerceIn(0, ladder.size - 1)
+
+        for (offset in ladder.indices) {
+            if (stopRequested.get()) return null
+            val index = (start + offset) % ladder.size
+            val protocol = ladder[index]
+            val label = CoreConfig.chainOuterLabel(protocol)
+            val budget = chainOuterBudgetMs(protocol)
+
+            // The core must be fully idle before this rung starts. If a previous
+            // rung is still unwinding, `startProxy` returns "already running"
+            // immediately while `isRunning`/`isReady` still describe the OLD tunnel
+            // — so awaitOuterProxy would accept a rung that never started. Refusing
+            // to continue is the only safe answer; the alternative is handing
+            // Psiphon a proxy backed by a tunnel that is being torn down.
+            if (NativeCore.isRunning()) {
+                ConnectionLog.record("Chain: core still busy; cannot start the $label leg")
+                return null
+            }
+
+            ConnectionLog.record(
+                "Chain leg 1/2 attempt ${offset + 1}/${ladder.size}: " +
+                    "$label → SOCKS ${CoreConfig.CHAIN_SOCKS_PORT} (${budget / 1000}s budget)"
+            )
+            sendStatus(STATUS_CONNECTING, "Connecting $label…")
+
+            val config = CoreConfig.chainOuterJson(this, protocol)
+            val started = runCatching {
+                // Provisions or loads this protocol's identity. MASQUE and WireGuard
+                // keep separate ones, and a failure here (a refused registration, no
+                // network) is this rung's failure, not the chain's.
+                NativeCore.prepare(config)
+                Thread({
+                    val result = NativeCore.startProxy(config)
+                    if (result != 0 && !stopRequested.get()) {
+                        val detail = NativeCore.lastError()
+                            .ifBlank { "exited with code $result" }
+                        ConnectionLog.record("Chain: $label leg ended: $detail")
+                        // Only a failure once this rung was the accepted one is the
+                        // chain's failure. Before that, ending is how a rung is
+                        // rejected and raiseOuterLeg moves on — reporting FAILED
+                        // there would abort the ladder on its first miss.
+                        if (chainOuterCommitted) {
+                            sendStatus(STATUS_FAILED, "The $label tunnel carrying Psiphon dropped")
+                        }
+                    }
+                }, "chain-outer-$protocol").start()
+            }.isSuccess
+
+            if (!started) {
+                ConnectionLog.record("Chain: $label could not be prepared: ${NativeCore.lastError()}")
+                stopOuterLeg()
+                continue
+            }
+
+            if (awaitOuterProxy(budget)) {
+                // Remember what worked, so the next connect starts here.
+                getSharedPreferences("settings", MODE_PRIVATE).edit()
+                    .putInt(CoreConfig.CHAIN_OUTER_PREF, index).apply()
+                chainOuterCommitted = true
+                ConnectionLog.record("Chain: $label is carrying the outer leg")
+                return label
+            }
+
+            if (stopRequested.get()) return null
+            ConnectionLog.record("Chain: $label did not come up in ${budget / 1000}s; trying the next transport")
+            stopOuterLeg()
+        }
+        return null
+    }
+
+    /**
+     * How long a given outer transport gets before the chain moves on.
+     *
+     * Not uniform, because their failure modes are not. MASQUE does not fail fast
+     * when blocked — it keeps scanning gateways until its own budget runs out — so
+     * its number is a cap on that scan rather than a timeout on a dial. WireGuard
+     * either handshakes quickly or is being dropped. WoW has to raise two tunnels
+     * in sequence, so it needs the most.
+     *
+     * The totals matter: worst case is the sum, spent only on the first connect
+     * from a SIM whose usual transport is blocked, since the winner is remembered.
+     */
+    private fun chainOuterBudgetMs(protocol: String): Long = when (protocol) {
+        "masque" -> 50_000L
+        "wireguard" -> 40_000L
+        else -> 60_000L
+    }
+
+    /**
+     * Stop the outer leg and wait for the core to actually let go.
+     *
+     * `aether_stop` only sets a flag; RUNNING stays true until the tunnel task
+     * unwinds and drops its guard. Starting the next rung before that returns
+     * "Aether tunnel already running" and the rung fails for the wrong reason.
+     */
+    private fun stopOuterLeg() {
+        NativeCore.stop()
+        val deadline = SystemClock.elapsedRealtime() + OUTER_STOP_GRACE_MS
+        while (NativeCore.isRunning() && SystemClock.elapsedRealtime() < deadline) {
+            try {
+                Thread.sleep(200)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+        }
+        if (NativeCore.isRunning()) {
+            ConnectionLog.record("Chain: previous outer leg is still shutting down")
+        }
+    }
+
+    /**
+     * Wait until the outer leg is genuinely ready to carry Psiphon.
+     *
+     * Gated on `aether_is_ready()`, NOT on the SOCKS port accepting a connection.
+     * That distinction is the whole point: `socks::serve` binds its listener as soon
+     * as the userspace netstack exists, before the tunnel behind it is validated, so
+     * a port probe returns true almost immediately and would hand Psiphon a proxy
+     * with nothing behind it. READY is set by `mark_ready()`, which the core only
+     * calls once its data path is up — for MASQUE after data-plane validation, for
+     * WoW after both legs are established.
+     *
+     * The port is then checked as well, since a ready tunnel with an unbound
+     * listener would still fail Psiphon's UpstreamProxyURL validation.
+     */
+    private fun awaitOuterProxy(budgetMs: Long): Boolean {
+        val startedAt = SystemClock.elapsedRealtime()
+        val deadline = startedAt + budgetMs
         while (SystemClock.elapsedRealtime() < deadline) {
             if (stopRequested.get()) return false
+            // A dead rung stops the core outright, so there is nothing left to wait
+            // for — but only after it has had time to set RUNNING at all. The caller
+            // has just spawned startProxy on another thread, and treating that gap as
+            // "the rung died" would reject every rung the instant it was started.
+            val elapsed = SystemClock.elapsedRealtime() - startedAt
+            if (elapsed > OUTER_START_GRACE_MS && !NativeCore.isRunning()) return false
+            if (NativeCore.isReady() && outerProxyAccepts()) return true
             try {
-                java.net.Socket().use { probe ->
-                    probe.connect(
-                        java.net.InetSocketAddress("127.0.0.1", CoreConfig.CHAIN_SOCKS_PORT),
-                        1_000,
-                    )
-                }
-                return true
-            } catch (_: Exception) {
-                try { Thread.sleep(500) } catch (_: InterruptedException) { return false }
+                Thread.sleep(300)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
             }
         }
         return false
     }
+
+    /** Whether the core's chained SOCKS listener is accepting connections. */
+    private fun outerProxyAccepts(): Boolean = runCatching {
+        java.net.Socket().use { probe ->
+            probe.connect(
+                java.net.InetSocketAddress("127.0.0.1", CoreConfig.CHAIN_SOCKS_PORT),
+                1_000,
+            )
+        }
+    }.isSuccess
 
     /**
      * Start a tunnel. Always whole-device VPN mode — proxy mode was removed, so
@@ -1356,6 +1540,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // a listener that no longer exists.
             NativeCore.detach()
             chainMode = false
+            chainOuterCommitted = false
             vpnModeActive.set(false)
             psiphonVpnActivated = false
             tun?.close()

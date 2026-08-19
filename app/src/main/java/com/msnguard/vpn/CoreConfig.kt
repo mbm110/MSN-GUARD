@@ -26,14 +26,13 @@ object CoreConfig {
     const val CHAIN_SOCKS_PORT = 1820
 
     /**
-     * Which protocol carries the outer leg of Psiphon-over-WARP.
+     * Which outer transport last carried the chain on this device.
      *
-     * MASQUE by default: it is the transport with the most field evidence behind
-     * it here, and it is the one whose gateway cache and last-known-good endpoint
-     * make a repeat connect fast. WARP-on-WARP would work too but stacks a third
-     * tunnel under Psiphon for no measured benefit.
+     * An index into [CHAIN_OUTER_LADDER]. The next connect starts there instead of
+     * walking the whole ladder again, so a SIM that needs WireGuard pays the MASQUE
+     * timeout only once, ever.
      */
-    const val CHAIN_OUTER_PREF = "chain_outer_protocol"
+    const val CHAIN_OUTER_PREF = "chain_outer_index"
 
     fun json(context: Context, protocol: String? = null): String =
         json(context, protocol, listenOverride = null)
@@ -71,7 +70,13 @@ object CoreConfig {
             put("endpoint_cache_path", File(context.filesDir, "masque-gateway-cache.json").absolutePath)
             put("endpoint_discovery", text("endpoint_discovery", "cache"))
             put("masque_transport", text("default_masque_transport", "h3"))
-            putOpt("forced_peer", text("manual_endpoint").ifBlank { null })
+            // A manual peer pins ONE address, and it belongs to whichever transport
+            // the user entered it for. Handing it to the chain's ladder would send a
+            // MASQUE gateway to the WireGuard rung, where it cannot work — so the
+            // chain's outer legs always scan.
+            if (listenOverride == null) {
+                putOpt("forced_peer", text("manual_endpoint").ifBlank { null })
+            }
             put("obfuscation_profile", text("obfuscation_profile", "balanced"))
             putOpt("obfuscation_parameters", manualObfuscation.takeIf { it.length() > 0 }?.toString())
             put("retry_obfuscation_profiles", prefs.getBoolean("retry_obfuscation_profiles", true))
@@ -98,17 +103,45 @@ object CoreConfig {
      * Config for the OUTER leg of Psiphon-over-WARP.
      *
      * Differences from a normal connect, each one load-bearing:
-     *  - `protocol` is the chosen WARP transport, never "psiphon"; the chain's
-     *    Psiphon half is the Go library, not the core.
+     *  - `protocol` is a WARP transport, never "psiphon"; the chain's Psiphon half
+     *    is the Go library, not the core.
      *  - `listen` moves to [CHAIN_SOCKS_PORT] because Psiphon keeps [SOCKS_PORT].
      *  - no `tun_fd` is passed by the caller (see NativeCore.startProxy), so the
      *    core runs its userspace netstack and publishes SOCKS instead of taking
      *    the device TUN — tun2socks owns that, on Psiphon's side.
+     *
+     * @param protocol which WARP transport carries this attempt. The service walks
+     *   [CHAIN_OUTER_LADDER] and calls this once per rung, so the choice belongs to
+     *   the caller rather than to a stored preference.
      */
-    fun chainOuterJson(context: Context): String {
-        val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-        val outer = prefs.getString(CHAIN_OUTER_PREF, "masque")?.trim().orEmpty()
-            .ifBlank { "masque" }
-        return json(context, outer, listenOverride = CHAIN_SOCKS_PORT)
+    fun chainOuterJson(context: Context, protocol: String): String =
+        json(context, protocol, listenOverride = CHAIN_SOCKS_PORT)
+
+    /**
+     * The outer transports tried, in order, until one carries Psiphon.
+     *
+     * Ordered by measured likelihood of working on an Iranian carrier, cheapest
+     * first:
+     *
+     *  - `masque` leads because it has two transports of its own (HTTP/3 over
+     *    UDP/443, then HTTP/2 over TCP/443 with TLS fragmentation) and a gateway
+     *    cache plus a last-known-good endpoint, so a repeat connect is fast.
+     *  - `wireguard` next: it is blocked outright on some carriers (Hamrah-e-Aval
+     *    has never carried it) but connects immediately on others.
+     *  - `gool` last. It is WARP-on-WARP, so it stacks two tunnels under Psiphon
+     *    for three in total — the slowest rung, and only worth reaching when the
+     *    single-layer ones are blocked.
+     *
+     * The rung that works is remembered per device, so this ordering only decides
+     * the very first attempt.
+     */
+    val CHAIN_OUTER_LADDER = listOf("masque", "wireguard", "gool")
+
+    /** Human-readable name for a rung of [CHAIN_OUTER_LADDER]. */
+    fun chainOuterLabel(protocol: String): String = when (protocol) {
+        "masque" -> "MASQUE"
+        "wireguard" -> "WireGuard"
+        "gool" -> "WoW"
+        else -> protocol.uppercase()
     }
 }

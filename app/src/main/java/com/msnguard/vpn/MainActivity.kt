@@ -3383,21 +3383,19 @@ class MainActivity : Activity() {
     private fun chainArmed(): Boolean = preferences().getBoolean(CHAIN_ARMED, false)
 
     /**
-     * Persist the chain choice and record which transport carries the outer leg.
+     * Persist whether the next connect chains Psiphon inside WARP.
      *
-     * The outer leg is always MASQUE. The rail's pick is what goes *inside* WARP,
-     * and the card is only available on PSIPHON, so there is no user choice left
-     * to honour here — MASQUE is chosen because its gateway cache and
-     * last-known-good endpoint make a repeat connect fast.
+     * Deliberately does NOT touch [CoreConfig.CHAIN_OUTER_PREF]. That key holds an
+     * index the service writes after an outer transport actually works, and it used
+     * to be written from here as a protocol *string* — reading it back with getInt
+     * would have thrown ClassCastException. Which transport carries the outer leg is
+     * discovered by trying them (MASQUE, then WireGuard, then WoW), not chosen here.
      */
     private fun setChainArmed(armed: Boolean) {
-        preferences().edit()
-            .putBoolean(CHAIN_ARMED, armed)
-            .putString(CoreConfig.CHAIN_OUTER_PREF, Protocol.MASQUE.coreName)
-            .apply()
+        preferences().edit().putBoolean(CHAIN_ARMED, armed).apply()
         if (armed) {
             ConnectionLog.record(
-                "Psiphon-over-WARP armed: outer ${Protocol.MASQUE.label}, Psiphon inside it"
+                "Psiphon-over-WARP armed: outer MASQUE, Psiphon inside it"
             )
         } else {
             ConnectionLog.record("Psiphon-over-WARP disarmed")

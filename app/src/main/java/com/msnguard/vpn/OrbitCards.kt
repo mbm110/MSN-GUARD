@@ -354,6 +354,9 @@ class ChainModeCard(
         setArmed(armed)
     }
 
+    /** Description of what the chain does, shown when armed. */
+    private fun armedSubtitle(): String = "armed · Psiphon inside WARP, auto transport"
+
     /** Paints the armed/disarmed look. Does not notify [onToggle]. */
     fun setArmed(value: Boolean) {
         armed = value
@@ -380,7 +383,7 @@ class ChainModeCard(
         // can be the faster of the two. "Slower" was true of the lab and wrong in
         // the field, so the label states the effect that always holds.
         subtitleView.text = unavailableReason ?: if (value) {
-            "armed · Psiphon inside WARP, different exit IP"
+            armedSubtitle()
         } else {
             "for when neither exit IP is accepted"
         }
