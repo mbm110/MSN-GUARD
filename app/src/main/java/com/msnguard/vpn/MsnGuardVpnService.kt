@@ -299,6 +299,32 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         private var connectedSince = 0L
 
         fun connectedSinceElapsed(): Long = connectedSince
+
+        /**
+         * The exit address the core last measured from inside the tunnel, or "".
+         *
+         * Static for the same reason as [connectedSince], but it fixes a sharper
+         * bug. The core measures the exit exactly once per tunnel, about a second
+         * after the first byte crosses (`ExitProbe` in tun.rs goes to `Done` and
+         * stops ticking — deliberately, since waking the loop forever costs
+         * battery). That measurement is announced with a single broadcast.
+         *
+         * Connect from the Quick Settings tile and there is no activity alive at
+         * that moment, and the receiver is registered in `onStart` rather than in
+         * the manifest — so the broadcast reaches nobody and the only measurement
+         * of the session is lost. Opening the app afterwards then finds its own
+         * `coreExitIp` empty and, correctly refusing to ask over the carrier link
+         * (we are excluded from our own TUN, so the answer would be the carrier's
+         * address), sits on "measuring…" for the rest of the session.
+         *
+         * The service outlives the UI, so it keeps the answer here and the
+         * activity reads it on start. The notification already showed this value
+         * while the card claimed to be measuring; now both read the same source.
+         */
+        @Volatile
+        private var lastExitIp = ""
+
+        fun lastMeasuredExitIp(): String = lastExitIp
     }
 
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
@@ -784,6 +810,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     val ip = event.getString("ip")
                     if (ip.isNotBlank()) {
                         currentVpnIp = ip
+                        // Survives the UI: the tile can connect with no activity
+                        // alive, and this is the session's only measurement.
+                        lastExitIp = ip
                         ConnectionLog.record("Tunnel exit $ip")
                         // The country is resolved by the UI from this address; the
                         // core cannot tell one from inside the tunnel.
@@ -811,6 +840,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         storedConfig = config
         currentProtocol = config.substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
         currentVpnIp = ""
+        // The previous tunnel's exit belongs to the previous tunnel. Cleared here
+        // as well as in stopTunnel because a reconnect goes straight from one
+        // startTunnel to the next, and a stale address would otherwise be handed
+        // to the UI as this session's measurement.
+        lastExitIp = ""
         currentPing = ""
         // Every new tunnel makes the core start counting bytes from zero again
         // (rx_total/tx_total are locals inside tun::bridge). Anything here that
@@ -969,6 +1003,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // DISCONNECTED broadcast left connectedSince set and the next session's
         // timer resumed the old elapsed time instead of restarting at zero.
         connectedSince = 0L
+        // No tunnel, no exit address. Leaving it set would let the next UI start
+        // paint a dead tunnel's exit as if it were live.
+        lastExitIp = ""
         // Disarm the escalation ladder before anything else: a pending timer that
         // fires after teardown would resurrect Psiphon on a dead TUN.
         ladderActive.set(false)

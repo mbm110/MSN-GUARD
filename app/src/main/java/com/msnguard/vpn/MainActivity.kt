@@ -989,6 +989,15 @@ class MainActivity : Activity() {
     }
 
     private fun refreshPublicIp() {
+        // A tunnel raised from the Quick Settings tile measured its exit before
+        // this activity existed, and that broadcast is long gone — the receiver
+        // only lives between onStart and onStop. The service kept the answer, so
+        // adopt it rather than sitting on "measuring…" for the whole session.
+        if (coreExitIp.isBlank() && isTunnelActive()) {
+            MsnGuardVpnService.lastMeasuredExitIp()
+                .takeIf { it.isNotBlank() }
+                ?.let { coreExitIp = it }
+        }
         // The core already told us, from inside the tunnel. Nothing an HTTP
         // request from this process could add is more accurate.
         if (coreExitIp.isNotBlank()) {

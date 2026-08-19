@@ -1,5 +1,6 @@
 package com.msnguard.vpn
 
+import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
@@ -77,9 +78,36 @@ class MsnGuardTileService : TileService() {
                 }
                 tile.updateTile()
             } else {
-                // Need to ask for permission - can't start activity from here
-                Log.w(LOG_TAG, "VPN permission required, cannot start from tile")
+                // No VPN consent yet. A TileService cannot host the consent
+                // dialog, so open the app and let it ask — silently logging left
+                // the user tapping a tile that visibly did nothing.
+                Log.w(LOG_TAG, "VPN permission required; opening the app to ask")
+                openApp()
             }
+        }
+    }
+
+    /**
+     * Brings the app up so it can ask for VPN consent, and closes the shade.
+     *
+     * The `Intent` overload of `startActivityAndCollapse` throws on API 34+, and
+     * the `PendingIntent` overload does not exist below it, so both are needed.
+     */
+    private fun openApp() {
+        val intent = Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startActivityAndCollapse(
+                PendingIntent.getActivity(
+                    this,
+                    0,
+                    intent,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                )
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            startActivityAndCollapse(intent)
         }
     }
 
