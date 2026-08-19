@@ -215,6 +215,28 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private val attributionPending = AtomicBoolean(false)
 
     /**
+     * Whether this attempt is the short "preferred country" attempt that runs in
+     * front of the ladder.
+     *
+     * The user's country choice is a preference, and Psiphon has no way to express
+     * one: `EgressRegion` is a hard filter, so a pinned country removes every
+     * server outside it from the candidate pool. On the worst domestic operator
+     * that is fatal — only 5 of the 430 embedded server entries advertise
+     * FRONTED-MEEK and every one of them is US/GB, so a pin on any other country
+     * deletes the only protocol family that works there.
+     *
+     * So the country gets one bounded attempt, on the rung that last carried a
+     * tunnel on this device, and then the flag clears and the normal ladder runs
+     * with no region filter at all. Cost of a wrong country is
+     * [REGION_PHASE_TIMEOUT_SECONDS], not a failed connection.
+     */
+    private var regionPhase = false
+
+    /** The country this session already tried, so it is attempted exactly once. */
+    private var regionPhaseTried = ""
+
+
+    /**
      * The escalation ladder, ordered by *measured* time-to-connect on a hostile
      * carrier, using the Build #65 field logs from Hamrah-e-Aval and SamanTel.
      *
@@ -387,6 +409,20 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
          * instantly.
          */
         private const val OUTER_START_GRACE_MS = 3_000L
+
+        /**
+         * Budget for the preferred-country attempt that runs in front of the ladder.
+         *
+         * Deliberately short. `EgressRegion` is a hard filter, so this attempt runs
+         * against one country's servers only — if that country is reachable it
+         * answers quickly, and if it is not, every extra second is time stolen from
+         * the ladder that will actually connect. 25s covers a fronted CDN handshake
+         * (measured at 33s on the worst operator *without* a filter, where the win
+         * came from a rung with a 60s budget) while keeping the worst case for a
+         * wrong country to roughly half a minute.
+         */
+        private const val REGION_PHASE_TIMEOUT_SECONDS = 25
+
         const val NOTIFICATION_ID = 1
         const val TRAFFIC_PREFS = "traffic_stats"
         const val TRAFFIC_MONTH = "month"
@@ -473,6 +509,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         ladderActive.set(false)
         cancelLadderTimer()
         ladderAttempts = 0
+        // The preferred-country attempt succeeded, or we were already past it.
+        // Either way the phase is over: Psiphon's NetworkMonitor can restart the
+        // controller on its own, and leaving the flag set would re-arm a filtered
+        // candidate pool on a tunnel that is already working.
+        if (regionPhase) {
+            regionPhase = false
+            ConnectionLog.record(
+                "Connected in preferred country ${PsiphonRegions.name(regionPhaseTried)}"
+            )
+        }
+
         // Attribution is NOT done here. The ActiveTunnel notice that names the
         // protocol arrives *after* this callback — both field logs show it one
         // line below "Psiphon connected" — so at this point activeTunnelProtocol
@@ -554,6 +601,42 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     override fun onClientRegion(region: String?) {
         if (!region.isNullOrBlank()) ConnectionLog.record("Psiphon region: $region")
+    }
+
+    /**
+     * Psiphon's live list of countries it can currently egress from.
+     *
+     * Cached because it is the only authoritative source: the 430 embedded server
+     * entries age, and the picker must not offer a country the network cannot
+     * actually reach. Arrives on every handshake, tunnel or not.
+     */
+    override fun onAvailableEgressRegions(regions: MutableList<String>?) {
+        val list = regions?.filterNotNull().orEmpty()
+        if (list.isEmpty()) return
+        PsiphonRegions.remember(this, list)
+        ConnectionLog.record("Psiphon egress countries available: ${list.size}")
+    }
+
+    /**
+     * Which country the established tunnel actually exits in.
+     *
+     * Logged next to the preference so a mismatch is visible: with the country
+     * treated as a preference rather than a pin, exiting somewhere else is the
+     * expected outcome of a failed region phase, not a bug.
+     */
+    override fun onConnectedServerRegion(region: String?) {
+        if (region.isNullOrBlank()) return
+        val wanted = CoreConfig.egressRegion(this)
+        val exitedIn = PsiphonRegions.name(region)
+        ConnectionLog.record(
+            if (wanted == null || wanted == region.uppercase()) {
+                "Exit country: $exitedIn ($region)"
+            } else {
+                "Exit country: $exitedIn ($region) — ${PsiphonRegions.name(wanted)} was preferred but unavailable"
+            }
+        )
+        getSharedPreferences("settings", MODE_PRIVATE).edit()
+            .putString("last_exit_region", region.uppercase()).apply()
     }
 
     override fun onBytesTransferred(sent: Long, received: Long) {
@@ -666,6 +749,41 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             )
         }
 
+        // The preferred-country attempt, in front of the ladder and only once.
+        //
+        // Applied AFTER the rung so it owns the establish timeout: the rung's own
+        // budget (up to 75s) is sized for searching a hostile carrier, and spending
+        // that on a country preference would make a wrong choice cost more than the
+        // whole ladder. A short budget is also the honest one — if the preferred
+        // country is reachable at all it answers quickly, because the filter has
+        // already removed everything else.
+        val preferredRegion = if (regionPhase) CoreConfig.egressRegion(this) else null
+        if (preferredRegion != null) {
+            config.put("EgressRegion", preferredRegion)
+            config.put("EstablishTunnelTimeoutSeconds", REGION_PHASE_TIMEOUT_SECONDS)
+            // Drop the rung's protocol ordering for this one attempt.
+            //
+            // Not a detail — it is what makes the feature usable. Rung A prefers
+            // FRONTED-MEEK, and only 5 of the 430 embedded entries advertise it, all
+            // of them US/GB. Since the remembered rung is A on any operator where
+            // fronting is the only thing that works, keeping its preference would
+            // pair "only fronted servers" with "only German servers" and match
+            // nothing at all — so a German preference would fail its 25s every
+            // single time, on exactly the operators where the user is most likely
+            // to have set one. Widening to Psiphon's full set asks the honest
+            // question instead: is *anything* in this country reachable?
+            //
+            // The chained branch below still narrows to TCP-only afterwards, which
+            // is a hard requirement of a SOCKS5 upstream rather than a preference.
+            config.remove("InitialLimitTunnelProtocols")
+            config.remove("InitialLimitTunnelProtocolsCandidateCount")
+            ConnectionLog.record(
+                "Preferred country ${PsiphonRegions.name(preferredRegion)} " +
+                    "($preferredRegion), all protocols — ${REGION_PHASE_TIMEOUT_SECONDS}s before the ladder"
+            )
+        }
+
+
         // Applied AFTER the rung, so no rung can widen it back. This is a hard
         // limit, unlike the rungs' InitialLimitTunnelProtocols preference, because
         // a preference lapses once the candidate budget is spent and Psiphon then
@@ -746,10 +864,41 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         ladderActive.set(true)
         // +8s grace so Psiphon's internal timeout and teardown land first; racing
         // it would restart the tunnel while the old controller is still stopping.
-        val budget = strategy.timeoutSeconds.toLong() + 8L
+        //
+        // During the preferred-country attempt the budget is the region phase's,
+        // not the rung's: buildPsiphonConfig() overrode EstablishTunnelTimeout for
+        // that attempt, so watching the rung's longer budget would leave the user
+        // on a filtered candidate pool long after Psiphon had already given up.
+        val seconds = if (regionPhase && CoreConfig.egressRegion(this) != null) {
+            REGION_PHASE_TIMEOUT_SECONDS
+        } else {
+            strategy.timeoutSeconds
+        }
+        val budget = seconds.toLong() + 8L
         ladderTimer = ladderScheduler.schedule({
             if (ladderActive.get() && !psiphonVpnActivated) escalateLadder()
         }, budget, TimeUnit.SECONDS)
+    }
+
+
+    /**
+     * Decide whether this connect starts with the preferred-country attempt.
+     *
+     * Called once per connect, before the first [startPsiphonTunnel]. Kept separate
+     * from the ladder state so both entry points (plain Psiphon and the chain) get
+     * identical behaviour — the user's country choice is about where traffic exits,
+     * which is the same question in either mode.
+     */
+    private fun armRegionPhase() {
+        val region = CoreConfig.egressRegion(this)
+        regionPhase = region != null
+        regionPhaseTried = region.orEmpty()
+        if (region != null) {
+            ConnectionLog.record(
+                "Preferred country: ${PsiphonRegions.name(region)} ($region), " +
+                    "then all countries if it does not connect"
+            )
+        }
     }
 
     private fun cancelLadderTimer() {
@@ -876,8 +1025,34 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         cancelLadderTimer()
 
         val ladder = activeLadder
+
+        // The preferred country failed. Drop the region filter and hand over to the
+        // ladder *at the same rung*, without counting an attempt: the rung was never
+        // given a fair try, it ran against one country's servers only. Counting it
+        // would silently shorten the ladder by one every time a country is pinned.
+        if (regionPhase) {
+            regionPhase = false
+            val region = regionPhaseTried
+            ConnectionLog.record(
+                "Preferred country ${PsiphonRegions.name(region)} did not connect — " +
+                    "continuing with all countries from strategy ${ladder.getOrNull(ladderIndex)?.name ?: "?"}"
+            )
+            sendStatus(STATUS_CONNECTING, "Trying all countries…")
+            worker.execute {
+                if (stopRequested.get()) return@execute
+                try { psiphonTunnel?.stop() } catch (_: Exception) {}
+                psiphonTunnel = null
+                activeSocksPort = CoreConfig.SOCKS_PORT
+                try { Thread.sleep(1200) } catch (_: InterruptedException) {}
+                if (stopRequested.get()) return@execute
+                startPsiphonTunnel()
+            }
+            return
+        }
+
         val failed = ladder.getOrNull(ladderIndex)
         ladderAttempts += 1
+
 
         // Wrap around instead of walking off the end. Because a successful rung is
         // remembered and reused first, the ladder can start anywhere — so "done"
@@ -892,6 +1067,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             sendStatus(STATUS_FAILED, "Could not connect on this carrier. Try Wi-Fi or another SIM.")
             ladderIndex = 0
             ladderAttempts = 0
+            regionPhase = false
             return
         }
 
@@ -1113,6 +1289,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             .getInt(winningStrategyKey(), 0)
             .coerceIn(0, activeLadder.size - 1)
         ladderAttempts = 0
+        armRegionPhase()
 
         worker.execute {
             try {
@@ -1415,6 +1592,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 .getInt(winningStrategyKey(), 0)
                 .coerceIn(0, activeLadder.size - 1)
             ladderAttempts = 0
+            armRegionPhase()
             worker.execute {
                 try {
                     ConnectionLog.record("Preparing PSIPHON identity")
@@ -1558,6 +1736,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // fires after teardown would resurrect Psiphon on a dead TUN.
         ladderActive.set(false)
         cancelLadderTimer()
+        // A stale region phase would apply the country filter to the *next*
+        // connect's first attempt even after the user set the picker back to Auto.
+        regionPhase = false
         // Order matters: stop routing first so no more packets enter a tunnel
         // that is being torn down, then stop Psiphon itself.
         Tun2SocksManager.stop()

@@ -2063,6 +2063,17 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
+        // Third in the same run of rows, and last on purpose: "Connection mode"
+        // picks what connects, "Outer transport" picks what carries it, and this
+        // picks where it comes out. Reading top to bottom follows the packet.
+        lateinit var egressRow: OrbitSettingsRow
+        egressRow = navRow("Preferred country", egressRegionLabel()) {
+            chooseEgressRegion { egressRow.setValue(egressRegionLabel()) }
+        }
+        content.addView(egressRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
         content.addView(navRow("Tunnel controls", "Shaping · Anti-DPI") { openTunnelControlsScreen() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2372,6 +2383,63 @@ class MainActivity : Activity() {
         after?.invoke()
     }
 
+    /**
+     * The preferred egress country, or "auto".
+     *
+     * Stored as the two-letter code (or [CoreConfig.EGRESS_REGION_AUTO]) so the
+     * service can hand it straight to Psiphon without a lookup table on that side.
+     */
+    private fun egressRegion(): String =
+        CoreConfig.egressRegion(this) ?: CoreConfig.EGRESS_REGION_AUTO
+
+    /** What the settings row shows: "Automatic" or "🇩🇪 Germany". */
+    private fun egressRegionLabel(): String {
+        val code = egressRegion()
+        return if (code == CoreConfig.EGRESS_REGION_AUTO) "Automatic" else PsiphonRegions.label(code)
+    }
+
+    /**
+     * Pick the country Psiphon should try first.
+     *
+     * Deliberately worded as a preference everywhere in this sheet. Psiphon's
+     * `EgressRegion` is a hard filter, so a country the carrier cannot reach would
+     * mean no connection at all — the service works around that by giving the
+     * choice one short attempt and then falling back to every country. The subtitle
+     * says so, because a control that silently disobeys is worse than one that
+     * explains its limits.
+     */
+    private fun chooseEgressRegion(after: (() -> Unit)? = null) {
+        val options = listOf(CoreConfig.EGRESS_REGION_AUTO) + PsiphonRegions.options(this)
+        showChoiceSheet(
+            title = "Preferred country",
+            subtitle = "Tried first. If it will not connect, all countries are tried.",
+            options = options,
+            selected = egressRegion(),
+            label = { code ->
+                if (code == CoreConfig.EGRESS_REGION_AUTO) "Automatic" else PsiphonRegions.label(code)
+            },
+            description = { code ->
+                if (code == CoreConfig.EGRESS_REGION_AUTO) {
+                    "Fastest — Psiphon picks whichever server answers first"
+                } else {
+                    PsiphonRegions.detail(code)
+                }
+            },
+            scrollable = true,
+        ) { chosen ->
+            preferences().edit().putString(CoreConfig.EGRESS_REGION_PREF, chosen).apply()
+            ConnectionLog.record(
+                if (chosen == CoreConfig.EGRESS_REGION_AUTO) {
+                    "Preferred exit country cleared — Psiphon chooses"
+                } else {
+                    "Preferred exit country set to ${PsiphonRegions.name(chosen)} ($chosen)"
+                }
+            )
+            after?.invoke()
+        }
+    }
+
+
     private fun chooseLogLevel() = showChoiceSheet(
         title = "Log level",
         subtitle = "Control verbosity of logs",
@@ -2584,6 +2652,23 @@ class MainActivity : Activity() {
         label: (T) -> String,
         description: (T) -> String,
         onSelected: (T) -> Unit,
+    ) = showChoiceSheet(title, subtitle, options, selected, label, description, false, onSelected)
+
+    /**
+     * @param scrollable caps the option list at 55% of the screen and scrolls it.
+     *   Needed once a list can be long — the country picker has 25+ entries, and
+     *   without this the sheet grows past the top of the screen and the rows at
+     *   both ends become unreachable.
+     */
+    private fun <T> showChoiceSheet(
+        title: String,
+        subtitle: String,
+        options: List<T>,
+        selected: T,
+        label: (T) -> String,
+        description: (T) -> String,
+        scrollable: Boolean,
+        onSelected: (T) -> Unit,
     ) {
         // `after` is invoked by the caller's onSelected lambda; see chooseObfuscation
         // and friends, which pass a refresh for the row that opened the sheet.
@@ -2601,6 +2686,9 @@ class MainActivity : Activity() {
         sheet.addView(label(subtitle, 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        // Rows live in their own container so a long list can be wrapped in a
+        // ScrollView without the header and subtitle scrolling away with it.
+        val optionsHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val rows = mutableMapOf<T, SelectionOption>()
         options.forEachIndexed { index, item ->
             val optionTitle = label(label(item), 16f, INK, TypefaceStyle.MEDIUM)
@@ -2626,9 +2714,30 @@ class MainActivity : Activity() {
             val option = SelectionOption(row, optionTitle, indicator, 18)
             rows[item] = option
             setSelectionState(option, item == selected, animate = false)
-            sheet.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(72)).apply {
+            optionsHost.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(72)).apply {
                 topMargin = if (index == 0) 0 else dp(8)
             })
+        }
+        if (scrollable) {
+            val cap = (resources.displayMetrics.heightPixels * 0.55f).toInt()
+            val scroll = ScrollView(this).apply {
+                isVerticalScrollBarEnabled = false
+                isFillViewport = false
+                addView(optionsHost)
+            }
+            sheet.addView(scroll, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, cap,
+            ))
+            // Open on the current choice rather than at the top: with 25 countries
+            // the selected one is usually off screen, and a picker that hides your
+            // own setting reads as if nothing was ever chosen.
+            rows[selected]?.row?.let { target ->
+                scroll.post { scroll.scrollTo(0, (target.top - dp(72)).coerceAtLeast(0)) }
+            }
+        } else {
+            sheet.addView(optionsHost, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
         }
         dialog.setContentView(FrameLayout(this).apply {
             setPadding(dp(16), 0, dp(16), dp(16))
@@ -2642,6 +2751,7 @@ class MainActivity : Activity() {
             setGravity(Gravity.BOTTOM)
         }
     }
+
 
     private fun closeSettingsScreen() {
         showingSettings = false

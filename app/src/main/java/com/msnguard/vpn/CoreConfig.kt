@@ -151,6 +151,42 @@ object CoreConfig {
     const val CHAIN_OUTER_AUTO = "auto"
 
     /**
+     * Which egress country the user asked Psiphon to try first, or "auto".
+     *
+     * A *preference*, not a constraint. Psiphon's own `EgressRegion` key is a hard
+     * filter — set it and every server outside that country disappears from the
+     * candidate pool — and pinning it for the whole session would break the one
+     * path that works on the worst domestic operator: of the 430 embedded server
+     * entries only 5 advertise FRONTED-MEEK, and all 5 are US/GB. So the country is
+     * used for a single short attempt in front of the ladder, then dropped.
+     *
+     * Shared by both Psiphon paths (plain and chained) on purpose: the question
+     * "which country do you want to come out in" has the same answer either way.
+     */
+    const val EGRESS_REGION_PREF = "psiphon_egress_region"
+
+    /** Value of [EGRESS_REGION_PREF] meaning "let Psiphon choose". */
+    const val EGRESS_REGION_AUTO = "auto"
+
+    /**
+     * The preferred egress country, or null when the user has not picked one.
+     *
+     * Anything that is not two ASCII letters is treated as "auto" rather than
+     * passed through: an invalid region would silently empty Psiphon's candidate
+     * pool and every rung would then fail for a reason that looks like censorship.
+     */
+    fun egressRegion(context: Context): String? {
+        val stored = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getString(EGRESS_REGION_PREF, EGRESS_REGION_AUTO)
+            ?.trim()
+            ?.uppercase()
+            .orEmpty()
+        if (stored.isEmpty() || stored.equals(EGRESS_REGION_AUTO, ignoreCase = true)) return null
+        return if (PsiphonRegions.isCode(stored)) stored else null
+    }
+
+
+    /**
      * The transports this connect may use for the outer leg.
      *
      * Auto returns the whole ladder. A pinned transport returns only itself — no
