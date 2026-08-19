@@ -2051,6 +2051,18 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
+        // Directly under "Connection mode", because it answers the same question one
+        // level down: that row picks what connects, this one picks what carries it
+        // when Psiphon over WARP is armed. Kept off the home screen — it is a
+        // once-per-SIM knob, and Auto already handles the common case.
+        lateinit var chainOuterRow: OrbitSettingsRow
+        chainOuterRow = navRow("Outer transport", chainOuterMode().label) {
+            chooseChainOuterMode { chainOuterRow.setValue(chainOuterMode().label) }
+        }
+        content.addView(chainOuterRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
         content.addView(navRow("Tunnel controls", "Shaping · Anti-DPI") { openTunnelControlsScreen() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2307,6 +2319,44 @@ class MainActivity : Activity() {
         description = { it.description },
     ) { chosen ->
         preferences().edit().putString(PERF_PROFILE, chosen.coreName).apply()
+        after?.invoke()
+    }
+
+    /**
+     * Which transport the chain pins for its outer leg, or Auto.
+     *
+     * Reads through [CoreConfig.chainOuterCandidates] rather than the raw preference,
+     * so an unknown or stale stored value resolves to AUTO in exactly the same way
+     * the service resolves it. The two must never disagree: the settings row would
+     * then show a pin the connect path ignores.
+     */
+    private fun chainOuterMode(): ChainOuterMode {
+        val candidates = CoreConfig.chainOuterCandidates(this)
+        if (candidates.size > 1) return ChainOuterMode.AUTO
+        return ChainOuterMode.entries.firstOrNull { it.coreName == candidates.first() }
+            ?: ChainOuterMode.AUTO
+    }
+
+    private fun chooseChainOuterMode(after: (() -> Unit)? = null) = showChoiceSheet(
+        title = "Outer transport",
+        subtitle = "Which WARP tunnel carries Psiphon in Psiphon over WARP",
+        options = ChainOuterMode.entries.toList(),
+        selected = chainOuterMode(),
+        label = { it.label },
+        description = { it.description },
+    ) { chosen ->
+        preferences().edit()
+            .putString(CoreConfig.CHAIN_OUTER_MODE_PREF, chosen.coreName)
+            .apply()
+        ConnectionLog.record(
+            if (chosen == ChainOuterMode.AUTO) {
+                "Psiphon-over-WARP outer transport set to Auto"
+            } else {
+                "Psiphon-over-WARP outer transport pinned to ${chosen.label}"
+            }
+        )
+        // The card's subtitle names the transport, so it has to be repainted.
+        renderChainCard()
         after?.invoke()
     }
 
@@ -3376,6 +3426,16 @@ class MainActivity : Activity() {
             else -> null
         }
         chainCard.setUnavailable(reason)
+        // Name the pinned transport on the card. Without this, a pin set in settings
+        // is invisible here and the card would still read "auto transport" while the
+        // connect path used only WireGuard.
+        chainCard.setOuterSummary(
+            if (chainOuterMode() == ChainOuterMode.AUTO) {
+                "auto transport"
+            } else {
+                "via ${chainOuterMode().label}"
+            }
+        )
         chainCard.setArmed(chainArmed())
     }
 
@@ -3744,6 +3804,31 @@ class MainActivity : Activity() {
         ALL("All"),
         APP("App"),
         CORE("Core"),
+    }
+
+    /**
+     * How the chain picks the WARP transport that carries Psiphon.
+     *
+     * AUTO is the default and should stay it: it tries MASQUE, then WireGuard, then
+     * WoW, and remembers the winner per device, so it is right on any carrier without
+     * being told anything. The pinned entries exist for a user who already knows what
+     * their carrier allows and would rather not sit through the search — a pin does
+     * NOT fall back, since spending a minute on a transport known to be blocked is
+     * the exact cost it is meant to avoid.
+     */
+    private enum class ChainOuterMode(
+        val coreName: String,
+        val label: String,
+        val description: String,
+    ) {
+        AUTO(
+            CoreConfig.CHAIN_OUTER_AUTO,
+            "Auto",
+            "Try MASQUE, then WireGuard, then WoW — remembers what works",
+        ),
+        MASQUE("masque", "MASQUE", "HTTP/3, falling back to HTTP/2 with TLS fragmentation"),
+        WIREGUARD("wireguard", "WireGuard", "Single WARP tunnel; blocked on some carriers"),
+        WOW("gool", "WoW", "WARP on WARP — slowest, for the most filtered networks"),
     }
 
     private data class SelectionOption(

@@ -1136,7 +1136,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
                 NativeCore.attach(this)
                 val outer = raiseOuterLeg() ?: error(
-                    "No WARP transport could carry Psiphon on this network"
+                    if (CoreConfig.chainOuterIsAuto(this)) {
+                        "No WARP transport could carry Psiphon on this network"
+                    } else {
+                        // Naming the pinned transport is the actionable part: the fix
+                        // is to change the pin, not to retry.
+                        val pinned = CoreConfig.chainOuterLabel(
+                            CoreConfig.chainOuterCandidates(this).first()
+                        )
+                        "$pinned could not carry Psiphon; try Auto in settings"
+                    }
                 )
                 ConnectionLog.record("Chain: outer leg ready — starting Psiphon through it")
 
@@ -1173,10 +1182,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * next rung would fail instantly if the previous one were still unwinding.
      */
     private fun raiseOuterLeg(): String? {
-        val ladder = CoreConfig.CHAIN_OUTER_LADDER
-        val start = getSharedPreferences("settings", MODE_PRIVATE)
+        // Auto gives the whole ladder; a pinned transport gives just that one, with
+        // no fallback — a pin exists to stop the app spending a minute on transports
+        // the user already knows their carrier blocks.
+        val ladder = CoreConfig.chainOuterCandidates(this)
+        val auto = ladder.size > 1
+        val remembered = getSharedPreferences("settings", MODE_PRIVATE)
             .getInt(CoreConfig.CHAIN_OUTER_PREF, 0)
-            .coerceIn(0, ladder.size - 1)
+        // The remembered index is into the full ladder, so it only means anything
+        // when the full ladder is what we are walking.
+        val start = if (auto) remembered.coerceIn(0, ladder.size - 1) else 0
+
+        if (!auto) {
+            ConnectionLog.record(
+                "Chain: outer transport pinned to ${CoreConfig.chainOuterLabel(ladder[0])}"
+            )
+        }
 
         for (offset in ladder.indices) {
             if (stopRequested.get()) return null
@@ -1232,16 +1253,30 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             }
 
             if (awaitOuterProxy(budget)) {
-                // Remember what worked, so the next connect starts here.
-                getSharedPreferences("settings", MODE_PRIVATE).edit()
-                    .putInt(CoreConfig.CHAIN_OUTER_PREF, index).apply()
+                // Remember what worked, so the next automatic connect starts here.
+                // Only meaningful for the full ladder: with a pin there is one entry
+                // and the index would refer to the wrong transport later.
+                if (auto) {
+                    getSharedPreferences("settings", MODE_PRIVATE).edit()
+                        .putInt(CoreConfig.CHAIN_OUTER_PREF, index).apply()
+                }
                 chainOuterCommitted = true
                 ConnectionLog.record("Chain: $label is carrying the outer leg")
                 return label
             }
 
             if (stopRequested.get()) return null
-            ConnectionLog.record("Chain: $label did not come up in ${budget / 1000}s; trying the next transport")
+            if (auto) {
+                ConnectionLog.record(
+                    "Chain: $label did not come up in ${budget / 1000}s; trying the next transport"
+                )
+            } else {
+                // A pin has nothing to fall back to, by design.
+                ConnectionLog.record(
+                    "Chain: $label did not come up in ${budget / 1000}s and it is pinned; " +
+                        "switch the outer transport to Auto in settings to try the others"
+                )
+            }
             stopOuterLeg()
         }
         return null

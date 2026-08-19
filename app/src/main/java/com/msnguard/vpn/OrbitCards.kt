@@ -281,6 +281,14 @@ class ChainModeCard(
     private var armed = false
     /** Why the card is unavailable, shown in place of the normal subtitle. */
     private var unavailableReason: String? = null
+    /**
+     * How the outer transport is chosen, as words for the armed subtitle.
+     *
+     * Set from settings, not here: the card shows the choice, the settings row makes
+     * it. Keeping the string rather than the enum keeps this view free of any
+     * knowledge of the transports themselves.
+     */
+    private var outerSummary: String = "auto transport"
 
     private fun px(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
@@ -355,7 +363,18 @@ class ChainModeCard(
     }
 
     /** Description of what the chain does, shown when armed. */
-    private fun armedSubtitle(): String = "armed · Psiphon inside WARP, auto transport"
+    private fun armedSubtitle(): String = "armed · Psiphon inside WARP, $outerSummary"
+
+    /**
+     * Says how the outer transport is chosen, e.g. "auto transport" or "via WoW".
+     *
+     * Repaints immediately so the card cannot disagree with the settings row that
+     * just changed it.
+     */
+    fun setOuterSummary(summary: String) {
+        outerSummary = summary
+        setArmed(armed)
+    }
 
     /** Paints the armed/disarmed look. Does not notify [onToggle]. */
     fun setArmed(value: Boolean) {

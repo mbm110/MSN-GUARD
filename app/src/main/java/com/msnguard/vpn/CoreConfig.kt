@@ -137,6 +137,43 @@ object CoreConfig {
      */
     val CHAIN_OUTER_LADDER = listOf("masque", "wireguard", "gool")
 
+    /**
+     * Which transport the user pinned for the chain's outer leg, or "auto".
+     *
+     * Separate from [CHAIN_OUTER_PREF]: this is a choice, that is a measurement.
+     * Pinning is for the case where the user already knows what their carrier
+     * allows and does not want to sit through the search — the automatic ladder
+     * remains the default because it is right without being told anything.
+     */
+    const val CHAIN_OUTER_MODE_PREF = "chain_outer_mode"
+
+    /** Value of [CHAIN_OUTER_MODE_PREF] meaning "try them all, in order". */
+    const val CHAIN_OUTER_AUTO = "auto"
+
+    /**
+     * The transports this connect may use for the outer leg.
+     *
+     * Auto returns the whole ladder. A pinned transport returns only itself — no
+     * silent fallback, because a pin exists precisely to stop the app spending time
+     * on transports the user knows are blocked. A stale or unknown pin falls back
+     * to auto rather than producing an empty ladder.
+     */
+    fun chainOuterCandidates(context: Context): List<String> {
+        val mode = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getString(CHAIN_OUTER_MODE_PREF, CHAIN_OUTER_AUTO)
+            ?.trim()
+            .orEmpty()
+        return when {
+            mode.isEmpty() || mode == CHAIN_OUTER_AUTO -> CHAIN_OUTER_LADDER
+            CHAIN_OUTER_LADDER.contains(mode) -> listOf(mode)
+            else -> CHAIN_OUTER_LADDER
+        }
+    }
+
+    /** Whether the outer transport is being chosen automatically. */
+    fun chainOuterIsAuto(context: Context): Boolean =
+        chainOuterCandidates(context).size > 1
+
     /** Human-readable name for a rung of [CHAIN_OUTER_LADDER]. */
     fun chainOuterLabel(protocol: String): String = when (protocol) {
         "masque" -> "MASQUE"
