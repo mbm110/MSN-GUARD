@@ -945,11 +945,40 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 "status" -> {
                     val status = event.getString("status")
                     val detail = if (event.isNull("detail")) null else event.getString("detail")
+                    // In chained mode these events describe the OUTER leg only.
+                    //
+                    // The core fires mark_ready() the moment WARP is up, which is
+                    // long before Psiphon has a tunnel. Forwarding that as
+                    // CONNECTED made the UI start its verification gate against
+                    // Psiphon's SOCKS port while Psiphon was still establishing:
+                    // the field log shows "no active tunnels" at 18:01:49 and the
+                    // probe only passing at 18:02:06, i.e. ten attempts and seven
+                    // seconds stuck on "Connecting" — and in the second log the
+                    // same race hit the probe ceiling and reported Connection
+                    // Failed over a perfectly healthy outer tunnel.
+                    //
+                    // So in chained mode the outer leg never reports CONNECTED.
+                    // The chain's CONNECTED comes from onConnected(), once Psiphon
+                    // has a tunnel and tun2socks is routing. Failures still pass
+                    // through: if the outer leg dies the chain cannot work.
+                    if (chainMode && status == STATUS_CONNECTED) {
+                        ConnectionLog.record("Chain: outer leg is up; waiting for Psiphon")
+                        sendStatus(STATUS_CONNECTING, "Connecting Psiphon through WARP…")
+                        return
+                    }
                     sendStatus(status, detail)
                 }
                 "traffic" -> {
                     val tx = event.getLong("tx")
                     val rx = event.getLong("rx")
+                    // Chained mode has two sets of counters for the same bytes: the
+                    // core's (outer, absolute totals) and Psiphon's (inner, deltas
+                    // via onBytesTransferred). Letting both write here made them
+                    // fight — Psiphon accumulating while the core overwrote. The
+                    // inner leg is the one carrying the user's data, and it is what
+                    // plain Psiphon mode already reports, so the outer leg's
+                    // counters are dropped for consistency.
+                    if (chainMode) return
                     currentTx = tx
                     currentRx = rx
                     updateTrafficNotification(tx, rx)
@@ -960,6 +989,24 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // reports the carrier's IP, not the tunnel's.
                 "exit_ip" -> {
                     val ip = event.getString("ip")
+                    // In chained mode this is the OUTER leg's exit — a Cloudflare
+                    // WARP address — and it is NOT where the device's traffic
+                    // leaves. Psiphon's egress is, and the field report caught the
+                    // contradiction: the card read Germany (Psiphon's server, per
+                    // `ConnectedServerRegion: DE`) while the WARP address behind it
+                    // was American. Publishing the outer address would make the
+                    // card and the traffic disagree, so it is logged and dropped.
+                    //
+                    // Belt and braces: the outer leg runs the userspace netstack,
+                    // which has no exit probe (only tun::bridge does), so today it
+                    // never emits this at all. The guard is here so that adding one
+                    // later cannot silently start overwriting the card.
+                    if (chainMode) {
+                        if (ip.isNotBlank()) {
+                            ConnectionLog.record("Chain: outer WARP leg exits at $ip (not the app's exit)")
+                        }
+                        return
+                    }
                     if (ip.isNotBlank()) {
                         currentVpnIp = ip
                         // Survives the UI: the tile can connect with no activity

@@ -1563,15 +1563,15 @@ class MainActivity : Activity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 val clipboard = getSystemService(ClipboardManager::class.java)
                 clipboard?.setPrimaryClip(ClipData.newPlainText("MSN-GUARD log", text))
-                // Android 13+ shows its own copy confirmation, so a Toast there
-                // would be a duplicate.
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-                    Toast.makeText(
-                        this,
-                        "Log copied (${text.length / 1024} KB)",
-                        Toast.LENGTH_SHORT,
-                    ).show()
-                }
+                // Always confirm, on every Android version. Android 13+ shows its
+                // own clipboard chip, so this is briefly a duplicate there — but a
+                // silent COPY on a long log is indistinguishable from a broken
+                // button, and being told twice is better than not being told.
+                Toast.makeText(
+                    this,
+                    "لاگ کپی شد (${text.length / 1024} KB)",
+                    Toast.LENGTH_SHORT,
+                ).show()
             }
         }, "log-copy").start()
     }
