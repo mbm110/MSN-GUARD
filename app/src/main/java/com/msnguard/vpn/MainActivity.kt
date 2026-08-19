@@ -3,6 +3,8 @@ package com.msnguard.vpn
 import android.app.Activity
 import android.app.Dialog
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -22,6 +24,7 @@ import android.os.Handler
 import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
@@ -39,6 +42,8 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
+import androidx.core.content.FileProvider
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
@@ -58,6 +63,14 @@ class MainActivity : Activity() {
     private lateinit var tileSpeed: MetricTile
     private lateinit var exitNodeCard: ExitNodeCard
     private lateinit var chainCard: ChainModeCard
+    /**
+     * Whether the transport controls accept input, i.e. no tunnel is up.
+     *
+     * Mirrored here because [renderChainCard] needs it alongside the selected
+     * protocol, and reading it back off the rail's `isEnabled` would couple the two
+     * controls for no reason.
+     */
+    private var modeControlsEnabled = true
     private lateinit var transportRail: TransportRail
     private lateinit var actionBar: OrbitActionBar
     private lateinit var footerWave: OrbitFooterWave
@@ -309,11 +322,11 @@ class MainActivity : Activity() {
         }
         exitNodeCard = ExitNodeCard(this, palette) { refreshPublicIp() }
         chainCard = ChainModeCard(this, palette) { armed -> setChainArmed(armed) }
-        chainCard.setArmed(chainArmed())
         transportRail = TransportRail(this, palette, Protocol.entries.map { railLabel(it) }) { index ->
             updateConnectionMode(Protocol.entries[index])
         }
         transportRail.select(Protocol.entries.indexOf(selectedProtocol), animate = false)
+        renderChainCard()
         actionBar = OrbitActionBar(this, palette, listOf(
             OrbitActionBar.Entry("LOG", OrbitActionBar.Glyph.LOG) { openLogsScreen() },
             OrbitActionBar.Entry("SPLIT", OrbitActionBar.Glyph.SPLIT) { openSplitTunnelScreen() },
@@ -978,11 +991,12 @@ class MainActivity : Activity() {
             dp(46),
         ).apply { topMargin = dp(12) })
 
-        // Below the rail, not on it: the rail picks ONE transport, this stacks
-        // Psiphon on top of the picked one. Separate row, separate accent.
+        // Below the rail, not on it: the rail picks the transport, this wraps the
+        // Psiphon one in WARP. Same dp(56) as the action bar so every full-width
+        // control on this screen is the same height.
         addView(chainCard, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
+            dp(56),
         ).apply { topMargin = dp(10) })
 
         addView(actionBar, LinearLayout.LayoutParams(
@@ -1242,7 +1256,18 @@ class MainActivity : Activity() {
         val header = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { closeLogsScreen() }, LinearLayout.LayoutParams(dp(48), dp(56)))
-            addView(label("Logs", 22f, INK, TypefaceStyle.MEDIUM))
+            addView(label("Logs", 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f,
+            ))
+            // COPY and SHARE act on the whole log FILE, not on the text above.
+            // What is on screen is the ring buffer (100 entries) plus
+            // NativeCore.lastLog(), and both drop their oldest lines — which is
+            // exactly why the beginning of a long log was unreachable. The file
+            // that ConnectionLog mirrors to keeps everything up to its 256KB cap.
+            addView(createLogActionButton("COPY") { copyFullLog() })
+            addView(createLogActionButton("SHARE") { shareFullLog() })
         }
         content.addView(header)
         content.addView(label("Tunnel and VPN events", 14f, MUTED), LinearLayout.LayoutParams(
@@ -1456,6 +1481,135 @@ class MainActivity : Activity() {
             LogTab.CORE -> coreEvents
         }
         return events.joinToString("\n").ifBlank { "No connection events yet" }
+    }
+
+    /**
+     * A small text button for the logs header.
+     *
+     * Not an OrbitActionBar entry: those are full-height pills with a glyph, and
+     * three of them already sit at the bottom of the main screen. These live inline
+     * next to the title.
+     */
+    private fun createLogActionButton(caption: String, onClick: () -> Unit): TextView =
+        label(caption, 11f, primary, TypefaceStyle.MEDIUM).apply {
+            letterSpacing = 0.1f
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            background = roundedBackground(SURFACE_VARIANT, 12, DIVIDER)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "$caption the full log"
+            setOnClickListener {
+                performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                onClick()
+            }
+            // Set here rather than via layoutParams: the view is not attached yet
+            // when this returns, so layoutParams is still null.
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { leftMargin = dp(6) }
+        }
+
+    private fun appVersionOrNull(): String? =
+        runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()
+
+    /**
+     * The whole log, oldest line first, read from disk.
+     *
+     * Why the file and not the screen: the visible text is capped twice over — the
+     * ring buffer holds 100 entries and `NativeCore.lastLog()` keeps only its own
+     * recent window — so on a long session the first lines are simply gone, which
+     * is precisely the case where they matter. `ConnectionLog` mirrors every line
+     * to `connection.log`, self-truncating at 256KB, so that file is the complete
+     * record.
+     *
+     * Falls back to the in-memory snapshot if the file is missing or unreadable,
+     * so the button always produces something.
+     */
+    private fun fullLogText(): String {
+        val fromDisk = runCatching {
+            File(filesDir, "connection.log").takeIf { it.isFile }?.readText()
+        }.getOrNull()
+        val core = NativeCore.lastLog().lineSequence().filter(String::isNotBlank).toList()
+        val app = fromDisk?.takeIf { it.isNotBlank() } ?: ConnectionLog.snapshot().joinToString("\n")
+        return buildString {
+            append("MSN-GUARD ")
+            append(appVersionOrNull() ?: "?")
+            append(" · ")
+            append(selectedProtocol.label)
+            if (chainRunning()) append(" over WARP")
+            append('\n')
+            append(app.trimEnd())
+            if (core.isNotEmpty()) {
+                append("\n--- core ---\n")
+                append(core.joinToString("\n"))
+            }
+        }
+    }
+
+    /**
+     * Copies the full log to the clipboard on a background thread.
+     *
+     * The read is off the main thread because the file can be a quarter of a
+     * megabyte and this is invoked from a tap; the clipboard write itself has to be
+     * on the main thread. Nothing is ever put into a TextView, which is what would
+     * actually freeze the UI on a long log.
+     */
+    private fun copyFullLog() {
+        Thread({
+            val text = runCatching { fullLogText() }.getOrElse { "Could not read the log: ${it.message}" }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val clipboard = getSystemService(ClipboardManager::class.java)
+                clipboard?.setPrimaryClip(ClipData.newPlainText("MSN-GUARD log", text))
+                // Android 13+ shows its own copy confirmation, so a Toast there
+                // would be a duplicate.
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                    Toast.makeText(
+                        this,
+                        "Log copied (${text.length / 1024} KB)",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }
+        }, "log-copy").start()
+    }
+
+    /**
+     * Shares the full log as a file.
+     *
+     * The escape hatch for a log too big to paste: clipboards and chat apps both
+     * truncate very long text, and a 256KB log is well past what either handles.
+     * Written into cacheDir/logs, which the FileProvider exposes.
+     */
+    private fun shareFullLog() {
+        Thread({
+            val result = runCatching {
+                val dir = File(cacheDir, "logs").apply { mkdirs() }
+                val target = File(dir, "msn-guard-log.txt")
+                target.writeText(fullLogText())
+                target
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.onFailure {
+                    Toast.makeText(this, "Could not write the log: ${it.message}", Toast.LENGTH_LONG).show()
+                }.onSuccess { file ->
+                    val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                    startActivity(
+                        Intent.createChooser(
+                            Intent(Intent.ACTION_SEND)
+                                .setType("text/plain")
+                                .putExtra(Intent.EXTRA_SUBJECT, "MSN-GUARD log")
+                                .putExtra(Intent.EXTRA_STREAM, uri)
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                            "Share log",
+                        )
+                    )
+                }
+            }
+        }, "log-share").start()
     }
 
     private fun openScannerScreen(animate: Boolean = true) {
@@ -2931,10 +3085,7 @@ class MainActivity : Activity() {
         // pick changes while the card is armed. Without this, arming on MASQUE and
         // then switching to WireGuard would still tunnel Psiphon through MASQUE.
         if (chainArmed()) setChainArmed(true)
-        // Psiphon cannot carry Psiphon. Selecting it leaves the card armed in
-        // preferences but visibly off, and configJson() ignores it — the state the
-        // user sees and the config that runs agree.
-        chainCard.setArmed(chainArmed() && protocol != Protocol.PSIPHON)
+        renderChainCard()
         // Keep the rail in sync when the change came from somewhere else (the
         // mode screen, a restored preference) rather than from a rail tap.
         transportRail.select(Protocol.entries.indexOf(protocol), animate = true)
@@ -2994,14 +3145,12 @@ class MainActivity : Activity() {
     /**
      * The config for the next connect.
      *
-     * When the chain card is armed the protocol becomes the chain marker instead
-     * of the rail's pick: the service reads that, runs the rail's transport as the
-     * outer leg (stored separately in CHAIN_OUTER_PREF) and Psiphon inside it.
-     * Psiphon-on-Psiphon is meaningless, so an armed card is ignored when the rail
-     * itself is on Psiphon.
+     * The chain marker replaces the protocol only when PSIPHON is selected and the
+     * card is armed: the chain wraps Psiphon in WARP, so it means nothing for the
+     * other transports and the card is disabled there.
      */
     private fun configJson(): String {
-        val chained = chainArmed() && selectedProtocol != Protocol.PSIPHON
+        val chained = chainArmed() && selectedProtocol == Protocol.PSIPHON
         return if (chained) {
             CoreConfig.json(this, MsnGuardVpnService.CHAIN_PROTOCOL_MARKER.lowercase())
         } else {
@@ -3048,11 +3197,11 @@ class MainActivity : Activity() {
         connectionTitle.setTextColor(connected)
         connectionTitle.text = "Connected"
         connectionDetail.text = when {
-            // Say what is actually carrying traffic. "MASQUE tunnel is active" is
-            // wrong when Psiphon is riding inside MASQUE — and this mode is only
-            // worth using if the user can see it is the one running.
-            chainRunning() && restored -> "Psiphon over ${selectedProtocol.label} recovered"
-            chainRunning() -> "Psiphon over ${selectedProtocol.label} is active"
+            // Say what is actually carrying traffic. With the chain armed the rail
+            // reads PSIPHON, so "Psiphon tunnel is active" hides the WARP leg that
+            // is doing the circumvention.
+            chainRunning() && restored -> "Psiphon over WARP recovered"
+            chainRunning() -> "Psiphon over WARP is active"
             restored -> "${selectedProtocol.label} tunnel recovered"
             else -> "${selectedProtocol.label} tunnel is active"
         }
@@ -3197,35 +3346,58 @@ class MainActivity : Activity() {
         // Arming or disarming mid-session would leave the running tunnel and the
         // card disagreeing, and the change only takes effect on the next connect
         // anyway. Locked while connected, like the rail.
-        chainCard.isEnabled = enabled
+        modeControlsEnabled = enabled
+        renderChainCard()
     }
 
     /** Whether the chain choice applies to the tunnel that is running now. */
     private fun chainRunning(): Boolean =
-        chainArmed() && selectedProtocol != Protocol.PSIPHON
+        chainArmed() && selectedProtocol == Protocol.PSIPHON
+
+    /**
+     * Paints the chain card for the current transport and connection state.
+     *
+     * Two independent reasons it can be unavailable, and the order matters — the
+     * transport reason is the one the user can act on, so it wins:
+     *
+     *  - not on PSIPHON: the chain wraps the Psiphon transport in WARP, so on
+     *    MASQUE/WireGuard/WoW there is nothing to wrap. Disabled rather than
+     *    hidden, so the feature stays discoverable with its precondition visible.
+     *  - connected: the same lock the transport rail gets, since the choice only
+     *    takes effect on the next connect.
+     *
+     * The armed preference is deliberately left untouched while unavailable, so
+     * switching away and back restores the user's choice instead of clearing it.
+     */
+    private fun renderChainCard() {
+        val reason = when {
+            selectedProtocol != Protocol.PSIPHON -> "only for the PSIPHON transport"
+            !modeControlsEnabled -> "disconnect to change"
+            else -> null
+        }
+        chainCard.setUnavailable(reason)
+        chainCard.setArmed(chainArmed())
+    }
 
     /** Whether the next connect should chain Psiphon over the picked transport. */
     private fun chainArmed(): Boolean = preferences().getBoolean(CHAIN_ARMED, false)
 
     /**
-     * Persist the chain choice and remember which transport carries the outer leg.
+     * Persist the chain choice and record which transport carries the outer leg.
      *
-     * The outer protocol is whatever the rail has selected — except Psiphon itself,
-     * which cannot carry Psiphon. That case falls back to MASQUE rather than being
-     * rejected, so arming the card can never produce a config that cannot run.
+     * The outer leg is always MASQUE. The rail's pick is what goes *inside* WARP,
+     * and the card is only available on PSIPHON, so there is no user choice left
+     * to honour here — MASQUE is chosen because its gateway cache and
+     * last-known-good endpoint make a repeat connect fast.
      */
     private fun setChainArmed(armed: Boolean) {
-        val outer = when (selectedProtocol) {
-            Protocol.PSIPHON -> Protocol.MASQUE
-            else -> selectedProtocol
-        }
         preferences().edit()
             .putBoolean(CHAIN_ARMED, armed)
-            .putString(CoreConfig.CHAIN_OUTER_PREF, outer.coreName)
+            .putString(CoreConfig.CHAIN_OUTER_PREF, Protocol.MASQUE.coreName)
             .apply()
         if (armed) {
             ConnectionLog.record(
-                "Psiphon-over-WARP armed: outer ${outer.label}, Psiphon inside it"
+                "Psiphon-over-WARP armed: outer ${Protocol.MASQUE.label}, Psiphon inside it"
             )
         } else {
             ConnectionLog.record("Psiphon-over-WARP disarmed")

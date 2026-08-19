@@ -260,14 +260,13 @@ class OrbitActionBar(
  * The Psiphon-over-WARP button: a full-width chained-shield card.
  *
  * A separate control rather than a fifth cell on the transport rail, because it
- * is not a fifth transport — it runs two of them at once, it is measurably slower
- * than either alone, and it exists only for the case where neither layer's exit
- * address works by itself. Putting it on the rail would present it as a peer of
- * MASQUE and WireGuard and invite users to leave it on.
+ * is not a fifth transport — it wraps the Psiphon transport in a WARP tunnel. It
+ * is therefore only meaningful while PSIPHON is the selected transport, and is
+ * shown disabled on MASQUE / WireGuard / WoW rather than hidden, so the feature
+ * stays discoverable and its precondition is obvious.
  *
- * So it reads as deliberate: dimmed and outlined when off, lit with the violet
- * accent and a "CHAINED" badge when armed, with the cost stated in the subtitle
- * instead of hidden.
+ * Dimmed and outlined when off, lit with the violet accent and a "CHAINED" badge
+ * when armed.
  */
 class ChainModeCard(
     context: Context,
@@ -280,34 +279,43 @@ class ChainModeCard(
     private val badgeView: TextView
     private val icon: ChainGlyphView
     private var armed = false
+    /** Why the card is unavailable, shown in place of the normal subtitle. */
+    private var unavailableReason: String? = null
 
     private fun px(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
     init {
         orientation = HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(px(13), px(11), px(14), px(11))
+        // Vertical padding only pads within the fixed height the parent gives this
+        // card, which matches the action bar's dp(56). Do not add height here.
+        setPadding(px(13), px(6), px(14), px(6))
         isClickable = true
         isFocusable = true
         setOnClickListener {
+            // A disabled card must not toggle. isEnabled=false already blocks the
+            // click on most devices, but a focus-based tap (TV remote, keyboard)
+            // can still deliver one, and silently flipping state there would leave
+            // the card and the config disagreeing.
+            if (!isEnabled) return@setOnClickListener
             performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
             setArmed(!armed)
             onToggle(armed)
         }
 
         icon = ChainGlyphView(context, palette.violet)
-        addView(icon, LayoutParams(px(40), px(40)))
+        addView(icon, LayoutParams(px(34), px(34)))
 
         val column = LinearLayout(context).apply { orientation = VERTICAL }
         titleView = TextView(context).apply {
             text = "PSIPHON OVER WARP"
-            textSize = 11.5f
+            textSize = 11f
             letterSpacing = 0.1f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             setSingleLine(true)
         }
         subtitleView = TextView(context).apply {
-            textSize = 10f
+            textSize = 9.5f
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
         }
@@ -315,9 +323,9 @@ class ChainModeCard(
         column.addView(subtitleView, LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = px(2) })
+        ).apply { topMargin = px(1) })
         addView(column, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-            leftMargin = px(12)
+            leftMargin = px(11)
         })
 
         badgeView = TextView(context).apply {
@@ -335,48 +343,65 @@ class ChainModeCard(
         setArmed(false)
     }
 
+    /**
+     * Marks the card unavailable and says why in the subtitle.
+     *
+     * @param reason shown instead of the usual subtitle; null means available.
+     */
+    fun setUnavailable(reason: String?) {
+        unavailableReason = reason
+        isEnabled = reason == null
+        setArmed(armed)
+    }
+
     /** Paints the armed/disarmed look. Does not notify [onToggle]. */
     fun setArmed(value: Boolean) {
         armed = value
+        val available = unavailableReason == null
+        val lit = value && available
         val density = resources.displayMetrics.density
-        val fill = if (value) {
+        val fill = if (lit) {
             Sculpt.blend(palette.surface, palette.violet, 0.16f)
         } else {
             Sculpt.blend(palette.surface, palette.ink, 0.02f)
         }
         background = Sculpt.sculptedRipple(
-            density, fill, 20, palette.violet,
+            density, fill, 18, palette.violet,
             accent = Sculpt.withAlpha(
-                if (value) palette.violet else palette.ink,
-                if (value) 0.45f else 0.085f,
+                if (lit) palette.violet else palette.ink,
+                if (lit) 0.45f else 0.085f,
             ),
         )
-        titleView.setTextColor(if (value) palette.ink else palette.muted)
+        titleView.setTextColor(if (lit) palette.ink else palette.muted)
         // What it changes, not a speed claim. Chaining measured slower than either
         // layer alone on a clean network (0.23s vs 0.32s latency, same protocol
-        // both sides), but on a filtered carrier Psiphon alone is forced onto
+        // both sides), but on a filtered carrier Psiphon alone is pushed onto
         // domain-fronted CDN paths whose latency is far worse — so inside WARP it
         // can be the faster of the two. "Slower" was true of the lab and wrong in
         // the field, so the label states the effect that always holds.
-        subtitleView.text = if (value) {
-            "armed · two tunnels, different exit IP"
+        subtitleView.text = unavailableReason ?: if (value) {
+            "armed · Psiphon inside WARP, different exit IP"
         } else {
             "for when neither exit IP is accepted"
         }
         subtitleView.setTextColor(Sculpt.withAlpha(palette.faint, 0.95f))
-        badgeView.text = if (value) "CHAINED" else "OFF"
-        badgeView.setTextColor(if (value) palette.violet else palette.faint)
+        badgeView.text = when {
+            !available -> "N/A"
+            value -> "CHAINED"
+            else -> "OFF"
+        }
+        badgeView.setTextColor(if (lit) palette.violet else palette.faint)
         badgeView.background = Sculpt.sculptedBackground(
             density,
-            if (value) Sculpt.withAlpha(palette.violet, 0.16f) else Sculpt.darken(palette.surface, 0.16f),
+            if (lit) Sculpt.withAlpha(palette.violet, 0.16f) else Sculpt.darken(palette.surface, 0.16f),
             999,
-            Sculpt.withAlpha(if (value) palette.violet else palette.ink, if (value) 0.4f else 0.10f),
+            Sculpt.withAlpha(if (lit) palette.violet else palette.ink, if (lit) 0.4f else 0.10f),
         )
-        icon.setLinked(value)
-        contentDescription = if (value) {
-            "Psiphon over WARP is armed"
-        } else {
-            "Psiphon over WARP is off"
+        icon.setLinked(lit)
+        contentDescription = when {
+            !available -> "Psiphon over WARP unavailable: $unavailableReason"
+            value -> "Psiphon over WARP is armed"
+            else -> "Psiphon over WARP is off"
         }
     }
 
@@ -384,7 +409,7 @@ class ChainModeCard(
 
     override fun setEnabled(enabled: Boolean) {
         super.setEnabled(enabled)
-        alpha = if (enabled) 1f else 0.5f
+        alpha = if (enabled) 1f else 0.45f
     }
 }
 

@@ -122,8 +122,9 @@ class MsnGuardTileService : TileService() {
         val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
         val armed = prefs.getBoolean(CHAIN_ARMED, false)
         val picked = prefs.getString(DEFAULT_PROTOCOL, Protocol.MASQUE.coreName)
-        // Psiphon cannot carry Psiphon — same rule as the main screen.
-        return if (armed && picked != Protocol.PSIPHON.coreName) {
+        // Same rule as the main screen: the chain wraps Psiphon, so it only applies
+        // when Psiphon is the selected transport.
+        return if (armed && picked == Protocol.PSIPHON.coreName) {
             CoreConfig.json(this, MsnGuardVpnService.CHAIN_PROTOCOL_MARKER.lowercase())
         } else {
             CoreConfig.json(this)

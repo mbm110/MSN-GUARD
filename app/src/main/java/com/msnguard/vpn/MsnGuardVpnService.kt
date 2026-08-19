@@ -62,6 +62,40 @@ private val PROTOCOLS_DIRECT = listOf(
 )
 
 /**
+ * Every protocol that can cross a SOCKS5 upstream proxy — i.e. TCP only.
+ *
+ * Used as a HARD limit (`LimitTunnelProtocols`, not the `InitialLimit…`
+ * preference) whenever Psiphon runs over WARP. Two separate reasons it has to be
+ * a hard limit:
+ *
+ *  - `InitialLimitTunnelProtocols` is only a preference: once the candidate
+ *    budget is spent Psiphon reverts to its full set, which includes the
+ *    `INPROXY-WEBRTC-*` entries the bundled server list advertises.
+ *  - in-proxy is WebRTC, so it needs raw UDP sockets. A SOCKS5 upstream cannot
+ *    carry those, and the field log proves what happens: STUN goes out over the
+ *    carrier instead of the tunnel ("Failed get server reflexive address udp4
+ *    stun:… timeout while waiting for XORMappedAddr"), ICE gathering takes 34s
+ *    instead of ~130ms, and the broker round trip resolves DNS *untunneled*
+ *    (`UntunneledResolveIP` → `context deadline exceeded`) on exactly the link
+ *    Hamrah-e-Aval null-routes.
+ *
+ * QUIC-OSSH is absent for the same reason — it is UDP. Psiphon already declines
+ * to dial it when an upstream proxy is set (measured: 0 attempts across a full
+ * run, against 3 when dialling directly), so naming it here would be a
+ * contradiction rather than an option.
+ */
+private val PROTOCOLS_CHAINABLE = listOf(
+    "FRONTED-MEEK-OSSH",
+    "FRONTED-MEEK-HTTP-OSSH",
+    "TLS-OSSH",
+    "UNFRONTED-MEEK-HTTPS-OSSH",
+    "UNFRONTED-MEEK-OSSH",
+    "SHADOWSOCKS-OSSH",
+    "OSSH",
+    "SSH",
+)
+
+/**
  * One rung of the Psiphon escalation ladder.
  *
  * Each rung is a complete, self-contained Psiphon config variant plus the time
@@ -257,6 +291,34 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             config.put("NetworkLatencyMultiplier", 3.0)
         },
     )
+
+    /**
+     * The ladder actually in use for this session.
+     *
+     * Chained runs drop rung C. It is WebRTC, a SOCKS5 upstream cannot carry UDP,
+     * and the field log shows the failure precisely: STUN leaving over the carrier
+     * instead of the tunnel, 34-second ICE gathering, and an untunneled broker DNS
+     * lookup timing out on the link Hamrah-e-Aval null-routes. Keeping it in the
+     * list did not merely waste its 75s budget — the *starting* rung is read from
+     * `psiphon_winning_strategy`, which plain Psiphon had already set to C after a
+     * successful unchained connect, so the very first chained attempt began on the
+     * one rung that cannot work and the chainable rungs never got a fair turn.
+     *
+     * Indices differ between the two lists, which is exactly why the remembered
+     * rung is stored under a separate key per mode — see [winningStrategyKey].
+     */
+    private val activeLadder: List<PsiphonStrategy>
+        get() = if (chainMode) psiphonLadder.filter { it.name != "C" } else psiphonLadder
+
+    /**
+     * Where the last-working rung is remembered, per mode.
+     *
+     * Chained and unchained runs have different ladders, so an index means
+     * different things in each. Sharing one key is what put the chain on rung C to
+     * begin with.
+     */
+    private fun winningStrategyKey(): String =
+        if (chainMode) "psiphon_winning_strategy_chained" else "psiphon_winning_strategy"
 
     companion object {
         const val LOG_TAG = "MsnGuardVpnService"
@@ -567,14 +629,46 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // protocol selection and worker-pool sizing on top of the base config,
         // and owns the establish timeout so a dead rung is abandoned quickly
         // instead of burning the full two minutes.
-        val strategy = psiphonLadder.getOrNull(ladderIndex)
+        val strategy = activeLadder.getOrNull(ladderIndex)
         if (strategy != null) {
             strategy.configure(config)
             config.put("EstablishTunnelTimeoutSeconds", strategy.timeoutSeconds)
             ConnectionLog.record(
-                "Strategy ${ladderIndex + 1}/${psiphonLadder.size} " +
+                "Strategy ${ladderIndex + 1}/${activeLadder.size} " +
                     "(${strategy.name}): ${strategy.label} — ${strategy.timeoutSeconds}s budget"
             )
+        }
+
+        // Applied AFTER the rung, so no rung can widen it back. This is a hard
+        // limit, unlike the rungs' InitialLimitTunnelProtocols preference, because
+        // a preference lapses once the candidate budget is spent and Psiphon then
+        // reverts to its full set — including the UDP protocols a SOCKS5 upstream
+        // cannot carry.
+        if (chainMode) {
+            config.put("LimitTunnelProtocols", JSONArray(PROTOCOLS_CHAINABLE))
+
+            // The rung's ORDERING is kept, just narrowed to what can cross the
+            // proxy. Dropping it entirely would collapse rung A into rung D, and
+            // rung A's "fronted first" is the behaviour that works on
+            // Hamrah-e-Aval, where every direct dial is null-routed.
+            val preference = config.optJSONArray("InitialLimitTunnelProtocols")
+            if (preference != null) {
+                val chainable = (0 until preference.length())
+                    .map(preference::getString)
+                    .filter(PROTOCOLS_CHAINABLE::contains)
+                if (chainable.isEmpty()) {
+                    config.remove("InitialLimitTunnelProtocols")
+                    config.remove("InitialLimitTunnelProtocolsCandidateCount")
+                } else {
+                    config.put("InitialLimitTunnelProtocols", JSONArray(chainable))
+                }
+            }
+
+            // In-proxy off explicitly: rung C is already filtered out of
+            // activeLadder, but the base config must not leave the door open.
+            config.put("InproxyEnabled", false)
+            config.put("InproxyAllowClient", false)
+            ConnectionLog.record("Chain: TCP-only protocols (a SOCKS proxy cannot carry UDP)")
         }
         return config.toString()
     }
@@ -620,7 +714,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * is the same: [escalateLadder] moves to the next rung.
      */
     private fun armLadderTimer() {
-        val strategy = psiphonLadder.getOrNull(ladderIndex) ?: return
+        val strategy = activeLadder.getOrNull(ladderIndex) ?: return
         cancelLadderTimer()
         ladderActive.set(true)
         // +8s grace so Psiphon's internal timeout and teardown land first; racing
@@ -686,7 +780,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private fun recordLadderWinner(rungAtConnect: Int) {
         val protocol = activeTunnelProtocol
-        val inproxyRung = psiphonLadder.indexOfFirst { it.name == "C" }
+        // Indices are into activeLadder, which is the list ladderIndex walks and
+        // the list the stored value is read back against. In chained mode rung C
+        // is not in it, so `inproxyRung` is -1 there and every in-proxy branch
+        // below is correctly unreachable.
+        val ladder = activeLadder
+        val inproxyRung = ladder.indexOfFirst { it.name == "C" }
 
         val (winnerIndex, reason) = when {
             // The protocol name is the strongest signal available. An INPROXY-*
@@ -695,8 +794,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 inproxyRung to "in-proxy protocol $protocol"
 
             protocol.isNotBlank() -> {
-                val matches = psiphonLadder.indices.filter { i ->
-                    psiphonLadder[i].preferredProtocols.contains(protocol)
+                val matches = ladder.indices.filter { i ->
+                    ladder[i].preferredProtocols.contains(protocol)
                 }
                 when {
                     matches.size == 1 -> matches[0] to "protocol $protocol is unique to this strategy"
@@ -719,16 +818,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             else -> rungAtConnect to "no protocol notice; keeping active strategy"
         }
 
-        val winner = psiphonLadder.getOrNull(winnerIndex) ?: return
+        val winner = ladder.getOrNull(winnerIndex) ?: return
         getSharedPreferences("settings", MODE_PRIVATE).edit()
-            .putInt("psiphon_winning_strategy", winnerIndex).apply()
+            .putInt(winningStrategyKey(), winnerIndex).apply()
 
         val via = if (protocol.isNotBlank()) " via $protocol" else ""
         ConnectionLog.record(
             "Connected$via — crediting strategy ${winner.name} (${winner.label}): $reason"
         )
         if (winnerIndex != rungAtConnect) {
-            val active = psiphonLadder.getOrNull(rungAtConnect)
+            val active = ladder.getOrNull(rungAtConnect)
             ConnectionLog.record(
                 "Note: strategy ${active?.name ?: "?"} was active but ${winner.name} " +
                     "carried the tunnel — next connect will start from ${winner.name}"
@@ -749,24 +848,28 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         if (!ladderActive.compareAndSet(true, false)) return
         cancelLadderTimer()
 
-        val failed = psiphonLadder.getOrNull(ladderIndex)
+        val ladder = activeLadder
+        val failed = ladder.getOrNull(ladderIndex)
         ladderAttempts += 1
 
         // Wrap around instead of walking off the end. Because a successful rung is
         // remembered and reused first, the ladder can start anywhere — so "done"
         // means every rung has had a turn, not that the index hit the last slot.
-        if (ladderAttempts >= psiphonLadder.size) {
+        if (ladderAttempts >= ladder.size) {
             ConnectionLog.record(
-                "All ${psiphonLadder.size} strategies exhausted — carrier is blocking every available path"
+                "All ${ladder.size} strategies exhausted — carrier is blocking every available path"
             )
+            // Deliberately the same generic failure whether chained or not: the
+            // user asked for one message, and a chained-specific string would only
+            // suggest the chain itself was at fault when the carrier is.
             sendStatus(STATUS_FAILED, "Could not connect on this carrier. Try Wi-Fi or another SIM.")
             ladderIndex = 0
             ladderAttempts = 0
             return
         }
 
-        ladderIndex = (ladderIndex + 1) % psiphonLadder.size
-        val next = psiphonLadder[ladderIndex]
+        ladderIndex = (ladderIndex + 1) % ladder.size
+        val next = ladder[ladderIndex]
         ConnectionLog.record(
             "Strategy ${failed?.name ?: "?"} timed out — escalating to ${next.name}: ${next.label}"
         )
@@ -903,9 +1006,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         chainMode = true
         psiphonVpnMode = true
         psiphonVpnActivated = false
+        // chainMode is set first, so this reads the chained ladder and the chained
+        // remembered rung. Reading the unchained key here is what started the very
+        // first chained attempt on rung C — the one rung a SOCKS upstream cannot
+        // carry — and burned its 75s budget before anything chainable was tried.
         ladderIndex = getSharedPreferences("settings", MODE_PRIVATE)
-            .getInt("psiphon_winning_strategy", 0)
-            .coerceIn(0, psiphonLadder.size - 1)
+            .getInt(winningStrategyKey(), 0)
+            .coerceIn(0, activeLadder.size - 1)
         ladderAttempts = 0
 
         worker.execute {
@@ -1036,9 +1143,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             psiphonVpnActivated = false
             // Start from the rung that last worked on this device. On the first
             // ever connect, or after a full ladder failure, this is rung 0.
+            // chainMode is false on this path, so both the ladder and the key are
+            // the unchained ones.
             ladderIndex = getSharedPreferences("settings", MODE_PRIVATE)
-                .getInt("psiphon_winning_strategy", 0)
-                .coerceIn(0, psiphonLadder.size - 1)
+                .getInt(winningStrategyKey(), 0)
+                .coerceIn(0, activeLadder.size - 1)
             ladderAttempts = 0
             worker.execute {
                 try {
