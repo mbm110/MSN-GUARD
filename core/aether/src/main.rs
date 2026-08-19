@@ -2816,20 +2816,56 @@ fn cache_masque_gateway(options: &StartOptions, gateway: prober::ProbeResult) {
     }
 }
 
+/// How many cached gateways are enough that topping the cache up is not worth
+/// its cost.
+///
+/// The cache only has to hold a few alternates for the next connect to have
+/// something to try before it falls back to a full scan. Past that, another
+/// scan buys nothing.
+const MASQUE_CACHE_WARM_ENOUGH: usize = 4;
+
+/// Whether the gateway cache is thin enough to be worth a background top-up.
+///
+/// Split out from [`spawn_masque_cache_refresh`] so the decision is testable
+/// without a tokio runtime.
+fn masque_cache_needs_refresh(options: &StartOptions) -> bool {
+    cached_masque_gateways(options).len() < MASQUE_CACHE_WARM_ENOUGH
+}
+
+/// Top the gateway cache up once in the background, then stop.
+///
+/// Once — not on a loop. This used to be `loop { hunt_best_gateway(Stealth);
+/// sleep(15s) }`, which on a phone means a ~900-candidate QUIC scan with real
+/// handshakes (up to a 180s budget) restarting every 15 seconds for the entire
+/// life of the tunnel. The radio therefore never got an idle window, which is
+/// the most expensive shape of background work on a phone: measured in the
+/// field at 37% of battery for this app while a plain proxy client on the same
+/// device stayed under 10%.
+///
+/// Stopping costs nothing on the data path. This cache is read only when
+/// *choosing* which gateway to dial, never while a tunnel is running, so it
+/// does not need re-deriving while connected — and the gateway actually in use
+/// is already written to it by `cache_masque_gateway` on every connect. Its one
+/// job is to give the next connect a warm list, and a single pass does that.
 fn spawn_masque_cache_refresh(probe: prober::MasqueProbe, cache_path: Option<String>) {
     let Some(path) = cache_path else { return };
+    // Mirror the probe's address family so counting and filtering agree.
+    let options = StartOptions {
+        endpoint_cache_path: Some(path),
+        ip_scan: probe.ip,
+        ..StartOptions::new(Protocol::Masque, String::new())
+    };
+
+    if !masque_cache_needs_refresh(&options) {
+        log::debug!("[masque] gateway cache already warm; skipping background top-up");
+        return;
+    }
+
     tokio::spawn(async move {
-        crate::ffi::record_log("Refreshing MASQUE gateway cache in the background");
-        loop {
-            if let Ok(gateway) = prober::hunt_best_gateway(&probe, ScanMode::Stealth).await {
-                let options = StartOptions {
-                    endpoint_cache_path: Some(path.clone()),
-                    ..StartOptions::new(Protocol::Masque, String::new())
-                };
-                cache_masque_gateway(&options, gateway);
-                crate::ffi::record_log(format!("Cached gateway {}:{}", gateway.ip, gateway.port));
-            }
-            tokio::time::sleep(Duration::from_secs(15)).await;
+        crate::ffi::record_log("Topping up the MASQUE gateway cache in the background");
+        if let Ok(gateway) = prober::hunt_best_gateway(&probe, ScanMode::Stealth).await {
+            cache_masque_gateway(&options, gateway);
+            crate::ffi::record_log(format!("Cached gateway {}:{}", gateway.ip, gateway.port));
         }
     });
 }
@@ -2938,6 +2974,42 @@ mod tests {
         assert!(aethernoize::from_profile(GOOL_OUTER_PROFILE).is_enabled());
         assert_ne!(GOOL_OUTER_PROFILE, "off");
         assert_ne!(GOOL_OUTER_PROFILE, "none");
+    }
+
+    /// The background cache top-up runs once, not forever.
+    ///
+    /// The refresh used to loop with a 15s sleep for the life of the tunnel,
+    /// each pass a full Stealth scan (~900 QUIC handshake candidates, 180s
+    /// budget), so the radio never got an idle window — the field report was 37%
+    /// of battery. Guarding on a warm cache is what makes the top-up bounded:
+    /// once the cache holds a few alternates there is nothing left to fetch, and
+    /// the connect that just succeeded has already written its own gateway in.
+    #[test]
+    fn a_warm_gateway_cache_needs_no_background_scan() {
+        let path = std::env::temp_dir().join(format!("aether-warm-{}.json", std::process::id()));
+        let mut options = StartOptions::new(Protocol::Masque, "aether.toml");
+        options.endpoint_cache_path = Some(path.to_string_lossy().into_owned());
+        let _ = fs::remove_file(&path);
+
+        // Empty cache: the next connect would have nothing to try, so scan.
+        assert!(masque_cache_needs_refresh(&options));
+
+        for host in 1..=MASQUE_CACHE_WARM_ENOUGH {
+            cache_masque_gateway(
+                &options,
+                prober::ProbeResult {
+                    ip: format!("162.159.198.{host}").parse().unwrap(),
+                    port: 443,
+                    rtt: Duration::from_millis(20),
+                },
+            );
+        }
+
+        assert!(
+            !masque_cache_needs_refresh(&options),
+            "a cache holding {MASQUE_CACHE_WARM_ENOUGH} gateways must not trigger another scan"
+        );
+        let _ = fs::remove_file(path);
     }
 
     #[test]
