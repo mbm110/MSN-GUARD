@@ -9,6 +9,11 @@ int aether_zt_request_email_code(const char* team, const char* email);
 int aether_zt_confirm_email_code(const char* code);
 const char* aether_last_result();
 int aether_start_json_with_tun(const char* json, int tun_fd);
+// TUN-less start: the core builds its userspace netstack and publishes a local
+// SOCKS5 listener instead of bridging an Android TUN. Used by the outer leg of
+// Psiphon-over-WARP. Declaring it here is what the first build of that feature
+// missed, and the NDK compile failed on the undeclared identifier.
+int aether_start_json(const char* json);
 int aether_stop();
 int aether_is_running();
 int aether_is_ready();
