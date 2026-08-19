@@ -256,6 +256,167 @@ class OrbitActionBar(
     }
 }
 
+/**
+ * The Psiphon-over-WARP button: a full-width chained-shield card.
+ *
+ * A separate control rather than a fifth cell on the transport rail, because it
+ * is not a fifth transport — it runs two of them at once, it is measurably slower
+ * than either alone, and it exists only for the case where neither layer's exit
+ * address works by itself. Putting it on the rail would present it as a peer of
+ * MASQUE and WireGuard and invite users to leave it on.
+ *
+ * So it reads as deliberate: dimmed and outlined when off, lit with the violet
+ * accent and a "CHAINED" badge when armed, with the cost stated in the subtitle
+ * instead of hidden.
+ */
+class ChainModeCard(
+    context: Context,
+    private val palette: AppAppearance.Palette,
+    private val onToggle: (Boolean) -> Unit,
+) : LinearLayout(context) {
+
+    private val titleView: TextView
+    private val subtitleView: TextView
+    private val badgeView: TextView
+    private val icon: ChainGlyphView
+    private var armed = false
+
+    private fun px(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
+
+    init {
+        orientation = HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(px(13), px(11), px(14), px(11))
+        isClickable = true
+        isFocusable = true
+        setOnClickListener {
+            performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+            setArmed(!armed)
+            onToggle(armed)
+        }
+
+        icon = ChainGlyphView(context, palette.violet)
+        addView(icon, LayoutParams(px(40), px(40)))
+
+        val column = LinearLayout(context).apply { orientation = VERTICAL }
+        titleView = TextView(context).apply {
+            text = "PSIPHON OVER WARP"
+            textSize = 11.5f
+            letterSpacing = 0.1f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setSingleLine(true)
+        }
+        subtitleView = TextView(context).apply {
+            textSize = 10f
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        column.addView(titleView)
+        column.addView(subtitleView, LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = px(2) })
+        addView(column, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            leftMargin = px(12)
+        })
+
+        badgeView = TextView(context).apply {
+            textSize = 8.5f
+            letterSpacing = 0.12f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            gravity = Gravity.CENTER
+            setPadding(px(9), px(4), px(9), px(4))
+        }
+        addView(badgeView, LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+
+        setArmed(false)
+    }
+
+    /** Paints the armed/disarmed look. Does not notify [onToggle]. */
+    fun setArmed(value: Boolean) {
+        armed = value
+        val density = resources.displayMetrics.density
+        val fill = if (value) {
+            Sculpt.blend(palette.surface, palette.violet, 0.16f)
+        } else {
+            Sculpt.blend(palette.surface, palette.ink, 0.02f)
+        }
+        background = Sculpt.sculptedRipple(
+            density, fill, 20, palette.violet,
+            accent = Sculpt.withAlpha(
+                if (value) palette.violet else palette.ink,
+                if (value) 0.45f else 0.085f,
+            ),
+        )
+        titleView.setTextColor(if (value) palette.ink else palette.muted)
+        // The cost is part of the label, not a footnote: chaining adds a hop and
+        // trades speed for a different exit address.
+        subtitleView.text = if (value) {
+            "armed · two tunnels, slower, different exit IP"
+        } else {
+            "for when neither exit IP is accepted"
+        }
+        subtitleView.setTextColor(Sculpt.withAlpha(palette.faint, 0.95f))
+        badgeView.text = if (value) "CHAINED" else "OFF"
+        badgeView.setTextColor(if (value) palette.violet else palette.faint)
+        badgeView.background = Sculpt.sculptedBackground(
+            density,
+            if (value) Sculpt.withAlpha(palette.violet, 0.16f) else Sculpt.darken(palette.surface, 0.16f),
+            999,
+            Sculpt.withAlpha(if (value) palette.violet else palette.ink, if (value) 0.4f else 0.10f),
+        )
+        icon.setLinked(value)
+        contentDescription = if (value) {
+            "Psiphon over WARP is armed"
+        } else {
+            "Psiphon over WARP is off"
+        }
+    }
+
+    fun isArmed(): Boolean = armed
+
+    override fun setEnabled(enabled: Boolean) {
+        super.setEnabled(enabled)
+        alpha = if (enabled) 1f else 0.5f
+    }
+}
+
+/** Two interlocking links — one tunnel inside another, drawn rather than shipped. */
+private class ChainGlyphView(
+    context: Context,
+    private val accent: Int,
+) : View(context) {
+
+    private var linked = false
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
+
+    fun setLinked(value: Boolean) {
+        linked = value
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val d = resources.displayMetrics.density
+        paint.strokeWidth = 1.9f * d
+        paint.color = if (linked) accent else Sculpt.withAlpha(accent, 0.45f)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val r = w * 0.19f
+        // Upper-left link and lower-right link, overlapping in the middle: the
+        // visual shorthand for one tunnel carried inside another.
+        canvas.drawCircle(w * 0.38f, h * 0.38f, r, paint)
+        canvas.drawCircle(w * 0.62f, h * 0.62f, r, paint)
+    }
+}
+
 /** Tiny vector glyphs drawn in code — three shapes is not worth three XML assets. */
 private class GlyphView(
     context: Context,

@@ -131,6 +131,26 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var psiphonVpnActivated = false
     private var activeSocksPort = 0
 
+    /**
+     * True while running Psiphon-over-WARP: the Rust core holds a WARP tunnel and
+     * publishes a local SOCKS5 listener, and Psiphon dials out through it.
+     *
+     * Why this mode exists at all — measured on this VPS, not assumed. Chaining
+     * costs latency (0.23s direct vs 0.32s chained on the same protocol) and buys
+     * no throughput, so it is NOT a speed feature and must never be the default.
+     * What it does buy is an exit IP that belongs to neither layer alone: sites
+     * that refuse Cloudflare WARP addresses see a Psiphon egress, and carriers
+     * that block every Psiphon dial see only a WARP flow. That is the case this
+     * mode is for.
+     *
+     * One measured consequence shapes the config: with an upstream proxy set,
+     * Psiphon never dials QUIC-OSSH (0 attempts across a full run, against 3 when
+     * dialling directly). Every protocol it does use is TCP, which the core's
+     * SOCKS listener carries — CMD_CONNECT only, and it was never asked for a UDP
+     * associate in testing.
+     */
+    private var chainMode = false
+
     // Evidence about how the tunnel was actually established, gathered from
     // Psiphon's own notices rather than inferred from which rung was active.
     private var activeTunnelProtocol = ""
@@ -265,6 +285,19 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val STATUS_DISCONNECTED = "disconnected"
         const val STATUS_FAILED = "failed"
         const val CHANNEL_ID = "vpn_channel"
+
+        /**
+         * Marks a config as Psiphon-over-WARP.
+         *
+         * Deliberately not a `protocol` value the core knows: the core never sees
+         * this string. `startTunnel` reads it, runs the two legs itself (core in
+         * SOCKS mode + the Psiphon Go library on top), and hands each leg the
+         * protocol name it actually understands.
+         */
+        const val CHAIN_PROTOCOL_MARKER = "PSIPHON-OVER-WARP"
+
+        /** How long the outer WARP leg gets to publish its SOCKS listener. */
+        private const val CHAIN_OUTER_TIMEOUT_MS = 90_000L
         const val NOTIFICATION_ID = 1
         const val TRAFFIC_PREFS = "traffic_stats"
         const val TRAFFIC_MONTH = "month"
@@ -506,6 +539,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // Emit detailed diagnostic notices so we can see exactly which
             // protocols/servers fail on which carriers.
             put("EmitDiagnosticNotices", true)
+            // Psiphon-over-WARP: dial out through the core's SOCKS listener, so
+            // every Psiphon connection leaves inside the WARP tunnel.
+            //
+            // Measured consequence, worth knowing before reading a chained log:
+            // with this set Psiphon stops attempting QUIC-OSSH entirely (0
+            // attempts over a full run, against 3 when dialling directly) and
+            // uses TCP protocols only. That is Psiphon's own rule — a SOCKS5
+            // upstream cannot carry its UDP dials — and it is why the ladder's
+            // fronted and direct rungs still work here while nothing needs a
+            // UDP associate from the outer listener.
+            if (chainMode) {
+                put(
+                    "UpstreamProxyURL",
+                    "socks5://127.0.0.1:${CoreConfig.CHAIN_SOCKS_PORT}",
+                )
+            }
             // Note: "DisableNetworkManager" was tried here and is a no-op — the
             // key does not exist in libgojni.so (verified with strings). Psiphon's
             // NetworkMonitor still restarts the tunnel when tun0 appears. That is
@@ -832,6 +881,122 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     /**
+     * Bring up Psiphon-over-WARP: WARP carries the traffic, Psiphon rides inside it.
+     *
+     * Order is forced by three separate constraints, none of them cosmetic:
+     *
+     *  1. TUN first, before either tunnel. Psiphon's NetworkMonitor treats tun0
+     *     appearing as a network change and restarts the controller, which is the
+     *     13-second restart loop the plain Psiphon path already works around.
+     *  2. The outer WARP leg next, and we must WAIT for its SOCKS listener. Psiphon
+     *     validates UpstreamProxyURL by dialling it; starting Psiphon first means
+     *     it dials a closed port and fails the whole rung.
+     *  3. tun2socks last, on Psiphon's port, from onConnected() — the same as the
+     *     plain path. Only then does device traffic have somewhere to go.
+     *
+     * The core runs WITHOUT a tun_fd here (NativeCore.startProxy), so it publishes
+     * SOCKS on CHAIN_SOCKS_PORT instead of taking the device TUN. Its own sockets
+     * are protected via the JNI protector, so the WARP leg leaves over the carrier
+     * link rather than looping back into our own TUN.
+     */
+    private fun startChainTunnel() {
+        chainMode = true
+        psiphonVpnMode = true
+        psiphonVpnActivated = false
+        ladderIndex = getSharedPreferences("settings", MODE_PRIVATE)
+            .getInt("psiphon_winning_strategy", 0)
+            .coerceIn(0, psiphonLadder.size - 1)
+        ladderAttempts = 0
+
+        worker.execute {
+            try {
+                val address = Tun2SocksManager.selectPrivateAddress()
+                ConnectionLog.record("Chain: creating TUN before either tunnel starts")
+                tun = Builder()
+                    .setSession("MSN-GUARD")
+                    .setMtu(Tun2SocksManager.VPN_INTERFACE_MTU)
+                    .addAddress(address.ipAddress, address.prefixLength)
+                    .addRoute("0.0.0.0", 0)
+                    .addRoute(address.subnet, address.prefixLength)
+                    .addDnsServer(address.router)
+                    // Same reasoning as the plain Psiphon path: public resolvers
+                    // plus our own exclusion, so both legs can resolve names
+                    // over the carrier link before any tunnel exists.
+                    .addDnsServer("1.1.1.1")
+                    .addDnsServer("8.8.8.8")
+                    .addDisallowedApplication(packageName)
+                    .establish() ?: error("Android could not establish the VPN interface")
+                vpnModeActive.set(true)
+
+                // --- Outer leg: WARP, in SOCKS mode ---
+                val outerConfig = CoreConfig.chainOuterJson(this)
+                val outerName = outerConfig
+                    .substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
+                ConnectionLog.record("Chain leg 1/2: $outerName → SOCKS ${CoreConfig.CHAIN_SOCKS_PORT}")
+                sendStatus(STATUS_CONNECTING, "Connecting $outerName…")
+
+                NativeCore.attach(this)
+                NativeCore.prepare(outerConfig)
+                // startProxy blocks for the tunnel's life, so it gets its own
+                // thread. Failures land in the log and in NativeCore.lastError().
+                Thread({
+                    val result = NativeCore.startProxy(outerConfig)
+                    if (result != 0 && !stopRequested.get()) {
+                        val detail = NativeCore.lastError()
+                            .ifBlank { "Outer tunnel exited with code $result" }
+                        ConnectionLog.record("Chain: outer leg ended: $detail")
+                        sendStatus(STATUS_FAILED, detail)
+                    }
+                }, "chain-outer").start()
+
+                if (!awaitOuterProxy()) {
+                    error("The outer WARP tunnel did not come up in time")
+                }
+                ConnectionLog.record("Chain: outer leg ready — starting Psiphon through it")
+
+                // --- Inner leg: Psiphon, dialling out through the outer SOCKS ---
+                activeSocksPort = CoreConfig.SOCKS_PORT
+                startPsiphonTunnel()
+                sendStatus(STATUS_CONNECTING, "Connecting Psiphon through $outerName…")
+            } catch (e: Exception) {
+                ConnectionLog.record("Chain start failed: ${e.message}")
+                sendStatus(STATUS_FAILED, e.message)
+                connected.set(false)
+                chainMode = false
+                stopTunnel(notify = false)
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+        }
+    }
+
+    /**
+     * Wait for the outer leg's SOCKS listener to accept a connection.
+     *
+     * Readiness is proven by connecting, not by NativeCore.isReady(): the listener
+     * is what Psiphon will dial, so the listener is what has to be up. isReady()
+     * reports the tunnel's own view and can lead the bind by a moment.
+     */
+    private fun awaitOuterProxy(): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + CHAIN_OUTER_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (stopRequested.get()) return false
+            try {
+                java.net.Socket().use { probe ->
+                    probe.connect(
+                        java.net.InetSocketAddress("127.0.0.1", CoreConfig.CHAIN_SOCKS_PORT),
+                        1_000,
+                    )
+                }
+                return true
+            } catch (_: Exception) {
+                try { Thread.sleep(500) } catch (_: InterruptedException) { return false }
+            }
+        }
+        return false
+    }
+
+    /**
      * Start a tunnel. Always whole-device VPN mode — proxy mode was removed, so
      * there is no longer a `vpnMode` parameter to branch on.
      */
@@ -855,6 +1020,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         stopRequested.set(false)
         vpnModeActive.set(true)
         startAsForeground()
+
+        // PSIPHON-OVER-WARP must be tested before the plain PSIPHON branch: its
+        // protocol name contains "PSIPHON" too, so the order of these checks is
+        // what keeps the chain from being started as an ordinary Psiphon tunnel.
+        if (currentProtocol.contains(CHAIN_PROTOCOL_MARKER)) {
+            startChainTunnel()
+            return
+        }
 
         // PSIPHON: callback-driven lifecycle — MUST NOT enter try/finally.
         // The finally block calls stopSelf() which destroys the service and kills Psiphon.
@@ -1020,7 +1193,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         if (psiphonVpnMode) {
             // In VPN mode nothing else owns the service lifecycle now that the
             // Rust core is out of the data path, so tear down here.
+            //
+            // This also covers Psiphon-over-WARP: NativeCore.stop() above ends the
+            // outer WARP leg, and chainMode must be cleared here so the next
+            // buildPsiphonConfig() does not attach an UpstreamProxyURL pointing at
+            // a listener that no longer exists.
             NativeCore.detach()
+            chainMode = false
             vpnModeActive.set(false)
             psiphonVpnActivated = false
             tun?.close()

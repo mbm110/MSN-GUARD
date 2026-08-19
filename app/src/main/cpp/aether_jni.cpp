@@ -120,6 +120,22 @@ Java_com_msnguard_vpn_NativeCore_nativeStart(JNIEnv* env, jobject, jstring confi
     return aether_start_json_with_tun(config_text.c_str(), tun_fd);
 }
 
+// Starts the core WITHOUT taking an Android TUN.
+//
+// This is the leg that makes Psiphon-over-WARP possible. With no tun_fd, main.rs
+// takes the `else` arm: it spins up the userspace netstack and binds a local
+// SOCKS5 listener instead of bridging a TUN. Psiphon is then pointed at that
+// listener with UpstreamProxyURL, so its traffic leaves inside WARP.
+//
+// aether_start_json blocks until the tunnel ends, exactly like nativeStart, so
+// the Kotlin caller must run it on its own thread.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_msnguard_vpn_NativeCore_nativeStartProxy(JNIEnv* env, jobject, jstring config) {
+    const auto config_text = copy_jstring(env, config);
+    if (config_text.empty()) return -1;
+    return aether_start_json(config_text.c_str());
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_com_msnguard_vpn_NativeCore_nativeStop(JNIEnv*, jobject) {
     return aether_stop();

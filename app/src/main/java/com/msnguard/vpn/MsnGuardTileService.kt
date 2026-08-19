@@ -111,7 +111,24 @@ class MsnGuardTileService : TileService() {
         }
     }
 
-    private fun configJson(): String = CoreConfig.json(this)
+    /**
+     * Config for a tile-initiated connect.
+     *
+     * Honours the chain card: the tile's whole promise is "reconnect the way I
+     * last connected", so if Psiphon-over-WARP is armed the tile must raise the
+     * chain, not the bare transport underneath it.
+     */
+    private fun configJson(): String {
+        val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+        val armed = prefs.getBoolean(CHAIN_ARMED, false)
+        val picked = prefs.getString(DEFAULT_PROTOCOL, Protocol.MASQUE.coreName)
+        // Psiphon cannot carry Psiphon — same rule as the main screen.
+        return if (armed && picked != Protocol.PSIPHON.coreName) {
+            CoreConfig.json(this, MsnGuardVpnService.CHAIN_PROTOCOL_MARKER.lowercase())
+        } else {
+            CoreConfig.json(this)
+        }
+    }
 
     private val selectedProtocolcoreName: String
         get() = getSharedPreferences(SETTINGS, MODE_PRIVATE)
@@ -187,6 +204,8 @@ class MsnGuardTileService : TileService() {
         const val PERF_PROFILE = "perf_profile"
         const val H2_FRAGMENTATION = "h2_fragmentation"
         const val DEFAULT_PROTOCOL = "default_protocol"
+        /** Mirrors MainActivity.CHAIN_ARMED — same SharedPreferences file. */
+        const val CHAIN_ARMED = "chain_armed"
 
         enum class Protocol(
             val label: String,

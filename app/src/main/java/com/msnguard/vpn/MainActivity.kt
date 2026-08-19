@@ -57,6 +57,7 @@ class MainActivity : Activity() {
     private lateinit var tileUp: MetricTile
     private lateinit var tileSpeed: MetricTile
     private lateinit var exitNodeCard: ExitNodeCard
+    private lateinit var chainCard: ChainModeCard
     private lateinit var transportRail: TransportRail
     private lateinit var actionBar: OrbitActionBar
     private lateinit var footerWave: OrbitFooterWave
@@ -307,6 +308,8 @@ class MainActivity : Activity() {
             openTrafficMonitorScreen()
         }
         exitNodeCard = ExitNodeCard(this, palette) { refreshPublicIp() }
+        chainCard = ChainModeCard(this, palette) { armed -> setChainArmed(armed) }
+        chainCard.setArmed(chainArmed())
         transportRail = TransportRail(this, palette, Protocol.entries.map { railLabel(it) }) { index ->
             updateConnectionMode(Protocol.entries[index])
         }
@@ -974,6 +977,13 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(46),
         ).apply { topMargin = dp(12) })
+
+        // Below the rail, not on it: the rail picks ONE transport, this stacks
+        // Psiphon on top of the picked one. Separate row, separate accent.
+        addView(chainCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
 
         addView(actionBar, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2917,6 +2927,14 @@ class MainActivity : Activity() {
         if (selectedProtocol == protocol) return
         selectedProtocol = protocol
         preferences().edit().putString(DEFAULT_PROTOCOL, protocol.coreName).apply()
+        // The chain's outer leg follows the rail, so re-record it whenever the
+        // pick changes while the card is armed. Without this, arming on MASQUE and
+        // then switching to WireGuard would still tunnel Psiphon through MASQUE.
+        if (chainArmed()) setChainArmed(true)
+        // Psiphon cannot carry Psiphon. Selecting it leaves the card armed in
+        // preferences but visibly off, and configJson() ignores it — the state the
+        // user sees and the config that runs agree.
+        chainCard.setArmed(chainArmed() && protocol != Protocol.PSIPHON)
         // Keep the rail in sync when the change came from somewhere else (the
         // mode screen, a restored preference) rather than from a rail tap.
         transportRail.select(Protocol.entries.indexOf(protocol), animate = true)
@@ -2973,7 +2991,23 @@ class MainActivity : Activity() {
             .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config))
     }
 
-    private fun configJson(): String = CoreConfig.json(this, selectedProtocol.coreName)
+    /**
+     * The config for the next connect.
+     *
+     * When the chain card is armed the protocol becomes the chain marker instead
+     * of the rail's pick: the service reads that, runs the rail's transport as the
+     * outer leg (stored separately in CHAIN_OUTER_PREF) and Psiphon inside it.
+     * Psiphon-on-Psiphon is meaningless, so an armed card is ignored when the rail
+     * itself is on Psiphon.
+     */
+    private fun configJson(): String {
+        val chained = chainArmed() && selectedProtocol != Protocol.PSIPHON
+        return if (chained) {
+            CoreConfig.json(this, MsnGuardVpnService.CHAIN_PROTOCOL_MARKER.lowercase())
+        } else {
+            CoreConfig.json(this, selectedProtocol.coreName)
+        }
+    }
 
     private fun renderStatus() {
         if (!TunnelStatus.isActive() && isTunnelActive()) {
@@ -3013,7 +3047,15 @@ class MainActivity : Activity() {
         pingFailureStreak = 0
         connectionTitle.setTextColor(connected)
         connectionTitle.text = "Connected"
-        connectionDetail.text = if (restored) "${selectedProtocol.label} tunnel recovered" else "${selectedProtocol.label} tunnel is active"
+        connectionDetail.text = when {
+            // Say what is actually carrying traffic. "MASQUE tunnel is active" is
+            // wrong when Psiphon is riding inside MASQUE — and this mode is only
+            // worth using if the user can see it is the one running.
+            chainRunning() && restored -> "Psiphon over ${selectedProtocol.label} recovered"
+            chainRunning() -> "Psiphon over ${selectedProtocol.label} is active"
+            restored -> "${selectedProtocol.label} tunnel recovered"
+            else -> "${selectedProtocol.label} tunnel is active"
+        }
         footerWave.setLit(true)
         chipLatency.text = "Latency …"
         startSessionTimer(restored)
@@ -3152,6 +3194,42 @@ class MainActivity : Activity() {
 
     private fun setModeEnabled(enabled: Boolean) {
         transportRail.isEnabled = enabled
+        // Arming or disarming mid-session would leave the running tunnel and the
+        // card disagreeing, and the change only takes effect on the next connect
+        // anyway. Locked while connected, like the rail.
+        chainCard.isEnabled = enabled
+    }
+
+    /** Whether the chain choice applies to the tunnel that is running now. */
+    private fun chainRunning(): Boolean =
+        chainArmed() && selectedProtocol != Protocol.PSIPHON
+
+    /** Whether the next connect should chain Psiphon over the picked transport. */
+    private fun chainArmed(): Boolean = preferences().getBoolean(CHAIN_ARMED, false)
+
+    /**
+     * Persist the chain choice and remember which transport carries the outer leg.
+     *
+     * The outer protocol is whatever the rail has selected — except Psiphon itself,
+     * which cannot carry Psiphon. That case falls back to MASQUE rather than being
+     * rejected, so arming the card can never produce a config that cannot run.
+     */
+    private fun setChainArmed(armed: Boolean) {
+        val outer = when (selectedProtocol) {
+            Protocol.PSIPHON -> Protocol.MASQUE
+            else -> selectedProtocol
+        }
+        preferences().edit()
+            .putBoolean(CHAIN_ARMED, armed)
+            .putString(CoreConfig.CHAIN_OUTER_PREF, outer.coreName)
+            .apply()
+        if (armed) {
+            ConnectionLog.record(
+                "Psiphon-over-WARP armed: outer ${outer.label}, Psiphon inside it"
+            )
+        } else {
+            ConnectionLog.record("Psiphon-over-WARP disarmed")
+        }
     }
 
     private fun isTunnelActive(): Boolean = visualState == OrbitDialView.State.CONNECTED ||
@@ -3611,6 +3689,8 @@ class MainActivity : Activity() {
         const val TLS_CURVE_PRESET = "tls_curve_preset"
         const val WIREGUARD_DATA_CHECK = "wireguard_data_check"
         const val KILL_SWITCH = "kill_switch"
+        /** Whether Psiphon-over-WARP is armed for the next connect. */
+        const val CHAIN_ARMED = "chain_armed"
         const val LAN_SHARING = "lan_sharing"
         const val LAN_BYPASS = "lan_bypass"
         const val DEFAULT_PROTOCOL = "default_protocol"
