@@ -1569,7 +1569,7 @@ class MainActivity : Activity() {
                 // button, and being told twice is better than not being told.
                 Toast.makeText(
                     this,
-                    "لاگ کپی شد (${text.length / 1024} KB)",
+                    "Log copied (${text.length / 1024} KB)",
                     Toast.LENGTH_SHORT,
                 ).show()
             }
