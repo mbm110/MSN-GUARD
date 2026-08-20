@@ -884,13 +884,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     /**
      * Decide whether this connect starts with the preferred-country attempt.
      *
-     * Called once per connect, before the first [startPsiphonTunnel]. Kept separate
-     * from the ladder state so both entry points (plain Psiphon and the chain) get
-     * identical behaviour — the user's country choice is about where traffic exits,
-     * which is the same question in either mode.
+     * Called once per connect, before the first [startPsiphonTunnel].
+     *
+     * Chained runs only. A plain Psiphon connect always lets Psiphon pick whichever
+     * server answers first, which is both the fastest path and the behaviour that
+     * predates this feature — so the country preference must not leak into it. The
+     * flag is written unconditionally (not just when chained) precisely so that a
+     * plain connect following a chained one cannot inherit a stale `true` and start
+     * against a filtered candidate pool.
      */
     private fun armRegionPhase() {
-        val region = CoreConfig.egressRegion(this)
+        val region = if (chainMode) CoreConfig.egressRegion(this) else null
         regionPhase = region != null
         regionPhaseTried = region.orEmpty()
         if (region != null) {

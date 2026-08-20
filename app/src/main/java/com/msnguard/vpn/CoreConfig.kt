@@ -162,6 +162,11 @@ object CoreConfig {
      *
      * Shared by both Psiphon paths (plain and chained) on purpose: the question
      * "which country do you want to come out in" has the same answer either way.
+     *
+     * Read only on the chained path, though — see
+     * [MsnGuardVpnService.armRegionPhase]. A plain Psiphon connect always takes
+     * whichever server answers first, which is the fastest path and the behaviour
+     * that predates this setting.
      */
     const val EGRESS_REGION_PREF = "psiphon_egress_region"
 

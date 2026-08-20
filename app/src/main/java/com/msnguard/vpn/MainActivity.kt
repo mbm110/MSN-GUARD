@@ -2456,12 +2456,17 @@ class MainActivity : Activity() {
      * choice one short attempt and then falling back to every country. The subtitle
      * says so, because a control that silently disobeys is worse than one that
      * explains its limits.
+     *
+     * Applies to Psiphon over WARP only; a plain Psiphon connect always takes
+     * whichever server answers first. That is enforced in the service
+     * (armRegionPhase reads the preference only when chained), and this row is
+     * disabled with the chain off so the two can never disagree.
      */
     private fun chooseEgressRegion(after: (() -> Unit)? = null) {
         val options = listOf(CoreConfig.EGRESS_REGION_AUTO) + PsiphonRegions.options(this)
         showChoiceSheet(
             title = "Preferred country",
-            subtitle = "Tried first. If it will not connect, all countries are tried.",
+            subtitle = "Psiphon over WARP tries this first. If it will not connect, all countries are tried.",
             options = options,
             selected = egressRegion(),
             label = { code ->
@@ -2835,14 +2840,11 @@ class MainActivity : Activity() {
             setChecked(armed)
             setAvailable(chainAvailable)
         }
-        // Both rows are gated on the switch, exactly as asked.
-        //
-        // Worth knowing, because it is a real cost: the service applies the region
-        // phase on BOTH Psiphon paths (startPsiphonTunnel is shared, armRegionPhase
-        // runs either way), so with the chain off the country preference still takes
-        // effect on a plain Psiphon connect — it just cannot be changed from here.
-        // Say the word and this row moves to `psiphonSelected` instead, which would
-        // let it be edited in plain Psiphon mode too.
+        // Both rows are gated on the switch, and the service agrees: armRegionPhase()
+        // reads the country preference only when chainMode is set, so a plain Psiphon
+        // connect always lets Psiphon pick whichever server answers first. Without
+        // that check the row would be un-editable here while still taking effect on
+        // the plain path — a setting the user could neither see nor change.
         val childrenAvailable = chainAvailable && armed
         chainOuterRow?.apply {
             setValue(chainOuterMode().label)
