@@ -430,6 +430,15 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val TRAFFIC_RX = "rx"
 
         /**
+         * Schema version of [TRAFFIC_PREFS], bumped when stored totals become
+         * untrustworthy and have to be discarded rather than migrated.
+         *
+         * 1 = totals written before the monthly-inflation fix.
+         */
+        const val TRAFFIC_SCHEMA = "schema"
+        const val TRAFFIC_SCHEMA_VERSION = 1
+
+        /**
          * How often the monthly traffic counters are written to disk while a
          * tunnel is up. Teardown always flushes, so this only bounds what a hard
          * process kill can lose.
@@ -1311,7 +1320,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // over the carrier link before any tunnel exists.
                     .addDnsServer("1.1.1.1")
                     .addDnsServer("8.8.8.8")
-                    .addDisallowedApplication(packageName)
+                    // Same reason as the plain Psiphon path: the Split screen's
+                    // choice has to apply to chained runs too, and our own package
+                    // stays off the TUN in every mode.
+                    .applySplitTunneling()
                     .establish() ?: error("Android could not establish the VPN interface")
                 vpnModeActive.set(true)
 
@@ -1636,7 +1648,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         // normally, so the fronted protocols become usable.
                         .addDnsServer("1.1.1.1")
                         .addDnsServer("8.8.8.8")
-                        .addDisallowedApplication(packageName)
+                        // Split tunnelling was ignored on this path: it only ever
+                        // excluded our own package, so a user who picked apps in the
+                        // Split screen and then connected with Psiphon silently got
+                        // every app tunnelled. applySplitTunneling() honours the
+                        // choice and still keeps our own process off the TUN in every
+                        // mode — which the DNS bootstrap above depends on.
+                        .applySplitTunneling()
                         .establish() ?: error("Android could not establish the VPN interface")
                     vpnModeActive.set(true)
                     ConnectionLog.record("TUN ready — now starting Psiphon on port $socksPort")
@@ -1705,6 +1723,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 NativeCore.detach()
                 vpnModeActive.set(false)
                 TunnelStatus.isNativeTunMode = false
+                // The native tunnel can end without stopTunnel() ever running —
+                // the core exiting on its own, or the kill-switch branch below,
+                // both land here instead. stopTunnel() is where the monthly
+                // counters are normally persisted, so without this the traffic
+                // since the last 60-second flush was lost on exactly the paths
+                // that end a session unexpectedly.
+                flushMonthlyTraffic()
                 val killSwitch = getSharedPreferences("settings", MODE_PRIVATE).getBoolean("kill_switch", false)
                 tun?.close()
                 tun = null
@@ -1819,6 +1844,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     private fun updateTrafficNotification(tx: Long, rx: Long) {
         val now = SystemClock.elapsedRealtime()
+        // Throttle FIRST, before the rebase guard below.
+        //
+        // The order used to be the other way round, and that was the monthly-total
+        // inflation bug. The guard zeroes `accountedTx/Rx`; the throttle then
+        // returned without recording anything. So any backwards sample that landed
+        // inside the 900 ms window left the accounting baseline at zero, and the
+        // next sample re-added the session's entire cumulative byte count to the
+        // month. One dip every 30 s over an hour of browsing turned 0.17 GB of real
+        // traffic into 10.4 GB — a 60x overstatement, which is what produced the
+        // reported 230 GB month.
+        //
+        // Returning before touching any state is the fix: a throttled callback must
+        // be a pure no-op. Backwards samples are still caught, just on a callback
+        // that goes on to consume them.
+        if (now - lastTrafficSampleMs < 900) return
+
         // The core's counters are per-tunnel locals, and the core reconnects on
         // its own (the MASQUE and WireGuard reconnect loops both re-enter
         // `tun::bridge`) without the service being told. When that happens the
@@ -1835,7 +1876,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             currentSpeedTx = 0
             currentSpeedRx = 0
         }
-        if (now - lastTrafficSampleMs < 900) return
 
         val elapsed = now - prevSpeedSampleMs
         if (elapsed > 0 && prevSpeedSampleMs > 0) {
@@ -1895,7 +1935,35 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private fun loadMonthlyTotals() {
         val month = currentMonthKey()
         if (monthKey == month) return
+        // The month just rolled over mid-session: persist what the old month
+        // accumulated before its key is replaced. Without this, everything since
+        // the last 60-second flush was silently dropped from the month that ended,
+        // because `monthKey` is what flushMonthlyTraffic() writes under.
+        if (monthKey != null) flushMonthlyTraffic()
         val prefs = getSharedPreferences(TRAFFIC_PREFS, MODE_PRIVATE)
+        // Discard totals written by a build that had the inflation bug.
+        //
+        // Fixing the accounting does not fix the number already on disk: it was
+        // overstated by roughly the number of throttled backwards samples, which
+        // varies per device, so there is no honest factor to divide by. Zeroing
+        // once is the only truthful option — the month restarts from a correct
+        // baseline instead of carrying a figure nobody can interpret.
+        //
+        // Gated on a stored schema version, not on the app version, so it happens
+        // exactly once ever rather than on every update from here on.
+        if (prefs.getInt(TRAFFIC_SCHEMA, 0) < TRAFFIC_SCHEMA_VERSION) {
+            prefs.edit()
+                .putInt(TRAFFIC_SCHEMA, TRAFFIC_SCHEMA_VERSION)
+                .remove(TRAFFIC_MONTH)
+                .remove(TRAFFIC_TX)
+                .remove(TRAFFIC_RX)
+                .apply()
+            monthTxTotal = 0
+            monthRxTotal = 0
+            monthKey = month
+            ConnectionLog.record("Monthly traffic counter reset — previous total was miscounted")
+            return
+        }
         val stored = prefs.getString(TRAFFIC_MONTH, null)
         monthTxTotal = if (stored == month) prefs.getLong(TRAFFIC_TX, 0) else 0
         monthRxTotal = if (stored == month) prefs.getLong(TRAFFIC_RX, 0) else 0

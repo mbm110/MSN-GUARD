@@ -784,13 +784,29 @@ class MainActivity : Activity() {
      * drops to DEGRADED with a message that says so. It is not torn down: the
      * core's own 10s stale-timeout owns teardown, and killing a tunnel that is
      * merely idle would be worse than labelling it.
+     *
+     * @param rebased guards the single re-arm below, so a counter that keeps
+     *   restarting cannot schedule this forever.
      */
-    private fun watchForTunnelBytes(request: Int, rxAtStart: Long) {
+    private fun watchForTunnelBytes(request: Int, rxAtStart: Long, rebased: Boolean = false) {
         sessionHandler.postDelayed({
             if (isFinishing || isDestroyed) return@postDelayed
             if (request != verifyRequest) return@postDelayed
             if (visualState != OrbitDialView.State.CONNECTED) return@postDelayed
             if (trafficRx > rxAtStart) return@postDelayed
+            // The counter went BACKWARDS, so the baseline this watch was armed with
+            // no longer refers to the same tunnel: the core's totals are per-tunnel
+            // locals and its own reconnect loop restarts them at zero without the
+            // UI being told. `trafficRx > rxAtStart` is then false no matter how
+            // much traffic flows, which reported a healthy tunnel as degraded —
+            // the same class of bug as the monthly-total inflation, from the same
+            // discontinuity. Re-arm once against the new baseline instead of
+            // judging the tunnel on a stale one.
+            if (trafficRx < rxAtStart && !rebased) {
+                ConnectionLog.record("Byte counter restarted — re-checking traffic from the new baseline")
+                watchForTunnelBytes(request, trafficRx, rebased = true)
+                return@postDelayed
+            }
             ConnectionLog.record("Tunnel moved no bytes in ${BYTE_WATCH_MS / 1000}s — reporting degraded")
             visualState = OrbitDialView.State.DEGRADED
             orbitDial.state = OrbitDialView.State.DEGRADED
