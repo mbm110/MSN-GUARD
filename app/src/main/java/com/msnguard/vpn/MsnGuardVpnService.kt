@@ -2267,6 +2267,42 @@ object ConnectionLog {
     private var sink: java.io.File? = null
 
     /**
+     * One formatter, reused.
+     *
+     * SimpleDateFormat is not thread-safe, which is why the usual advice is to make
+     * a new one per call — but every write here is already inside a @Synchronized
+     * block, so one instance is safe and saves an object plus its parsed pattern on
+     * every line. That matters because a single Psiphon connect produces several
+     * hundred lines in under two seconds.
+     */
+    private val stamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+
+    /**
+     * Psiphon notices that are pure bookkeeping.
+     *
+     * These are not merely noise to read past — they were actively destructive. A
+     * single connect emits one `updated server <id>` line per server entry (430 of
+     * them in the field log, plus a second wave after the tunnel comes up), and the
+     * ring buffer holds 100 entries. Every genuinely useful line — which strategy
+     * ran, which country was preferred, why a rung failed — was evicted before the
+     * user could ever see it, and each line also cost a JNI hop and a separate file
+     * append.
+     *
+     * Dropped by prefix rather than by log level so the interesting warnings and
+     * errors from the same subsystem still arrive.
+     */
+    private val NOISE = listOf(
+        "\"message\":\"updated server ",
+        "\"message\":\"Memory metrics at ",
+        "\"message\":\"Datastore metrics at ",
+        "\"message\":\"DNS metrics at ",
+        "\"message\":\"ServerEntryIterator.reset:",
+        "\"message\":\"Awaited ScanServerEntries:",
+        "\"message\":\"Set dial parameters for ",
+        "\"message\":\"port forward failures for ",
+    )
+
+    /**
      * Ported from upstream v0.8.0: mirror the ring buffer to a file so logs
      * survive the process being killed. Required — the merged MainActivity calls
      * this on startup. Capped and self-truncating so it cannot grow unbounded.
@@ -2281,7 +2317,8 @@ object ConnectionLog {
 
     @Synchronized
     fun record(message: String) {
-        val line = "${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())}  $message"
+        if (NOISE.any(message::contains)) return
+        val line = "${stamp.format(java.util.Date())}  $message"
         if (entries.size == MAX_ENTRIES) entries.removeFirst()
         entries.addLast(line)
         runCatching { sink?.appendText(line + "\n") }

@@ -188,6 +188,22 @@ class OrbitSettingsRow(
             .joinToString(", ")
     }
 
+    /**
+     * Grey the row out and stop it accepting taps.
+     *
+     * A disabled row still says what it *would* control, which is why the title
+     * stays put and only the colours fade: hiding the row instead would leave the
+     * user wondering where a setting went, and leaving it tappable would open a
+     * sheet whose choice has no effect.
+     */
+    fun setAvailable(available: Boolean) {
+        if (isEnabled == available) return
+        isEnabled = available
+        isClickable = available
+        isFocusable = available
+        alpha = if (available) 1f else 0.42f
+    }
+
     private fun dp(value: Int): Int = (value * density).roundToInt()
 
     private companion object {
@@ -321,6 +337,31 @@ class OrbitToggleRow(
     private fun updateDescription(title: String) {
         contentDescription = "$title, ${if (isOn) "on" else "off"}"
         track.contentDescription = contentDescription
+    }
+
+    /**
+     * Grey the row out and stop it toggling.
+     *
+     * Same reasoning as [OrbitSettingsRow.setAvailable]: a switch whose state has
+     * no effect is worse than a visibly disabled one, because the user has no way
+     * to tell that flipping it did nothing.
+     */
+    fun setAvailable(available: Boolean) {
+        if (isEnabled == available) return
+        isEnabled = available
+        isClickable = available
+        isFocusable = available
+        track.isClickable = available
+        track.isFocusable = available
+        alpha = if (available) 1f else 0.42f
+    }
+
+    /** Repaint to [value] without invoking the toggle callback. */
+    fun setChecked(value: Boolean) {
+        if (isOn == value) return
+        isOn = value
+        thumb.translationX = restingThumbX()
+        renderSwitch()
     }
 
     private fun dp(value: Int): Int = (value * density).roundToInt()

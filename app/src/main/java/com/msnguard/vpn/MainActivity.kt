@@ -127,6 +127,19 @@ class MainActivity : Activity() {
         }
     }
     private var showingSettings = false
+    /**
+     * Settings rows that outlive the builder that created them.
+     *
+     * The settings page is built imperatively and then navigated away from — to the
+     * mode screen, to a choice sheet — so any row whose value can change while the
+     * page is still alive has to be reachable afterwards. Nulled in
+     * [closeSettingsScreen] so a destroyed view is never repainted.
+     */
+    private var connectionModeRow: OrbitSettingsRow? = null
+    private var psiphonChainRow: OrbitToggleRow? = null
+    private var chainOuterRow: OrbitSettingsRow? = null
+    private var egressRegionRow: OrbitSettingsRow? = null
+
     private var showingLogs = false
     private var showingScanner = false
     private var showingMode = false
@@ -2047,37 +2060,73 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        content.addView(navRow("Connection mode", selectedProtocol.label) { openModeScreen() }, LinearLayout.LayoutParams(
+        // Held in a field, not a local: the mode screen is a separate page that
+        // writes the preference and pops back here, so the row that shows the
+        // current mode has to be repaintable from outside this builder. Without
+        // that, picking a mode only appeared after leaving and re-entering
+        // settings, because this row was built once with the old value.
+        val modeRow = navRow("Connection mode", selectedProtocol.label) { openModeScreen() }
+        connectionModeRow = modeRow
+        content.addView(modeRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
-        // Directly under "Connection mode", because it answers the same question one
-        // level down: that row picks what connects, this one picks what carries it
-        // when Psiphon over WARP is armed. Kept off the home screen — it is a
-        // once-per-SIM knob, and Auto already handles the common case.
-        lateinit var chainOuterRow: OrbitSettingsRow
-        chainOuterRow = navRow("Outer transport", chainOuterMode().label) {
-            chooseChainOuterMode { chainOuterRow.setValue(chainOuterMode().label) }
-        }
-        content.addView(chainOuterRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        // Third in the same run of rows, and last on purpose: "Connection mode"
-        // picks what connects, "Outer transport" picks what carries it, and this
-        // picks where it comes out. Reading top to bottom follows the packet.
-        lateinit var egressRow: OrbitSettingsRow
-        egressRow = navRow("Preferred country", egressRegionLabel()) {
-            chooseEgressRegion { egressRow.setValue(egressRegionLabel()) }
-        }
-        content.addView(egressRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
         content.addView(navRow("Tunnel controls", "Shaping · Anti-DPI") { openTunnelControlsScreen() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
+
+        // Psiphon gets its own section: all three controls below are meaningless
+        // unless the chain is armed, and grouping them says that structurally
+        // instead of relying on the user to infer it from a mixed list.
+        content.addView(sectionLabel("PSIPHON"), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(26) })
+        // The switch comes first because it gates the two rows under it. Toggling
+        // it repaints them in place — and the home-screen card too, which is the
+        // same setting shown twice and must never disagree.
+        //
+        // Built as an OrbitToggleRow directly rather than through createToggleRow():
+        // that helper returns LinearLayout, and this row has to be re-checked and
+        // re-enabled from outside the builder (the home-screen card writes the same
+        // preference, and the chain is only available on the PSIPHON transport).
+        val chainRow = OrbitToggleRow(
+            this,
+            palette,
+            "Psiphon over WARP",
+            "Tunnel Psiphon inside a WARP transport",
+            chainArmed(),
+        ) { armed ->
+            setChainArmed(armed)
+            renderChainCard()
+            refreshPsiphonRows()
+        }
+        psiphonChainRow = chainRow
+        content.addView(chainRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
+
+        val outerRow = navRow("Outer transport", chainOuterMode().label) {
+            chooseChainOuterMode { chainOuterRow?.setValue(chainOuterMode().label) }
+        }
+        chainOuterRow = outerRow
+        content.addView(outerRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+        // Last of the three: the transport row decides what carries Psiphon, this
+        // one decides where Psiphon comes out. Reading downwards follows the packet.
+        val countryRow = navRow("Preferred country", egressRegionLabel()) {
+            chooseEgressRegion { egressRegionRow?.setValue(egressRegionLabel()) }
+        }
+        egressRegionRow = countryRow
+        content.addView(countryRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+        refreshPsiphonRows()
 
         content.addView(sectionLabel("ABOUT"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2755,8 +2804,56 @@ class MainActivity : Activity() {
 
     private fun closeSettingsScreen() {
         showingSettings = false
+        // Drop the row references with the page. Repainting a view whose parent has
+        // been removed is harmless but pointless, and holding them would keep a
+        // destroyed hierarchy alive for as long as the activity lives.
+        connectionModeRow = null
+        psiphonChainRow = null
+        chainOuterRow = null
+        egressRegionRow = null
         settingsPage?.let { animatePageClose(it) { settingsPage = null } }
     }
+
+    /**
+     * Repaint the Psiphon section for the current armed state.
+     *
+     * Both rows below the switch only affect a chained connect, so with the chain
+     * off they are shown greyed and inert rather than hidden: the user can still
+     * see what arming would give them, and cannot set a value that silently does
+     * nothing. Also refreshes the values, since a choice sheet may have changed
+     * them while this page stayed open.
+     */
+    private fun refreshPsiphonRows() {
+        // The chain is only meaningful on the PSIPHON transport, and only while
+        // nothing is connected — the same two conditions the home-screen card
+        // enforces. Reading them from one place keeps the card and this section from
+        // ever showing different answers.
+        val psiphonSelected = selectedProtocol == Protocol.PSIPHON
+        val chainAvailable = psiphonSelected && modeControlsEnabled
+        val armed = chainArmed()
+        psiphonChainRow?.apply {
+            setChecked(armed)
+            setAvailable(chainAvailable)
+        }
+        // Both rows are gated on the switch, exactly as asked.
+        //
+        // Worth knowing, because it is a real cost: the service applies the region
+        // phase on BOTH Psiphon paths (startPsiphonTunnel is shared, armRegionPhase
+        // runs either way), so with the chain off the country preference still takes
+        // effect on a plain Psiphon connect — it just cannot be changed from here.
+        // Say the word and this row moves to `psiphonSelected` instead, which would
+        // let it be edited in plain Psiphon mode too.
+        val childrenAvailable = chainAvailable && armed
+        chainOuterRow?.apply {
+            setValue(chainOuterMode().label)
+            setAvailable(childrenAvailable)
+        }
+        egressRegionRow?.apply {
+            setValue(egressRegionLabel())
+            setAvailable(childrenAvailable)
+        }
+    }
+
 
     private fun openTrafficMonitorScreen() {
         trafficMonitorPage?.let(pageHost::removeView)
@@ -3246,6 +3343,13 @@ class MainActivity : Activity() {
         // then switching to WireGuard would still tunnel Psiphon through MASQUE.
         if (chainArmed()) setChainArmed(true)
         renderChainCard()
+        // The settings page may still be behind the mode screen the user just used.
+        // Repaint its rows now rather than on the next rebuild: this is exactly the
+        // bug the field report caught — the mode row kept the previous value until
+        // settings was left and re-entered.
+        connectionModeRow?.setValue(protocol.label)
+        refreshPsiphonRows()
+
         // Keep the rail in sync when the change came from somewhere else (the
         // mode screen, a restored preference) rather than from a rail tap.
         transportRail.select(Protocol.entries.indexOf(protocol), animate = true)
@@ -3547,6 +3651,11 @@ class MainActivity : Activity() {
             }
         )
         chainCard.setArmed(chainArmed())
+        // The settings page carries the same switch, so keep it in step whenever the
+        // card is repainted — arming from the home screen must not leave a stale
+        // "off" behind in settings.
+        refreshPsiphonRows()
+
     }
 
     /** Whether the next connect should chain Psiphon over the picked transport. */

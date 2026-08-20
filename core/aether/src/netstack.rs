@@ -519,15 +519,23 @@ async fn run(
                     Some(pkt) => {
                         rx_total += pkt.len() as u64;
 
-                        // Diagnostic: log first few packets to verify TUN bridge works
+                        // Diagnostic: prove the TUN bridge is delivering packets.
+                        //
+                        // Goes to log::debug!, not ffi::record_log. record_log crosses
+                        // the JNI boundary, appends to a file and pushes onto the
+                        // in-app ring buffer, and this arm fires on *every* inbound
+                        // packet until 5KB has flowed — in the field log that was
+                        // ~25 lines in a single second at connect time, each one
+                        // waking the app process to write to storage while the
+                        // handshake is the only thing that should be running. The
+                        // information is worth keeping for a logcat session; it is
+                        // not worth a file write per packet on a phone battery.
                         if rx_total < 5000 {
                             let pkt_len = pkt.len();
                             let proto_str = if pkt_len > 9 {
                                 match pkt[9] { 6 => "TCP", 17 => "UDP", _ => "other" }
                             } else { "?" };
-                            ffi::record_log(format!(
-                                "[netstack] RX {pkt_len}B {proto_str} (total={rx_total})"
-                            ));
+                            log::debug!("[netstack] RX {pkt_len}B {proto_str} (total={rx_total})");
                         }
 
                         // Transparent accept: intercept TCP SYN before feeding to netstack.
