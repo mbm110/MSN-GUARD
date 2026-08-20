@@ -34,7 +34,32 @@
                      Harmless on phones, and there is no reason to drop it. -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+            <!--
+              Long-pressing the Quick Settings tile lands here.
+              Android looks for an activity with this action; when nothing declares
+              it, it falls back to the system App Info page — which is exactly what
+              a user reported ("holding the tile opens the app's system settings").
+              Declaring it on MainActivity makes long-press open the app.
+            -->
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
+
+        <!--
+          Invisible helper whose only job is to let the QS tile collapse the shade.
+          Own taskAffinity so it never stacks on top of MainActivity; noHistory +
+          excludeFromRecents so it leaves no trace in recents.
+        -->
+        <activity
+            android:name=".ShadeCollapseActivity"
+            android:exported="false"
+            android:theme="@style/Theme.MsnGuard.Invisible"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:launchMode="singleInstance" />
 
         <service
             android:name=".MsnGuardVpnService"
@@ -48,7 +73,7 @@
 
         <service
             android:name=".MsnGuardTileService"
-            android:icon="@drawable/ic_notification"
+            android:icon="@drawable/ic_tile_disconnected"
             android:label="@string/vpn_tile_label"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
             android:exported="true">

@@ -287,7 +287,26 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         palette = AppAppearance.load(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            OnBackInvokedCallback { handleBack() }.also { callback ->
+            // A registered OnBackInvokedCallback ALWAYS consumes the gesture — its
+            // `onBackInvoked()` returns Unit, so unlike `onBackPressed()` there is
+            // no "return false and let the system handle it". The old code passed
+            // `handleBack()` in and discarded its result, so wherever this callback
+            // is the live back path, the app could not be exited with Back at all:
+            // with no page open, handleBack() returned false and nothing happened.
+            //
+            // Why only SOME phones (the field report): whether this callback or
+            // onBackPressed() receives Back depends on the OS version, because this
+            // app targets SDK 36 and does not set
+            // `android:enableOnBackInvokedCallback`.
+            //   - Android 13/14: the flag defaults to false, the callback is
+            //     ignored, Back goes to onBackPressed() -> exits correctly.
+            //   - Android 15+: predictive back is on by default for targetSdk 35+,
+            //     the callback becomes authoritative, onBackPressed() is no longer
+            //     called -> Back did nothing on the home screen.
+            //
+            // finish() is what super.onBackPressed() does for a root launcher
+            // activity, so both paths now behave identically.
+            OnBackInvokedCallback { if (!handleBack()) finish() }.also { callback ->
                 predictiveBackCallback = callback
                 onBackInvokedDispatcher.registerOnBackInvokedCallback(
                     OnBackInvokedDispatcher.PRIORITY_DEFAULT,

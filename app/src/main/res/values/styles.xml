@@ -42,6 +42,20 @@
         <item name="android:windowBackground">#04070B</item>
    </style>
 
+    <!--
+      Invisible, non-animating window used only to collapse the Quick Settings
+      shade (see ShadeCollapseActivity). It must never paint anything: a normal
+      theme would flash the void background over whatever is behind the shade.
+    -->
+    <style name="Theme.MsnGuard.Invisible" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+   </style>
+
     <style name="ThemeOverlay.MsnGuard.AlertDialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
         <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.MsnGuard.Dialog</item>
         <item name="colorSurface">#0B1116</item>

@@ -28,7 +28,10 @@ class MsnGuardTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
-        toggleConnection()
+        // toggleConnection() reports whether it already dealt with the shade —
+        // the consent path opens the app, which collapses it. Starting a second
+        // activity on top of that would cover Android's consent dialog.
+        if (!toggleConnection()) collapseShade()
     }
 
     private fun updateTile() {
@@ -37,10 +40,7 @@ class MsnGuardTileService : TileService() {
         val state = if (isConnected) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
 
         tile.state = state
-        tile.icon = Icon.createWithResource(
-            this,
-            R.drawable.ic_notification
-        )
+        tile.icon = tileIcon(isConnected)
         tile.label = getString(R.string.vpn_tile_label)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             tile.subtitle = if (isConnected) getString(R.string.vpn_connected) else getString(R.string.vpn_disconnected)
@@ -48,42 +48,105 @@ class MsnGuardTileService : TileService() {
         tile.updateTile()
     }
 
-    private fun toggleConnection() {
-        val tile = qsTile ?: return
+    /**
+     * Tile icon for the current state.
+     *
+     * Solid shield when connected, hollow-and-broken shield when not. The system
+     * tints tile icons a single colour, so the difference has to be carried by
+     * shape — a coloured icon renders as a flat blob and colour alone would also
+     * be invisible to a colour-blind user.
+     *
+     * These two drawables already existed in the project and were never wired up;
+     * the tile always drew `ic_notification` regardless of state.
+     */
+    private fun tileIcon(isConnected: Boolean): Icon = Icon.createWithResource(
+        this,
+        if (isConnected) R.drawable.ic_tile_connected else R.drawable.ic_tile_disconnected,
+    )
+
+    /**
+     * Applies the tap.
+     *
+     * @return true when this call already started an activity (and therefore
+     *   collapsed the shade itself), so the caller must not start another.
+     */
+    private fun toggleConnection(): Boolean {
+        val tile = qsTile ?: return false
         val isConnected = TunnelStatus.isActive()
 
         if (isConnected) {
             // Disconnect
             startService(Intent(this, MsnGuardVpnService::class.java).setAction(MsnGuardVpnService.ACTION_DISCONNECT))
             tile.state = Tile.STATE_INACTIVE
+            tile.icon = tileIcon(false)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 tile.subtitle = getString(R.string.vpn_disconnected)
             }
             tile.updateTile()
-        } else {
-            // Connect. VPN mode is the only mode, so Android's VPN consent is
-            // always required before the service may build a TUN.
-            val permissionIntent = VpnService.prepare(this)
-            if (permissionIntent == null) {
-                // Already have permission
-                val config = configJson()
-                startForegroundService(
-                    Intent(this, MsnGuardVpnService::class.java)
-                        .setAction(MsnGuardVpnService.ACTION_CONNECT)
-                        .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config)
-                )
-                tile.state = Tile.STATE_ACTIVE
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    tile.subtitle = getString(R.string.vpn_connecting)
-                }
-                tile.updateTile()
-            } else {
-                // No VPN consent yet. A TileService cannot host the consent
-                // dialog, so open the app and let it ask — silently logging left
-                // the user tapping a tile that visibly did nothing.
-                Log.w(LOG_TAG, "VPN permission required; opening the app to ask")
-                openApp()
+            return false
+        }
+
+        // Connect. VPN mode is the only mode, so Android's VPN consent is
+        // always required before the service may build a TUN.
+        val permissionIntent = VpnService.prepare(this)
+        if (permissionIntent == null) {
+            // Already have permission
+            val config = configJson()
+            startForegroundService(
+                Intent(this, MsnGuardVpnService::class.java)
+                    .setAction(MsnGuardVpnService.ACTION_CONNECT)
+                    .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config)
+            )
+            tile.state = Tile.STATE_ACTIVE
+            tile.icon = tileIcon(true)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                tile.subtitle = getString(R.string.vpn_connecting)
             }
+            tile.updateTile()
+            return false
+        }
+
+        // No VPN consent yet. A TileService cannot host the consent dialog, so
+        // open the app and let it ask — silently logging left the user tapping a
+        // tile that visibly did nothing.
+        Log.w(LOG_TAG, "VPN permission required; opening the app to ask")
+        openApp()
+        return true
+    }
+
+    /**
+     * Collapses the Quick Settings shade after a toggle.
+     *
+     * `startActivityAndCollapse` is the only supported way to do this, and it
+     * insists on a real activity — hence [ShadeCollapseActivity], which finishes
+     * immediately and draws nothing.
+     *
+     * Skipped when the consent path already ran: that path calls [openApp], which
+     * collapses the shade itself, and starting a second activity on top would
+     * cover the consent dialog.
+     */
+    private fun collapseShade() {
+        val intent = Intent(this, ShadeCollapseActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startActivityAndCollapse(
+                    PendingIntent.getActivity(
+                        this,
+                        1,
+                        intent,
+                        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                    )
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                startActivityAndCollapse(intent)
+            }
+        } catch (error: Exception) {
+            // Never let a cosmetic shade animation break the toggle: some OEM
+            // shells restrict activity starts from a tile. The connect/disconnect
+            // has already been issued by this point.
+            Log.w(LOG_TAG, "Could not collapse the shade: ${error.message}")
         }
     }
 
