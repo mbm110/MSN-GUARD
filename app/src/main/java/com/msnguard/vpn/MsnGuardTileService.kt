@@ -40,29 +40,16 @@ class MsnGuardTileService : TileService() {
         val state = if (isConnected) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
 
         tile.state = state
-        tile.icon = tileIcon(isConnected)
+        tile.icon = Icon.createWithResource(
+            this,
+            R.drawable.ic_notification
+        )
         tile.label = getString(R.string.vpn_tile_label)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             tile.subtitle = if (isConnected) getString(R.string.vpn_connected) else getString(R.string.vpn_disconnected)
         }
         tile.updateTile()
     }
-
-    /**
-     * Tile icon for the current state.
-     *
-     * Solid shield when connected, hollow-and-broken shield when not. The system
-     * tints tile icons a single colour, so the difference has to be carried by
-     * shape — a coloured icon renders as a flat blob and colour alone would also
-     * be invisible to a colour-blind user.
-     *
-     * These two drawables already existed in the project and were never wired up;
-     * the tile always drew `ic_notification` regardless of state.
-     */
-    private fun tileIcon(isConnected: Boolean): Icon = Icon.createWithResource(
-        this,
-        if (isConnected) R.drawable.ic_tile_connected else R.drawable.ic_tile_disconnected,
-    )
 
     /**
      * Applies the tap.
@@ -78,7 +65,6 @@ class MsnGuardTileService : TileService() {
             // Disconnect
             startService(Intent(this, MsnGuardVpnService::class.java).setAction(MsnGuardVpnService.ACTION_DISCONNECT))
             tile.state = Tile.STATE_INACTIVE
-            tile.icon = tileIcon(false)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 tile.subtitle = getString(R.string.vpn_disconnected)
             }
@@ -98,7 +84,6 @@ class MsnGuardTileService : TileService() {
                     .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config)
             )
             tile.state = Tile.STATE_ACTIVE
-            tile.icon = tileIcon(true)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 tile.subtitle = getString(R.string.vpn_connecting)
             }

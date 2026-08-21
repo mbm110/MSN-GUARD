@@ -1,24 +1,15 @@
-<!--
-  Quick Settings tile icon, DISCONNECTED state.
-
-  Same shield outline as the connected icon, but hollow and with a diagonal
-  break across it. The system tints tile icons a single colour, so the two
-  states must be distinguishable by SHAPE alone — an outlined, broken shield
-  next to a solid filled one reads correctly in both the on and off tints,
-  and stays legible for a colour-blind user.
--->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
-    <!-- Hollow shield: outer silhouette with the inner area cut back out. -->
+    <path
+        android:fillColor="#FF9E9E9E"
+        android:pathData="M12,2L21,20H3L12,2Z" />
     <path
         android:fillColor="#FFFFFFFF"
-        android:fillType="evenOdd"
-        android:pathData="M12,2 L4,5 v6 c0,5.55 3.84,10.74 8,12 c4.16,-1.26 8,-6.45 8,-12 V5 L12,2 z M12,4.15 L18,6.4 V11 c0,4.55 -3.06,8.86 -6,9.92 C9.06,19.86 6,15.55 6,11 V6.4 L12,4.15 z" />
-    <!-- Diagonal break, drawn as a filled quad so it needs no stroke support. -->
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M7.6,6.2 L9,4.8 L17.2,13 L15.8,14.4 z" />
+        android:pathData="M7,7L17,17M7,17L17,7"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
 </vector>

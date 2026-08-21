@@ -73,7 +73,7 @@
 
         <service
             android:name=".MsnGuardTileService"
-            android:icon="@drawable/ic_tile_disconnected"
+            android:icon="@drawable/ic_notification"
             android:label="@string/vpn_tile_label"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
             android:exported="true">
