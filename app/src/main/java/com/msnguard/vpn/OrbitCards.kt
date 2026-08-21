@@ -281,6 +281,17 @@ class ChainModeCard(
     private var armed = false
     /** Why the card is unavailable, shown in place of the normal subtitle. */
     private var unavailableReason: String? = null
+
+    /**
+     * Whether the chain can apply to the selected transport at all.
+     *
+     * Separate from [unavailableReason] because "cannot be changed right now" and
+     * "does not apply to this transport" are different facts and were being
+     * conflated. Connected-on-Psiphon is not applicable=false — the chain is
+     * actively carrying traffic — it is merely locked, so the card must still show
+     * CHAINED rather than N/A.
+     */
+    private var applicable = false
     /**
      * How the outer transport is chosen, as words for the armed subtitle.
      *
@@ -355,9 +366,14 @@ class ChainModeCard(
      * Marks the card unavailable and says why in the subtitle.
      *
      * @param reason shown instead of the usual subtitle; null means available.
+     * @param applicable whether the chain applies to the selected transport at all.
+     *   Defaults to `reason == null` so existing single-argument calls keep their
+     *   old meaning. Pass true with a non-null reason for "applies, but locked" —
+     *   which is what being connected on Psiphon is.
      */
-    fun setUnavailable(reason: String?) {
+    fun setUnavailable(reason: String?, applicable: Boolean = reason == null) {
         unavailableReason = reason
+        this.applicable = applicable
         isEnabled = reason == null
         setArmed(armed)
     }
@@ -380,7 +396,11 @@ class ChainModeCard(
     fun setArmed(value: Boolean) {
         armed = value
         val available = unavailableReason == null
-        val lit = value && available
+        // Lit means "the chain is on and it applies here" — NOT "the card is
+        // interactive". Those were the same expression, so a live chained tunnel
+        // (locked while connected) went dark and showed N/A, claiming the feature
+        // did not apply while it was carrying every packet.
+        val lit = value && applicable
         val density = resources.displayMetrics.density
         val fill = if (lit) {
             Sculpt.blend(palette.surface, palette.violet, 0.16f)
@@ -408,7 +428,10 @@ class ChainModeCard(
         }
         subtitleView.setTextColor(Sculpt.withAlpha(palette.faint, 0.95f))
         badgeView.text = when {
-            !available -> "N/A"
+            // N/A means "does not apply to this transport", so it must not appear
+            // merely because the card is locked. While connected on Psiphon the
+            // chain is live, and the badge has to keep saying so.
+            !applicable -> "N/A"
             value -> "CHAINED"
             else -> "OFF"
         }
@@ -421,7 +444,9 @@ class ChainModeCard(
         )
         icon.setLinked(lit)
         contentDescription = when {
-            !available -> "Psiphon over WARP unavailable: $unavailableReason"
+            // Mirrors the badge exactly: N/A only when the chain does not apply.
+            !applicable -> "Psiphon over WARP unavailable: $unavailableReason"
+            value && !available -> "Psiphon over WARP is armed, $unavailableReason"
             value -> "Psiphon over WARP is armed"
             else -> "Psiphon over WARP is off"
         }

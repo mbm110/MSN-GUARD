@@ -2131,7 +2131,12 @@ class MainActivity : Activity() {
             palette,
             "Psiphon over WARP",
             "Tunnel Psiphon inside a WARP transport",
-            chainArmed(),
+            // chainRunning(), NOT chainArmed(): the stored preference is global, but
+            // the chain only applies to the PSIPHON transport. Showing the raw
+            // preference made the switch sit lit-and-disabled on MASQUE — green, so
+            // it read as "on", while being greyed, so it read as "off". Displaying
+            // the effective value makes the two agree.
+            chainRunning(),
         ) { armed ->
             setChainArmed(armed)
             renderChainCard()
@@ -2870,17 +2875,24 @@ class MainActivity : Activity() {
         // ever showing different answers.
         val psiphonSelected = selectedProtocol == Protocol.PSIPHON
         val chainAvailable = psiphonSelected && modeControlsEnabled
-        val armed = chainArmed()
         psiphonChainRow?.apply {
-            setChecked(armed)
+            // Show the EFFECTIVE state, not the stored preference.
+            //
+            // Field report: with MASQUE selected, this switch was green *and* greyed
+            // out. Green says "the chain is on", grey says "you cannot change it" —
+            // together they claim the app is chaining through something the user
+            // cannot turn off, which is not true at all. The chain simply does not
+            // apply off the PSIPHON transport.
+            //
+            // chainRunning() is exactly that: armed AND on Psiphon. So the switch
+            // reads off on MASQUE/WireGuard/WoW, and the stored preference is left
+            // untouched underneath, so switching back to Psiphon restores it.
+            setChecked(chainRunning())
             setAvailable(chainAvailable)
         }
-        // Both rows are gated on the switch, and the service agrees: armRegionPhase()
-        // reads the country preference only when chainMode is set, so a plain Psiphon
-        // connect always lets Psiphon pick whichever server answers first. Without
-        // that check the row would be un-editable here while still taking effect on
-        // the plain path — a setting the user could neither see nor change.
-        val childrenAvailable = chainAvailable && armed
+        // The two rows below follow the switch's VISIBLE state, not the preference,
+        // for the same reason: with the switch reading off they must not look live.
+        val childrenAvailable = chainAvailable && chainRunning()
         chainOuterRow?.apply {
             setValue(chainOuterMode().label)
             setAvailable(childrenAvailable)
@@ -3671,12 +3683,17 @@ class MainActivity : Activity() {
      * switching away and back restores the user's choice instead of clearing it.
      */
     private fun renderChainCard() {
+        val psiphonSelected = selectedProtocol == Protocol.PSIPHON
         val reason = when {
-            selectedProtocol != Protocol.PSIPHON -> "only for the PSIPHON transport"
+            !psiphonSelected -> "only for the PSIPHON transport"
             !modeControlsEnabled -> "disconnect to change"
             else -> null
         }
-        chainCard.setUnavailable(reason)
+        // Two separate facts, and collapsing them was a bug: "locked" is not the
+        // same as "does not apply". Connected on Psiphon is locked but fully
+        // applicable — the chain is carrying the session — so the card must keep
+        // showing CHAINED instead of dropping to N/A and going dark.
+        chainCard.setUnavailable(reason, applicable = psiphonSelected)
         // Name the pinned transport on the card. Without this, a pin set in settings
         // is invisible here and the card would still read "auto transport" while the
         // connect path used only WireGuard.
