@@ -155,6 +155,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var monthRxTotal = 0L
     private var lastTrafficFlushMs = 0L
     private var lastNotificationUpdateMs = 0L
+
+    /**
+     * Whether this session has already recorded its transport as working.
+     *
+     * A latch, not a state: the recording is idempotent and only the first crossing
+     * of the byte threshold matters, so once set every later traffic sample costs a
+     * single boolean test instead of a preferences write. Reset per tunnel in
+     * [resetSessionTraffic].
+     */
+    private var plainTransportRecorded = false
     private var storedConfig: String? = null
     private var currentProtocol = "Tunnel"
     private var currentVpnIp = ""
@@ -444,6 +454,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
          * process kill can lose.
          */
         private const val TRAFFIC_FLUSH_MS = 60_000L
+
+        /**
+         * In-tunnel RX bytes that count as "this transport really works".
+         *
+         * Mirrors `MainActivity.VERIFY_MIN_RX_BYTES` on purpose — the two answer the
+         * same question ("did real payload arrive?") and drifting apart would let one
+         * of them accept a tunnel the other rejects. Not shared as one constant
+         * because the activity's copy also documents the verification gate's own
+         * retry loop; if either changes, change both.
+         */
+        private const val VERIFIED_RX_BYTES = 4_096L
+
 
         /**
          * How often the ongoing notification's byte counters are refreshed. The
@@ -1359,15 +1381,65 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     /**
+     * Records that the current PLAIN transport reached the internet on this network.
+     *
+     * Only meaningful for the three transports the chain can use as its outer leg,
+     * and only for an unchained run — inside the chain the byte counters belong to
+     * Psiphon, and [raiseOuterLeg] already records that case directly and more
+     * precisely.
+     *
+     * The threshold is deliberately the same 4 KiB the app's own verification gate
+     * uses ([VERIFIED_RX_BYTES], mirroring MainActivity.VERIFY_MIN_RX_BYTES), and it
+     * is on **RX only**:
+     *
+     *  - TX proves nothing. A dead or size-blind tunnel still sends: retransmits
+     *    leave, the WireGuard health probe leaves, and none of it comes back. Every
+     *    fake-connected bug in this project's history looked healthy on TX.
+     *  - The floor must clear the core's own keepalive drip. The 3-second WireGuard
+     *    data-plane probe pushes a few hundred bytes through a completely dead
+     *    tunnel, so `rx > 0` would happily record a transport that carries nothing.
+     *
+     * Latches per session via [plainTransportRecorded] so this is one boolean test
+     * per traffic sample once it has fired, not a SharedPreferences write per second.
+     */
+    private fun recordWorkingPlainTransport(rx: Long) {
+        if (plainTransportRecorded) return
+        if (chainMode || psiphonVpnMode) return
+        if (rx < VERIFIED_RX_BYTES) return
+        val transport = currentProtocol.lowercase()
+        if (transport !in CoreConfig.CHAIN_OUTER_LADDER) return
+        plainTransportRecorded = true
+        getSharedPreferences("settings", MODE_PRIVATE).edit()
+            .putString(CoreConfig.PLAIN_WORKING_TRANSPORT_PREF, transport)
+            .apply()
+        ConnectionLog.record(
+            "$currentProtocol carried real traffic on this network — " +
+                "Psiphon-over-WARP will try it first"
+        )
+    }
+
+    /**
      * Try each WARP transport in turn until one is carrying traffic.
      *
      * Returns the label of the transport that came up, or null when none did.
      *
-     * Starts from the rung that last worked on this device, then wraps, so every
-     * rung still gets a turn but the known-good one goes first. That matters more
-     * here than in the Psiphon ladder: a rung the carrier blocks outright does not
-     * fail fast — MASQUE keeps scanning gateways until its budget expires — so a
+     * Starts from the rung with the best evidence for this network, then wraps, so
+     * every rung still gets a turn but the likeliest one goes first. That matters
+     * more here than in the Psiphon ladder: a rung the carrier blocks outright does
+     * not fail fast — MASQUE keeps scanning gateways until its budget expires — so a
      * wrong starting rung costs the user most of a minute.
+     *
+     * Evidence is ranked, strongest first:
+     *
+     *  1. [CoreConfig.CHAIN_OUTER_PREF] — a transport that has carried Psiphon
+     *     inside it before. Direct evidence about the exact job at hand.
+     *  2. [CoreConfig.PLAIN_WORKING_TRANSPORT_PREF] — a transport that reached the
+     *     internet unchained on this carrier. Weaker (carrying Psiphon is harder
+     *     than carrying ordinary traffic, so this can still fail) but far better
+     *     than a static order, and it is the common case for a user who used the
+     *     app normally before arming the chain.
+     *  3. Ladder order — a fresh install with no history at all starts at MASQUE and
+     *     walks the usual sequence.
      *
      * Each rung gets its own budget (see [chainOuterBudgetMs]) and the core is fully
      * stopped between attempts: `aether_start_json` refuses to run twice
@@ -1380,15 +1452,34 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // the user already knows their carrier blocks.
         val ladder = CoreConfig.chainOuterCandidates(this)
         val auto = ladder.size > 1
-        val remembered = getSharedPreferences("settings", MODE_PRIVATE)
-            .getInt(CoreConfig.CHAIN_OUTER_PREF, 0)
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        // -1, not 0: absent must be distinguishable from "rung 0 worked", or a fresh
+        // install would look like it had already proven MASQUE and the plain-history
+        // hint below would never be consulted.
+        val chainMemory = prefs.getInt(CoreConfig.CHAIN_OUTER_PREF, -1)
+        val plainHint = prefs.getString(CoreConfig.PLAIN_WORKING_TRANSPORT_PREF, null)
+            ?.let { ladder.indexOf(it) }
+            ?.takeIf { it >= 0 }
         // The remembered index is into the full ladder, so it only means anything
         // when the full ladder is what we are walking.
-        val start = if (auto) remembered.coerceIn(0, ladder.size - 1) else 0
+        val start = when {
+            !auto -> 0
+            chainMemory in ladder.indices -> chainMemory
+            plainHint != null -> plainHint
+            else -> 0
+        }
 
         if (!auto) {
             ConnectionLog.record(
                 "Chain: outer transport pinned to ${CoreConfig.chainOuterLabel(ladder[0])}"
+            )
+        } else if (chainMemory !in ladder.indices && plainHint != null) {
+            // Say which evidence was used. Without this the reordering is invisible
+            // and a support log cannot distinguish it from the static order.
+            ConnectionLog.record(
+                "Chain: no chained history yet — starting with " +
+                    "${CoreConfig.chainOuterLabel(ladder[plainHint])}, which last carried " +
+                    "real traffic on its own"
             )
         }
 
@@ -1585,6 +1676,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         resetSessionTraffic()
         stopRequested.set(false)
         vpnModeActive.set(true)
+        // Belt and braces with the clear in stopTunnel(): a reconnect goes straight
+        // from one startTunnel to the next without necessarily passing through the
+        // teardown path, and these two flags decide whether this session counts as
+        // "plain" for recordWorkingPlainTransport(). The branches below set them
+        // again for the Psiphon and chained paths.
+        chainMode = false
+        psiphonVpnMode = false
         startAsForeground()
 
         // PSIPHON-OVER-WARP must be tested before the plain PSIPHON branch: its
@@ -1787,6 +1885,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             chainMode = false
             chainOuterCommitted = false
             vpnModeActive.set(false)
+            // Cleared with the rest of the per-session Psiphon state. It used to be
+            // left set, which was harmless only because nothing read it after
+            // teardown — recordWorkingPlainTransport() now does, and a stale `true`
+            // would make every later plain MASQUE/WireGuard session look like a
+            // Psiphon one and never record the transport that actually worked.
+            psiphonVpnMode = false
             psiphonVpnActivated = false
             tun?.close()
             tun = null
@@ -1892,6 +1996,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         )
         accountedTx = tx
         accountedRx = rx
+        // A plain tunnel that has moved real bytes is evidence about this carrier
+        // that the chain can reuse later. Cheap: a single boolean check on the
+        // common path.
+        recordWorkingPlainTransport(rx)
         sendTraffic(tx, rx, monthTx, monthRx)
 
         if (now - lastTrafficFlushMs >= TRAFFIC_FLUSH_MS) {
@@ -2013,6 +2121,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         prevSpeedSampleMs = 0
         lastTrafficSampleMs = 0
         lastNotificationUpdateMs = 0
+        // Per-session latch: each tunnel gets one chance to prove its transport
+        // works. Without this reset the flag would stay set for the life of the
+        // process, so a later session on a different transport (or a different
+        // network) would never record what actually worked.
+        plainTransportRecorded = false
         // The UI keeps its own mirrors, and it cannot know the core restarted
         // counting unless it is told. Without this broadcast the activity would
         // hold the old totals until the first traffic sample of the new session,

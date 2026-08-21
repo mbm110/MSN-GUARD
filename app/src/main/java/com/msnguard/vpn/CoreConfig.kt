@@ -34,6 +34,30 @@ object CoreConfig {
      */
     const val CHAIN_OUTER_PREF = "chain_outer_index"
 
+    /**
+     * Which transport last carried a PLAIN (unchained) tunnel far enough to move
+     * real bytes, as a `CHAIN_OUTER_LADDER` entry — or absent if none ever has.
+     *
+     * Separate key from [CHAIN_OUTER_PREF] because they are different measurements
+     * and must not overwrite each other:
+     *
+     *  - [CHAIN_OUTER_PREF] = "this transport carried Psiphon **inside** it". Direct
+     *    evidence about the chain.
+     *  - this key = "this transport reached the internet on this carrier **on its
+     *    own**". Weaker evidence for the chain — carrying Psiphon is a harder job
+     *    than carrying ordinary traffic — but far better than the static ladder
+     *    order when the chain has no history yet.
+     *
+     * So the chain's own memory always wins; this is only consulted when it is
+     * absent. See [MsnGuardVpnService.raiseOuterLeg].
+     *
+     * Written only after the byte threshold in
+     * [MsnGuardVpnService.recordWorkingPlainTransport] — a handshake is not
+     * evidence, which is the whole lesson of the fake-connected bugs.
+     */
+    const val PLAIN_WORKING_TRANSPORT_PREF = "plain_working_transport"
+
+
     fun json(context: Context, protocol: String? = null): String =
         json(context, protocol, listenOverride = null)
 
