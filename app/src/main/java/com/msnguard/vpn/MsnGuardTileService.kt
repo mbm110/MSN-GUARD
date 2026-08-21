@@ -183,7 +183,7 @@ class MsnGuardTileService : TileService() {
      */
     private fun configJson(): String {
         val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        val armed = prefs.getBoolean(CHAIN_ARMED, false)
+        val armed = prefs.getBoolean(CHAIN_ARMED, CHAIN_ARMED_DEFAULT)
         val picked = prefs.getString(DEFAULT_PROTOCOL, Protocol.MASQUE.coreName)
         // Same rule as the main screen: the chain wraps Psiphon, so it only applies
         // when Psiphon is the selected transport.
@@ -270,6 +270,16 @@ class MsnGuardTileService : TileService() {
         const val DEFAULT_PROTOCOL = "default_protocol"
         /** Mirrors MainActivity.CHAIN_ARMED — same SharedPreferences file. */
         const val CHAIN_ARMED = "chain_armed"
+
+        /**
+         * Mirrors MainActivity.CHAIN_ARMED_DEFAULT.
+         *
+         * Must stay in step with it: the tile's promise is "reconnect the way I last
+         * connected", so if the two defaults disagree, a tile-initiated connect on a
+         * fresh install raises a different tunnel shape than the button does.
+         */
+        const val CHAIN_ARMED_DEFAULT = true
+
 
         enum class Protocol(
             val label: String,

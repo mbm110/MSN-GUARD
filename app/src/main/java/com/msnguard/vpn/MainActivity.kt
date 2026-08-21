@@ -157,24 +157,6 @@ class MainActivity : Activity() {
     private var trafficSpeedValue: TextView? = null
     private var trafficSessionValue: TextView? = null
     private var trafficMonthValue: TextView? = null
-    private var trafficHourlyChart: OrbitBarChartView? = null
-    private var trafficDailyChart: OrbitBarChartView? = null
-    private var trafficHourlyTotal: TextView? = null
-    private var trafficDailyTotal: TextView? = null
-
-    /**
-     * Site-check state, all scoped to the Traffic monitor page.
-     *
-     * Keyed by host rather than by name because a service can appear under two
-     * categories, and one probe must repaint every row showing it.
-     * [netMonitorRequest] is the same generation-counter pattern the IP refresh and
-     * verification gate use: it invalidates in-flight results when the page closes
-     * or a second sweep starts, so a late answer cannot paint a detached view.
-     */
-    private val netMonitorRows = HashMap<String, MutableList<TextView>>()
-    private var netMonitorButton: OrbitSettingsRow? = null
-    private var netMonitorRequest = 0
-    private var netMonitorRunning = false
     private var trafficTx = 0L
     private var trafficRx = 0L
     private var trafficSpeedTx = 0L
@@ -2933,39 +2915,6 @@ class MainActivity : Activity() {
         trafficSpeedValue = addTrafficMetric(content, "LIVE SPEED")
         trafficSessionValue = addTrafficMetric(content, "THIS SESSION")
         trafficMonthValue = addTrafficMetric(content, "THIS MONTH")
-
-        // History: when the traffic went, not just how much. The month total
-        // answers the billing question; these answer "what was that spike".
-        content.addView(sectionCaption("LAST 24 HOURS"), sectionCaptionParams())
-        trafficHourlyChart = OrbitBarChartView(this, palette).also {
-            content.addView(it, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(96),
-            ).apply { topMargin = dp(10) })
-        }
-        trafficHourlyTotal = label("", 13f, MUTED).also {
-            content.addView(it, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(6); leftMargin = dp(4) })
-        }
-
-        content.addView(sectionCaption("LAST 14 DAYS"), sectionCaptionParams())
-        trafficDailyChart = OrbitBarChartView(this, palette).also {
-            content.addView(it, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(96),
-            ).apply { topMargin = dp(10) })
-        }
-        trafficDailyTotal = label("", 13f, MUTED).also {
-            content.addView(it, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(6); leftMargin = dp(4) })
-        }
-
-        addNetMonitorSection(content)
-
         scroll.addView(content)
         page.addView(scroll, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3010,194 +2959,12 @@ class MainActivity : Activity() {
         trafficSpeedValue = null
         trafficSessionValue = null
         trafficMonthValue = null
-        trafficHourlyChart = null
-        trafficDailyChart = null
-        trafficHourlyTotal = null
-        trafficDailyTotal = null
-        // Abandon any in-flight reachability probes: their results would land on
-        // views that are being detached, and a background sweep the user cannot
-        // see is exactly the kind of pointless work the battery audit removed.
-        netMonitorRequest++
-        netMonitorRunning = false
-        netMonitorRows.clear()
-        netMonitorButton = null
     }
-
-    /**
-     * "Site check" — reachability probes for well-known services, grouped by
-     * category, rendered inside the Traffic monitor page.
-     *
-     * Lives here rather than on its own screen because it answers the same
-     * question the traffic figures do — "is this tunnel doing its job" — and a
-     * separate page for one button and a list would be a worse trade.
-     */
-    private fun addNetMonitorSection(content: LinearLayout) {
-        content.addView(sectionCaption("SITE CHECK"), sectionCaptionParams())
-        content.addView(
-            label(
-                "Tests whether well-known sites answer through the current connection. " +
-                    "\"Sanctioned\" means the site replied but refused this exit country — " +
-                    "a different preferred country fixes that, reconnecting will not.",
-                13f,
-                MUTED,
-            ),
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(8); leftMargin = dp(4); rightMargin = dp(4) },
-        )
-
-        netMonitorButton = OrbitSettingsRow(
-            this,
-            palette,
-            title = "Run site check",
-            value = "${NetMonitor.allSites.size} sites",
-            onClick = { startNetMonitorSweep() },
-        ).also {
-            content.addView(it, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(56),
-            ).apply { topMargin = dp(12) })
-        }
-
-        NetMonitor.categories.forEach { category ->
-            content.addView(
-                label(category.title.uppercase(), 11f, palette.faint).apply { letterSpacing = 0.08f },
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(18); leftMargin = dp(4) },
-            )
-            category.sites.forEach { site ->
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(4), dp(7), dp(4), dp(7))
-                }
-                row.addView(
-                    label(site.name, 14f, INK, singleLine = true),
-                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-                )
-                val state = label(NetMonitor.Result.Idle.label, 13f, MUTED, TypefaceStyle.MEDIUM)
-                row.addView(state)
-                // Keyed by host, not by name: the same service can appear in two
-                // categories (Twitch is in both Gaming and Social), and both rows
-                // must update from one probe.
-                netMonitorRows.getOrPut(site.host) { mutableListOf() }.add(state)
-                content.addView(row, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ))
-            }
-        }
-    }
-
-    /**
-     * Probes every site once, a few at a time, and paints results as they land.
-     *
-     * Bounded concurrency, not one thread per site: 60-odd simultaneous TLS
-     * handshakes through one tunnel is a self-inflicted congestion spike that
-     * makes every measurement wrong, and on a SOCKS path it would also starve the
-     * listener the tunnel itself needs.
-     */
-    private fun startNetMonitorSweep() {
-        if (netMonitorRunning) return
-        netMonitorRunning = true
-        val request = ++netMonitorRequest
-        val sites = NetMonitor.allSites
-        netMonitorButton?.setValue("testing 0/${sites.size}")
-        netMonitorRows.values.forEach { views ->
-            views.forEach { it.text = NetMonitor.Result.Testing.label; it.setTextColor(MUTED) }
-        }
-
-        Thread {
-            val queue = java.util.concurrent.ConcurrentLinkedQueue(sites)
-            val done = java.util.concurrent.atomic.AtomicInteger(0)
-            val workers = (1..NET_MONITOR_CONCURRENCY).map {
-                Thread {
-                    while (true) {
-                        if (request != netMonitorRequest) return@Thread
-                        val site = queue.poll() ?: return@Thread
-                        val result = NetMonitor.probe(site) { url -> openTunnelConnection(url) }
-                        val finished = done.incrementAndGet()
-                        runOnUiThread {
-                            if (isFinishing || isDestroyed) return@runOnUiThread
-                            if (request != netMonitorRequest) return@runOnUiThread
-                            paintNetMonitorResult(site, result)
-                            netMonitorButton?.setValue("testing $finished/${sites.size}")
-                        }
-                    }
-                }.apply { isDaemon = true; start() }
-            }
-            workers.forEach { runCatching { it.join() } }
-            runOnUiThread {
-                if (isFinishing || isDestroyed) return@runOnUiThread
-                if (request != netMonitorRequest) return@runOnUiThread
-                netMonitorRunning = false
-                netMonitorButton?.setValue("${sites.size} sites")
-            }
-        }.apply { isDaemon = true; start() }
-    }
-
-    private fun paintNetMonitorResult(site: NetMonitor.Site, result: NetMonitor.Result) {
-        val colour = when (result) {
-            is NetMonitor.Result.Reachable -> connected
-            is NetMonitor.Result.Sanctioned -> palette.amber
-            is NetMonitor.Result.Blocked -> palette.danger
-            else -> MUTED
-        }
-        netMonitorRows[site.host]?.forEach { view ->
-            view.text = result.label
-            view.setTextColor(colour)
-        }
-    }
-
-    private fun sectionCaptionParams() = LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT,
-        ViewGroup.LayoutParams.WRAP_CONTENT,
-    ).apply { topMargin = dp(26); leftMargin = dp(4) }
-
-    /** Small all-caps caption used to head a section inside a page. */
-    private fun sectionCaption(text: String): TextView =
-        label(text, 12f, MUTED).apply { letterSpacing = 0.1f }
 
     private fun renderTrafficMonitor() {
         trafficSpeedValue?.text = "↓ ${formatTraffic(trafficSpeedRx)}/s   ↑ ${formatTraffic(trafficSpeedTx)}/s"
         trafficSessionValue?.text = "↓ ${formatTraffic(trafficRx)}   ↑ ${formatTraffic(trafficTx)}"
         trafficMonthValue?.text = "↓ ${formatTraffic(trafficMonthRx)}   ↑ ${formatTraffic(trafficMonthTx)}"
-        renderTrafficHistory()
-    }
-
-    /**
-     * Repaints the two history charts.
-     *
-     * Read from disk on demand rather than pushed from the service: history only
-     * needs to be current while this page is open, and the service already writes
-     * it on the same slow timer as the month total.
-     */
-    private fun renderTrafficHistory() {
-        trafficHourlyChart?.let { chart ->
-            val buckets = TrafficHistory.lastHours(this, 24)
-            chart.labelEvery = 4
-            chart.setBuckets(buckets)
-            val (tx, rx) = TrafficHistory.sum(buckets)
-            trafficHourlyTotal?.text = if (tx + rx == 0L) {
-                "No traffic recorded in the last 24 hours"
-            } else {
-                "↓ ${formatTraffic(rx)}   ↑ ${formatTraffic(tx)}"
-            }
-        }
-        trafficDailyChart?.let { chart ->
-            val buckets = TrafficHistory.lastDays(this, 14)
-            chart.labelEvery = 2
-            chart.setBuckets(buckets)
-            val (tx, rx) = TrafficHistory.sum(buckets)
-            trafficDailyTotal?.text = if (tx + rx == 0L) {
-                "No traffic recorded in the last 14 days"
-            } else {
-                "↓ ${formatTraffic(rx)}   ↑ ${formatTraffic(tx)}"
-            }
-        }
     }
 
     /** One-line month total, shown as the Traffic monitor row's value. */
@@ -3928,8 +3695,20 @@ class MainActivity : Activity() {
 
     }
 
-    /** Whether the next connect should chain Psiphon over the picked transport. */
-    private fun chainArmed(): Boolean = preferences().getBoolean(CHAIN_ARMED, false)
+    /**
+     * Whether the next connect should chain Psiphon over the picked transport.
+     *
+     * Defaults to ON. The chain is the configuration that actually gets through on
+     * the hostile Iranian carriers this app exists for, so a user who picks Psiphon
+     * and connects should get it without having to find a second switch first —
+     * which is the same one-click-connect rule the rest of the app follows.
+     *
+     * The default only applies until the user expresses a preference. [setChainArmed]
+     * records that they did, so an explicit "off" is remembered and is NOT quietly
+     * re-armed on the next launch.
+     */
+    private fun chainArmed(): Boolean =
+        preferences().getBoolean(CHAIN_ARMED, CHAIN_ARMED_DEFAULT)
 
     /**
      * Persist whether the next connect chains Psiphon inside WARP.
@@ -4415,18 +4194,6 @@ class MainActivity : Activity() {
         /** Matches `"country":"IR"` and `"country_code":"IR"` alike. */
         val COUNTRY_CODE_JSON = Regex("\"country(?:_code)?\"\\s*:\\s*\"([A-Za-z]{2})\"")
         const val IP_TIMEOUT_MS = 5_000
-
-        /**
-         * Simultaneous site-check probes.
-         *
-         * Six, not "all of them": every probe is a full TLS handshake through the
-         * tunnel, and sixty at once is a self-inflicted congestion spike that makes
-         * the latency numbers meaningless. On the Psiphon path it would also flood
-         * the same local SOCKS listener tun2socks depends on, so the measurement
-         * would degrade the connection it is measuring.
-         */
-        const val NET_MONITOR_CONCURRENCY = 6
-
         const val IP_FETCH_ATTEMPTS = 3
         const val IP_RETRY_DELAY_MS = 300L
         const val SETTINGS = "settings"
@@ -4447,6 +4214,18 @@ class MainActivity : Activity() {
         const val KILL_SWITCH = "kill_switch"
         /** Whether Psiphon-over-WARP is armed for the next connect. */
         const val CHAIN_ARMED = "chain_armed"
+
+        /**
+         * Psiphon-over-WARP is armed by default.
+         *
+         * It is the combination that survives the carriers this app targets, and the
+         * standing requirement here is one-click connect — a user who selects Psiphon
+         * should not have to discover a second switch to get the working
+         * configuration. An explicit choice by the user always wins over this: the
+         * key is written on every toggle, so "off" persists.
+         */
+        const val CHAIN_ARMED_DEFAULT = true
+
         const val LAN_SHARING = "lan_sharing"
         const val LAN_BYPASS = "lan_bypass"
         const val DEFAULT_PROTOCOL = "default_protocol"
