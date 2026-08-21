@@ -96,6 +96,41 @@ private val PROTOCOLS_CHAINABLE = listOf(
 )
 
 /**
+ * Public DNS resolvers on NON-standard ports, for Psiphon's own resolver.
+ *
+ * Why this exists, from a field log where Psiphon could not connect at all:
+ * every dial died on the same line —
+ * `checkDNSAnswerIP#1767: IP is bogon`. The resolver got an *answer*, and the
+ * answer was a private-range address, i.e. the operator's DNS hijack. Psiphon
+ * correctly refused it, so tactics never loaded and not one of the five bundled
+ * FRONTED-MEEK entries could be resolved. `Tunnels: {"count":0}`.
+ *
+ * The resolvers we put on the TUN (`applyDns`, 1.1.1.1 / 8.8.8.8) do NOT help
+ * here. Psiphon's resolver builds its own UDP socket and calls `bindToDevice` on
+ * it (upstream `resolver.go`), so it leaves *outside* the TUN, straight onto the
+ * operator link where UDP/53 is hijacked no matter which address is targeted.
+ *
+ * The port is the whole point. The hijack observed intercepts UDP/53; the same
+ * providers answering on another port were reached cleanly from an uncensored
+ * host. So these are ordinary public resolvers reached where the interception
+ * does not sit:
+ *
+ *  - 208.67.222.222:5353 / 208.67.220.220:5353 — OpenDNS's alternate port
+ *  - 9.9.9.9:9953 — Quad9's alternate port
+ *
+ * Scope, so nobody expects too much of this: it fixes name resolution only. On a
+ * network that also blocks the transport itself there is nothing to resolve to,
+ * and a chained run never even reaches this code — the outer WARP leg has to be
+ * up first, and if it is up then DNS was never the problem. Plain Psiphon is
+ * where this pays off.
+ */
+private val PSIPHON_ALTERNATE_DNS = listOf(
+    "208.67.222.222:5353",
+    "9.9.9.9:9953",
+    "208.67.220.220:5353",
+)
+
+/**
  * One rung of the Psiphon escalation ladder.
  *
  * Each rung is a complete, self-contained Psiphon config variant plus the time
@@ -742,6 +777,29 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // Emit detailed diagnostic notices so we can see exactly which
             // protocols/servers fail on which carriers.
             put("EmitDiagnosticNotices", true)
+            // --- Give Psiphon a resolver the operator does not intercept ---
+            //
+            // See [PSIPHON_ALTERNATE_DNS] for the field evidence. Three keys, and
+            // each one is load-bearing:
+            //
+            //  * PreferredAlternateServers, not AlternateServers: upstream only
+            //    consults the plain Alternate list when the system server list is
+            //    EMPTY, and on Android it never is — GetDNSServers returns the
+            //    resolvers we set on the TUN. Only the Preferred list is allowed
+            //    to go first while system servers exist.
+            //  * Probability 1.0, because the default is 0.0. The Preferred list
+            //    is selected by a weighted coin flip, so without this the list is
+            //    configured and then almost never used.
+            //  * AttemptsPerPreferredServer 2 (default 1): one lost UDP packet on
+            //    a mobile link would otherwise drop us straight back to the
+            //    hijacked system resolver.
+            //
+            // Not a hard override: the system resolvers stay in the list behind
+            // these, so a network with honest DNS still resolves normally if the
+            // alternate ports are the ones being blocked.
+            put("DNSResolverPreferredAlternateServers", JSONArray(PSIPHON_ALTERNATE_DNS))
+            put("DNSResolverPreferAlternateServerProbability", 1.0)
+            put("DNSResolverAttemptsPerPreferredServer", 2)
             // Psiphon-over-WARP: dial out through the core's SOCKS listener, so
             // every Psiphon connection leaves inside the WARP tunnel.
             //
@@ -846,6 +904,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             config.put("InproxyAllowClient", false)
             ConnectionLog.record("Chain: TCP-only protocols (a SOCKS proxy cannot carry UDP)")
         }
+        // Stated once per attempt so a support log proves the resolver was in
+        // play. Without it, a future "IP is bogon" log would be impossible to
+        // tell apart from a build that predates this.
+        ConnectionLog.record(
+            "Psiphon DNS: ${PSIPHON_ALTERNATE_DNS.size} public resolvers on " +
+                "non-standard ports preferred over the operator's"
+        )
         return config.toString()
     }
 
