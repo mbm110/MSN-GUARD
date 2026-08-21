@@ -1886,10 +1886,20 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         prevRx = rx
         prevSpeedSampleMs = now
 
-        val (monthTx, monthRx) = recordMonthlyTraffic(
-            (tx - accountedTx).coerceAtLeast(0),
-            (rx - accountedRx).coerceAtLeast(0),
-        )
+        // Compute the deltas ONCE and feed both consumers from them.
+        //
+        // They used to be computed twice, inline, in two adjacent calls. That was
+        // correct only because `accountedTx/Rx` happened to be updated after both —
+        // i.e. correct by accident. Anyone reordering those lines would have made
+        // the history and the month total disagree silently, which is precisely the
+        // failure mode that produced the 60x inflation bug.
+        val txDelta = (tx - accountedTx).coerceAtLeast(0)
+        val rxDelta = (rx - accountedRx).coerceAtLeast(0)
+        val (monthTx, monthRx) = recordMonthlyTraffic(txDelta, rxDelta)
+        // Same deltas as the month total, on purpose: the history then inherits the
+        // throttle/rebase discipline above instead of re-deriving it from a counter
+        // that can restart.
+        TrafficHistory.add(this, txDelta, rxDelta)
         accountedTx = tx
         accountedRx = rx
         sendTraffic(tx, rx, monthTx, monthRx)
@@ -1961,6 +1971,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             monthTxTotal = 0
             monthRxTotal = 0
             monthKey = month
+            // The hourly/daily history was accumulated from the same inflated
+            // samples, so it is wrong by the same factor. Leaving it would put a
+            // chart on screen that contradicts the corrected total.
+            TrafficHistory.reset(this)
             ConnectionLog.record("Monthly traffic counter reset — previous total was miscounted")
             return
         }
@@ -2033,6 +2047,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             .putLong(TRAFFIC_TX, monthTxTotal)
             .putLong(TRAFFIC_RX, monthRxTotal)
             .apply()
+        // The hourly/daily history is fed from the same deltas and must reach disk
+        // on the same schedule, or a teardown loses up to a minute of buckets that
+        // the month total kept.
+        TrafficHistory.flush(this)
     }
 
     private fun sendTraffic(tx: Long, rx: Long, monthTx: Long, monthRx: Long) {
