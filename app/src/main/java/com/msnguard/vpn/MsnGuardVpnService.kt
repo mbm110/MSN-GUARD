@@ -480,7 +480,21 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val STATUS_CONNECTED = "connected"
         const val STATUS_DISCONNECTED = "disconnected"
         const val STATUS_FAILED = "failed"
-        const val CHANNEL_ID = "vpn_channel"
+        /**
+         * Deliberately a new id, not a rename.
+         *
+         * A channel's lock-screen visibility is fixed at creation: after the first
+         * `createNotificationChannel` call Android ignores every later change to
+         * that field, so patching the old channel in place would have shipped a
+         * build where the code says PUBLIC and the device still behaves as before
+         * for everyone who already had the app installed. A fresh id is created
+         * fresh, with the new visibility, and [CHANNEL_ID_LEGACY] is deleted so the
+         * user is not left with two VPN rows in notification settings.
+         */
+        const val CHANNEL_ID = "vpn_channel_v2"
+
+        /** The pre-1.4.6 channel, deleted on first foreground start. */
+        private const val CHANNEL_ID_LEGACY = "vpn_channel"
 
         /**
          * Marks a config as Psiphon-over-WARP.
@@ -2388,19 +2402,58 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     private fun startAsForeground() {
         val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel(
-            CHANNEL_ID,
-            "VPN Service",
-            NotificationManager.IMPORTANCE_LOW
-        ))
+        ensureNotificationChannel(manager)
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("MSN-GUARD")
             .setContentText("Connecting...")
             .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setOnlyAlertOnce(true)
             .build()
         startForeground(NOTIFICATION_ID, notification)
+    }
+
+    /**
+     * Create the notification channel so the row survives on the lock screen.
+     *
+     * Why the old channel did not: it was `IMPORTANCE_LOW`, which Android files as
+     * a *silent* notification, and the lock screen's own filter ("Show sensitive /
+     * Don't show silent notifications", plus the equivalent on MIUI/EMUI/One UI)
+     * drops silent rows entirely on many devices. That is the difference the user
+     * sees against other VPN apps: it is the importance class, not the content.
+     *
+     * So the channel is `IMPORTANCE_DEFAULT` — the alerting class, which the lock
+     * screen keeps — with sound and vibration explicitly removed. Alerting without
+     * noise is the combination a VPN status row wants; raising importance alone
+     * would have made it beep.
+     *
+     * `lockscreenVisibility = PUBLIC` is the second half: with `PRIVATE` (the
+     * default) a device set to hide sensitive content shows "Contents hidden"
+     * instead of the status. Nothing here is sensitive — app name, protocol,
+     * byte counters — and hiding it defeats the purpose of the request.
+     *
+     * Battery cost of all this: zero. It changes how an already-posted
+     * notification is classified, not how often it is posted.
+     */
+    private fun ensureNotificationChannel(manager: NotificationManager) {
+        // Visibility and importance are frozen at creation time, so the old
+        // channel can never be upgraded in place — it is removed instead. Harmless
+        // when it was never created (fresh install).
+        try { manager.deleteNotificationChannel(CHANNEL_ID_LEGACY) } catch (_: Exception) {}
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "VPN Service",
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            setSound(null, null)
+            enableVibration(false)
+            enableLights(false)
+            setShowBadge(false)
+        }
+        manager.createNotificationChannel(channel)
     }
 
     private fun notification(tx: Long, rx: Long): Notification {
@@ -2433,6 +2486,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)
+            // Same reasoning as the channel: nothing here is sensitive, and PRIVATE
+            // would render "Contents hidden" on a device that hides sensitive
+            // content — the exact case the user is complaining about.
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            // The channel is now IMPORTANCE_DEFAULT so the lock screen keeps the
+            // row. Without this, every one of these updates (one every 5s while
+            // traffic flows) would count as a fresh alert and could buzz the device
+            // continuously. Sound and vibration are already off at the channel, but
+            // this also stops the heads-up popover from reappearing.
+            .setOnlyAlertOnce(true)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Disconnect", disconnectPendingIntent)
             .addAction(android.R.drawable.ic_menu_revert, "Reconnect", reconnectPendingIntent)
             .build()
