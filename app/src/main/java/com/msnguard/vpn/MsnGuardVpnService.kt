@@ -327,10 +327,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // 425 direct entries that are known-dead on this carrier.
             config.put("InitialLimitTunnelProtocols", JSONArray(PROTOCOLS_FRONTED))
             config.put("InitialLimitTunnelProtocolsCandidateCount", 30)
+            // A HARD limit as well as the initial preference, so the rung's whole
+            // budget is spent on fronted candidates instead of lapsing back to the
+            // 425 direct entries that are null-routed on this carrier. Rung D is
+            // where direct protocols get their turn.
+            config.put("LimitTunnelProtocols", JSONArray(PROTOCOLS_FRONTED))
             config.put("ConnectionWorkerPoolSize", 12)
             // CDN paths are legitimately slower than a direct dial; without this
             // Psiphon abandons them as if they were dead.
             config.put("NetworkLatencyMultiplier", 2.0)
+            applyTacticsOverride(config)
         },
         PsiphonStrategy(
             name = "D",
@@ -344,6 +350,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // connected this way on QUIC-OSSH — and it is also the safety net if
             // the CDN fronts themselves ever get blocked.
             config.put("ConnectionWorkerPoolSize", 16)
+            // Direct dials do not need tactics either, and with tactics on this
+            // rung was also being forced onto in-proxy — see applyTacticsOverride.
+            applyTacticsOverride(config)
         },
         PsiphonStrategy(
             name = "C",
@@ -595,7 +604,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
         val port = activeSocksPort
         if (port <= 0) {
-            sendStatus(STATUS_FAILED, "Psiphon SOCKS port unavailable")
+            failAndStop("Psiphon SOCKS port unavailable")
             return
         }
         val socksProxy = "127.0.0.1:$port"
@@ -619,12 +628,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
         val tunFd = tun
         if (tunFd == null) {
-            sendStatus(STATUS_FAILED, "VPN interface missing")
+            failAndStop("VPN interface missing")
             return
         }
 
         if (!Tun2SocksManager.start(tunFd, port)) {
-            sendStatus(STATUS_FAILED, "Could not start whole-device routing")
+            failAndStop("Could not start whole-device routing")
             return
         }
         psiphonVpnActivated = true
@@ -866,6 +875,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // is a hard requirement of a SOCKS5 upstream rather than a preference.
             config.remove("InitialLimitTunnelProtocols")
             config.remove("InitialLimitTunnelProtocolsCandidateCount")
+            // Rung A now also pins a HARD fronted-only limit, and that would
+            // survive the two removals above — pairing "only fronted servers"
+            // with "only this country's servers" and matching nothing, which is
+            // the exact failure this widening exists to prevent.
+            config.remove("LimitTunnelProtocols")
             ConnectionLog.record(
                 "Preferred country ${PsiphonRegions.name(preferredRegion)} " +
                     "($preferredRegion), all protocols — ${REGION_PHASE_TIMEOUT_SECONDS}s before the ladder"
@@ -943,6 +957,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         } catch (e: Exception) {
             ConnectionLog.record("Psiphon start failed: ${e.message}")
             activeSocksPort = 0
+            // Nothing is armed at this point — the exception happened before
+            // armLadderTimer(), so no watchdog and no onExiting() will ever fire.
+            // Without stopping here the service sits on "Connecting…" forever with
+            // a live TUN and no tunnel behind it.
+            failAndStop(e.message ?: "Psiphon could not start")
         }
     }
 
@@ -1161,13 +1180,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             ConnectionLog.record(
                 "All ${ladder.size} strategies exhausted — carrier is blocking every available path"
             )
-            // Deliberately the same generic failure whether chained or not: the
-            // user asked for one message, and a chained-specific string would only
-            // suggest the chain itself was at fault when the carrier is.
-            sendStatus(STATUS_FAILED, "Could not connect on this carrier. Try Wi-Fi or another SIM.")
             ladderIndex = 0
             ladderAttempts = 0
             regionPhase = false
+            // Deliberately the same generic failure whether chained or not: the
+            // user asked for one message, and a chained-specific string would only
+            // suggest the chain itself was at fault when the carrier is.
+            failAndStop("Could not connect on this carrier. Try Wi-Fi or another SIM.")
             return
         }
 
@@ -1188,6 +1207,79 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             if (stopRequested.get()) return@execute
             startPsiphonTunnel()
         }
+    }
+
+    /**
+     * Take protocol selection back from Psiphon's remote tactics.
+     *
+     * The field log from Iran proved the rung's protocol list was being ignored:
+     * rung A asked for the three FRONTED-MEEK protocols, and Psiphon's own
+     * `CandidateServers` notice reported
+     * `initialLimitTunnelProtocols: [INPROXY-WEBRTC-*]` instead, followed by
+     * `in-proxy protocol selection forced` and 228 WebRTC dials that had no hope
+     * on a network where UDP is dead.
+     *
+     * That is not a bug in our config — it is precedence. `Config.SetParameters`
+     * passes `[configParameters, tacticsParameters]` to `Parameters.Set`, and
+     * `getAppliedValue` walks that list **backwards**, so the remotely delivered
+     * tactics value wins over anything the app set. Psiphon changed its Iran
+     * tactics to force in-proxy, and every rung of our ladder silently became the
+     * same in-proxy rung. It is also why the ladder felt useless: three rungs, one
+     * effective behaviour.
+     *
+     * `DisableTactics` is the only lever that restores our own ordering, because
+     * it stops the tactics request and the stored-tactics load entirely. It is
+     * applied per rung, not globally:
+     *
+     *  - rung A (fronted) sets it — the fronting domains live in the embedded
+     *    server entries, so this rung needs nothing from tactics.
+     *  - rung C (in-proxy) must NOT set it — broker specs arrive via tactics, and
+     *    without them the peer-relay rung cannot dial at all.
+     *
+     * Cost: rung A loses remote tuning it was not benefiting from anyway. Benefit:
+     * the 5 fronted server entries actually get dialled, which is the only path
+     * that has ever worked on Hamrah-e-Aval.
+     */
+    private fun applyTacticsOverride(config: JSONObject) {
+        // Chained runs are left exactly as they were. Psiphon rides inside WARP
+        // there, its tactics request goes out over a working tunnel, and the user
+        // reports the chain connecting on the first try — so there is nothing to
+        // fix and no reason to change a path that works. Rung C is filtered out of
+        // the chained ladder anyway, so forced in-proxy cannot strand it either.
+        if (chainMode) return
+        config.put("DisableTactics", true)
+        // With tactics off there are no broker specs, so in-proxy is dead weight
+        // here: it would still consume worker slots on WebRTC/ICE that cannot
+        // complete. Rung C is where the peer relay gets its turn, with tactics on.
+        config.put("InproxyEnabled", false)
+        config.put("InproxyAllowClient", false)
+        ConnectionLog.record(
+            "Tactics disabled for this rung — using the app's own protocol order"
+        )
+    }
+
+    /**
+     * Report a terminal failure and actually stop.
+     *
+     * Every path that reaches this used to call `sendStatus(STATUS_FAILED, …)` and
+     * return, which told the UI the truth but left the service running with a
+     * live TUN and the placeholder "Connecting…" notification. On a Psiphon run
+     * the TUN is created *before* Psiphon starts, so that state is not merely
+     * cosmetic: the device has a default route into a tunnel with nothing on the
+     * other end, i.e. no internet, and no visible sign the app has given up. That
+     * is exactly what was reported from the field.
+     *
+     * The kill switch is deliberately not consulted here. These are failures to
+     * ever establish, not a tunnel dropping under a user who asked to stay
+     * protected — blocking all traffic after a failed connect would leave the
+     * device offline with no explanation.
+     */
+    private fun failAndStop(detail: String) {
+        sendStatus(STATUS_FAILED, detail)
+        connected.set(false)
+        stopTunnel(notify = false)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun stopPsiphonTunnel() {
@@ -1435,12 +1527,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 sendStatus(STATUS_CONNECTING, "Connecting Psiphon through $outer…")
             } catch (e: Exception) {
                 ConnectionLog.record("Chain start failed: ${e.message}")
-                sendStatus(STATUS_FAILED, e.message)
-                connected.set(false)
                 chainMode = false
-                stopTunnel(notify = false)
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                failAndStop(e.message ?: "Chain start failed")
             }
         }
     }
@@ -1589,7 +1677,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         // rejected and raiseOuterLeg moves on — reporting FAILED
                         // there would abort the ladder on its first miss.
                         if (chainOuterCommitted) {
-                            sendStatus(STATUS_FAILED, "The $label tunnel carrying Psiphon dropped")
+                            failAndStop("The $label tunnel carrying Psiphon dropped")
                         }
                     }
                 }, "chain-outer-$protocol").start()
