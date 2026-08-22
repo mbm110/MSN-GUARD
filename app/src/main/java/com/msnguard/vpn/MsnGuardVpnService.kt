@@ -407,6 +407,53 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private fun winningStrategyKey(): String =
         if (chainMode) "psiphon_winning_strategy_chained" else "psiphon_winning_strategy"
 
+    /** Where the ladder composition that produced the remembered index is stored. */
+    private fun ladderShapeKey(): String = winningStrategyKey() + "_shape"
+
+    /**
+     * The rung composition currently in use, e.g. "A,D,C".
+     *
+     * The remembered rung is persisted as a plain index into [activeLadder], so it
+     * is only meaningful for the exact ladder that wrote it. Every past change to
+     * the rung list silently repointed it: the ladder once had a rung B, and an
+     * index of 1 meant "443-only protocols" then and "all protocols (direct)" now.
+     */
+    private fun ladderSignature(): String = activeLadder.joinToString(",") { it.name }
+
+    /**
+     * The rung this connect should start on.
+     *
+     * Reads the remembered index only when the ladder still has the shape it had
+     * when that index was written. After an app update that adds, removes or
+     * reorders rungs the stored number points somewhere else, and the cost is a
+     * full rung timeout on the first connect after every update — on precisely the
+     * carrier where the user already found a working path. Falling back to rung 0
+     * is honest: the ladder's own ordering is the best guess when there is no
+     * valid memory, and the next successful connect rewrites it.
+     */
+    private fun rememberedRungIndex(): Int {
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val shape = ladderSignature()
+        val storedShape = prefs.getString(ladderShapeKey(), null)
+        if (storedShape != shape) {
+            // Drop the stale index and record the new shape, so this happens once
+            // per update rather than on every connect.
+            prefs.edit()
+                .remove(winningStrategyKey())
+                .putString(ladderShapeKey(), shape)
+                .apply()
+            if (storedShape != null) {
+                ConnectionLog.record(
+                    "Strategy list changed ($storedShape -> $shape) — " +
+                        "discarding the remembered strategy and starting from the top"
+                )
+            }
+            return 0
+        }
+        return prefs.getInt(winningStrategyKey(), 0)
+            .coerceIn(0, activeLadder.size - 1)
+    }
+
     companion object {
         const val LOG_TAG = "MsnGuardVpnService"
         const val ACTION_CONNECT = "com.msnguard.vpn.CONNECT"
@@ -1115,7 +1162,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
         val winner = ladder.getOrNull(winnerIndex) ?: return
         getSharedPreferences("settings", MODE_PRIVATE).edit()
-            .putInt(winningStrategyKey(), winnerIndex).apply()
+            .putInt(winningStrategyKey(), winnerIndex)
+            // Written together with the index, never separately: the index is only
+            // meaningful for the ladder shape that produced it, and
+            // rememberedRungIndex() discards it if the two disagree.
+            .putString(ladderShapeKey(), ladderSignature())
+            .apply()
 
         val via = if (protocol.isNotBlank()) " via $protocol" else ""
         ConnectionLog.record(
@@ -1477,9 +1529,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // remembered rung. Reading the unchained key here is what started the very
         // first chained attempt on rung C — the one rung a SOCKS upstream cannot
         // carry — and burned its 75s budget before anything chainable was tried.
-        ladderIndex = getSharedPreferences("settings", MODE_PRIVATE)
-            .getInt(winningStrategyKey(), 0)
-            .coerceIn(0, activeLadder.size - 1)
+        ladderIndex = rememberedRungIndex()
         ladderAttempts = 0
         armRegionPhase()
 
@@ -1855,9 +1905,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // ever connect, or after a full ladder failure, this is rung 0.
             // chainMode is false on this path, so both the ladder and the key are
             // the unchained ones.
-            ladderIndex = getSharedPreferences("settings", MODE_PRIVATE)
-                .getInt(winningStrategyKey(), 0)
-                .coerceIn(0, activeLadder.size - 1)
+            ladderIndex = rememberedRungIndex()
             ladderAttempts = 0
             armRegionPhase()
             worker.execute {
