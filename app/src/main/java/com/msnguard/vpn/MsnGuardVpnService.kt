@@ -493,7 +493,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
          */
         const val CHANNEL_ID = "vpn_channel_v2"
 
-        /** The pre-1.4.6 channel, deleted on first foreground start. */
+        /** The pre-1.4.0 channel, deleted on first foreground start. */
         private const val CHANNEL_ID_LEGACY = "vpn_channel"
 
         /**
