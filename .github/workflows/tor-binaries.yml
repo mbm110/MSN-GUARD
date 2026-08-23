@@ -1,0 +1,203 @@
+name: Tor binaries
+
+# Builds the two native executables the Tor transport needs, for both shipping
+# ABIs, and uploads them as artifacts. They are then committed once into
+# app/src/main/jniLibs/ and only rebuilt when a pinned version changes — this
+# workflow is deliberately NOT part of the normal APK build, which would
+# otherwise pay ~25 minutes of Tor/OpenSSL compilation on every push.
+#
+#   libtor.so         the tor client itself
+#   libobfs4proxy.so  lyrebird, which serves obfs4 + meek_lite + webtunnel + snowflake
+#
+# Both are renamed to lib*.so because Android only grants the execute bit to
+# files the APK packager recognises as native libraries. They are launched with
+# ProcessBuilder, never dlopen'd.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/build-tor.sh'
+      - '.github/workflows/tor-binaries.yml'
+
+jobs:
+  tor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq autoconf automake libtool pkg-config
+
+      - name: Setup Android NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'ndk;26.3.11579264'
+
+      - name: Build libtor.so for both ABIs
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
+        run: |
+          chmod +x tools/build-tor.sh
+          tools/build-tor.sh arm64-v8a armeabi-v7a
+
+      - name: Report what was produced
+        run: |
+          ls -la app/src/main/jniLibs/*/libtor.so
+          sha256sum app/src/main/jniLibs/*/libtor.so
+
+      - name: Upload libtor.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: libtor
+          path: app/src/main/jniLibs/*/libtor.so
+          if-no-files-found: error
+
+  lyrebird:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # Pinned to a tag, not a branch: this binary terminates the user's
+      # traffic obfuscation, so it does not get to float.
+      #
+      # lyrebird 0.8.1 registers meeklite, obfs2, obfs3, obfs4, scramblesuit,
+      # snowflake and webtunnel in one binary (transports/transports.go), so a
+      # single executable covers every mode we plan to offer — no separate
+      # Snowflake gomobile AAR needed.
+      - name: Clone lyrebird
+        run: |
+          git clone --depth 1 --branch lyrebird-0.8.1 \
+            https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird.git
+          cd lyrebird
+          echo "Pinned commit: $(git rev-parse HEAD)"
+          test "$(git rev-parse HEAD)" = "0b10edbb61e0ca6fb70c7d57aeaabf315f1fade1" \
+            || { echo "ERROR: lyrebird-0.8.1 does not point at the expected commit"; exit 1; }
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: false
+
+      - name: Setup Android NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'ndk;26.3.11579264'
+
+      - name: Build lyrebird for both ABIs
+        env:
+          NDK: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
+        run: |
+          set -euo pipefail
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cd lyrebird
+
+          build() {
+            local ABI="$1" GOARCH="$2" GOARM="${3:-}" CC="$4"
+            local OUT="../out/$ABI/libobfs4proxy.so"
+            mkdir -p "$(dirname "$OUT")"
+            echo "==> $ABI ($GOARCH)"
+            # -buildmode=pie is required: Android refuses to exec a non-PIE
+            #   binary on API 21+.
+            # CGO_ENABLED=1 because -buildmode=pie needs an external linker,
+            #   which is also how we get the 16 KB page alignment through.
+            # max-page-size=16384 for Pixel 8 and later, which use 16 KB pages
+            #   and will not load a 4 KB-aligned binary at all.
+            # -s -w strips the symbol table and DWARF: ~30% smaller, and this
+            #   is a 17 MB binary shipped twice.
+            # -trimpath keeps the runner's absolute paths out of the output.
+            env GOOS=android GOARCH="$GOARCH" ${GOARM:+GOARM=$GOARM} \
+                CGO_ENABLED=1 CC="$TOOLCHAIN/$CC" \
+                go build -trimpath -buildmode=pie \
+                  -ldflags "-s -w -extldflags '-Wl,-z,max-page-size=16384 -Wl,-z,relro -Wl,-z,now'" \
+                  -o "$OUT" ./cmd/lyrebird
+            "$TOOLCHAIN/llvm-strip" --strip-unneeded "$OUT" || true
+          }
+
+          build arm64-v8a   arm64 ""  aarch64-linux-android26-clang
+          build armeabi-v7a arm   7   armv7a-linux-androideabi26-clang
+
+      - name: Verify PIE and page alignment
+        env:
+          NDK: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
+        run: |
+          set -euo pipefail
+          READELF="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          for f in out/*/libobfs4proxy.so; do
+            TYPE=$("$READELF" -h "$f" | awk '/Type:/ {print $2}')
+            ALIGN=$("$READELF" -l "$f" | awk '/LOAD/ {print $NF; exit}')
+            SIZE=$(stat -c%s "$f")
+            echo "$f  type=$TYPE align=$ALIGN size=$SIZE"
+            # An EXEC binary is not PIE and will not launch; 0x1000 alignment
+            # fails on 16 KB-page devices. Both are silent runtime failures,
+            # so fail the build instead.
+            [ "$TYPE" = "DYN" ] || { echo "ERROR: $f is not PIE"; exit 1; }
+            [ "$ALIGN" = "0x4000" ] || { echo "ERROR: $f align=$ALIGN, want 0x4000"; exit 1; }
+          done
+          sha256sum out/*/libobfs4proxy.so
+
+      # Proves the binary is a working PT and not just a well-formed ELF: run it
+      # on the host with the managed-transport env vars Tor would set and check
+      # that it announces the transports we need. Built for android/amd64 since
+      # the runner cannot exec an arm64 binary.
+      - name: Smoke-test the managed transport protocol
+        run: |
+          set -euo pipefail
+          cd lyrebird
+          env GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+            go build -trimpath -o /tmp/lyrebird-host ./cmd/lyrebird
+          mkdir -p /tmp/pt_state
+          set +e
+          OUTPUT=$(env TOR_PT_MANAGED_TRANSPORT_VER=1 \
+                       TOR_PT_CLIENT_TRANSPORTS=obfs4,meek_lite,snowflake \
+                       TOR_PT_STATE_LOCATION=/tmp/pt_state/ \
+                       TOR_PT_EXIT_ON_STDIN_CLOSE=1 \
+                   timeout 20 /tmp/lyrebird-host < /dev/null 2>&1)
+          set -e
+          echo "$OUTPUT"
+          for t in obfs4 meek_lite snowflake; do
+            echo "$OUTPUT" | grep -q "CMETHOD $t socks5" \
+              || { echo "ERROR: lyrebird did not announce $t"; exit 1; }
+          done
+          echo "$OUTPUT" | grep -q "CMETHODS DONE" \
+            || { echo "ERROR: no CMETHODS DONE"; exit 1; }
+          echo "OK: all three transports announced"
+
+      - name: Upload libobfs4proxy.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: lyrebird
+          path: out/*/libobfs4proxy.so
+          if-no-files-found: error
+
+  # GeoIP databases, needed for ExitNodes {cc} country selection. Tiny compared
+  # to the executables, and they ship inside the Tor source tarball, so there is
+  # nothing extra to trust.
+  geoip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Extract geoip files from the Tor tarball
+        run: |
+          set -euo pipefail
+          TOR_VERSION=0.4.9.11
+          EXPECTED=2e6c1720118c812acf0079fd47cf91b6bfaba5d766c321c4d3d2a28d6a11a8ed
+          curl -fL --retry 3 -o tor.tar.gz "https://dist.torproject.org/tor-$TOR_VERSION.tar.gz"
+          echo "$EXPECTED  tor.tar.gz" | sha256sum -c -
+          mkdir -p assets
+          tar -xzf tor.tar.gz "tor-$TOR_VERSION/src/config/geoip" "tor-$TOR_VERSION/src/config/geoip6"
+          cp "tor-$TOR_VERSION/src/config/geoip"  assets/geoip
+          cp "tor-$TOR_VERSION/src/config/geoip6" assets/geoip6
+          ls -la assets/
+          sha256sum assets/*
+
+      - name: Upload geoip
+        uses: actions/upload-artifact@v4
+        with:
+          name: geoip
+          path: assets/*
+          if-no-files-found: error
