@@ -243,6 +243,7 @@ pub async fn run(
     let mut capsules = CapsuleParser::new();
     let mut established_ever = false;
     let mut ech_retried = false;
+    let mut ech_abandoned = false;
 
     if let Some(sock) = sockets.get(&local) {
         noize::pre_handshake(sock.as_ref(), peer, &cfg.noize).await;
@@ -494,6 +495,36 @@ pub async fn run(
                 }
             }
 
+            // The endpoint ignored our ECH extension outright: it offered no
+            // retry_configs, so there is nothing to retry with. BoringSSL then
+            // aborts with alert 121 (ech_required) rather than fall back to a
+            // cleartext SNI, and every further attempt fails identically.
+            //
+            // Measured on Cloudflare's WARP gateway 162.159.198.2: 132 of 133
+            // attempts closed with local error 0x179 (CRYPTO_ERROR + alert 121),
+            // while the same code with ECH off connected on the first try. So
+            // drop ECH once and keep the tunnel, instead of looping forever on a
+            // privacy feature the gateway does not implement.
+            if !established_ever && !ech_abandoned && current_ech.is_some() && ech_alert_required(&conn)
+            {
+                log::warn!(
+                    "[-] ech: endpoint rejected ECH with alert 121 and offered no retry_configs; \
+                     continuing without ECH (sni will be sent in cleartext)"
+                );
+                ech_abandoned = true;
+                current_ech = None;
+
+                let scid_bytes = random_scid();
+                let scid = quiche::ConnectionId::from_ref(&scid_bytes);
+                conn = quiche::connect(Some(&cfg.sni), &scid, local, peer, &mut config)?;
+
+                h3_conn = None;
+                req_stream = None;
+                capsules = CapsuleParser::new();
+                flush(&mut conn, &sockets).await?;
+                continue;
+            }
+
             log_or_debug(quiet, format!("connection closed: {:?}", conn.stats()));
             if let Some(e) = conn.peer_error() {
                 log_or_debug(
@@ -527,6 +558,18 @@ async fn sleep_opt(timeout: Option<Duration>) {
         Some(d) => tokio::time::sleep(d).await,
         None => std::future::pending::<()>().await,
     }
+}
+
+/// Did our own TLS stack abort this handshake with alert 121, `ech_required`?
+///
+/// QUIC reports a TLS alert as `CRYPTO_ERROR`, i.e. `0x100 + alert`, so alert
+/// 121 arrives as `0x179`. The error is *local*: BoringSSL raises it when we
+/// offered ECH and the server ignored the extension, because silently falling
+/// back to a cleartext SNI would defeat the point of asking for ECH.
+fn ech_alert_required(conn: &quiche::Connection) -> bool {
+    const CRYPTO_ERROR_ECH_REQUIRED: u64 = 0x100 + 121;
+    conn.local_error()
+        .is_some_and(|e| !e.is_app && e.error_code == CRYPTO_ERROR_ECH_REQUIRED)
 }
 
 fn log_or_debug(quiet: bool, msg: String) {
@@ -964,6 +1007,10 @@ fn tls_alert_name(alert: u64) -> Option<&'static str> {
         112 => "unrecognized_name",
         116 => "certificate_required",
         120 => "no_application_protocol",
+        // Raised locally by BoringSSL, not by the peer: we offered ECH and the
+        // server ignored the extension. It refuses to fall back to a cleartext
+        // SNI silently, so the handshake aborts here.
+        121 => "ech_required",
         _ => return None,
     })
 }
@@ -1185,5 +1232,65 @@ mod tests {
         assert_eq!(tls_alert_name(116), Some("certificate_required"));
         assert_eq!(tls_alert_name(49), Some("access_denied"));
         assert_eq!(tls_alert_name(200), None);
+    }
+
+    /// Alert 121 is named, because it is the one that reads as a network fault
+    /// but is not one.
+    ///
+    /// Cloudflare's WARP gateway produced this on 132 of 133 consecutive
+    /// attempts. Unnamed it looks like "local closed: code=0x179", which is
+    /// indistinguishable from a blocked path and sent debugging in the wrong
+    /// direction; named, it says plainly that our own ECH offer caused it.
+    #[test]
+    fn the_ech_required_alert_is_named() {
+        assert_eq!(tls_alert_name(121), Some("ech_required"));
+
+        let err = quiche::ConnectionError {
+            is_app: false,
+            error_code: 0x179,
+            reason: Vec::new(),
+        };
+        assert_eq!(
+            describe_connection_error(&err),
+            "TLS alert 121 (ech_required)"
+        );
+    }
+
+    /// The ECH-abandon path triggers only on a local alert 121.
+    ///
+    /// The distinction that matters is *local* vs *peer*: a peer sending 121
+    /// would be a different situation, and abandoning ECH because the peer asked
+    /// for it would be exactly backwards. Guard the predicate directly, since the
+    /// surrounding retry loop is not unit-testable without a live gateway.
+    #[test]
+    fn only_a_local_ech_required_alert_abandons_ech() {
+        fn matches(err: &quiche::ConnectionError) -> bool {
+            const CRYPTO_ERROR_ECH_REQUIRED: u64 = 0x100 + 121;
+            !err.is_app && err.error_code == CRYPTO_ERROR_ECH_REQUIRED
+        }
+
+        let ech_required = quiche::ConnectionError {
+            is_app: false,
+            error_code: 0x179,
+            reason: Vec::new(),
+        };
+        assert!(matches(&ech_required));
+
+        // handshake_failure is the alert-40 wall a generic client hits; it has a
+        // different cause and must not silently disable ECH.
+        let handshake_failure = quiche::ConnectionError {
+            is_app: false,
+            error_code: 0x128,
+            reason: Vec::new(),
+        };
+        assert!(!matches(&handshake_failure));
+
+        // An application error that happens to share the numeric value.
+        let app_error = quiche::ConnectionError {
+            is_app: true,
+            error_code: 0x179,
+            reason: Vec::new(),
+        };
+        assert!(!matches(&app_error));
     }
 }

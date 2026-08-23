@@ -48,6 +48,10 @@ jobs:
         working-directory: core/aether
         run: cargo build --release --bin aether
 
+      - name: Unit tests
+        working-directory: core/aether
+        run: cargo test --release --lib
+
       # --turbo keeps the scan short; --no-data-check stops the run from waiting
       # on end-to-end validation, since the handshake is the thing under test.
       # Non-interactive: every prompt is pre-answered through AETHER_* env vars.
@@ -68,6 +72,15 @@ jobs:
             --bind 127.0.0.1:1819 2>&1 | tee ech-on.log || true
           echo "--- verdict ---"
           grep -iE "ech:|ech config injected|handshake established|no ECHConfigList|ECHConfigList" ech-on.log || echo "(no ech lines found)"
+          echo "--- did the fallback work? ---"
+          # The fix must abandon ECH once and then connect. Assert both, so a
+          # regression fails the run instead of hiding in the log.
+          grep -q "endpoint rejected ECH with alert 121" ech-on.log \
+            || { echo "FAIL: never detected the ech_required alert"; exit 1; }
+          grep -q "quic handshake established" ech-on.log \
+            || { echo "FAIL: no handshake after abandoning ECH"; exit 1; }
+          echo "  abandon-then-connect: OK"
+          echo "  alert-121 closes: $(grep -c 'ech_required' ech-on.log)"
 
       - name: Probe HTTP/3 WITHOUT ECH (control)
         working-directory: core/aether
