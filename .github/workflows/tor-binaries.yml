@@ -157,21 +157,30 @@ jobs:
         env:
           NDK: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
         run: |
-          set -uo pipefail
+          set -euo pipefail
           READELF="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+
+          # Never pipe an LLVM tool into anything that can close stdout early
+          # (awk with exit, head, grep -m, sed q). LLVM handles SIGPIPE and
+          # exits EX_IOERR (74); pipefail then propagates it and set -e kills
+          # the step with no error message. That is what failed the first two
+          # runs — on binaries that were already correct. Capture whole outputs
+          # into variables, then parse the strings.
           echo "--- files present ---"
-          ls -la out/*/libobfs4proxy.so || { echo "ERROR: no binaries were produced"; exit 1; }
+          ls -la out/*/libobfs4proxy.so
+
           for f in out/*/libobfs4proxy.so; do
             echo "=== $f ==="
-            # Print the raw readelf output before parsing it. When the awk
-            # extraction returned an empty string on the first run there was no
-            # way to tell whether the binary was wrong or the parse was.
-            "$READELF" -h "$f" | sed -n '1,20p'
-            "$READELF" -l "$f" | grep -A1 'Type.*Offset\|LOAD' | head -20
-            TYPE=$("$READELF" -h "$f" | awk -F: '/Type:/ {print $2}' | awk '{print $1}')
-            ALIGN=$("$READELF" -l "$f" | awk '$1=="LOAD" {print $NF; exit}')
+            hdr=$("$READELF" -h "$f")
+            phdrs=$("$READELF" -l "$f")
+            printf '%s\n' "$hdr"
+            printf '%s\n' "$phdrs" | grep -E '^ *(Type|LOAD)' || true
+
+            TYPE=$(awk -F: '/^ *Type:/ {print $2}' <<< "$hdr" | awk '{print $1}')
+            ALIGN=$(awk '$1 == "LOAD" && !seen {a = $NF; seen = 1} END {print a}' <<< "$phdrs")
             SIZE=$(stat -c%s "$f")
             echo "parsed: type=[$TYPE] align=[$ALIGN] size=$SIZE"
+
             # An EXEC binary is not PIE and will not launch; 0x1000 alignment
             # fails on 16 KB-page devices. Both are silent runtime failures,
             # so fail the build instead.
@@ -199,11 +208,14 @@ jobs:
                    timeout 20 /tmp/lyrebird-host < /dev/null 2>&1)
           set -e
           echo "$OUTPUT"
+          # grep -q exits on first match and closes the pipe, so feeding it from
+          # `echo ... |` risks SIGPIPE killing the step under pipefail. Use a
+          # here-string: no pipeline, no SIGPIPE.
           for t in obfs4 meek_lite snowflake; do
-            echo "$OUTPUT" | grep -q "CMETHOD $t socks5" \
+            grep -q "CMETHOD $t socks5" <<< "$OUTPUT" \
               || { echo "ERROR: lyrebird did not announce $t"; exit 1; }
           done
-          echo "$OUTPUT" | grep -q "CMETHODS DONE" \
+          grep -q "CMETHODS DONE" <<< "$OUTPUT" \
             || { echo "ERROR: no CMETHODS DONE"; exit 1; }
           echo "OK: all three transports announced"
 

@@ -22,14 +22,34 @@
 #   BUILD_DIR=/tmp/torbuild tools/build-tor.sh
 set -euo pipefail
 
-# Name the exact failing command. Without this, a subshell dying under set -e
-# gives a bare exit code and no location, which is what made the first CI run
-# unreadable.
+# -E so the ERR trap is inherited into functions and subshells. Without it the
+# trap never fired, which is why the first two CI runs reported a bare exit code.
+set -E
 trap 'rc=$?; echo "!!! FAILED rc=$rc line=$LINENO cmd: $BASH_COMMAND" >&2' ERR
 
-# Disk is the prime suspect for an unexplained failure on a hosted runner:
-# OpenSSL + Tor + the NDK together are tens of gigabytes and the runner starts
-# with ~14 GB free on /.
+# Read an ELF property without ever closing the reader's stdout early.
+#
+# LLVM tools install a SIGPIPE handler and exit with EX_IOERR (74) rather than
+# dying by signal. So `llvm-readelf ... | awk '{print; exit}'` makes readelf
+# exit 74, pipefail propagates it, and set -e kills the script — with no error
+# message, because nothing actually failed. That is exactly what killed the
+# first two CI runs on a binary that was already correct.
+#
+# Capture the whole output first, then parse the string. Never pipe an LLVM tool
+# into awk/head/grep -m/sed q.
+elf_load_align() {
+    local out
+    out=$("$TOOLCHAIN/bin/llvm-readelf" -l "$1")
+    awk '$1 == "LOAD" && !seen { align = $NF; seen = 1 } END { print align }' <<< "$out"
+}
+elf_type() {
+    local out
+    out=$("$TOOLCHAIN/bin/llvm-readelf" -h "$1")
+    awk -F: '/^ *Type:/ { print $2 }' <<< "$out" | awk '{ print $1 }'
+}
+
+# Disk is worth watching on a hosted runner: OpenSSL + Tor + the NDK together
+# are tens of gigabytes and the runner starts with ~14 GB free on /.
 show_disk() { echo "--- disk: $* ---"; df -h / /home 2>/dev/null | sed 's/^/    /'; }
 
 # --- Pinned versions ---
@@ -297,17 +317,22 @@ EOF
 
     # Verify the two properties that silently break at runtime if wrong.
     local align type
-    align=$("$TOOLCHAIN/bin/llvm-readelf" -l "$OUT_SO" | awk '/LOAD/ {print $NF; exit}')
-    type=$("$TOOLCHAIN/bin/llvm-readelf" -h "$OUT_SO" | awk '/Type:/ {print $2}')
+    align=$(elf_load_align "$OUT_SO")
+    type=$(elf_type "$OUT_SO")
     echo
     echo "==> [$ABI] installed $OUT_SO"
     echo "    size:       $(stat -c%s "$OUT_SO") bytes"
     echo "    ELF type:   $type (want DYN — an EXEC binary is not PIE and will not launch)"
     echo "    LOAD align: $align (want 0x4000 = 16 KB)"
-    echo "    version:    $(strings "$OUT_SO" | grep -o 'Tor [0-9.]\+' | head -1)"
+    # `strings | grep -o | head` would hit the same SIGPIPE trap as readelf did,
+    # so grab the whole match list and take the first element in bash.
+    local vers
+    vers=$(strings "$OUT_SO" | grep -o 'Tor [0-9.]\+' || true)
+    echo "    version:    ${vers%%$'\n'*}"
 
     [[ "$type" == "DYN" ]] || { echo "ERROR: not PIE"; return 1; }
     [[ "$align" == "0x4000" ]] || { echo "ERROR: wrong page alignment: $align"; return 1; }
+    show_disk "after $ABI"
 }
 
 if [[ $# -eq 0 ]]; then
