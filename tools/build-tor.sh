@@ -22,6 +22,16 @@
 #   BUILD_DIR=/tmp/torbuild tools/build-tor.sh
 set -euo pipefail
 
+# Name the exact failing command. Without this, a subshell dying under set -e
+# gives a bare exit code and no location, which is what made the first CI run
+# unreadable.
+trap 'rc=$?; echo "!!! FAILED rc=$rc line=$LINENO cmd: $BASH_COMMAND" >&2' ERR
+
+# Disk is the prime suspect for an unexplained failure on a hosted runner:
+# OpenSSL + Tor + the NDK together are tens of gigabytes and the runner starts
+# with ~14 GB free on /.
+show_disk() { echo "--- disk: $* ---"; df -h / /home 2>/dev/null | sed 's/^/    /'; }
+
 # --- Pinned versions ---
 TOR_VERSION=0.4.9.11
 OPENSSL_VERSION=3.5.4

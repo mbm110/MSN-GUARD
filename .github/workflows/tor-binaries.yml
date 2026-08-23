@@ -42,8 +42,32 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
         run: |
+          echo "--- before ---"; df -h /; free -m
           chmod +x tools/build-tor.sh
-          tools/build-tor.sh arm64-v8a armeabi-v7a
+          # Tee to a file and upload it as an artifact. The first run's step
+          # output stopped dead at the last make line with no error message, so
+          # the step log alone cannot be trusted to contain the failure.
+          set +e
+          bash -x tools/build-tor.sh arm64-v8a armeabi-v7a > /tmp/tor-build.log 2>&1
+          rc=$?
+          set -e
+          echo "--- script rc=$rc, log is $(wc -l < /tmp/tor-build.log) lines ---"
+          echo "--- last 80 lines ---"
+          tail -80 /tmp/tor-build.log
+          echo "--- any disk/OOM/linker complaint anywhere in the log? ---"
+          grep -nE 'No space|space left|Killed|out of memory|cannot open|undefined reference|ld\.lld: error|collect2' /tmp/tor-build.log | tail -30 || echo "(none)"
+          echo "--- after ---"; df -h /; free -m
+          ls -la app/src/main/jniLibs/*/ 2>&1 || true
+          find build/tor-build -maxdepth 4 -name tor -type f -ls 2>&1 || true
+          exit $rc
+
+      - name: Upload the build log whatever happened
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tor-build-log
+          path: /tmp/tor-build.log
+          if-no-files-found: warn
 
       - name: Report what was produced
         run: |
@@ -93,6 +117,7 @@ jobs:
           NDK: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
         run: |
           set -euo pipefail
+          trap 'rc=$?; echo "!!! FAILED rc=$rc line=$LINENO cmd: $BASH_COMMAND" >&2' ERR
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
           cd lyrebird
 
@@ -116,26 +141,41 @@ jobs:
                   -ldflags "-s -w -extldflags '-Wl,-z,max-page-size=16384 -Wl,-z,relro -Wl,-z,now'" \
                   -o "$OUT" ./cmd/lyrebird
             "$TOOLCHAIN/llvm-strip" --strip-unneeded "$OUT" || true
+            # Confirm the file materialised before the next ABI overwrites the
+            # shell state; a silent `go build` failure would otherwise only
+            # surface two steps later in the verify job.
+            ls -la "$OUT"
           }
 
           build arm64-v8a   arm64 ""  aarch64-linux-android26-clang
           build armeabi-v7a arm   7   armv7a-linux-androideabi26-clang
 
+          echo "==> both ABIs built"
+          ls -la ../out/*/libobfs4proxy.so
+
       - name: Verify PIE and page alignment
         env:
           NDK: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
         run: |
-          set -euo pipefail
+          set -uo pipefail
           READELF="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          echo "--- files present ---"
+          ls -la out/*/libobfs4proxy.so || { echo "ERROR: no binaries were produced"; exit 1; }
           for f in out/*/libobfs4proxy.so; do
-            TYPE=$("$READELF" -h "$f" | awk '/Type:/ {print $2}')
-            ALIGN=$("$READELF" -l "$f" | awk '/LOAD/ {print $NF; exit}')
+            echo "=== $f ==="
+            # Print the raw readelf output before parsing it. When the awk
+            # extraction returned an empty string on the first run there was no
+            # way to tell whether the binary was wrong or the parse was.
+            "$READELF" -h "$f" | sed -n '1,20p'
+            "$READELF" -l "$f" | grep -A1 'Type.*Offset\|LOAD' | head -20
+            TYPE=$("$READELF" -h "$f" | awk -F: '/Type:/ {print $2}' | awk '{print $1}')
+            ALIGN=$("$READELF" -l "$f" | awk '$1=="LOAD" {print $NF; exit}')
             SIZE=$(stat -c%s "$f")
-            echo "$f  type=$TYPE align=$ALIGN size=$SIZE"
+            echo "parsed: type=[$TYPE] align=[$ALIGN] size=$SIZE"
             # An EXEC binary is not PIE and will not launch; 0x1000 alignment
             # fails on 16 KB-page devices. Both are silent runtime failures,
             # so fail the build instead.
-            [ "$TYPE" = "DYN" ] || { echo "ERROR: $f is not PIE"; exit 1; }
+            [ "$TYPE" = "DYN" ] || { echo "ERROR: $f is not PIE (type=$TYPE)"; exit 1; }
             [ "$ALIGN" = "0x4000" ] || { echo "ERROR: $f align=$ALIGN, want 0x4000"; exit 1; }
           done
           sha256sum out/*/libobfs4proxy.so
