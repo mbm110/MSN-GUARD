@@ -384,6 +384,21 @@ pub async fn run(
                     String::from_utf8_lossy(conn.application_proto())
                 ),
             );
+            // Report whether ECH was actually negotiated, not merely offered.
+            // Cloudflare accepts ECH over TCP/TLS on these hostnames but a
+            // generic QUIC client never gets far enough to find out, so this is
+            // the only place the h3 answer can be observed.
+            if current_ech.is_some() {
+                if tls::ech_accepted(&mut conn) {
+                    log_or_debug(quiet, "[+] ech: ACCEPTED over http/3 (sni encrypted)".to_string());
+                } else {
+                    log_or_debug(
+                        quiet,
+                        "[-] ech: offered but IGNORED by the endpoint (sni sent in cleartext)"
+                            .to_string(),
+                    );
+                }
+            }
             let mut h3c = h3::Connection::with_transport(&mut conn, &h3_config)?;
             let headers = masque::connect_ip_request(&cfg.authority, &cfg.path);
             let sid = h3c.send_request(&mut conn, &headers, false)?;

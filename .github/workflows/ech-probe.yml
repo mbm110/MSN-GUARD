@@ -1,0 +1,106 @@
+name: ECH probe (temporary)
+
+# Answers one question that black-box testing could not: does Cloudflare's
+# MASQUE endpoint accept ECH over HTTP/3?
+#
+# A generic Go QUIC client is rejected with alert 40 on every anycast edge
+# before ECH is ever evaluated, so the question can only be settled by the real
+# client: quiche + BoringSSL, with a real WARP registration certificate. That is
+# exactly what this core is. The runner has unrestricted internet, so the core
+# can register and connect for real.
+#
+# Delete this workflow once the answer is recorded.
+
+on:
+  push:
+    branches: [ech-probe]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # BoringSSL needs cmake and Go to build; both are preinstalled on the
+      # runner, but assert it rather than discovering it halfway through a build.
+      - name: Check build prerequisites
+        run: |
+          cmake --version | head -1
+          go version
+          clang --version | head -1
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/aether/target
+          key: ech-probe-${{ runner.os }}-${{ hashFiles('core/aether/Cargo.toml') }}
+
+      - name: Build the aether CLI for the host
+        working-directory: core/aether
+        run: cargo build --release --bin aether
+
+      # --turbo keeps the scan short; --no-data-check stops the run from waiting
+      # on end-to-end validation, since the handshake is the thing under test.
+      # Non-interactive: every prompt is pre-answered through AETHER_* env vars.
+      - name: Probe HTTP/3 WITH ECH
+        id: with_ech
+        working-directory: core/aether
+        env:
+          AETHER_PROTOCOL: masque
+          AETHER_SCAN: turbo
+          AETHER_IP: "4"
+          AETHER_ECH: auto
+          AETHER_LOG_LEVEL: info
+          AETHER_MASQUE_STARTUP_SECS: "90"
+        run: |
+          set -o pipefail
+          timeout 300 ./target/release/aether \
+            --no-data-check \
+            --bind 127.0.0.1:1819 2>&1 | tee ech-on.log || true
+          echo "--- verdict ---"
+          grep -iE "ech:|ech config injected|handshake established|no ECHConfigList|ECHConfigList" ech-on.log || echo "(no ech lines found)"
+
+      - name: Probe HTTP/3 WITHOUT ECH (control)
+        working-directory: core/aether
+        env:
+          AETHER_PROTOCOL: masque
+          AETHER_SCAN: turbo
+          AETHER_IP: "4"
+          AETHER_LOG_LEVEL: info
+          AETHER_MASQUE_STARTUP_SECS: "90"
+        run: |
+          set -o pipefail
+          timeout 300 ./target/release/aether \
+            --no-data-check \
+            --bind 127.0.0.1:1820 2>&1 | tee ech-off.log || true
+          echo "--- verdict ---"
+          grep -iE "ech|handshake established" ech-off.log || echo "(no lines found)"
+
+      - name: Summarise
+        if: always()
+        working-directory: core/aether
+        run: |
+          echo "## ECH over HTTP/3" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -iE "ech:|ech config injected|handshake established|alpn=" ech-on.log 2>/dev/null | head -20 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "## control (no ECH)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -iE "handshake established|alpn=" ech-off.log 2>/dev/null | head -10 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ech-probe-logs
+          path: core/aether/*.log

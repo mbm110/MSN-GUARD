@@ -23,6 +23,14 @@ extern "C" {
         out_retry_configs: *mut *const u8,
         out_retry_configs_len: *mut usize,
     );
+
+    /// Returns 1 if this connection actually negotiated ECH, 0 otherwise.
+    ///
+    /// Injecting an ECHConfigList only means we *offered* ECH. A server that
+    /// ignores the extension still completes the handshake, with the SNI sent
+    /// in cleartext in the outer ClientHello. Without asking BoringSSL we have
+    /// no way to tell those two outcomes apart.
+    fn SSL_ech_accepted(ssl: *const c_void) -> c_int;
 }
 
 const CHROME_GROUPS: &str = "P-256:X25519:P-384";
@@ -237,4 +245,14 @@ pub fn decode_ech_config_list(b64: &str) -> Result<Vec<u8>> {
     base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
         .map_err(|e| AetherError::Ech(e.to_string()))
+}
+
+/// Whether the completed handshake actually negotiated ECH.
+///
+/// Call this only after the handshake is established. Before that BoringSSL has
+/// nothing to report and the answer is meaninglessly `false`.
+pub fn ech_accepted(conn: &mut quiche::Connection) -> bool {
+    let ssl: &mut boring::ssl::SslRef = conn.as_mut();
+    let ssl_ptr = ssl.as_ptr() as *const c_void;
+    unsafe { SSL_ech_accepted(ssl_ptr) == 1 }
 }
