@@ -366,6 +366,10 @@ object TorSocksFront {
 
     // ------------------------------------------------------------ TCP relay
 
+    private fun isIpLiteral(host: String): Boolean =
+        host.indexOf(':') >= 0 || // bare IPv6
+            Regex("^\\d{1,3}(\\.\\d{1,3}){3}$").matches(host) // IPv4
+
     /**
      * Chain a CONNECT onto Tor's SOCKS port.
      *
@@ -398,16 +402,32 @@ object TorSocksFront {
                 return
             }
 
-            val addressBytes = InetAddress.getByName(host).address
-            val addressType = if (addressBytes.size == 16) ATYP_IPV6 else ATYP_IPV4
-            val request = ByteArray(4 + addressBytes.size + 2)
-            request[0] = SOCKS_VERSION.toByte()
-            request[1] = CMD_CONNECT.toByte()
-            request[2] = 0
-            request[3] = addressType.toByte()
-            System.arraycopy(addressBytes, 0, request, 4, addressBytes.size)
-            request[4 + addressBytes.size] = ((port shr 8) and 0xFF).toByte()
-            request[5 + addressBytes.size] = (port and 0xFF).toByte()
+            // Pass the target to Tor exactly as we got it. An IP literal goes as
+            // an IP (the common case: tun2socks has no names). A HOSTNAME must
+            // go through as ATYP_DOMAIN so TOR resolves it inside the circuit —
+            // resolving here first both leaks the name to the carrier resolver
+            // and hands Tor an address it may reject ("private address"), which
+            // is what the field log caught.
+            val request: ByteArray = if (isIpLiteral(host)) {
+                val addressBytes = InetAddress.getByName(host).address
+                val addressType = if (addressBytes.size == 16) ATYP_IPV6 else ATYP_IPV4
+                ByteArray(4 + addressBytes.size + 2).apply {
+                    this[3] = addressType.toByte()
+                    System.arraycopy(addressBytes, 0, this, 4, addressBytes.size)
+                    this[4 + addressBytes.size] = ((port shr 8) and 0xFF).toByte()
+                    this[5 + addressBytes.size] = (port and 0xFF).toByte()
+                }
+            } else {
+                val name = host.toByteArray(Charsets.US_ASCII)
+                check(name.size <= 255) { "hostname too long" }
+                ByteArray(5 + name.size + 2).apply {
+                    this[3] = ATYP_DOMAIN.toByte()
+                    this[4] = name.size.toByte()
+                    System.arraycopy(name, 0, this, 5, name.size)
+                    this[5 + name.size] = ((port shr 8) and 0xFF).toByte()
+                    this[6 + name.size] = (port and 0xFF).toByte()
+                }
+            }
             upOut.write(request)
             upOut.flush()
 

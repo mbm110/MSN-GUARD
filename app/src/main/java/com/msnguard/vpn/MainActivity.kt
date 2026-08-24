@@ -4041,7 +4041,12 @@ class MainActivity : Activity() {
      * the TUN is created before Psiphon starts, so the port must be known up
      * front.
      */
-    private fun socksPort(): Int = CoreConfig.SOCKS_PORT
+    private fun socksPort(): Int =
+        if (TunnelStatus.isActive() && TorManager.isTorActive) {
+            TorManager.FRONT_SOCKS_PORT
+        } else {
+            CoreConfig.SOCKS_PORT
+        }
 
     private fun splitTunnelSummary(): String {
         val settings = SplitTunnelSettings(this)

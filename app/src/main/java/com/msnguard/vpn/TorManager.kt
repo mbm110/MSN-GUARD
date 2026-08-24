@@ -73,13 +73,13 @@ object TorManager {
     /**
      * How long each ladder rung gets to reach 100% bootstrap.
      *
-     * Direct is deliberately short. Tor's own default would spend minutes
-     * retrying unreachable guards; 30 seconds is enough for a reachable network
-     * and fast enough that a censored one moves on to a bridge quickly. The
-     * bridge rungs get longer because a PT adds a CDN or WebRTC round trip
-     * before the first Tor cell.
+     * Direct gets 90s. Its first-ever run on a device has no cached directory
+     * data and can spend most of that downloading a consensus over a throttled
+     * link — the field log shows 61% at the old 30s cutoff on a rung that was
+     * minutes from finishing. With warm state it is a few seconds; the budget
+     * exists for the cold case, not the warm one.
      */
-    private const val DIRECT_TIMEOUT_S = 30L
+    private const val DIRECT_TIMEOUT_S = 90L
     private const val BRIDGE_TIMEOUT_S = 60L
 
     /** Poll interval while waiting for bootstrap. */
@@ -113,19 +113,20 @@ object TorManager {
     private class Rung(val mode: TorMode, val timeoutSeconds: Long)
 
     /**
-     * Ladder order, cheapest-first by expected time to a working circuit.
+     * Ladder order, as specified: Direct → Meek → obfs4 → Snowflake.
      *
      * Direct first because when it works it is both fastest to connect and
-     * fastest to use. Then obfs4, which is a plain TCP obfuscation layer and
-     * adds almost no latency. Meek next: it works nearly everywhere because it
-     * looks like HTTPS to a CDN, but every cell pays an HTTP round trip.
-     * Snowflake last — it depends on finding a volunteer proxy through a broker,
-     * which is the highest-variance step of the four.
+     * fastest to use. Meek next: it works nearly everywhere because it looks
+     * like HTTPS to a CDN, but every cell pays an HTTP round trip, so it is the
+     * preferred bridge ahead of obfs4. obfs4 after that — plain TCP
+     * obfuscation, fast once connected, but its public bridges are the first
+     * thing a censor scans for. Snowflake last: finding a volunteer proxy
+     * through a broker is the highest-variance step of the four.
      */
     private val ladder = listOf(
         Rung(TorMode.DIRECT, DIRECT_TIMEOUT_S),
-        Rung(TorMode.OBFS4, BRIDGE_TIMEOUT_S),
         Rung(TorMode.MEEK, BRIDGE_TIMEOUT_S),
+        Rung(TorMode.OBFS4, BRIDGE_TIMEOUT_S),
         Rung(TorMode.SNOWFLAKE, BRIDGE_TIMEOUT_S),
     )
 
@@ -150,6 +151,9 @@ object TorManager {
     @Volatile
     var activeMode: TorMode? = null
         private set
+
+    /** True while a Tor session is up — the UI's probe must use our front port. */
+    val isTorActive: Boolean get() = activeMode != null
 
     val isRunning: Boolean
         get() = torProcess?.isAlive == true
@@ -384,18 +388,23 @@ object TorManager {
      * caller escalates from — a partially bootstrapped Tor cannot carry traffic,
      * so treating, say, 80% as success is how you ship a "connected" button that
      * does nothing.
+     *
+     * Only `state`/`lock` deletion policy lives here: see [keepTorState], the
+     * caches are deliberately kept between attempts so a warm retry does not
+     * re-download the consensus. The field log's 61%-at-30s Direct run was on a
+     * cold cache; SlipNet connects in seconds because it keeps that cache warm.
      */
     private fun attempt(context: Context, dataDir: File, mode: TorMode, timeoutSeconds: Long): Boolean {
         bootstrapPercent = 0
         lastLoggedPercent = -1
 
-        // Force a fresh guard draw. See the NumEntryGuards note in writeTorrc:
-        // sticky guards plus an unreachable one means every attempt fails the
-        // same way. The descriptor caches are deliberately kept — they make a
-        // retry faster and hold nothing that pins us to a dead guard.
-        listOf("state", "lock").forEach { name ->
-            File(dataDir, name).takeIf { it.exists() }?.delete()
-        }
+        // Fresh guard draw, but keep everything else. `state` holds the guard
+        // list AND the directory-cache bookmarks; deleting it wholesale (the
+        // old behaviour) threw away the cached consensus with it and forced a
+        // full directory fetch per attempt — minutes on a bad link. Deleting
+        // just the guard entry inside forces the redraw NumEntryGuards exists
+        // for while the descriptor caches stay warm.
+        keepTorState(dataDir)
 
         val transport = transportFor(mode)
         if (transport != null && !startPt(context, dataDir, transport)) {
@@ -465,6 +474,30 @@ object TorManager {
 
         ConnectionLog.record("$TAG ${mode.label} bootstrapped")
         return true
+    }
+
+    /**
+     * Reset the guard choice without nuking the directory cache.
+     *
+     * Tor's `state` file holds two unrelated things: the entry-guard selection
+     * and the bookmarks into the cached consensus/descriptors. Deleting the
+     * whole file (what we used to do) forces a full directory refetch on every
+     * attempt — that is the difference between SlipNet's 3-second connect and
+     * our 30-second failure. Editing just the GuardLines out keeps the cache
+     * warm while still forcing a fresh guard draw, which is the only reason we
+     * were deleting it (NumEntryGuards 1 + a dead guard would otherwise fail
+     * every attempt identically).
+     */
+    private fun keepTorState(dataDir: File) {
+        val state = File(dataDir, "state")
+        if (!state.exists()) return
+        runCatching {
+            val lines = state.readLines().filter { !it.startsWith("GuardEntry") }
+            state.writeText(lines.joinToString("\n") + "\n")
+        }
+        // `lock` is Tor's process lock; it must go or the new process refuses
+        // to start thinking another tor is running.
+        File(dataDir, "lock").delete()
     }
 
     private fun stopTorProcess() {
