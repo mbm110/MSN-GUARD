@@ -408,10 +408,19 @@ object TorSocksFront {
             // resolving here first both leaks the name to the carrier resolver
             // and hands Tor an address it may reject ("private address"), which
             // is what the field log caught.
+            // ⚠️ The first three bytes are NOT optional and are easy to lose in a
+            // refactor: ByteArray() is zero-filled, so omitting them sends
+            // `00 00 00 …` and Tor answers "Socks version 0 not recognized. (This
+            // port is not an HTTP proxy…)" for every single flow — a fully
+            // bootstrapped circuit that carries nothing. That is exactly what the
+            // first field build did, hundreds of times per session.
             val request: ByteArray = if (isIpLiteral(host)) {
                 val addressBytes = InetAddress.getByName(host).address
                 val addressType = if (addressBytes.size == 16) ATYP_IPV6 else ATYP_IPV4
                 ByteArray(4 + addressBytes.size + 2).apply {
+                    this[0] = SOCKS_VERSION.toByte()
+                    this[1] = CMD_CONNECT.toByte()
+                    this[2] = 0
                     this[3] = addressType.toByte()
                     System.arraycopy(addressBytes, 0, this, 4, addressBytes.size)
                     this[4 + addressBytes.size] = ((port shr 8) and 0xFF).toByte()
@@ -421,6 +430,9 @@ object TorSocksFront {
                 val name = host.toByteArray(Charsets.US_ASCII)
                 check(name.size <= 255) { "hostname too long" }
                 ByteArray(5 + name.size + 2).apply {
+                    this[0] = SOCKS_VERSION.toByte()
+                    this[1] = CMD_CONNECT.toByte()
+                    this[2] = 0
                     this[3] = ATYP_DOMAIN.toByte()
                     this[4] = name.size.toByte()
                     System.arraycopy(name, 0, this, 5, name.size)

@@ -258,7 +258,10 @@ class MainActivity : Activity() {
                 return
             }
             when (intent.getStringExtra(MsnGuardVpnService.EXTRA_STATUS)) {
-                MsnGuardVpnService.STATUS_CONNECTING -> showConnecting(intent.getStringExtra(MsnGuardVpnService.EXTRA_DETAIL))
+                MsnGuardVpnService.STATUS_CONNECTING -> showConnecting(
+                    intent.getStringExtra(MsnGuardVpnService.EXTRA_DETAIL),
+                    intent.getIntExtra(MsnGuardVpnService.EXTRA_PROGRESS, -1),
+                )
                 MsnGuardVpnService.STATUS_STARTING -> showStarting()
                 MsnGuardVpnService.STATUS_SCANNING -> showScanning()
                 // NOT showConnected(). The service's CONNECTED only means the
@@ -508,7 +511,6 @@ class MainActivity : Activity() {
             autoPingHandler.post(autoPingRunnable)
         }
         renderStatus()
-        appUpdater.resumeInstallIfPermitted()
     }
 
     /**
@@ -1214,13 +1216,14 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun updateNotificationHealth(ip: String? = null, ping: String? = null) {
+    private fun updateNotificationHealth(ip: String? = null, ping: String? = null, country: String? = null) {
         if (!TunnelStatus.isActive()) return
         startService(Intent(this, MsnGuardVpnService::class.java)
             .setAction(MsnGuardVpnService.ACTION_NOTIFICATION_HEALTH)
             .apply {
                 ip?.let { putExtra(MsnGuardVpnService.EXTRA_NOTIFICATION_IP, it) }
                 ping?.let { putExtra(MsnGuardVpnService.EXTRA_NOTIFICATION_PING, it) }
+                country?.let { putExtra(MsnGuardVpnService.EXTRA_NOTIFICATION_COUNTRY, it) }
             })
     }
 
@@ -1263,6 +1266,10 @@ class MainActivity : Activity() {
                 if (country.isNullOrBlank()) return@runOnUiThread
                 coreExitCountry = country
                 exitNodeCard.render(ip, country, isTunnelActive())
+                // The notification names the exit country too. Psiphon reports
+                // its own through onConnectedServerRegion and wins; this is the
+                // fallback for transports that cannot self-report.
+                updateNotificationHealth(country = country)
             }
         }.start()
     }
@@ -2053,6 +2060,23 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
+
+        // Auto-reconnect sits next to the kill switch because the two answer the
+        // same question — "the tunnel just died, now what?" — and a user who wants
+        // one usually wants the other. It is deliberately NOT tied to the kill
+        // switch: blocking traffic and retrying are independent choices, and
+        // pairing them would mean you cannot retry without blocking.
+        val autoReconnectRow = createToggleRow(
+            "Auto reconnect",
+            "Reconnect automatically if the tunnel drops",
+            autoReconnectEnabled(),
+        ) {
+            preferences().edit().putBoolean(MsnGuardVpnService.AUTO_RECONNECT_PREF, it).apply()
+        }
+        content.addView(autoReconnectRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
 
         // "Share on LAN" is gone with proxy mode: it only ever widened the SOCKS
         // bind from 127.0.0.1 to 0.0.0.0, and in VPN mode no SOCKS listener is
@@ -3529,15 +3553,23 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun showConnecting(detail: String? = null) {
+    private fun showConnecting(detail: String? = null, progress: Int = -1) {
+        // The percentage arrives on its own broadcasts, most of which carry no new
+        // text, so it is applied before the shared progress renderer rather than
+        // through it.
+        orbitDial.progressPercent = progress
         showConnectionProgress("Connecting", detail ?: "Starting ${selectedProtocol.label} tunnel")
     }
 
     private fun showStarting() {
+        // STARTING and SCANNING are also CONNECTING on the dial, so a stale
+        // percentage from the previous attempt would still be drawn.
+        orbitDial.progressPercent = -1
         showConnectionProgress("Starting", "Preparing ${selectedProtocol.label} tunnel")
     }
 
     private fun showScanning() {
+        orbitDial.progressPercent = -1
         showConnectionProgress("Scanning", "Finding the best MASQUE gateway")
     }
 
@@ -3557,6 +3589,7 @@ class MainActivity : Activity() {
     private fun showConnected(restored: Boolean = false) {
         visualState = OrbitDialView.State.CONNECTED
         orbitDial.state = visualState
+        orbitDial.progressPercent = -1
         renderStatusLed()
         pingFailureStreak = 0
         connectionTitle.setTextColor(connected)
@@ -3976,6 +4009,15 @@ class MainActivity : Activity() {
     private fun wireGuardDataCheck(): Boolean = preferences().getBoolean(WIREGUARD_DATA_CHECK, true)
 
     private fun killSwitchEnabled(): Boolean = preferences().getBoolean(KILL_SWITCH, false)
+
+    /**
+     * Auto-reconnect preference, read through the service's own key and default so
+     * the toggle and the retry loop can never disagree about what "on" means.
+     */
+    private fun autoReconnectEnabled(): Boolean = preferences().getBoolean(
+        MsnGuardVpnService.AUTO_RECONNECT_PREF,
+        MsnGuardVpnService.AUTO_RECONNECT_DEFAULT,
+    )
 
     private fun lanSharingEnabled(): Boolean = preferences().getBoolean(LAN_SHARING, false)
 

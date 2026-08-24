@@ -189,7 +189,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var monthTxTotal = 0L
     private var monthRxTotal = 0L
     private var lastTrafficFlushMs = 0L
-    private var lastNotificationUpdateMs = 0L
 
     /**
      * Whether this session has already recorded its transport as working.
@@ -204,6 +203,56 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var currentProtocol = "Tunnel"
     private var currentVpnIp = ""
     private var currentPing = ""
+
+    /**
+     * Country shown on the notification's second line, e.g. "Germany".
+     *
+     * Empty until something authoritative supplies it. The notification simply
+     * omits the segment while it is empty rather than printing a placeholder —
+     * an unknown exit country is not worth a line of its own.
+     */
+    private var currentCountry = ""
+
+    /** Last progress value published, so a repost can reuse it. */
+    @Volatile
+    private var connectProgress = -1
+
+    /** Polls [TorManager.progress] while Tor bootstraps. */
+    private var torProgressTask: java.util.concurrent.ScheduledFuture<*>? = null
+
+    /**
+     * Liveness watchdog for an established tunnel. See [startWatchdog].
+     */
+    private var watchdogTask: java.util.concurrent.ScheduledFuture<*>? = null
+
+    /**
+     * True only when the *user* asked to disconnect (dial tap, notification
+     * action, kill switch, revoke).
+     *
+     * The distinction is the whole point of auto-reconnect: a tunnel that dies
+     * on its own must come back, and one the user switched off must stay off.
+     * [stopRequested] cannot answer this — it is set by every teardown path,
+     * including the ones auto-reconnect itself drives.
+     */
+    private val userInitiatedStop = AtomicBoolean(false)
+
+    /** Consecutive auto-reconnect attempts since the last verified connect. */
+    private var reconnectAttempts = 0
+
+    /** The pending auto-reconnect, so a user action can cancel it. */
+    private var reconnectTask: java.util.concurrent.ScheduledFuture<*>? = null
+
+    /**
+     * Set by the Rust-core path when its tunnel ended without the user asking.
+     *
+     * The core's lifecycle is a blocking call inside a `try/finally`, so unlike
+     * the Psiphon and Tor paths the decision "was this a drop or a disconnect"
+     * has to be carried from the body of the try into the finally block.
+     */
+    private var nativeExitWasUnexpected = false
+
+    /** Composited launcher artwork for the notification. Built once. */
+    private var cachedBadge: android.graphics.drawable.Icon? = null
     private var psiphonTunnel: PsiphonTunnel? = null
     private var psiphonConfigJson: String = ""
     private var psiphonVpnMode = false
@@ -487,6 +536,57 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val EXTRA_TRAFFIC_MONTH_RX = "traffic_month_rx"
         const val EXTRA_NOTIFICATION_IP = "notification_ip"
         const val EXTRA_NOTIFICATION_PING = "notification_ping"
+
+        /**
+         * Country the tunnel exits in, for the notification's second line.
+         *
+         * Sent by the activity once its geolocation lookup lands, because that
+         * lookup is a property of the address rather than of the route and the
+         * service has no reason to duplicate it. Psiphon also fills this in
+         * directly from `onConnectedServerRegion`, which is authoritative and
+         * arrives earlier.
+         */
+        const val EXTRA_NOTIFICATION_COUNTRY = "notification_country"
+
+        /**
+         * 0..100 while connecting, or -1 when this status carries no measurable
+         * progress.
+         *
+         * Deliberately not a fabricated animation: every value published here is
+         * a real milestone the service has actually reached (see
+         * [publishProgress]), and for Tor it is the bootstrap percentage Tor
+         * itself reports. A progress bar that moves on a timer while nothing
+         * happens is worse than no progress bar.
+         */
+        const val EXTRA_PROGRESS = "progress"
+
+        /**
+         * Accent used for the notification's icon tint and header text.
+         *
+         * Sampled from the launcher artwork's neon ring (#70E0B0 region), so the
+         * shade row and the app icon read as the same brand.
+         */
+        private const val NOTIFICATION_ACCENT = 0xFF70E0B0.toInt()
+
+        /** Preference key for the auto-reconnect toggle. */
+        const val AUTO_RECONNECT_PREF = "auto_reconnect"
+
+        /**
+         * Auto-reconnect is ON by default.
+         *
+         * The standing requirement for this app is one-click connect on a hostile
+         * network. A tunnel that dies at 3am and stays dead until the user notices
+         * their apps are offline is the same failure as not connecting at all, so
+         * recovery is not an opt-in feature. An explicit "off" from the user is
+         * still honoured — the key is written on every toggle.
+         */
+        const val AUTO_RECONNECT_DEFAULT = true
+
+        /** How often the liveness watchdog checks an established tunnel. */
+        private const val WATCHDOG_INTERVAL_S = 30L
+
+        /** Auto-reconnect backoff in seconds; the last entry repeats forever. */
+        private val RECONNECT_BACKOFF_S = longArrayOf(5, 15, 30, 60, 120)
         /** Exit address measured by the core from inside the tunnel. */
         const val EXTRA_EXIT_IP = "exit_ip"
         const val STATUS_CONNECTING = "connecting"
@@ -586,13 +686,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
          */
         private const val VERIFIED_RX_BYTES = 4_096L
 
-
-        /**
-         * How often the ongoing notification's byte counters are refreshed. The
-         * core reports traffic about once a second; repainting the shade that
-         * often is visually indistinguishable and measurably more expensive.
-         */
-        private const val NOTIFICATION_UPDATE_MS = 5_000L
 
         /**
          * elapsedRealtime at the moment the tunnel last reached CONNECTED, or 0
@@ -719,9 +812,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // to be overwritten by the first traffic sample from the Rust core; with
         // tun2socks the first sample can be seconds away, so the notification
         // would sit on "Connecting..." while the device was fully tunnelled.
-        getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, notification(currentTx, currentRx))
+        repostNotification()
         sendStatus(STATUS_CONNECTED)
+        startWatchdog()
     }
 
     override fun onExiting() {
@@ -735,6 +828,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // that follows a successful connection.
         if (!stopRequested.get() && !psiphonVpnActivated && ladderActive.get()) {
             escalateLadder()
+        }
+        // The controller exiting *after* a session was established is the silent
+        // death the field report describes: Psiphon is gone, tun2socks keeps
+        // routing into nothing, and without this the app would sit there claiming
+        // to be connected. Handled here rather than waiting up to 30s for the
+        // watchdog tick, because this callback is the definitive signal.
+        if (!stopRequested.get() && !userInitiatedStop.get() &&
+            psiphonVpnActivated && connected.get()
+        ) {
+            onTunnelLost("the Psiphon tunnel stopped")
         }
     }
 
@@ -788,6 +891,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         )
         getSharedPreferences("settings", MODE_PRIVATE).edit()
             .putString("last_exit_region", region.uppercase()).apply()
+        // Psiphon knows its own egress country, which is both earlier and more
+        // reliable than the activity's geolocation lookup. One repost, on a
+        // change the user can see.
+        if (currentCountry != exitedIn) {
+            currentCountry = exitedIn
+            repostNotification()
+        }
     }
 
     override fun onBytesTransferred(sent: Long, received: Long) {
@@ -1380,9 +1490,20 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_CONNECT -> intent.getStringExtra(EXTRA_CONFIG)?.let { config ->
+                // A fresh user-initiated connect clears both the "user switched it
+                // off" latch and the backoff counter, so a manual retry always
+                // starts from the first, shortest delay.
+                userInitiatedStop.set(false)
+                reconnectAttempts = 0
                 startTunnel(config)
             }
-            ACTION_DISCONNECT -> stopTunnel()
+            ACTION_DISCONNECT -> {
+                // The one place that means "the user wants this off". Auto-reconnect
+                // reads this latch and stays out of the way.
+                userInitiatedStop.set(true)
+                cancelAutoReconnect()
+                stopTunnel()
+            }
             ACTION_RECONNECT -> {
                 val config = storedConfig
                 if (config != null && connected.get()) {
@@ -1397,19 +1518,42 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             ACTION_NOTIFICATION_HEALTH -> {
                 intent.getStringExtra(EXTRA_NOTIFICATION_IP)?.let { currentVpnIp = it }
                 intent.getStringExtra(EXTRA_NOTIFICATION_PING)?.let { currentPing = it }
-                getSystemService(NotificationManager::class.java)
-                    .notify(NOTIFICATION_ID, notification(currentTx, currentRx))
+                // The activity's geolocation lookup is a fallback for transports
+                // that cannot name their own exit country (everything except
+                // Psiphon, which reports it via onConnectedServerRegion). It must
+                // not overwrite a country Psiphon already gave us.
+                intent.getStringExtra(EXTRA_NOTIFICATION_COUNTRY)?.takeIf { it.isNotBlank() }
+                    ?.let { if (currentCountry.isBlank()) currentCountry = it }
+                repostNotification()
             }
         }
         return Service.START_REDELIVER_INTENT
     }
 
     override fun onDestroy() {
+        cancelAutoReconnect()
+        stopTorProgressPolling()
         stopTunnel(notify = false)
         cancelLadderTimer()
         ladderScheduler.shutdownNow()
         worker.shutdownNow()
         super.onDestroy()
+    }
+
+    /**
+     * Android revoked our VPN permission — another VPN app was started, or the
+     * user hit "disconnect" in system settings.
+     *
+     * Reconnecting here would be wrong twice over: the permission is gone, so a
+     * retry cannot succeed, and fighting another VPN app for the tunnel is not
+     * this app's decision to make. Treated exactly like a user disconnect.
+     */
+    override fun onRevoke() {
+        ConnectionLog.record("VPN permission revoked by the system")
+        userInitiatedStop.set(true)
+        cancelAutoReconnect()
+        stopTunnel()
+        super.onRevoke()
     }
 
     fun protectSocket(fd: Int): Boolean = !vpnModeActive.get() || protect(fd)
@@ -1510,8 +1654,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         // The country is resolved by the UI from this address; the
                         // core cannot tell one from inside the tunnel.
                         sendExitIp(ip)
-                        getSystemService(NotificationManager::class.java)
-                            .notify(NOTIFICATION_ID, notification(currentTx, currentRx))
+                        repostNotification()
                     }
                 }
                 "log" -> {
@@ -1658,8 +1801,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     .establish() ?: error("Android could not establish the VPN interface")
                 vpnModeActive.set(true)
 
-                sendStatus(STATUS_CONNECTING, "Starting Tor…")
+                sendStatus(STATUS_CONNECTING, "Starting Tor…", 5)
                 ConnectionLog.record("Tor: TUN ready — bootstrapping")
+                // Tor is the one transport that reports genuine progress, so the
+                // percentage under "Connecting" is its own bootstrap figure.
+                startTorProgressPolling()
 
                 if (!TorManager.start(this)) {
                     error(
@@ -1672,6 +1818,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         }
                     )
                 }
+                stopTorProgressPolling()
 
                 val mode = TorManager.activeMode?.label ?: "Tor"
                 activeSocksPort = TorManager.FRONT_SOCKS_PORT
@@ -1682,8 +1829,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 currentVpnIp = ""
                 sendStatus(STATUS_CONNECTED, "Tor connected via $mode")
                 ConnectionLog.record("Tor: connected via $mode")
+                // The mode is only known now, and it is part of the notification's
+                // subtitle ("Tor (Meek)").
+                repostNotification()
                 startTrafficPolling()
+                startWatchdog()
             } catch (e: Exception) {
+                stopTorProgressPolling()
                 ConnectionLog.record("Tor start failed: ${e.message}")
                 TorManager.stop()
                 failAndStop(e.message ?: "Tor start failed")
@@ -1719,6 +1871,166 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         torTrafficTask?.cancel(false)
         torTrafficTask = null
     }
+
+    // ------------------------------------------------------ auto-reconnect
+
+    /**
+     * Watch an established tunnel and bring it back when it dies on its own.
+     *
+     * ## The bug this fixes
+     *
+     * Reported from the field: after some hours the notification still said
+     * connected, but nothing had internet. Opening the app showed the tunnel
+     * already disconnected, and tapping connect fixed it. Two separate faults
+     * produced that:
+     *
+     *  1. **Nothing noticed.** On the Psiphon and Tor paths the data plane is
+     *     `tun2socks` + a tunnel process. If those die without the service being
+     *     told — a Psiphon controller exit after a long doze, tun2socks unwinding
+     *     on a network change, Tor's process being killed by the OEM's memory
+     *     manager — no callback fires. `connected` stays true and the
+     *     notification keeps its last text forever. (The Rust-core path is
+     *     different: its `finally` block runs and reports FAILED.)
+     *  2. **Nothing recovered.** Even where the failure *was* reported, the only
+     *     response was to paint the UI red and wait for a human.
+     *
+     * ## Shape
+     *
+     * A 30-second poll — the cheapest thing that can detect case 1 at all, and
+     * ~2,900 wakeups over 24 hours of connection, which is inside the budget for
+     * a foreground VPN service that is already holding a TUN. It only asks
+     * questions that are free (are these threads/processes alive) and never
+     * touches the network, so a doze-suppressed tick costs nothing.
+     *
+     * Deliberately **not** an HTTP health check: our own package is off the TUN
+     * (`addDisallowedApplication`), so a probe from here rides the carrier link
+     * and proves nothing about the tunnel — the same trap documented in
+     * `openTunnelConnection`. Process liveness is the honest signal available in
+     * the service.
+     */
+    private fun startWatchdog() {
+        watchdogTask?.cancel(false)
+        reconnectAttempts = 0
+        watchdogTask = ladderScheduler.scheduleWithFixedDelay({
+            try {
+                if (stopRequested.get() || userInitiatedStop.get()) return@scheduleWithFixedDelay
+                if (!connected.get()) return@scheduleWithFixedDelay
+                val dead = tunnelIsDead() ?: return@scheduleWithFixedDelay
+                ConnectionLog.record("Watchdog: $dead — reconnecting")
+                onTunnelLost(dead)
+            } catch (_: Exception) {
+            }
+        }, WATCHDOG_INTERVAL_S, WATCHDOG_INTERVAL_S, TimeUnit.SECONDS)
+    }
+
+    private fun stopWatchdog() {
+        watchdogTask?.cancel(false)
+        watchdogTask = null
+    }
+
+    /**
+     * Reason the current data path is broken, or null when it looks healthy.
+     *
+     * Per-transport because each has a different thing that can die silently.
+     * Everything checked here is a local liveness flag; nothing blocks.
+     */
+    private fun tunnelIsDead(): String? {
+        // Whole-device routing is common to Psiphon, the chain and Tor. Without
+        // it, packets from the TUN reach nothing regardless of tunnel state.
+        val needsRouting = psiphonVpnMode || currentProtocol.contains("TOR")
+        if (needsRouting && !Tun2SocksManager.isRunning) return "device routing stopped"
+
+        if (currentProtocol.contains("TOR")) {
+            if (!TorManager.isRunning) return "the Tor process exited"
+            if (!TorSocksFront.isRunning) return "the Tor front-end stopped"
+            return null
+        }
+        if (psiphonVpnMode && psiphonTunnel == null) return "the Psiphon tunnel is gone"
+        return null
+    }
+
+    /**
+     * Tear the dead session down and schedule its replacement.
+     *
+     * Runs on [ladderScheduler]; [stopTunnel] and [startTunnel] are both safe off
+     * the main thread, and `teardownService = false` keeps the foreground service
+     * (and therefore the notification and the VPN permission) alive across the
+     * gap so the reconnect does not have to re-prompt the user.
+     */
+    private fun onTunnelLost(reason: String) {
+        if (!autoReconnectEnabled()) {
+            ConnectionLog.record("Auto reconnect is off — leaving the tunnel down")
+            sendStatus(STATUS_FAILED, reason)
+            connected.set(false)
+            stopTunnel(notify = false)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
+        stopWatchdog()
+        connected.set(false)
+        stopTunnel(notify = false, teardownService = false)
+        scheduleAutoReconnect(reason)
+    }
+
+    /**
+     * Re-dial after a backoff, until it works or the user intervenes.
+     *
+     * Backoff is 5s, 15s, 30s, 60s, then 120s forever. Capped rather than
+     * abandoned: the overnight case this exists for is a phone that lost its
+     * data connection entirely, and the correct behaviour when service returns
+     * three hours later is still to reconnect. A 2-minute ceiling costs one
+     * wakeup per two minutes while offline, which is less than the OS already
+     * spends retrying its own connectivity checks.
+     */
+    private fun scheduleAutoReconnect(reason: String) {
+        if (userInitiatedStop.get()) return
+        val config = storedConfig
+        if (config == null) {
+            ConnectionLog.record("Auto reconnect: no stored config; giving up")
+            return
+        }
+        val delay = RECONNECT_BACKOFF_S[
+            reconnectAttempts.coerceAtMost(RECONNECT_BACKOFF_S.size - 1)
+        ]
+        reconnectAttempts++
+        // The UI is told CONNECTING, not FAILED: from the user's point of view the
+        // app is working on it, and painting the dial red for a recovery that is
+        // about to happen on its own is the wrong report.
+        sendStatus(STATUS_CONNECTING, "Reconnecting after $reason…")
+        ConnectionLog.record("Auto reconnect #$reconnectAttempts in ${delay}s")
+        reconnectTask?.cancel(false)
+        reconnectTask = ladderScheduler.schedule({
+            try {
+                if (userInitiatedStop.get() || connected.get()) return@schedule
+                startTunnel(config)
+            } catch (e: Exception) {
+                ConnectionLog.record("Auto reconnect failed to start: ${e.message}")
+                scheduleAutoReconnect("start failure")
+            }
+        }, delay, TimeUnit.SECONDS)
+    }
+
+    private fun cancelAutoReconnect() {
+        reconnectTask?.cancel(false)
+        reconnectTask = null
+        stopWatchdog()
+        reconnectAttempts = 0
+    }
+
+    private fun autoReconnectEnabled(): Boolean =
+        getSharedPreferences("settings", MODE_PRIVATE)
+            .getBoolean(AUTO_RECONNECT_PREF, AUTO_RECONNECT_DEFAULT)
+
+    /**
+     * Whether a dropped tunnel will be picked back up automatically.
+     *
+     * Both conditions matter: the feature must be on, and the user must not have
+     * asked for the disconnect. Used to decide whether a drop is reported as a
+     * failure (red dial, session over) or as a reconnect in progress.
+     */
+    private fun willAutoReconnect(): Boolean =
+        autoReconnectEnabled() && !userInitiatedStop.get() && storedConfig != null
 
     /**
      * Records that the current PLAIN transport reached the internet on this network.
@@ -1999,9 +2311,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private fun startTunnel(config: String) {
         if (!connected.compareAndSet(false, true)) return
+        // A start supersedes any pending retry, whoever asked for it.
+        reconnectTask?.cancel(false)
+        reconnectTask = null
+        nativeExitWasUnexpected = false
         storedConfig = config
         currentProtocol = config.substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
         currentVpnIp = ""
+        // The country belongs to the session that just ended. Left set, the
+        // notification would label a fresh tunnel with the previous exit's
+        // country until something overwrote it.
+        currentCountry = ""
         // The previous tunnel's exit belongs to the previous tunnel. Cleared here
         // as well as in stopTunnel because a reconnect goes straight from one
         // startTunnel to the next, and a stale address would otherwise be handed
@@ -2149,20 +2469,29 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 TunnelStatus.isNativeTunMode = true
                 val result = NativeCore.start(config, tun!!.fd)
 
+                // Did the tunnel end on its own, i.e. without the user asking?
+                // That is the case auto-reconnect exists for, and it has to be
+                // decided here where the exit reason is still known.
+                val diedOnItsOwn = !stopRequested.get()
                 if (result != 0 && !stopRequested.get()) {
                     val detail = NativeCore.lastError().ifBlank { "Tunnel exited with code $result" }
                     ConnectionLog.record("Native tunnel exited: $detail")
-                    sendStatus(STATUS_FAILED, detail)
+                    if (!willAutoReconnect()) sendStatus(STATUS_FAILED, detail)
                 } else if (stopRequested.get()) {
                     sendStatus(STATUS_DISCONNECTED)
                 } else {
                     ConnectionLog.record("Native tunnel stopped unexpectedly")
-                    sendStatus(STATUS_FAILED, "Tunnel stopped unexpectedly")
+                    if (!willAutoReconnect()) sendStatus(STATUS_FAILED, "Tunnel stopped unexpectedly")
                 }
+                nativeExitWasUnexpected = diedOnItsOwn
             } catch (error: Exception) {
                 val detail = NativeCore.lastError().ifBlank { error.message ?: "Tunnel setup failed" }
                 Log.e(LOG_TAG, "Tunnel failed: $detail", error)
                 sendStatus(STATUS_FAILED, detail)
+                // A setup failure is not a dropped tunnel: there is nothing to
+                // restore, and retrying a config Android or the core rejected
+                // would loop. Reported and left to the user.
+                nativeExitWasUnexpected = false
             } finally {
                 NativeCore.detach()
                 vpnModeActive.set(false)
@@ -2182,7 +2511,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     ConnectionLog.record("Kill switch active; blocking all traffic")
                     sendStatus(STATUS_FAILED, "Kill switch active — tunnel dropped")
                     rebuildKillSwitchVpn()
+                } else if (nativeExitWasUnexpected && willAutoReconnect()) {
+                    // The core died on its own and the user still wants to be
+                    // connected. Keep the foreground service alive so the retry
+                    // does not need a fresh VPN consent dialog.
+                    nativeExitWasUnexpected = false
+                    scheduleAutoReconnect("the tunnel dropped")
                 } else {
+                    nativeExitWasUnexpected = false
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 }
@@ -2193,6 +2529,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     private fun stopTunnel(notify: Boolean = true, teardownService: Boolean = true) {
         stopRequested.set(true)
+        // The watchdog must go first: it is what turns a teardown into a
+        // reconnect, and leaving it armed while we dismantle the data path would
+        // make it fire on the wreckage of a session that is deliberately ending.
+        stopWatchdog()
+        stopTorProgressPolling()
         // The traffic counters are only flushed to disk on a slow timer while
         // running, so an ordinary disconnect must persist the remainder here or
         // the last minute of the session would be lost from the monthly total.
@@ -2292,7 +2633,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         }
     }
 
-    private fun sendStatus(status: String, detail: String? = null) {
+    /**
+     * Post the current notification content once.
+     *
+     * Every caller is a real state change (connected, protocol resolved, country
+     * learned) — never a timer. See [updateTrafficNotification] for why nothing
+     * periodic is allowed to call this.
+     */
+    private fun repostNotification() {
+        try {
+            getSystemService(NotificationManager::class.java)
+                .notify(NOTIFICATION_ID, notification())
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun sendStatus(status: String, detail: String? = null, progress: Int = -1) {
         Log.i(LOG_TAG, "status=$status${detail?.let { " detail=$it" } ?: ""}")
         // Stamp the connect moment here rather than at each call site: there are
         // several paths to CONNECTED (native tunnel ready, Psiphon proxy ready,
@@ -2301,14 +2657,60 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             STATUS_CONNECTED -> if (connectedSince == 0L) connectedSince = SystemClock.elapsedRealtime()
             STATUS_DISCONNECTED, STATUS_FAILED -> connectedSince = 0L
         }
+        // Keep the last known figure across the many CONNECTING broadcasts that
+        // carry no progress of their own, so a "Starting Tor…" message arriving
+        // after "40%" does not visibly reset the percentage to nothing.
+        if (progress >= 0) connectProgress = progress
+        if (status == STATUS_CONNECTED || status == STATUS_DISCONNECTED || status == STATUS_FAILED) {
+            connectProgress = -1
+        }
         sendBroadcast(Intent(ACTION_STATUS)
             .setPackage(packageName)
             .putExtra(EXTRA_STATUS, status)
+            .putExtra(EXTRA_PROGRESS, connectProgress)
             .apply { detail?.let { putExtra(EXTRA_DETAIL, it) } })
         TileService.requestListeningState(
             this,
             ComponentName(this, MsnGuardTileService::class.java),
         )
+    }
+
+    /**
+     * Republish the current CONNECTING state with a new percentage.
+     *
+     * Used by the Tor bootstrap poller, which has a number but nothing new to
+     * say in words. The detail text is left untouched by passing null, so the
+     * line the user is reading ("trying Meek…") survives the update.
+     */
+    private fun publishProgress(percent: Int) {
+        if (percent == connectProgress) return
+        sendStatus(STATUS_CONNECTING, null, percent)
+    }
+
+    /**
+     * Mirror Tor's own bootstrap percentage into the UI while it climbs.
+     *
+     * Tor reports 15 bootstrap notices per attempt and [TorManager] already
+     * parses them into [TorManager.progress]; polling that field is cheaper than
+     * threading a callback through the process reader, and one wakeup a second
+     * on a screen the user is actively watching is not a battery concern — the
+     * poller is cancelled the moment the connect resolves either way.
+     */
+    private fun startTorProgressPolling() {
+        torProgressTask?.cancel(false)
+        torProgressTask = ladderScheduler.scheduleAtFixedRate({
+            try {
+                if (stopRequested.get()) return@scheduleAtFixedRate
+                val percent = TorManager.progress
+                if (percent in 1..99) publishProgress(percent)
+            } catch (_: Exception) {
+            }
+        }, 1L, 1L, TimeUnit.SECONDS)
+    }
+
+    private fun stopTorProgressPolling() {
+        torProgressTask?.cancel(false)
+        torProgressTask = null
     }
 
     private fun updateTrafficNotification(tx: Long, rx: Long) {
@@ -2372,16 +2774,21 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             lastTrafficFlushMs = now
         }
 
-        // Rebuilding and posting the notification is not free: it crosses into
-        // system_server and re-lays out the shade row. At one update a second for
-        // hours that adds up, and the text only carries byte counters — nobody is
-        // reading them per-second from a collapsed notification. Every few seconds
-        // conveys the same thing.
-        if (now - lastNotificationUpdateMs >= NOTIFICATION_UPDATE_MS) {
-            getSystemService(NotificationManager::class.java)
-                .notify(NOTIFICATION_ID, notification(tx, rx))
-            lastNotificationUpdateMs = now
-        }
+        // The notification is NOT reposted here any more.
+        //
+        // It used to be, every 5 seconds, because it carried live byte counters
+        // and speeds. That was the lock-screen alarm the user reported: the row
+        // is IMPORTANCE_DEFAULT (required, or MIUI's lock screen drops it as
+        // "silent"), and on MIUI every *post* of a DEFAULT row pokes the ambient
+        // display even with setOnlyAlertOnce and no sound or vibration on the
+        // channel. A tunnel left connected overnight therefore woke the screen
+        // 720 times an hour.
+        //
+        // With the counters gone from the text there is nothing left in it that
+        // changes second to second: the elapsed time is drawn by SystemUI's own
+        // chronometer (see [notification]), and protocol and country only change
+        // when something real happens — each of which reposts once, from its own
+        // call site. So the steady state is exactly zero posts.
         lastTrafficSampleMs = now
     }
 
@@ -2485,7 +2892,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // out a window inherited from the tunnel that just died.
         prevSpeedSampleMs = 0
         lastTrafficSampleMs = 0
-        lastNotificationUpdateMs = 0
         // Per-session latch: each tunnel gets one chance to prove its transport
         // works. Without this reset the flag would stay set for the life of the
         // process, so a later session on a different transport (or a different
@@ -2537,30 +2943,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             .putExtra(EXTRA_EXIT_IP, ip))
     }
 
-    private fun formatBytes(bytes: Long): String = when {
-        bytes < 1_024 -> "$bytes B"
-        bytes < 1_048_576 -> "${bytes / 1_024} KB"
-        bytes < 1_073_741_824 -> "${bytes / 1_048_576} MB"
-        else -> String.format(java.util.Locale.US, "%.2f GB", bytes / 1_073_741_824.toDouble())
-    }
-
-    private fun formatSpeed(bytesPerSec: Long): String = when {
-        bytesPerSec < 1_024 -> "$bytesPerSec B/s"
-        bytesPerSec < 1_048_576 -> "${bytesPerSec / 1_024} KB/s"
-        else -> String.format(java.util.Locale.US, "%.1f MB/s", bytesPerSec / 1_048_576.0)
-    }
-
     private fun startAsForeground() {
         val manager = getSystemService(NotificationManager::class.java)
         ensureNotificationChannel(manager)
         val notification = Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("MSN-GUARD")
-            .setContentText("Connecting...")
+            .setContentTitle("Connecting…")
+            .setContentText(prettyProtocol())
             .setSmallIcon(R.drawable.ic_notification)
+            .setLargeIcon(appBadge())
+            .setColor(NOTIFICATION_ACCENT)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOnlyAlertOnce(true)
+            // No elapsed time yet, and a "0 seconds ago" stamp on a connect
+            // attempt is noise.
+            .setShowWhen(false)
             .build()
         startForeground(NOTIFICATION_ID, notification)
     }
@@ -2606,7 +3004,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         manager.createNotificationChannel(channel)
     }
 
-    private fun notification(tx: Long, rx: Long): Notification {
+    /**
+     * The ongoing status notification.
+     *
+     * Takes no traffic figures: byte counters and speeds were removed from the
+     * text (see [updateTrafficNotification]), which is what allows the row to be
+     * posted only on real state changes instead of every few seconds.
+     */
+    private fun notification(): Notification {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -2629,10 +3034,21 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             this, 2, reconnectIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("MSN-GUARD")
-            .setContentText("VPN: $currentProtocol • ${formatBytes(tx)}↑ ${formatBytes(rx)}↓ • ${formatSpeed(currentSpeedTx)}↑ ${formatSpeed(currentSpeedRx)}↓")
+        // Second line: what is carrying the traffic and where it comes out.
+        // Byte counters and speed are deliberately gone from here — see
+        // [updateTrafficNotification] for why they were the cause of the
+        // lock-screen wakeups, not just clutter.
+        val method = prettyProtocol()
+        val subtitle = if (currentCountry.isNotBlank()) "$method • $currentCountry" else method
+
+        val builder = Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("VPN connected")
+            .setContentText(subtitle)
             .setSmallIcon(R.drawable.ic_notification)
+            .setLargeIcon(appBadge())
+            // Tints the small icon and the header text in the app's own accent,
+            // which is what makes the row read as MSN-GUARD's at a glance.
+            .setColor(NOTIFICATION_ACCENT)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)
@@ -2640,15 +3056,97 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // would render "Contents hidden" on a device that hides sensitive
             // content — the exact case the user is complaining about.
             .setVisibility(Notification.VISIBILITY_PUBLIC)
-            // The channel is now IMPORTANCE_DEFAULT so the lock screen keeps the
-            // row. Without this, every one of these updates (one every 5s while
-            // traffic flows) would count as a fresh alert and could buzz the device
-            // continuously. Sound and vibration are already off at the channel, but
-            // this also stops the heads-up popover from reappearing.
             .setOnlyAlertOnce(true)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Disconnect", disconnectPendingIntent)
             .addAction(android.R.drawable.ic_menu_revert, "Reconnect", reconnectPendingIntent)
-            .build()
+
+        // The session timer, ticked by the system rather than by us.
+        //
+        // This is the whole fix for the lock-screen buzzing. Putting an elapsed
+        // time in the text would mean re-posting the notification every second,
+        // and on MIUI/EMUI every post of an IMPORTANCE_DEFAULT row wakes the
+        // ambient display even with setOnlyAlertOnce — which is exactly what the
+        // user saw. setUsesChronometer hands the clock to SystemUI: it counts up
+        // on its own from `when`, forever, with zero further posts from us.
+        //
+        // `when` is derived by mapping the elapsedRealtime stamp we already keep
+        // onto wall-clock time; using System.currentTimeMillis() directly would
+        // restart the displayed timer on every repost.
+        if (connectedSince > 0L) {
+            val elapsed = SystemClock.elapsedRealtime() - connectedSince
+            builder.setWhen(System.currentTimeMillis() - elapsed)
+                .setUsesChronometer(true)
+                .setShowWhen(true)
+        } else {
+            builder.setShowWhen(false)
+        }
+
+        return builder.build()
+    }
+
+    /**
+     * Human-readable transport name for the notification.
+     *
+     * [currentProtocol] is upper-cased raw config text ("PSIPHON-OVER-WARP",
+     * "TOR", "MASQUE"), which is right for substring matching and wrong for a
+     * user-facing line. For Tor it also names the transport that actually
+     * carried the circuit, because "Tor" alone hides the difference between a
+     * direct connection and one riding a Snowflake proxy.
+     */
+    private fun prettyProtocol(): String = when {
+        currentProtocol.contains(CHAIN_PROTOCOL_MARKER) -> "Psiphon over WARP"
+        currentProtocol.contains("TOR") ->
+            TorManager.activeMode?.let { "Tor (${it.label})" } ?: "Tor"
+        currentProtocol.contains("PSIPHON") -> "Psiphon"
+        currentProtocol.contains("MASQUE") -> "MASQUE"
+        currentProtocol.contains("WIREGUARD") -> "WireGuard"
+        currentProtocol.contains("GOOL") -> "WARP-on-WARP"
+        currentProtocol.isBlank() -> "Tunnel"
+        else -> currentProtocol.lowercase().replaceFirstChar { it.uppercase() }
+    }
+
+    /**
+     * The app's launcher artwork as a round, full-colour notification badge.
+     *
+     * Rendered here rather than handed to the system as
+     * `Icon.createWithResource(R.mipmap.ic_launcher)` because that resource is an
+     * adaptive icon: launchers apply a mask to it, but `setLargeIcon` does not,
+     * so on several OEM shells it lands as an unmasked square with the
+     * background plate showing at the corners. Compositing background+foreground
+     * into a circular bitmap ourselves gives the same round badge on every
+     * device.
+     *
+     * Cached: this is a 128 px bitmap draw, and rebuilding it on every repost
+     * would be pure waste on a row that is posted for hours.
+     */
+    private fun appBadge(): android.graphics.drawable.Icon {
+        cachedBadge?.let { return it }
+        val size = (resources.displayMetrics.density * 48f).toInt().coerceAtLeast(96)
+        val bitmap = android.graphics.Bitmap.createBitmap(
+            size, size, android.graphics.Bitmap.Config.ARGB_8888
+        )
+        val canvas = android.graphics.Canvas(bitmap)
+
+        // Circular clip first, so both layers are trimmed identically.
+        val clip = android.graphics.Path().apply {
+            addCircle(size / 2f, size / 2f, size / 2f, android.graphics.Path.Direction.CW)
+        }
+        canvas.clipPath(clip)
+
+        // Adaptive-icon geometry: the artwork is authored on a 108dp canvas of
+        // which the inner 72dp is the guaranteed-visible area, i.e. the layers
+        // are drawn 1.5x oversized and centred. Reproducing that scale is what
+        // keeps the neon ring from being cropped.
+        val inset = (-size * 0.25f).toInt()
+        val bounds = android.graphics.Rect(inset, inset, size - inset, size - inset)
+        listOf(R.drawable.msnguard_icon_bg, R.drawable.msnguard_icon_fg).forEach { id ->
+            getDrawable(id)?.apply {
+                setBounds(bounds)
+                draw(canvas)
+            }
+        }
+        return android.graphics.drawable.Icon.createWithBitmap(bitmap)
+            .also { cachedBadge = it }
     }
 
     private fun Builder.applySplitTunneling(): Builder {

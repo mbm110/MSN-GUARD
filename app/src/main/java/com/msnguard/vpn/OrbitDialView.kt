@@ -82,6 +82,20 @@ class OrbitDialView(
             invalidate()
         }
 
+    /**
+     * Connect progress, 0..100, or -1 for "no measurable progress".
+     *
+     * Only drawn in [State.CONNECTING], and only when non-negative: a transport
+     * that cannot report real progress shows the spinner alone rather than a
+     * fabricated number. See MsnGuardVpnService.EXTRA_PROGRESS.
+     */
+    var progressPercent: Int = -1
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
+
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
     private val density = resources.displayMetrics.density
@@ -467,6 +481,32 @@ class OrbitDialView(
             State.CONNECTING -> palette.amber
             State.FAILED -> palette.danger
             else -> Sculpt.withAlpha(palette.muted, 0.9f)
+        }
+        // While a connect is measurably progressing, the percentage replaces the
+        // shield glyph: the spinner already says "working", so the number is the
+        // only new information. Transports that cannot measure progress keep the
+        // glyph — no fabricated figure (see progressPercent).
+        if (state == State.CONNECTING && progressPercent >= 0) {
+            textPaint.typeface = monoTypeface
+            textPaint.textAlign = Paint.Align.CENTER
+            textPaint.textSize = 22f * density * geo
+            textPaint.color = palette.amber
+            canvas.drawText("$progressPercent%", cx, cy - dp(4) * geo, textPaint)
+            textPaint.typeface = labelTypeface
+            textPaint.textSize = 9f * density * geo
+            textPaint.letterSpacing = 0.19f
+            textPaint.color = Sculpt.withAlpha(palette.faint, 0.95f)
+            canvas.drawText("PROGRESS", cx, cy + dp(12) * geo, textPaint)
+            textPaint.letterSpacing = 0f
+
+            textPaint.typeface = labelTypeface
+            textPaint.textAlign = Paint.Align.CENTER
+            textPaint.textSize = 10.5f * density * geo
+            textPaint.letterSpacing = 0.19f
+            textPaint.color = palette.amber
+            canvas.drawText("CONNECTING", cx, cy + dp(26) * geo, textPaint)
+            textPaint.letterSpacing = 0f
+            return
         }
         val path = Path().apply {
             moveTo(cx, shieldTop)
