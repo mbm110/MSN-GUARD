@@ -31,6 +31,48 @@ jobs:
         with:
           packages: 'platform-tools build-tools;36.0.0 platforms;android-36 ndk;26.3.11579264 cmake;3.22.1'
 
+      # Tor binaries come from the tor-binaries workflow's artifacts, never from
+      # a third-party download at build time. The run is pinned by id so a
+      # rebuild of this repo cannot silently pick up different binaries —
+      # moving the pin is the explicit, auditable act.
+      #
+      # app/src/main/jniLibs/ is gitignored (it also receives the Rust core's
+      # outputs), so placing them here is what makes AGP package them. geoip is
+      # deliberately NOT copied: 24 MB uncompressed, needed only for ExitNodes
+      # country selection, which Tor mode does not offer.
+      - name: Fetch Tor binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TOR_RUN_ID: "32675767664"
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/torbin
+          for ART in libtor lyrebird; do
+            ID=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${TOR_RUN_ID}/artifacts" \
+              --jq ".artifacts[] | select(.name==\"$ART\") | .id")
+            [ -n "$ID" ] || { echo "artifact $ART not found in run $TOR_RUN_ID"; exit 1; }
+            gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/$ID/zip" > "/tmp/$ART.zip"
+            unzip -o -j "/tmp/$ART.zip" -d "/tmp/torbin/$ART"
+          done
+          mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/jniLibs/armeabi-v7a
+          cp /tmp/torbin/libtor/arm64-v8a/libtor.so                app/src/main/jniLibs/arm64-v8a/
+          cp /tmp/torbin/lyrebird/arm64-v8a/libobfs4proxy.so       app/src/main/jniLibs/arm64-v8a/
+          cp /tmp/torbin/libtor/armeabi-v7a/libtor.so              app/src/main/jniLibs/armeabi-v7a/
+          cp /tmp/torbin/lyrebird/armeabi-v7a/libobfs4proxy.so     app/src/main/jniLibs/armeabi-v7a/
+          # Sanity gate, same as the producing workflow asserts: PIE (Type: DYN).
+          # A wrong binary here fails at runtime with no message at all.
+          #
+          # readelf output is captured into a variable before parsing — piping
+          # LLVM tools into grep/awk trips SIGPIPE handling (exit 74) under
+          # pipefail, which is exactly how the binaries workflow lost two runs.
+          READELF="$ANDROID_HOME/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          for f in app/src/main/jniLibs/*/lib*.so; do
+            OUT=$("$READELF" -h "$f")
+            TYPE=$(printf '%s' "$OUT" | sed -n 's/.*Type: *\([A-Z]*\).*/\1/p')
+            [ "$TYPE" = "DYN" ] || { echo "ERROR: $f is not PIE"; exit 1; }
+          done
+          ls -la app/src/main/jniLibs/*/
+
       - name: Make scripts executable
         run: chmod +x ./gradlew ./core/build-android.sh
 

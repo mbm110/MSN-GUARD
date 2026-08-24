@@ -140,6 +140,9 @@ class MainActivity : Activity() {
     private var chainOuterRow: OrbitSettingsRow? = null
     private var egressRegionRow: OrbitSettingsRow? = null
 
+    /** Settings row showing the Tor connection mode; repainted after a pick. */
+    private var torModeRowRef: OrbitSettingsRow? = null
+
     private var showingLogs = false
     private var showingScanner = false
     private var showingMode = false
@@ -2168,6 +2171,21 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(8) })
         refreshPsiphonRows()
 
+        // Tor section, mirroring the Psiphon one: the mode picker is the only
+        // control, and it is meaningful regardless of what else is set.
+        content.addView(sectionLabel("TOR"), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(26) })
+        val torModeRow = navRow("Connection mode", torMode().label) {
+            chooseTorMode { torModeRowRef?.setValue(torMode().label) }
+        }
+        torModeRowRef = torModeRow
+        content.addView(torModeRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
+
         content.addView(sectionLabel("ABOUT"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2458,6 +2476,40 @@ class MainActivity : Activity() {
         // The card's subtitle names the transport, so it has to be repainted.
         renderChainCard()
         after?.invoke()
+    }
+
+    /**
+     * The user's Tor connection mode, defaulting to [TorManager.TorMode.AUTO].
+     */
+    private fun torMode(): TorManager.TorMode = TorManager.selectedMode(this)
+
+    /**
+     * Pick how Tor connects.
+     *
+     * Auto walks Direct → obfs4 → Meek → Snowflake on every connect, starting
+     * from whichever worked last. A pinned mode is exactly that: one method, no
+     * silent fallback — the service surfaces "try Auto" in its error instead.
+     */
+    private fun chooseTorMode(after: (() -> Unit)? = null) {
+        val modes = TorManager.TorMode.entries.toList()
+        showChoiceSheet(
+            title = "Connection mode",
+            subtitle = "How Tor reaches the network. Auto tries each method until one works.",
+            options = modes,
+            selected = torMode(),
+            label = { it.label },
+            description = { it.description },
+        ) { chosen ->
+            preferences().edit().putString(TorManager.MODE_PREF, chosen.key).apply()
+            ConnectionLog.record(
+                if (chosen == TorManager.TorMode.AUTO) {
+                    "Tor connection mode set to Auto"
+                } else {
+                    "Tor connection mode pinned to ${chosen.label}"
+                }
+            )
+            after?.invoke()
+        }
     }
 
     private fun chooseH2Fragmentation(after: (() -> Unit)? = null) = showChoiceSheet(
@@ -2856,6 +2908,7 @@ class MainActivity : Activity() {
         psiphonChainRow = null
         chainOuterRow = null
         egressRegionRow = null
+        torModeRowRef = null
         settingsPage?.let { animatePageClose(it) { settingsPage = null } }
     }
 
@@ -3470,7 +3523,6 @@ class MainActivity : Activity() {
             CoreConfig.json(this, selectedProtocol.coreName)
         }
     }
-
     private fun renderStatus() {
         if (!TunnelStatus.isActive() && isTunnelActive()) {
             NativeCore.lastError().takeIf(String::isNotBlank)?.let(::showFailure) ?: showDisconnected("Tunnel stopped unexpectedly")
@@ -4011,6 +4063,7 @@ class MainActivity : Activity() {
         WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel"),
         WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel"),
         PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel"),
+        TOR("Tor", "tor", "Onion routing; slowest but hardest to block"),
     }
 
     private enum class ScanTarget(

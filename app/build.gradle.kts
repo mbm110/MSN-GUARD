@@ -54,6 +54,31 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    packaging {
+        jniLibs {
+            // REQUIRED for Tor. Not a size tweak — the feature does not work
+            // without it.
+            //
+            // libtor.so and libobfs4proxy.so are executables that we exec() as
+            // processes, because the built libtor.so exports no tor_run_main to
+            // dlopen. Android 10+ forbids exec() from the app's writable home
+            // directory (a W^X violation), and the only place a packaged binary
+            // may be executed from is the read-only nativeLibraryDir under
+            // /data/app.
+            //
+            // AGP 8 defaults this to false, which leaves native libs compressed
+            // inside the APK and mapped straight out of it — nothing is ever
+            // written to nativeLibraryDir, so there is no file to exec and Tor
+            // fails with ENOENT no matter how correct the binary is.
+            //
+            // Side effect, in our favour: legacy packaging stores the libs
+            // deflated instead of uncompressed, so the APK gets smaller even
+            // with Tor added. The cost moves to installed size, since the system
+            // then keeps an extracted copy alongside the APK.
+            useLegacyPackaging = true
+        }
+    }
+
     if (releaseKeystore != null) {
         val envProps = Properties().apply {
             val envFile = rootProject.file("keystore.env")

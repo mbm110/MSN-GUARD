@@ -253,6 +253,21 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     // gets its own budget, and a timeout promotes us to the next rung without
     // any user interaction.
     private val ladderScheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
+
+    /**
+     * Polls [TorSocksFront]'s byte counters while a Tor session is up.
+     *
+     * Needed because Tor mode is the only path with no push source for traffic:
+     * the Rust core emits a `traffic` event and Psiphon calls
+     * `onBytesTransferred`, but a Tor session has neither. Without this the UI
+     * would sit at 0 B on a working tunnel and the RX verification gate would
+     * never arm.
+     *
+     * One task per second, cancelled on teardown, and it does nothing but read
+     * two atomics — the same cost as the existing notification refresh, so this
+     * does not add a wakeup source beyond what a connected session already has.
+     */
+    private var torTrafficTask: java.util.concurrent.ScheduledFuture<*>? = null
     private var ladderIndex = 0
     private var ladderAttempts = 0
     private var ladderTimer: ScheduledFuture<*>? = null
@@ -1598,6 +1613,114 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     /**
+     * Bring up a Tor session: TUN → tun2socks → TorSocksFront → Tor → circuit.
+     *
+     * Deliberately shaped like the plain Psiphon path rather than the Rust-core
+     * one, because the sequencing constraint is the same: the TUN must exist
+     * before the tunnel process starts, or Android's new-network callback makes
+     * the tunnel treat tun0 as a network change and restart.
+     *
+     * Unlike Psiphon this path is **synchronous** — there is no connect callback
+     * to wait on. [TorManager.start] blocks on its worker thread until bootstrap
+     * reaches 100% or every mode has failed, so tun2socks is started right here
+     * once it returns true.
+     *
+     * Note what is NOT done here: no ladder, no `armRegionPhase`, no
+     * `recordWorkingPlainTransport`. Those all belong to the Psiphon/WARP
+     * transports. Tor keeps its own mode memory inside [TorManager].
+     */
+    private fun startTorTunnel() {
+        worker.execute {
+            try {
+                val address = Tun2SocksManager.selectPrivateAddress()
+                ConnectionLog.record("Tor: creating TUN before Tor starts")
+                tun = Builder()
+                    .setSession("MSN-GUARD")
+                    .setMtu(Tun2SocksManager.VPN_INTERFACE_MTU)
+                    .addAddress(address.ipAddress, address.prefixLength)
+                    .addRoute("0.0.0.0", 0)
+                    .addRoute(address.subnet, address.prefixLength)
+                    // The ONLY resolver, on purpose — and the opposite of the
+                    // Psiphon path, which also lists 1.1.1.1 and 8.8.8.8.
+                    //
+                    // There, the public resolvers exist to break a bootstrap
+                    // deadlock: Psiphon must resolve CDN hostnames before its
+                    // tunnel is up. Tor has no such need — every bridge here is
+                    // reached by IP, or by a URL the transport resolves itself
+                    // over the carrier link (our own package is off the TUN).
+                    //
+                    // Listing a public resolver on this path would be an actual
+                    // anonymity leak: apps' DNS would go to Cloudflare in the
+                    // clear, outside the circuit, revealing exactly what a Tor
+                    // user is browsing. Tor's DNSPort is the only resolver.
+                    .addDnsServer(address.router)
+                    .applySplitTunneling()
+                    .establish() ?: error("Android could not establish the VPN interface")
+                vpnModeActive.set(true)
+
+                sendStatus(STATUS_CONNECTING, "Starting Tor…")
+                ConnectionLog.record("Tor: TUN ready — bootstrapping")
+
+                if (!TorManager.start(this)) {
+                    error(
+                        if (TorManager.selectedMode(this) == TorManager.TorMode.AUTO) {
+                            "Tor could not connect with any method on this network"
+                        } else {
+                            // Name the pinned mode: the fix is to change it or
+                            // switch to Auto, not to retry the same thing.
+                            "Tor could not connect over ${TorManager.selectedMode(this).label}; try Auto"
+                        }
+                    )
+                }
+
+                val mode = TorManager.activeMode?.label ?: "Tor"
+                activeSocksPort = TorManager.FRONT_SOCKS_PORT
+                if (!Tun2SocksManager.start(tun!!, TorManager.FRONT_SOCKS_PORT)) {
+                    error("Could not start device routing")
+                }
+
+                currentVpnIp = ""
+                sendStatus(STATUS_CONNECTED, "Tor connected via $mode")
+                ConnectionLog.record("Tor: connected via $mode")
+                startTrafficPolling()
+            } catch (e: Exception) {
+                ConnectionLog.record("Tor start failed: ${e.message}")
+                TorManager.stop()
+                failAndStop(e.message ?: "Tor start failed")
+            }
+        }
+    }
+
+    /**
+     * Feeds [TorSocksFront]'s counters into the same traffic pipeline the other
+     * transports use.
+     *
+     * [updateTrafficNotification] already owns everything downstream — speed
+     * deltas, monthly totals with the rebase guard, notification throttling — so
+     * this poll only has to present the numbers once a second; nothing about the
+     * accounting is duplicated here.
+     *
+     * Runs on [ladderScheduler], which is idle for the whole life of a connected
+     * Tor session: its other job, the Psiphon escalation timer, is cancelled
+     * before any of this starts.
+     */
+    private fun startTrafficPolling() {
+        torTrafficTask?.cancel(false)
+        torTrafficTask = ladderScheduler.scheduleAtFixedRate({
+            try {
+                if (!TorSocksFront.isRunning) return@scheduleAtFixedRate
+                updateTrafficNotification(TorSocksFront.sessionTx, TorSocksFront.sessionRx)
+            } catch (_: Exception) {
+            }
+        }, 1L, 1L, TimeUnit.SECONDS)
+    }
+
+    private fun stopTrafficPolling() {
+        torTrafficTask?.cancel(false)
+        torTrafficTask = null
+    }
+
+    /**
      * Records that the current PLAIN transport reached the internet on this network.
      *
      * Only meaningful for the three transports the chain can use as its outer leg,
@@ -1910,6 +2033,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             return
         }
 
+        // TOR is checked before PSIPHON only for symmetry with the chain marker
+        // above; "TOR" and "PSIPHON" do not overlap as substrings, so the order
+        // between these two is not load-bearing.
+        if (currentProtocol.contains("TOR")) {
+            startTorTunnel()
+            return
+        }
+
         // PSIPHON: callback-driven lifecycle — MUST NOT enter try/finally.
         // The finally block calls stopSelf() which destroys the service and kills Psiphon.
         if (currentProtocol.contains("PSIPHON")) {
@@ -2084,6 +2215,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // Order matters: stop routing first so no more packets enter a tunnel
         // that is being torn down, then stop Psiphon itself.
         Tun2SocksManager.stop()
+        stopTrafficPolling()
+        TorManager.stop()
         stopPsiphonTunnel()
         NativeCore.stop()
         TunnelStatus.isNativeTunMode = false
@@ -2113,6 +2246,23 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             if (notify) sendStatus(STATUS_DISCONNECTED)
             // A reconnect re-enters startTunnel() on the worker thread, so the
             // service must survive; only a real disconnect stops it.
+            if (teardownService) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+            return
+        }
+
+        if (currentProtocol.contains("TOR")) {
+            // Tor owns its own lifecycle the same way: no Rust core attached
+            // (NativeCore.attach/detach never ran on this path), so everything
+            // to unwind lives in TorManager/Tun2SocksManager, both already
+            // stopped above. All that is left here is the TUN and the service.
+            vpnModeActive.set(false)
+            tun?.close()
+            tun = null
+            connected.set(false)
+            if (notify) sendStatus(STATUS_DISCONNECTED)
             if (teardownService) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()

@@ -275,6 +275,7 @@ class MsnGuardTileService : TileService() {
             WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel"),
             WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel"),
             PSIPHON("Psiphon", "psiphon", "SOCKS5 proxy tunnel"),
+            TOR("Tor", "tor", "Onion routing"),
         }
 
         enum class ScanTarget(
