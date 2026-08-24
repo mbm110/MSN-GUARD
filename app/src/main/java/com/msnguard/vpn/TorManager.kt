@@ -71,16 +71,51 @@ object TorManager {
     private const val PT_HANDSHAKE_TIMEOUT_S = 10L
 
     /**
-     * How long each ladder rung gets to reach 100% bootstrap.
+     * How long a rung may sit at the **same percentage** before it is escalated.
      *
-     * Direct gets 90s. Its first-ever run on a device has no cached directory
-     * data and can spend most of that downloading a consensus over a throttled
-     * link — the field log shows 61% at the old 30s cutoff on a rung that was
-     * minutes from finishing. With warm state it is a few seconds; the budget
-     * exists for the cold case, not the warm one.
+     * This replaced a fixed per-rung budget, which is what made every transport
+     * look broken on a network where they were all working. Field log, one
+     * attempt per rung, ladder order:
+     *
+     * ```
+     *   Direct    45% reached,          killed at its 90s deadline
+     *   Meek      45% in 5s, then 50%,  killed at its 60s deadline
+     *   obfs4     45% in 23s, then 50%, killed at its 60s deadline
+     *   Snowflake 45% in 15s, then 50%, killed at its 60s deadline
+     * ```
+     *
+     * Every rung reached "asking for relay descriptors" (45%) and moved into
+     * "loading relay descriptors" (50%). Getting there means the transport
+     * carried a TLS handshake, a consensus download and an authority-cert
+     * download — the transport was never the problem. What did not fit in 60s is
+     * the descriptor download that follows, which is the long pole on a slow
+     * link and costs an HTTP round trip per cell over meek. Not one rung
+     * reported an error; all four reported a deadline.
+     *
+     * SlipNet has no per-transport timeout at all — its `startClient` returns as
+     * soon as tor is spawned and the UI waits as long as the user tolerates.
+     * That is why it connects on this network while we declared failure.
+     *
+     * So bound the thing that actually distinguishes a blocked transport from a
+     * slow one: absence of movement. 90s and not less, because the descriptor
+     * phase advances in batches and a single batch over meek can legitimately
+     * take that long — a 45s window would have killed the field log's Meek rung
+     * *earlier* than the old fixed budget did.
      */
-    private const val DIRECT_TIMEOUT_S = 90L
-    private const val BRIDGE_TIMEOUT_S = 60L
+    private const val STALL_TIMEOUT_S = 90L
+
+    /**
+     * Absolute ceiling per rung, however well it is progressing.
+     *
+     * Only a backstop against a transport that dribbles one percent a minute
+     * forever. Bridges get longer than direct because the slow phase is the
+     * descriptor download and on a bridge rung that runs over the bridge.
+     *
+     * Worst case for the whole AUTO ladder is now bounded by the stall detector,
+     * not by these: four blocked transports cost 4 × 90s, not 4 × ceiling.
+     */
+    private const val DIRECT_TIMEOUT_S = 150L
+    private const val BRIDGE_TIMEOUT_S = 300L
 
     /** Poll interval while waiting for bootstrap. */
     private const val BOOTSTRAP_POLL_MS = 250L
@@ -206,11 +241,11 @@ object TorManager {
      *  - **`DormantClientTimeout`** raised from Tor's 24-hour default to 4 weeks.
      *    On the default, Tor shuts itself down after a day idle and the next
      *    connect pays a full bootstrap — which over meek or snowflake is minutes.
-     *  - **`NumEntryGuards 1`** and deleting `state` before each attempt. Tor
+     *  - **`NumEntryGuards 1`** and re-drawing the guard on direct mode. Tor
      *    normally sticks to a chosen guard for weeks, which is right for
      *    anonymity and wrong here: one unreachable guard would make every
-     *    connect attempt fail identically. Re-drawing gives a fresh guard each
-     *    try. This is a deliberate trade of guard stability for reachability.
+     *    connect attempt fail identically. Bridge modes do **not** get the
+     *    redraw — see [keepTorState].
      *  - **No `Socks5Proxy`.** Tor refuses to start when both a proxy and a
      *    `ClientTransportPlugin` are configured (`config.c` logs "external proxy
      *    with another proxy type" and does `goto err`), so chaining Tor behind
@@ -231,6 +266,12 @@ object TorManager {
             appendLine("SocksPolicy accept 127.0.0.0/8")
             appendLine("SocksPolicy reject *")
             appendLine("Log notice stdout")
+            // Tor's own default is 0 (scrub addresses from logs). SlipNet sets
+            // this and it is why its logs name the bridge that failed while ours
+            // said only "general SOCKS server failure". Our in-app log is 100
+            // lines shown to one user about their own connection, so there is no
+            // third party to protect — and without it a dead bridge is invisible.
+            appendLine("SafeLogging 0")
             appendLine("AvoidDiskWrites 1")
             appendLine("DormantClientTimeout 2419200")
             appendLine("ClientBootstrapConsensusAuthorityDownloadInitialDelay 0")
@@ -398,13 +439,11 @@ object TorManager {
         bootstrapPercent = 0
         lastLoggedPercent = -1
 
-        // Fresh guard draw, but keep everything else. `state` holds the guard
-        // list AND the directory-cache bookmarks; deleting it wholesale (the
-        // old behaviour) threw away the cached consensus with it and forced a
-        // full directory fetch per attempt — minutes on a bad link. Deleting
-        // just the guard entry inside forces the redraw NumEntryGuards exists
-        // for while the descriptor caches stay warm.
-        keepTorState(dataDir)
+        // Clear the process lock, and on direct mode only, force a fresh guard
+        // draw. Bridge rungs keep their guard entries: tor dials every
+        // configured bridge anyway, so the entries cost nothing and the cached
+        // bridge descriptor they point at saves a handshake.
+        keepTorState(dataDir, mode)
 
         val transport = transportFor(mode)
         if (transport != null && !startPt(context, dataDir, transport)) {
@@ -435,12 +474,22 @@ object TorManager {
 
         val bootstrapped = CountDownLatch(1)
 
+        // Timestamp of the last percentage *increase*, which is what the stall
+        // detector measures. An atomic rather than a plain `var` because the
+        // stdout reader thread writes it and this thread reads it; `@Volatile`
+        // is not allowed on a local, and a captured `var` would be boxed in a
+        // non-thread-safe Ref.
+        val lastProgressMs = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+
         Thread({
             try {
                 BufferedReader(InputStreamReader(process.inputStream)).forEachLine { line ->
                     val match = Regex("Bootstrapped (\\d+)%").find(line)
                     if (match != null) {
                         val percent = match.groupValues[1].toIntOrNull() ?: 0
+                        if (percent > bootstrapPercent) {
+                            lastProgressMs.set(System.currentTimeMillis())
+                        }
                         bootstrapPercent = percent
                         // Log every 20% instead of all 15 notices: the in-app log
                         // is 100 lines total and a full bootstrap would flood it.
@@ -461,12 +510,33 @@ object TorManager {
             }
         }, "tor-stdout").apply { isDaemon = true }.start()
 
-        val reached = bootstrapped.await(timeoutSeconds, TimeUnit.SECONDS) && bootstrapPercent >= 100
+        // Wait in short slices so a stall can be noticed while it is happening.
+        // The old code did one `await(timeoutSeconds)`, which is why a rung that
+        // was still climbing got killed at a fixed deadline and a rung that was
+        // dead on arrival held the ladder for the full budget. Both cases are
+        // now decided by whether the percentage is still moving.
+        val deadlineMs = System.currentTimeMillis() + timeoutSeconds * 1_000
+        var stalled = false
+        while (!bootstrapped.await(BOOTSTRAP_POLL_MS, TimeUnit.MILLISECONDS)) {
+            if (stopping.get()) break
+            if (!process.isAlive) break
+            val now = System.currentTimeMillis()
+            if (now - lastProgressMs.get() > STALL_TIMEOUT_S * 1_000) {
+                stalled = true
+                break
+            }
+            if (now > deadlineMs) break
+        }
+
+        val reached = bootstrapPercent >= 100
 
         if (!reached || !process.isAlive) {
-            ConnectionLog.record(
-                "$TAG ${mode.label} failed at $bootstrapPercent% after ${timeoutSeconds}s"
-            )
+            val why = when {
+                stalled -> "stalled ${STALL_TIMEOUT_S}s at $bootstrapPercent%"
+                !process.isAlive -> "tor exited at $bootstrapPercent%"
+                else -> "hit the ${timeoutSeconds}s ceiling at $bootstrapPercent%"
+            }
+            ConnectionLog.record("$TAG ${mode.label} failed — $why")
             stopTorProcess()
             stopPt()
             return false
@@ -479,25 +549,36 @@ object TorManager {
     /**
      * Reset the guard choice without nuking the directory cache.
      *
-     * Tor's `state` file holds two unrelated things: the entry-guard selection
-     * and the bookmarks into the cached consensus/descriptors. Deleting the
-     * whole file (what we used to do) forces a full directory refetch on every
-     * attempt — that is the difference between SlipNet's 3-second connect and
-     * our 30-second failure. Editing just the GuardLines out keeps the cache
-     * warm while still forcing a fresh guard draw, which is the only reason we
-     * were deleting it (NumEntryGuards 1 + a dead guard would otherwise fail
-     * every attempt identically).
+     * Only for [TorMode.DIRECT]. Verified on tor 0.4.6.10 (two runs, 2 dead
+     * bridges listed ahead of 2 live ones): with `UseBridges 1` tor dials
+     * **every** configured bridge regardless of `NumEntryGuards`, reaching a
+     * live one in both `NumEntryGuards 1` and `3`. So there is no dead-guard
+     * lockout to fix on the bridge rungs, and stripping their guard entries only
+     * throws away the cached bridge descriptor and forces a fresh handshake —
+     * the opposite of what we want on the rung that is already the slow one.
+     *
+     * Two bugs lived here before. The filter tested `startsWith("GuardEntry")`,
+     * but tor writes the key as `Guard ` (guard-spec A.5: `Guard in=default
+     * rsa_id=… sampled_on=…`), so it matched nothing and the whole function was
+     * a no-op — dumped the state file from a real run and counted 20 `Guard `
+     * lines, 0 `GuardEntry`. And it ran for every mode, not just direct.
+     *
+     * Stripping the lines is safe: tor re-samples a full guard set and
+     * re-bootstrapped to 100% in 4s on the edited file, with no parse warning.
      */
-    private fun keepTorState(dataDir: File) {
+    private fun keepTorState(dataDir: File, mode: TorMode) {
+        // `lock` is Tor's process lock; it must always go or the new process
+        // refuses to start thinking another tor is running.
+        File(dataDir, "lock").delete()
+
+        if (mode != TorMode.DIRECT) return
+
         val state = File(dataDir, "state")
         if (!state.exists()) return
         runCatching {
-            val lines = state.readLines().filter { !it.startsWith("GuardEntry") }
+            val lines = state.readLines().filter { !it.startsWith("Guard ") }
             state.writeText(lines.joinToString("\n") + "\n")
         }
-        // `lock` is Tor's process lock; it must go or the new process refuses
-        // to start thinking another tor is running.
-        File(dataDir, "lock").delete()
     }
 
     private fun stopTorProcess() {
