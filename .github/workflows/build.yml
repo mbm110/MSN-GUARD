@@ -52,7 +52,9 @@ jobs:
               --jq ".artifacts[] | select(.name==\"$ART\") | .id")
             [ -n "$ID" ] || { echo "artifact $ART not found in run $TOR_RUN_ID"; exit 1; }
             gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/$ID/zip" > "/tmp/$ART.zip"
-            unzip -o -j "/tmp/$ART.zip" -d "/tmp/torbin/$ART"
+            # Keep the archive's arm64-v8a/armeabi-v7a layout — -j would flatten
+            # both ABIs onto one name and silently keep only the last one.
+            unzip -o "/tmp/$ART.zip" -d "/tmp/torbin/$ART"
           done
           mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/jniLibs/armeabi-v7a
           cp /tmp/torbin/libtor/arm64-v8a/libtor.so                app/src/main/jniLibs/arm64-v8a/
