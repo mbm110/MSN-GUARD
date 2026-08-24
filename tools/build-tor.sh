@@ -324,14 +324,26 @@ EOF
     echo "    size:       $(stat -c%s "$OUT_SO") bytes"
     echo "    ELF type:   $type (want DYN — an EXEC binary is not PIE and will not launch)"
     echo "    LOAD align: $align (want 0x4000 = 16 KB)"
-    # `strings | grep -o | head` would hit the same SIGPIPE trap as readelf did,
-    # so grab the whole match list and take the first element in bash.
-    local vers
-    vers=$(strings "$OUT_SO" | grep -o 'Tor [0-9.]\+' || true)
-    echo "    version:    ${vers%%$'\n'*}"
+    # Do not try to *read* the version out of the binary: the first match is the
+    # control protocol's "not supported by Tor 0.1.2.17 and later" warning, which
+    # is also four components, so no regex shape distinguishes it. The real
+    # banner is embedded as "(on Tor 0.4.9.11 )". So assert the expected version
+    # is present rather than reporting whichever match comes first — that catches
+    # a stale tarball or a cached source tree building the wrong release.
+    #
+    # Capture first, then match. `strings … | grep -qF` is the same class of bug
+    # as the readelf pipe: grep -q exits on first match, strings takes SIGPIPE,
+    # the pipeline reports 141, and the check silently reports "not found" on a
+    # binary that does contain the string. Verified against these exact binaries.
+    local all_strings vers_found="no"
+    all_strings=$(strings "$OUT_SO")
+    grep -qF "Tor $TOR_VERSION" <<< "$all_strings" && vers_found="yes"
+    echo "    version:    Tor $TOR_VERSION present in binary: $vers_found"
 
     [[ "$type" == "DYN" ]] || { echo "ERROR: not PIE"; return 1; }
     [[ "$align" == "0x4000" ]] || { echo "ERROR: wrong page alignment: $align"; return 1; }
+    [[ "$vers_found" == "yes" ]] \
+        || { echo "ERROR: binary does not contain 'Tor $TOR_VERSION'"; return 1; }
     show_disk "after $ABI"
 }
 
