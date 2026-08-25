@@ -34,6 +34,12 @@ core/android-libs/
 core/**/target/
 core/**/target-android/
 
+# GeoIP databases for the Tor exit-country picker. Generated at build time by
+# tools/filter-geoip.py from the checksum-pinned Tor tarball — 6.4 MB of derived
+# data that would otherwise be committed and go stale.
+app/src/main/assets/geoip
+app/src/main/assets/geoip6
+
 # Vendored quiche development-only fuzzing fixtures
 core/quiche/fuzz/
 

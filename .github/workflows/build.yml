@@ -37,9 +37,7 @@ jobs:
       # moving the pin is the explicit, auditable act.
       #
       # app/src/main/jniLibs/ is gitignored (it also receives the Rust core's
-      # outputs), so placing them here is what makes AGP package them. geoip is
-      # deliberately NOT copied: 24 MB uncompressed, needed only for ExitNodes
-      # country selection, which Tor mode does not offer.
+      # outputs), so placing them here is what makes AGP package them.
       - name: Fetch Tor binaries
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -77,6 +75,31 @@ jobs:
 
       - name: Make scripts executable
         run: chmod +x ./gradlew ./core/build-android.sh
+
+      # GeoIP database for the Tor exit-country picker. Without it, ExitNodes
+      # {cc} resolves to an empty relay set and bootstrap stalls at 45-50%
+      # forever — the exact bug 1.4.3 shipped. Built here rather than committed:
+      # 6.4 MB of generated data does not belong in git, and generating it from
+      # the checksum-pinned Tor tarball means the ranges are auditable.
+      #
+      # Filtered to the countries TorRegions.kt offers (1.8 MB in the APK instead
+      # of 4.5 MB) and the IPv6 database is replaced by a stub, since the country
+      # of a relay comes from its IPv4 address. Verified on live Tor: FR DE NL RO
+      # SE CA all honoured, 6/6.
+      - name: Build filtered GeoIP database
+        run: |
+          set -euo pipefail
+          TOR_VERSION=0.4.9.11
+          EXPECTED=2e6c1720118c812acf0079fd47cf91b6bfaba5d766c321c4d3d2a28d6a11a8ed
+          curl -fL --retry 3 -o tor.tar.gz "https://dist.torproject.org/tor-$TOR_VERSION.tar.gz"
+          echo "$EXPECTED  tor.tar.gz" | sha256sum -c -
+          tar -xzf tor.tar.gz "tor-$TOR_VERSION/src/config/geoip"
+          python3 tools/filter-geoip.py \
+            "tor-$TOR_VERSION/src/config/geoip" \
+            app/src/main/java/com/msnguard/vpn/TorRegions.kt \
+            app/src/main/assets
+          rm -rf tor.tar.gz "tor-$TOR_VERSION"
+          ls -la app/src/main/assets/geoip app/src/main/assets/geoip6
 
       # The release keystore lives only in repo secrets. Without it we fall back
       # to a debug build, so a fork or a PR from someone without secret access

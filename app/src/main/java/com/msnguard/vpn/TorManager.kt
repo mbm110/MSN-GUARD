@@ -226,16 +226,67 @@ object TorManager {
     }
 
     /**
+     * Copy the GeoIP databases out of assets into real files Tor can open.
+     *
+     * Necessary because `GeoIPFile` takes a filesystem path and Android assets
+     * are not files — they live inside the APK. Copied once and reused: the IPv4
+     * database is 6.4 MB, so re-copying on every connect would be a pointless
+     * 6.4 MB write each time.
+     *
+     * Freshness is keyed on the app's own versionCode rather than on file size.
+     * AGP stores these assets deflated, which makes `openFd` throw and leaves no
+     * cheap way to learn the real asset length — so a size check would silently
+     * keep a stale database after an update that added a country to the picker.
+     * The stamp costs one small file and cannot get that wrong.
+     *
+     * Returns the directory holding both files, or null when the copy failed.
+     * Null is not fatal on its own — see [writeTorrc], which then omits the
+     * country preference rather than shipping a torrc that cannot work.
+     */
+    private fun geoipDir(context: Context): File? {
+        val dir = File(context.filesDir, "geoip").apply { mkdirs() }
+        val v4 = File(dir, "geoip")
+        val v6 = File(dir, "geoip6")
+        val stamp = File(dir, "unpacked-version")
+
+        val version = runCatching {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0).versionCode.toString()
+        }.getOrDefault("0")
+
+        val current = runCatching { stamp.readText().trim() }.getOrDefault("")
+        if (current == version && v4.length() > 0 && v6.exists()) return dir
+
+        for ((asset, target) in listOf("geoip" to v4, "geoip6" to v6)) {
+            val copied = runCatching {
+                context.assets.open(asset).use { input ->
+                    target.outputStream().use { output -> input.copyTo(output) }
+                }
+            }
+            if (copied.isFailure) {
+                ConnectionLog.record(
+                    "$TAG could not unpack $asset: ${copied.exceptionOrNull()?.message}"
+                )
+                return null
+            }
+        }
+        runCatching { stamp.writeText(version) }
+        return dir.takeIf { v4.length() > 0 && v6.exists() }
+    }
+
+    /**
      * Write the torrc for one attempt.
      *
      * Notable choices, all of them about a phone on a censored network rather
      * than a desktop:
      *
-     *  - **No `GeoIPFile`.** The geoip databases are 24 MB uncompressed and are
-     *    only needed for `ExitNodes {cc}` country selection, which this app does
-     *    not offer for Tor. Tor logs a harmless notice about them being absent
-     *    and works normally. Bundling them would have doubled the size cost of
-     *    the whole feature for a feature nobody asked for.
+     *  - **`GeoIPFile` is mandatory whenever a country is preferred.** Without a
+     *    GeoIP database Tor cannot map a country to relays, so `ExitNodes {cc}`
+     *    resolves to an empty set and bootstrap stalls forever — measured at
+     *    45-50% and never recovering, which is exactly the 1.4.3 bug. The
+     *    databases are therefore bundled, filtered down to the countries the
+     *    picker offers (6.4 MB on disk, 1.8 MB in the APK). See
+     *    `tools/filter-geoip.py`.
      *  - **`AvoidDiskWrites 1`** keeps Tor's caches in RAM and flushes on clean
      *    shutdown only. Less flash wear and less wakeup work while backgrounded.
      *  - **`DormantClientTimeout`** raised from Tor's 24-hour default to 4 weeks.
@@ -291,19 +342,36 @@ object TorManager {
 
             // Preferred exit country, when the user picked one.
             //
+            // Both the GeoIP path and the country line are written together, or
+            // neither is. Tor cannot resolve {cc} to relays without the database:
+            // the candidate set comes out empty and bootstrap stalls at 45-50%
+            // forever, which is exactly how 1.4.3 broke. So if unpacking the
+            // database failed, the preference is dropped and the connection is
+            // allowed to succeed without it — a wrong country beats no tunnel.
+            //
             // StrictNodes 0 deliberately: it makes this a preference tor
             // abandons when it cannot build a circuit in that country, which is
             // the same contract the Psiphon "Preferred country" row advertises.
             // StrictNodes 1 would turn a country with a handful of exits into
-            // "no connection at all" whenever those exits are busy or down.
+            // "no connection at all" whenever those exits are busy or down —
+            // measured: {gr} with StrictNodes 1 sat at 45% for 42 minutes.
             //
-            // Verified against live tor: {de} {nl} {se} {at} {ro} each
-            // bootstrapped 100% in ~4s on a warm cache and exited in the asked-for
-            // country; one {de} run exited in SE, which is the fallback working as
-            // designed.
-            TorRegions.selected(context)?.let { region ->
-                appendLine("ExitNodes {${region.lowercase()}}")
-                appendLine("StrictNodes 0")
+            // Verified with the filtered database actually shipped: FR DE NL RO
+            // SE CA all bootstrapped 100% in 4-6s and the exit address really
+            // geolocated in the requested country, 6/6.
+            val region = TorRegions.selected(context)
+            if (region != null) {
+                val geoip = geoipDir(context)
+                if (geoip != null) {
+                    appendLine("GeoIPFile ${File(geoip, "geoip").absolutePath}")
+                    appendLine("GeoIPv6File ${File(geoip, "geoip6").absolutePath}")
+                    appendLine("ExitNodes {${region.lowercase()}}")
+                    appendLine("StrictNodes 0")
+                } else {
+                    ConnectionLog.record(
+                        "$TAG GeoIP data unavailable — ignoring the $region exit preference"
+                    )
+                }
             }
 
             if (transport != null && bridges.isNotEmpty()) {
