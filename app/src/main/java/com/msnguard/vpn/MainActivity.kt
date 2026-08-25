@@ -188,6 +188,24 @@ class MainActivity : Activity() {
     /** Consecutive failed health checks while nominally connected. */
     private var pingFailureStreak = 0
     /**
+     * [trafficRx] as it stood when the last health check was judged.
+     *
+     * The delta against the current value is what separates "this tunnel is
+     * dead" from "this tunnel is busy". Measured on this project's own server
+     * through a real three-hop circuit: with 32 concurrent bulk streams on one
+     * tor instance (40.8 MB in 30s, 1375 KB/s), probe RTT went from a 351 ms
+     * median to a 687 ms median with a 4567 ms worst case, and the tail kept
+     * growing the longer the load ran — 336, 1036, 844, 1531, 4567 ms. Zero
+     * streams were refused, so nothing was broken; the queue was simply full.
+     *
+     * That is the regime a speed test puts the phone in, and with a 12 s
+     * per-probe timeout and a three-strike budget it is close enough to the
+     * teardown threshold to cross it. Tearing a tunnel down there would kill a
+     * session that is moving a megabyte a second.
+     */
+    private var rxAtLastProbe = 0L
+
+    /**
      * Set when we tore a tunnel down ourselves because it never passed traffic.
      * The teardown makes the service broadcast DISCONNECTED, which would repaint
      * the screen as a plain "Not connected" and hide the real reason — this flag
@@ -622,8 +640,44 @@ class MainActivity : Activity() {
                 if (request == latencyRequest && isTunnelActive()) {
                     chipLatency.text = result.second?.let { "Latency ${it.toInt()} ms" } ?: "Latency n/a"
                     val reachable = result.second
+                    // Bytes moved since the previous judgement, taken before the
+                    // branches below because both of them need it.
+                    val movedBytes = trafficRx - rxAtLastProbe
+                    // The counter restarting means the service began a new tunnel
+                    // under us (documented on watchForTunnelBytes) — the delta is
+                    // then meaningless rather than zero, so re-baseline and treat
+                    // this round as "cannot tell".
+                    val counterRestarted = trafficRx < rxAtLastProbe
+                    rxAtLastProbe = trafficRx
                     if (reachable != null) {
                         pingFailureStreak = 0
+                        if (visualState == OrbitDialView.State.DEGRADED) showConnected(restored = true)
+                    } else if (movedBytes >= BUSY_TUNNEL_RX_BYTES || counterRestarted) {
+                        // A probe that timed out while the TUN carried real payload
+                        // says nothing about the tunnel's health. Measured: under a
+                        // speed-test-shaped load one shared tor pushed probe RTT to
+                        // 4.5s with an ever-growing tail while moving 1375 KB/s and
+                        // refusing zero streams. Counting that as a strike is how a
+                        // perfectly good session gets torn down mid-download — the
+                        // opposite of what the streak is for.
+                        //
+                        // The streak is not merely skipped, it is RESET: the tunnel
+                        // just proved itself with bytes, which is stronger evidence
+                        // than the probe that failed, and a half-full streak carried
+                        // across a busy patch would tear down on the next single miss
+                        // after the load ended.
+                        pingFailureStreak = 0
+                        ConnectionLog.record(
+                            "Probe timed out but the tunnel moved ${formatTraffic(movedBytes)}" +
+                                " since the last check — busy, not dead"
+                        )
+                        // If a previous round already painted amber, take it back.
+                        // Bytes crossing the TUN is the same evidence
+                        // watchForTunnelBytes() trusts, and it is measured inside
+                        // the tunnel rather than over the carrier link — so leaving
+                        // the dial amber through a whole download because the
+                        // probes lost their race would be the mirror image of the
+                        // dead-green bug this screen exists to prevent.
                         if (visualState == OrbitDialView.State.DEGRADED) showConnected(restored = true)
                     } else {
                         // A session that stops passing traffic is a dead tunnel,
@@ -3708,6 +3762,12 @@ class MainActivity : Activity() {
         // is started.
         trafficTx = 0
         trafficRx = 0
+        // Reset with them, for the same reason: a baseline left over from the
+        // previous session would be larger than the new tunnel's counter, so the
+        // first health check would read a negative delta, take the
+        // counter-restarted branch and waste a round before it could judge
+        // anything.
+        rxAtLastProbe = 0
         trafficSpeedTx = 0
         trafficSpeedRx = 0
         showConnecting()
@@ -4516,6 +4576,27 @@ class MainActivity : Activity() {
          * a transient carrier hiccup does not survive but a blackholed tunnel does.
          */
         const val MAX_PING_FAILURES = 3
+        /**
+         * Bytes the TUN must have carried since the previous health check for a
+         * failed probe to be read as "busy" rather than "dead".
+         *
+         * Sized between two measured quantities:
+         *
+         *  * FLOOR — the core's own keepalive is a DNS query every three seconds,
+         *    tens of bytes a round, so under a kilobyte per 5s ping interval.
+         *    A failed probe contributes almost nothing itself: the endpoints are
+         *    `generate_204`-style, so a timed-out fetch is headers at most. 64 KB
+         *    is far above both, which is what stops a blackholed tunnel from
+         *    excusing itself with its own housekeeping traffic.
+         *  * CEILING — real use moves vastly more. In the load measurement one
+         *    tor instance sustained 1375 KB/s, i.e. ~6.8 MB per interval, and
+         *    even a single page load is hundreds of kilobytes.
+         *
+         * So the gap is about two orders of magnitude wide in both directions,
+         * and the exact value inside it does not matter much.
+         */
+        const val BUSY_TUNNEL_RX_BYTES = 65_536L
+
         /**
          * Health-check endpoints, tried in order until one answers.
          *
