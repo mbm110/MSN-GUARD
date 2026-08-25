@@ -2196,22 +2196,6 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
 
-        // "Share on LAN" is gone with proxy mode: it only ever widened the SOCKS
-        // bind from 127.0.0.1 to 0.0.0.0, and in VPN mode no SOCKS listener is
-        // exposed at all. lanSharingEnabled() survives as a private helper
-        // because lanBypassEnabled() still migrates the old value forward.
-        val lanBypassRow = createToggleRow(
-            "Bypass LAN",
-            "Keep local devices reachable while connected",
-            lanBypassEnabled(),
-        ) {
-            preferences().edit().putBoolean(LAN_BYPASS, it).apply()
-        }
-        content.addView(lanBypassRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-
         content.addView(sectionLabel("ROUTING & DATA"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -4304,15 +4288,17 @@ class MainActivity : Activity() {
         MsnGuardVpnService.AUTO_RECONNECT_DEFAULT,
     )
 
-    private fun lanSharingEnabled(): Boolean = preferences().getBoolean(LAN_SHARING, false)
-
-    private fun lanBypassEnabled(): Boolean {
-        if (!preferences().contains(LAN_BYPASS) && lanSharingEnabled()) {
-            preferences().edit().putBoolean(LAN_BYPASS, true).apply()
-            return true
-        }
-        return preferences().getBoolean(LAN_BYPASS, false)
-    }
+    /**
+     * The LAN-bypass preference has no UI any more.
+     *
+     * The switch it fed configured the removed proxy mode's SOCKS bind; in VPN
+     * mode it changed nothing the user could see, which is why it never did
+     * anything useful. [MsnGuardVpnService.lanBypassEnabled] still READS the key
+     * and still migrates the older `lan_sharing` value forward, so a user who
+     * turned it on in an older build keeps the routing they had — the switch is
+     * gone, the honoured preference is not. Nothing in the UI writes it now, so
+     * new installs simply get the default: everything through the tunnel.
+     */
 
     private fun savedProtocol(): Protocol {
         val name = preferences().getString(DEFAULT_PROTOCOL, Protocol.MASQUE.coreName)
@@ -4670,8 +4656,6 @@ class MainActivity : Activity() {
          */
         const val CHAIN_ARMED_DEFAULT = true
 
-        const val LAN_SHARING = "lan_sharing"
-        const val LAN_BYPASS = "lan_bypass"
         const val DEFAULT_PROTOCOL = "default_protocol"
         const val LOG_LEVEL = "log_level"
         const val PERF_PROFILE = "perf_profile"

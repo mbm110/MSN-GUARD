@@ -2920,16 +2920,26 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // Gated on a stored schema version, not on the app version, so it happens
         // exactly once ever rather than on every update from here on.
         if (prefs.getInt(TRAFFIC_SCHEMA, 0) < TRAFFIC_SCHEMA_VERSION) {
+            // Was there actually anything to throw away? On a fresh install there
+            // is not, and announcing "your total was miscounted" to someone who
+            // has never had a total is both false and alarming — the line showed
+            // up on the first line of every field log for that reason.
+            val hadTotals = prefs.contains(TRAFFIC_TX) || prefs.contains(TRAFFIC_RX)
             prefs.edit()
                 .putInt(TRAFFIC_SCHEMA, TRAFFIC_SCHEMA_VERSION)
                 .remove(TRAFFIC_MONTH)
                 .remove(TRAFFIC_TX)
                 .remove(TRAFFIC_RX)
-                .apply()
+                // commit(), not apply(): this must be on disk before anything
+                // else, because if the write is lost the discard runs again on the
+                // next launch and the month restarts from zero a second time.
+                .commit()
             monthTxTotal = 0
             monthRxTotal = 0
             monthKey = month
-            ConnectionLog.record("Monthly traffic counter reset — previous total was miscounted")
+            if (hadTotals) {
+                ConnectionLog.record("Monthly traffic counter reset — previous total was miscounted")
+            }
             return
         }
         val stored = prefs.getString(TRAFFIC_MONTH, null)
