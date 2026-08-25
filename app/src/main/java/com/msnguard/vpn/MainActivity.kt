@@ -2257,7 +2257,6 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
-        refreshPsiphonRows()
 
         // Tor section, mirroring the Psiphon one: the mode picker is the only
         // control, and it is meaningful regardless of what else is set.
@@ -2311,6 +2310,12 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
+        // Only now, with BOTH sections' rows constructed and their refs assigned.
+        // This call used to sit right after the Psiphon rows, where torChainRowRef
+        // and torRegionRowRef were still null — so the Tor rows were built and
+        // never had their availability applied, and both stayed fully live on a
+        // page where MASQUE or Psiphon was the selected transport.
+        refreshPsiphonRows()
 
         content.addView(sectionLabel("ABOUT"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3148,6 +3153,15 @@ class MainActivity : Activity() {
             setChecked(chainArmed(Protocol.TOR) && torSelected && torChainable)
             setAvailable(torSelected && torChainable && modeControlsEnabled)
         }
+        // Tor's exit-country picker, greyed off the TOR transport for the same
+        // reason Psiphon's is: it configures a transport that is not selected, and
+        // a live-looking row that changes nothing about the next connect is a lie.
+        //
+        // NOT gated on the chain switch, unlike Psiphon's country row. There the
+        // country only reaches Psiphon through the chained config; here ExitNodes
+        // is written to torrc on every Tor session, chained or not — so the only
+        // conditions are "Tor is selected" and "not locked mid-session".
+        torRegionRowRef?.setAvailable(torSelected && modeControlsEnabled)
     }
 
 
