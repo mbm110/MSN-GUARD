@@ -6,7 +6,8 @@
 # This produces libtun2socks.so, exposing three JNI methods that are registered
 # from JNI_OnLoad against ca/psiphon/Tun2SocksJniLoader:
 #   runTun2Socks(int fd, int mtu, String ip4, String mask, String ip6,
-#                String socksAddr, String udpgwAddr, int transparentDns)
+#                String socksAddr, String udpgwAddr, int transparentDns,
+#                int udpgwDnsOnly)
 #   terminateTun2Socks()
 #   initTun2socksLogger(String className, String methodName)
 #

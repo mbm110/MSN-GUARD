@@ -1885,7 +1885,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
                 val mode = TorManager.activeMode?.label ?: "Tor"
                 activeSocksPort = TorManager.FRONT_SOCKS_PORT
-                if (!Tun2SocksManager.start(tun!!, TorManager.FRONT_SOCKS_PORT)) {
+                // dnsOnlyUdpgw: Tor is TCP-only, so TorSocksFront answers DNS and
+                // discards every other UDP flow. Feeding those flows to udpgw
+                // anyway burned one of its 256 never-expiring conids each, and
+                // once the table saturated (a few minutes of QUIC-heavy traffic,
+                // e.g. speed tests) DNS replies came back on rebinded conids and
+                // were rejected as "wrong remote address" — name resolution died
+                // mid-session while the tunnel itself was still healthy.
+                if (!Tun2SocksManager.start(tun!!, TorManager.FRONT_SOCKS_PORT, dnsOnlyUdpgw = true)) {
                     error("Could not start device routing")
                 }
 

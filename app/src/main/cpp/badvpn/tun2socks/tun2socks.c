@@ -118,6 +118,11 @@ struct {
     int udpgw_max_connections;
     int udpgw_connection_buffer_size;
     int udpgw_transparent_dns;
+    // MSN-GUARD: accept only DNS (destination port 53) into udpgw. Used on the
+    // Tor path, where non-DNS UDP can never be delivered but would still claim
+    // one of the 256 never-expiring udpgw connection slots (see
+    // process_device_udp_packet below).
+    int udpgw_dns_only;
 
     // ==== PSIPHON ====
     int tun_fd;
@@ -276,7 +281,8 @@ static void runTun2SocksNative(
         jstring vpn_ipv6_address,
         jstring socks_server_address,
         jstring udpgw_server_address,
-        jint udpgw_transparent_dns);
+        jint udpgw_transparent_dns,
+        jint udpgw_dns_only);
 
 static void terminateTun2SocksNative(
         JNIEnv *env,
@@ -301,7 +307,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     }
 
     static JNINativeMethod method_table[] = {
-        {"runTun2Socks","(IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V", (void *) runTun2SocksNative},
+        {"runTun2Socks","(IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;II)V", (void *) runTun2SocksNative},
         {"terminateTun2Socks", "()V", (void *) terminateTun2SocksNative},
         {"initTun2socksLogger", "(Ljava/lang/String;Ljava/lang/String;)V", (void *) initTun2socksLoggerNative}
     };
@@ -407,7 +413,8 @@ void runTun2SocksNative(
         jstring vpn_ipv6_address,
         jstring socks_server_address,
         jstring udpgw_server_address,
-        jint udpgw_transparent_dns) {
+        jint udpgw_transparent_dns,
+        jint udpgw_dns_only) {
     const char *vpnIpAddressStr = (*env)->GetStringUTFChars(env, vpn_ipv4_address, 0);
     const char *vpnNetMaskStr = (*env)->GetStringUTFChars(env, vpn_ipv4_netmask, 0);
     const char *vpnIpv6AddressStr = vpn_ipv6_address ?
@@ -425,6 +432,7 @@ void runTun2SocksNative(
     options.socks_server_addr = (char *) socksServerAddressStr;
     options.udpgw_remote_server_addr = (char *) udpgwServerAddressStr;
     options.udpgw_transparent_dns = udpgw_transparent_dns;
+    options.udpgw_dns_only = udpgw_dns_only;
     options.set_signal = 0;
     options.loglevel = 2;
 
@@ -768,6 +776,7 @@ void print_help (const char *name)
         "        [--udpgw-max-connections <number>]\n"
         "        [--udpgw-connection-buffer-size <number>]\n"
         "        [--udpgw-transparent-dns]\n"
+        "        [--udpgw-dns-only]\n"
         "Address format is a.b.c.d:port (IPv4) or [addr]:port (IPv6).\n",
         name
     );
@@ -806,6 +815,7 @@ void init_arguments (const char* program_name)
     options.udpgw_max_connections = DEFAULT_UDPGW_MAX_CONNECTIONS;
     options.udpgw_connection_buffer_size = DEFAULT_UDPGW_CONNECTION_BUFFER_SIZE;
     options.udpgw_transparent_dns = 0;
+    options.udpgw_dns_only = 0;
 
     options.tun_fd = 0;
     options.set_signal = 1;
@@ -997,6 +1007,9 @@ int parse_arguments (int argc, char *argv[])
         }
         else if (!strcmp(arg, "--udpgw-transparent-dns")) {
             options.udpgw_transparent_dns = 1;
+        }
+        else if (!strcmp(arg, "--udpgw-dns-only")) {
+            options.udpgw_dns_only = 1;
         }
         else {
             fprintf(stderr, "unknown option: %s\n", arg);
@@ -1322,6 +1335,10 @@ int process_device_udp_packet (uint8_t *data, int data_len)
     BAddr local_addr;
     BAddr remote_addr;
     int is_dns;
+    // Destination port in network order, lifted out of the per-version blocks
+    // below so the dns-only check after the switch can see it (`udp_header` is
+    // scoped to each case).
+    uint16_t dest_port_net = 0;
     
     uint8_t ip_version = 0;
     if (data_len > 0) {
@@ -1360,6 +1377,7 @@ int process_device_udp_packet (uint8_t *data, int data_len)
             // construct addresses
             BAddr_InitIPv4(&local_addr, ipv4_header.source_address, udp_header.source_port);
             BAddr_InitIPv4(&remote_addr, ipv4_header.destination_address, udp_header.dest_port);
+            dest_port_net = udp_header.dest_port;
             
             // if transparent DNS is enabled, any packet arriving at out netif
             // address to port 53 is considered a DNS packet
@@ -1404,6 +1422,7 @@ int process_device_udp_packet (uint8_t *data, int data_len)
             // construct addresses
             BAddr_InitIPv6(&local_addr, ipv6_header.source_address, udp_header.source_port);
             BAddr_InitIPv6(&remote_addr, ipv6_header.destination_address, udp_header.dest_port);
+            dest_port_net = udp_header.dest_port;
             
             // TODO dns
             is_dns = 0;
@@ -1414,6 +1433,21 @@ int process_device_udp_packet (uint8_t *data, int data_len)
         } break;
     }
     
+    // MSN-GUARD: on Tor, udpgw carries DNS only. Everything else (QUIC, NTP,
+    // STUN...) could never be delivered through Tor anyway — the SOCKS front
+    // discards it — yet each new flow used to claim one of the 256 never-expiring
+    // conids until the table saturated and DNS replies started landing on
+    // rebinded conids ("wrong remote address"), killing name resolution
+    // mid-session under load. Drop such packets here instead of feeding them to
+    // udpgw. Apps fall back to TCP exactly as they already do.
+    if (options.udpgw_dns_only && dest_port_net != hton16(53)) {
+        static unsigned dns_only_drops = 0;
+        if (dns_only_drops++ % 256 == 0) {
+            BLog(BLOG_WARNING, "UDP to port != 53 dropped (udpgw dns-only mode), drops=%u", dns_only_drops);
+        }
+        return 1;
+    }
+
     // check payload length
     if (data_len > udp_mtu) {
         BLog(BLOG_ERROR, "packet is too large, cannot send to udpgw");

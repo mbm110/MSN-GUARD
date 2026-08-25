@@ -51,7 +51,11 @@ public class Tun2SocksJniLoader {
             String vpnIpv6Address,
             String socksServerAddress,
             String udpgwServerAddress,
-            int udpgwTransparentDNS);
+            int udpgwTransparentDNS,
+            // MSN-GUARD: when 1, udpgw accepts only DNS (UDP port 53); all other
+            // UDP is dropped before it can consume a connection slot. Tor sets
+            // this because its SOCKS front cannot carry non-DNS UDP anyway.
+            int udpgwDnsOnly);
 
     // Stops tun2socks
     public native static void terminateTun2Socks();

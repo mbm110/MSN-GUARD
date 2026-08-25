@@ -123,13 +123,19 @@ object Tun2SocksManager {
     /**
      * Start routing the whole device through [socksProxyPort].
      *
+     * When [dnsOnlyUdpgw] is true, udpgw accepts only DNS (destination port 53)
+     * and every other UDP packet is dropped inside tun2socks before it can claim
+     * one of the 256 never-expiring connection slots. Tor sets this: its SOCKS
+     * front cannot carry non-DNS UDP anyway, so letting those packets through
+     * only saturated the slot table and killed name resolution mid-session.
+     *
      * [tunFd] is duplicated internally: runTun2Socks() takes ownership of the
      * fd it is given and closes it on exit, so the caller keeps its original
      * descriptor alive for the whole VPN session and can restart tun2socks
      * across Psiphon rotations without re-establishing the TUN interface.
      */
     @Synchronized
-    fun start(tunFd: ParcelFileDescriptor, socksProxyPort: Int): Boolean {
+    fun start(tunFd: ParcelFileDescriptor, socksProxyPort: Int, dnsOnlyUdpgw: Boolean = false): Boolean {
         if (tun2SocksThread != null) {
             ConnectionLog.record("tun2socks already running")
             return true
@@ -203,6 +209,7 @@ object Tun2SocksManager {
                     socksServerAddress,
                     udpgwServerAddress,
                     1, // transparent DNS through udpgw
+                    if (dnsOnlyUdpgw) 1 else 0,
                 )
             } catch (e: Throwable) {
                 ConnectionLog.record("tun2socks crashed: ${e.message}")
