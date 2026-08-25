@@ -257,13 +257,17 @@ class OrbitActionBar(
 }
 
 /**
- * The Psiphon-over-WARP button: a full-width chained-shield card.
+ * The over-WARP button: a full-width chained-shield card.
  *
  * A separate control rather than a fifth cell on the transport rail, because it
- * is not a fifth transport — it wraps the Psiphon transport in a WARP tunnel. It
- * is therefore only meaningful while PSIPHON is the selected transport, and is
- * shown disabled on MASQUE / WireGuard / WoW rather than hidden, so the feature
- * stays discoverable and its precondition is obvious.
+ * is not a fifth transport — it wraps the selected transport in a WARP tunnel. It
+ * is therefore only meaningful on the two transports that can be wrapped
+ * (PSIPHON and TOR), and is shown disabled on MASQUE / WireGuard / WoW rather
+ * than hidden, so the feature stays discoverable and its precondition is obvious.
+ *
+ * The inner transport's name is set from outside via [setInner], because which
+ * one is being wrapped depends on the rail's selection and this view has no
+ * business knowing the transport list.
  *
  * Dimmed and outlined when off, lit with the violet accent and a "CHAINED" badge
  * when armed.
@@ -281,6 +285,9 @@ class ChainModeCard(
     private var armed = false
     /** Why the card is unavailable, shown in place of the normal subtitle. */
     private var unavailableReason: String? = null
+
+    /** The transport being wrapped, for every string this card shows. */
+    private var innerName: String = "PSIPHON"
 
     /**
      * Whether the chain can apply to the selected transport at all.
@@ -378,8 +385,30 @@ class ChainModeCard(
         setArmed(armed)
     }
 
+    /**
+     * Names the transport this card wraps, e.g. "PSIPHON" or "TOR".
+     *
+     * Drives the title, the armed subtitle and the accessibility text together, so
+     * a card reading "PSIPHON OVER WARP" can never appear while the rail has Tor
+     * selected. Repaints immediately for the same reason [setOuterSummary] does.
+     */
+    fun setInner(name: String) {
+        innerName = name.uppercase()
+        titleView.text = "$innerName OVER WARP"
+        setArmed(armed)
+    }
+
+    /**
+     * The inner transport as prose: "Psiphon", "Tor".
+     *
+     * [innerName] is stored upper-cased for the title, which is shouting in a
+     * sentence, so it is title-cased here rather than at every use site.
+     */
+    private fun innerLabel(): String =
+        innerName.take(1) + innerName.drop(1).lowercase()
+
     /** Description of what the chain does, shown when armed. */
-    private fun armedSubtitle(): String = "armed · Psiphon inside WARP, $outerSummary"
+    private fun armedSubtitle(): String = "armed · ${innerLabel()} inside WARP, $outerSummary"
 
     /**
      * Says how the outer transport is chosen, e.g. "auto transport" or "via WoW".
@@ -443,12 +472,13 @@ class ChainModeCard(
             Sculpt.withAlpha(if (lit) palette.violet else palette.ink, if (lit) 0.4f else 0.10f),
         )
         icon.setLinked(lit)
+        val label = innerLabel()
         contentDescription = when {
             // Mirrors the badge exactly: N/A only when the chain does not apply.
-            !applicable -> "Psiphon over WARP unavailable: $unavailableReason"
-            value && !available -> "Psiphon over WARP is armed, $unavailableReason"
-            value -> "Psiphon over WARP is armed"
-            else -> "Psiphon over WARP is off"
+            !applicable -> "$label over WARP unavailable: $unavailableReason"
+            value && !available -> "$label over WARP is armed, $unavailableReason"
+            value -> "$label over WARP is armed"
+            else -> "$label over WARP is off"
         }
     }
 

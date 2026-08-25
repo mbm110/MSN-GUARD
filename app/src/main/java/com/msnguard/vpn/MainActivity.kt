@@ -143,6 +143,9 @@ class MainActivity : Activity() {
     /** Settings row showing the Tor connection mode; repainted after a pick. */
     private var torModeRowRef: OrbitSettingsRow? = null
 
+    /** Tor's own over-WARP switch, in the TOR section. */
+    private var torChainRowRef: OrbitToggleRow? = null
+
     /** Settings row showing the preferred Tor exit country. */
     private var torRegionRowRef: OrbitSettingsRow? = null
 
@@ -2219,14 +2222,14 @@ class MainActivity : Activity() {
             palette,
             "Psiphon over WARP",
             "Tunnel Psiphon inside a WARP transport",
-            // chainRunning(), NOT chainArmed(): the stored preference is global, but
-            // the chain only applies to the PSIPHON transport. Showing the raw
-            // preference made the switch sit lit-and-disabled on MASQUE — green, so
-            // it read as "on", while being greyed, so it read as "off". Displaying
-            // the effective value makes the two agree.
-            chainRunning(),
+            // The EFFECTIVE state, not the stored preference: the key is global, but
+            // this switch is Psiphon's. Showing the raw preference made the switch
+            // sit lit-and-disabled on MASQUE — green, so it read as "on", while being
+            // greyed, so it read as "off". Displaying the effective value makes the
+            // two agree.
+            chainArmed(Protocol.PSIPHON) && selectedProtocol == Protocol.PSIPHON,
         ) { armed ->
-            setChainArmed(armed)
+            setChainArmed(armed, Protocol.PSIPHON)
             renderChainCard()
             refreshPsiphonRows()
         }
@@ -2263,13 +2266,40 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
         val torModeRow = navRow("Connection mode", torMode().label) {
-            chooseTorMode { torModeRowRef?.setValue(torMode().label) }
+            chooseTorMode {
+                torModeRowRef?.setValue(torMode().label)
+                // The mode decides whether the chain can apply at all, so both the
+                // switch below and the home card have to be repainted after a pick —
+                // otherwise arming stays lit under a freshly pinned obfs4.
+                refreshPsiphonRows()
+                renderChainCard()
+            }
         }
         torModeRowRef = torModeRow
         content.addView(torModeRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
+        // Tor's own chain switch, separate from Psiphon's. Placed directly under the
+        // mode row because the mode is what decides whether it can apply: Direct and
+        // Meek can be chained, obfs4 and Snowflake cannot.
+        val torChainRow = OrbitToggleRow(
+            this,
+            palette,
+            "Tor over WARP",
+            "Direct and Meek only, inside a WARP transport",
+            chainArmed(Protocol.TOR) && selectedProtocol == Protocol.TOR &&
+                TorManager.isChainable(torMode()),
+        ) { armed ->
+            setChainArmed(armed, Protocol.TOR)
+            renderChainCard()
+            refreshPsiphonRows()
+        }
+        torChainRowRef = torChainRow
+        content.addView(torChainRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
         // Same control as Psiphon's "Preferred country", same wording, same
         // preference-not-a-pin semantics — deliberately, because to the user it is
         // the same question. Underneath it is tor's ExitNodes with StrictNodes 0.
@@ -3060,26 +3090,28 @@ class MainActivity : Activity() {
         chainOuterRow = null
         egressRegionRow = null
         torModeRowRef = null
+        torChainRowRef = null
         torRegionRowRef = null
         settingsPage?.let { animatePageClose(it) { settingsPage = null } }
     }
 
     /**
-     * Repaint the Psiphon section for the current armed state.
+     * Repaint the Psiphon and Tor sections for the current armed state.
      *
-     * Both rows below the switch only affect a chained connect, so with the chain
-     * off they are shown greyed and inert rather than hidden: the user can still
-     * see what arming would give them, and cannot set a value that silently does
-     * nothing. Also refreshes the values, since a choice sheet may have changed
+     * Both rows below the Psiphon switch only affect a chained connect, so with the
+     * chain off they are shown greyed and inert rather than hidden: the user can
+     * still see what arming would give them, and cannot set a value that silently
+     * does nothing. Also refreshes the values, since a choice sheet may have changed
      * them while this page stayed open.
      */
     private fun refreshPsiphonRows() {
-        // The chain is only meaningful on the PSIPHON transport, and only while
-        // nothing is connected — the same two conditions the home-screen card
-        // enforces. Reading them from one place keeps the card and this section from
-        // ever showing different answers.
+        // The Psiphon switch is scoped to PSIPHON explicitly, not to whatever is
+        // selected: it sits in the PSIPHON section and writes the Psiphon key, so
+        // reading the generic selection here would make it mirror Tor's state while
+        // Tor was selected.
         val psiphonSelected = selectedProtocol == Protocol.PSIPHON
         val chainAvailable = psiphonSelected && modeControlsEnabled
+        val psiphonChained = chainArmed(Protocol.PSIPHON) && psiphonSelected
         psiphonChainRow?.apply {
             // Show the EFFECTIVE state, not the stored preference.
             //
@@ -3089,15 +3121,15 @@ class MainActivity : Activity() {
             // cannot turn off, which is not true at all. The chain simply does not
             // apply off the PSIPHON transport.
             //
-            // chainRunning() is exactly that: armed AND on Psiphon. So the switch
-            // reads off on MASQUE/WireGuard/WoW, and the stored preference is left
-            // untouched underneath, so switching back to Psiphon restores it.
-            setChecked(chainRunning())
+            // So the switch reads off on MASQUE/WireGuard/WoW/TOR, and the stored
+            // preference is left untouched underneath, so switching back to Psiphon
+            // restores it.
+            setChecked(psiphonChained)
             setAvailable(chainAvailable)
         }
         // The two rows below follow the switch's VISIBLE state, not the preference,
         // for the same reason: with the switch reading off they must not look live.
-        val childrenAvailable = chainAvailable && chainRunning()
+        val childrenAvailable = chainAvailable && psiphonChained
         chainOuterRow?.apply {
             setValue(chainOuterMode().label)
             setAvailable(childrenAvailable)
@@ -3105,6 +3137,16 @@ class MainActivity : Activity() {
         egressRegionRow?.apply {
             setValue(egressRegionLabel())
             setAvailable(childrenAvailable)
+        }
+
+        // Tor's own switch, same rules, plus the mode condition: obfs4 and Snowflake
+        // cannot be chained, so with either pinned the switch reads off and greyed
+        // instead of promising something the service will refuse.
+        val torSelected = selectedProtocol == Protocol.TOR
+        val torChainable = TorManager.isChainable(torMode())
+        torChainRowRef?.apply {
+            setChecked(chainArmed(Protocol.TOR) && torSelected && torChainable)
+            setAvailable(torSelected && torChainable && modeControlsEnabled)
         }
     }
 
@@ -3664,11 +3706,17 @@ class MainActivity : Activity() {
      * The config for the next connect.
      *
      * The chain marker replaces the protocol only when PSIPHON is selected and the
-     * card is armed: the chain wraps Psiphon in WARP, so it means nothing for the
-     * other transports and the card is disabled there.
+     * card is armed: it is Psiphon's chain marker specifically, and the service
+     * dispatches on it into the Psiphon-over-WARP path.
+     *
+     * Tor deliberately has no marker. Its config stays plain `tor` and the service
+     * asks [TorManager.chainArmed] on the way in, because the answer also depends on
+     * the Tor mode (obfs4 and Snowflake cannot be chained) and that rule already
+     * lives in TorManager. Encoding it in the protocol string here would put the
+     * same decision in two places.
      */
     private fun configJson(): String {
-        val chained = chainArmed() && selectedProtocol == Protocol.PSIPHON
+        val chained = chainArmed(Protocol.PSIPHON) && selectedProtocol == Protocol.PSIPHON
         return if (chained) {
             CoreConfig.json(this, MsnGuardVpnService.CHAIN_PROTOCOL_MARKER.lowercase())
         } else {
@@ -3724,10 +3772,10 @@ class MainActivity : Activity() {
         connectionTitle.text = "Connected"
         connectionDetail.text = when {
             // Say what is actually carrying traffic. With the chain armed the rail
-            // reads PSIPHON, so "Psiphon tunnel is active" hides the WARP leg that
-            // is doing the circumvention.
-            chainRunning() && restored -> "Psiphon over WARP recovered"
-            chainRunning() -> "Psiphon over WARP is active"
+            // reads PSIPHON or TOR, so "<transport> tunnel is active" hides the WARP
+            // leg that is doing the circumvention.
+            chainRunning() && restored -> "${selectedProtocol.label} over WARP recovered"
+            chainRunning() -> "${selectedProtocol.label} over WARP is active"
             restored -> "${selectedProtocol.label} tunnel recovered"
             else -> "${selectedProtocol.label} tunnel is active"
         }
@@ -3876,17 +3924,48 @@ class MainActivity : Activity() {
         renderChainCard()
     }
 
+    /**
+     * Which preference key holds the over-WARP switch for [protocol].
+     *
+     * Two keys, not one. The chain applies to Psiphon and to Tor, but they are
+     * separate features with separate evidence behind them, and one shared key
+     * would mean arming the chain for Psiphon silently changed how Tor connects —
+     * a setting the user never touched altering a transport they did not select.
+     * [TorManager.chainArmed] reads the Tor one on the service side, so the two
+     * sides cannot drift.
+     */
+    private fun chainPrefKey(protocol: Protocol): String =
+        if (protocol == Protocol.TOR) TorManager.CHAIN_ARMED_PREF else CHAIN_ARMED
+
+    /**
+     * Whether the chain applies to the current selection at all.
+     *
+     * Tor adds a second condition Psiphon does not have: only Direct and Meek were
+     * measured working inside a proxy, so with obfs4 or Snowflake pinned there is
+     * nothing the chain could carry. Mirrors [TorManager.isChainable] — the same
+     * rule has to hold on both sides or the switch would offer something the
+     * service refuses to do.
+     */
+    private fun chainApplies(): Boolean = when (selectedProtocol) {
+        Protocol.PSIPHON -> true
+        Protocol.TOR -> TorManager.isChainable(torMode())
+        else -> false
+    }
+
     /** Whether the chain choice applies to the tunnel that is running now. */
-    private fun chainRunning(): Boolean =
-        chainArmed() && selectedProtocol == Protocol.PSIPHON
+    private fun chainRunning(): Boolean = chainArmed() && chainApplies()
 
     /**
      * Paints the chain card for the current transport and connection state.
      *
-     * Two independent reasons it can be unavailable, and the order matters — the
-     * transport reason is the one the user can act on, so it wins:
+     * Three independent reasons it can be unavailable, in the order the user can
+     * act on them:
      *
-     *  - not on PSIPHON: the chain wraps the Psiphon transport in WARP, so on
+     *  - a Tor mode that cannot be chained: obfs4 and Snowflake were never
+     *    measured working through a proxy, so the chain is refused for them
+     *    rather than offered and then ignored. Naming the mode makes the fix
+     *    obvious — switch Tor to Auto, Direct or Meek.
+     *  - not on PSIPHON or TOR: the chain wraps one of those two in WARP, so on
      *    MASQUE/WireGuard/WoW there is nothing to wrap. Disabled rather than
      *    hidden, so the feature stays discoverable with its precondition visible.
      *  - connected: the same lock the transport rail gets, since the choice only
@@ -3896,17 +3975,22 @@ class MainActivity : Activity() {
      * switching away and back restores the user's choice instead of clearing it.
      */
     private fun renderChainCard() {
-        val psiphonSelected = selectedProtocol == Protocol.PSIPHON
+        val applies = chainApplies()
         val reason = when {
-            !psiphonSelected -> "only for the PSIPHON transport"
+            selectedProtocol == Protocol.TOR && !TorManager.isChainable(torMode()) ->
+                "not available with ${torMode().label}"
+            !applies -> "only for the PSIPHON and TOR transports"
             !modeControlsEnabled -> "disconnect to change"
             else -> null
         }
+        // Which transport is being wrapped, so the card cannot read
+        // "PSIPHON OVER WARP" while the rail has Tor selected.
+        chainCard.setInner(if (selectedProtocol == Protocol.TOR) "TOR" else "PSIPHON")
         // Two separate facts, and collapsing them was a bug: "locked" is not the
         // same as "does not apply". Connected on Psiphon is locked but fully
         // applicable — the chain is carrying the session — so the card must keep
         // showing CHAINED instead of dropping to N/A and going dark.
-        chainCard.setUnavailable(reason, applicable = psiphonSelected)
+        chainCard.setUnavailable(reason, applicable = applies)
         // Name the pinned transport on the card. Without this, a pin set in settings
         // is invisible here and the card would still read "auto transport" while the
         // connect path used only WireGuard.
@@ -3926,7 +4010,7 @@ class MainActivity : Activity() {
     }
 
     /**
-     * Whether the next connect should chain Psiphon over the picked transport.
+     * Whether the next connect should chain the selected transport over WARP.
      *
      * Defaults to ON. The chain is the configuration that actually gets through on
      * the hostile Iranian carriers this app exists for, so a user who picks Psiphon
@@ -3937,11 +4021,11 @@ class MainActivity : Activity() {
      * records that they did, so an explicit "off" is remembered and is NOT quietly
      * re-armed on the next launch.
      */
-    private fun chainArmed(): Boolean =
-        preferences().getBoolean(CHAIN_ARMED, CHAIN_ARMED_DEFAULT)
+    private fun chainArmed(protocol: Protocol = selectedProtocol): Boolean =
+        preferences().getBoolean(chainPrefKey(protocol), CHAIN_ARMED_DEFAULT)
 
     /**
-     * Persist whether the next connect chains Psiphon inside WARP.
+     * Persist whether the next connect chains the selected transport inside WARP.
      *
      * Deliberately does NOT touch [CoreConfig.CHAIN_OUTER_PREF]. That key holds an
      * index the service writes after an outer transport actually works, and it used
@@ -3949,14 +4033,13 @@ class MainActivity : Activity() {
      * would have thrown ClassCastException. Which transport carries the outer leg is
      * discovered by trying them (MASQUE, then WireGuard, then WoW), not chosen here.
      */
-    private fun setChainArmed(armed: Boolean) {
-        preferences().edit().putBoolean(CHAIN_ARMED, armed).apply()
+    private fun setChainArmed(armed: Boolean, protocol: Protocol = selectedProtocol) {
+        preferences().edit().putBoolean(chainPrefKey(protocol), armed).apply()
+        val inner = if (protocol == Protocol.TOR) "Tor" else "Psiphon"
         if (armed) {
-            ConnectionLog.record(
-                "Psiphon-over-WARP armed: outer MASQUE, Psiphon inside it"
-            )
+            ConnectionLog.record("$inner-over-WARP armed: outer MASQUE, $inner inside it")
         } else {
-            ConnectionLog.record("Psiphon-over-WARP disarmed")
+            ConnectionLog.record("$inner-over-WARP disarmed")
         }
     }
 

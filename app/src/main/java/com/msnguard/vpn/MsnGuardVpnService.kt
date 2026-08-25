@@ -1590,8 +1590,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         // ladder is still walking, several rungs can each announce
                         // themselves ready before being rejected.
                         if (chainOuterCommitted && status == STATUS_CONNECTED) {
-                            ConnectionLog.record("Chain: outer leg is up; waiting for Psiphon")
-                            sendStatus(STATUS_CONNECTING, "Connecting Psiphon through WARP…")
+                            // Name the inner leg: this same branch now serves Tor
+                            // over WARP, where "waiting for Psiphon" would be wrong.
+                            val inner = if (currentProtocol.contains("TOR")) "Tor" else "Psiphon"
+                            ConnectionLog.record("Chain: outer leg is up; waiting for $inner")
+                            sendStatus(STATUS_CONNECTING, "Connecting $inner through WARP…")
                         }
                         return
                     }
@@ -1768,11 +1771,32 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * reaches 100% or every mode has failed, so tun2socks is started right here
      * once it returns true.
      *
-     * Note what is NOT done here: no ladder, no `armRegionPhase`, no
+     * ## Tor over WARP
+     *
+     * When [TorManager.chainArmed] agrees, a WARP leg is raised first and Tor is
+     * pointed at its SOCKS listener, exactly as Psiphon-over-WARP does — the same
+     * [raiseOuterLeg] ladder (MASQUE → WireGuard → WoW) and the same per-device
+     * memory of which rung worked, untouched. Only Tor's own ladder narrows:
+     * Direct then Meek, because those are the two that were measured working
+     * through a proxy (see [TorManager] `chainedLadder`).
+     *
+     * [chainMode] is set for a chained Tor run as well, and it is load-bearing for
+     * three behaviours in [onEvent] that are about the outer leg rather than about
+     * Psiphon: the premature CONNECTED is swallowed, the outer traffic counters are
+     * dropped in favour of the inner leg's, and the outer exit IP is not published
+     * as the session's exit. All three are exactly what a chained Tor run needs.
+     * The Psiphon-specific reads of [chainMode] are unreachable here: no
+     * `psiphonLadder`, no `armRegionPhase`, no Psiphon config is built on this path.
+     *
+     * Note what is still NOT done here: no ladder, no `armRegionPhase`, no
      * `recordWorkingPlainTransport`. Those all belong to the Psiphon/WARP
      * transports. Tor keeps its own mode memory inside [TorManager].
      */
     private fun startTorTunnel() {
+        val chained = TorManager.chainArmed(this)
+        chainMode = chained
+        chainOuterCommitted = false
+
         worker.execute {
             try {
                 val address = Tun2SocksManager.selectPrivateAddress()
@@ -1796,12 +1820,43 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // anonymity leak: apps' DNS would go to Cloudflare in the
                     // clear, outside the circuit, revealing exactly what a Tor
                     // user is browsing. Tor's DNSPort is the only resolver.
+                    //
+                    // This holds for the chained run too. The outer WARP leg
+                    // resolves its own gateway names in the core, off the TUN, so
+                    // it needs nothing added here either.
                     .addDnsServer(address.router)
                     .applySplitTunneling()
                     .establish() ?: error("Android could not establish the VPN interface")
                 vpnModeActive.set(true)
 
-                sendStatus(STATUS_CONNECTING, "Starting Tor…", 5)
+                // --- Outer leg, when armed: WARP first, then Tor inside it ---
+                var outer: String? = null
+                if (chained) {
+                    NativeCore.attach(this)
+                    outer = raiseOuterLeg(inner = "Tor") ?: error(
+                        if (CoreConfig.chainOuterIsAuto(this)) {
+                            "No WARP transport could carry Tor on this network"
+                        } else {
+                            val pinned = CoreConfig.chainOuterLabel(
+                                CoreConfig.chainOuterCandidates(this).first()
+                            )
+                            "$pinned could not carry Tor; try Auto in settings"
+                        }
+                    )
+                    // Only now, once a rung is committed and its listener accepts:
+                    // arming the proxy earlier would have Tor write Socks5Proxy
+                    // pointing at a port with nothing behind it.
+                    TorManager.useUpstreamProxy("127.0.0.1:${CoreConfig.CHAIN_SOCKS_PORT}")
+                    ConnectionLog.record("Chain: outer leg ready — bootstrapping Tor through $outer")
+                } else {
+                    TorManager.useUpstreamProxy(null)
+                }
+
+                sendStatus(
+                    STATUS_CONNECTING,
+                    if (outer != null) "Starting Tor through $outer…" else "Starting Tor…",
+                    5,
+                )
                 ConnectionLog.record("Tor: TUN ready — bootstrapping")
                 // Tor is the one transport that reports genuine progress, so the
                 // percentage under "Connecting" is its own bootstrap figure.
@@ -1809,12 +1864,20 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
                 if (!TorManager.start(this)) {
                     error(
-                        if (TorManager.selectedMode(this) == TorManager.TorMode.AUTO) {
-                            "Tor could not connect with any method on this network"
-                        } else {
+                        when {
+                            // Inside the chain only Direct and Meek are tried, so
+                            // "any method" would overstate what was attempted and
+                            // send the user looking for a network fault. Disarming
+                            // the chain is the actionable next step, since obfs4
+                            // and Snowflake are available unchained.
+                            outer != null -> "Tor could not connect through $outer; " +
+                                "turn Tor over WARP off to try obfs4 and Snowflake"
+                            TorManager.selectedMode(this) == TorManager.TorMode.AUTO ->
+                                "Tor could not connect with any method on this network"
                             // Name the pinned mode: the fix is to change it or
                             // switch to Auto, not to retry the same thing.
-                            "Tor could not connect over ${TorManager.selectedMode(this).label}; try Auto"
+                            else -> "Tor could not connect over " +
+                                "${TorManager.selectedMode(this).label}; try Auto"
                         }
                     )
                 }
@@ -1827,8 +1890,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 }
 
                 currentVpnIp = ""
-                sendStatus(STATUS_CONNECTED, "Tor connected via $mode")
-                ConnectionLog.record("Tor: connected via $mode")
+                val via = if (outer != null) "$mode over $outer" else mode
+                sendStatus(STATUS_CONNECTED, "Tor connected via $via")
+                ConnectionLog.record("Tor: connected via $via")
                 // The mode is only known now, and it is part of the notification's
                 // subtitle ("Tor (Meek)").
                 repostNotification()
@@ -1838,6 +1902,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 stopTorProgressPolling()
                 ConnectionLog.record("Tor start failed: ${e.message}")
                 TorManager.stop()
+                // The outer leg is the service's to stop; TorManager only owns tor
+                // and its PT. Left running it would hold the core and make the next
+                // connect fail with "already running".
+                if (chained) stopOuterLeg()
+                chainMode = false
                 failAndStop(e.message ?: "Tor start failed")
             }
         }
@@ -1943,6 +2012,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         if (currentProtocol.contains("TOR")) {
             if (!TorManager.isRunning) return "the Tor process exited"
             if (!TorSocksFront.isRunning) return "the Tor front-end stopped"
+            // Tor over WARP: tor stays alive when the outer leg dies, but every
+            // circuit it holds is dead, so tor's own liveness is not enough here.
+            // Checked last so a plainer cause is reported in preference to this.
+            if (chainMode && !NativeCore.isRunning()) return "the WARP leg carrying Tor stopped"
             return null
         }
         if (psiphonVpnMode && psiphonTunnel == null) return "the Psiphon tunnel is gone"
@@ -2098,7 +2171,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * concurrently (its RUNNING compare_exchange returns "already running"), so the
      * next rung would fail instantly if the previous one were still unwinding.
      */
-    private fun raiseOuterLeg(): String? {
+    private fun raiseOuterLeg(inner: String = "Psiphon"): String? {
         // Auto gives the whole ladder; a pinned transport gives just that one, with
         // no fallback — a pin exists to stop the app spending a minute on transports
         // the user already knows their carrier blocks.
@@ -2146,8 +2219,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // rung is still unwinding, `startProxy` returns "already running"
             // immediately while `isRunning`/`isReady` still describe the OLD tunnel
             // — so awaitOuterProxy would accept a rung that never started. Refusing
-            // to continue is the only safe answer; the alternative is handing
-            // Psiphon a proxy backed by a tunnel that is being torn down.
+            // to continue is the only safe answer; the alternative is handing the
+            // inner leg a proxy backed by a tunnel that is being torn down.
             if (NativeCore.isRunning()) {
                 ConnectionLog.record("Chain: core still busy; cannot start the $label leg")
                 return null
@@ -2176,7 +2249,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         // rejected and raiseOuterLeg moves on — reporting FAILED
                         // there would abort the ladder on its first miss.
                         if (chainOuterCommitted) {
-                            failAndStop("The $label tunnel carrying Psiphon dropped")
+                            failAndStop("The $label tunnel carrying $inner dropped")
                         }
                     }
                 }, "chain-outer-$protocol").start()
@@ -2595,10 +2668,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         }
 
         if (currentProtocol.contains("TOR")) {
-            // Tor owns its own lifecycle the same way: no Rust core attached
-            // (NativeCore.attach/detach never ran on this path), so everything
-            // to unwind lives in TorManager/Tun2SocksManager, both already
-            // stopped above. All that is left here is the TUN and the service.
+            // Tor owns its own lifecycle the same way: everything to unwind lives in
+            // TorManager/Tun2SocksManager, both already stopped above. All that is
+            // left is the outer leg's bookkeeping, the TUN and the service.
+            if (chainMode) {
+                // Tor over WARP did attach the core, so it must detach — unlike the
+                // unchained Tor path, where attach/detach never ran. NativeCore.stop()
+                // above already ended the outer leg; without the detach the next
+                // connect starts with a core still bound to a dead service.
+                NativeCore.detach()
+                chainMode = false
+                chainOuterCommitted = false
+            }
             vpnModeActive.set(false)
             tun?.close()
             tun = null
@@ -3092,11 +3173,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * user-facing line. For Tor it also names the transport that actually
      * carried the circuit, because "Tor" alone hides the difference between a
      * direct connection and one riding a Snowflake proxy.
+     *
+     * Tor over WARP has no marker in [currentProtocol] — the chain is decided from
+     * the preference, not the config string — so [chainMode] is what distinguishes
+     * it here.
      */
     private fun prettyProtocol(): String = when {
         currentProtocol.contains(CHAIN_PROTOCOL_MARKER) -> "Psiphon over WARP"
-        currentProtocol.contains("TOR") ->
-            TorManager.activeMode?.let { "Tor (${it.label})" } ?: "Tor"
+        currentProtocol.contains("TOR") -> {
+            val mode = TorManager.activeMode?.let { " (${it.label})" } ?: ""
+            if (chainMode) "Tor$mode over WARP" else "Tor$mode"
+        }
         currentProtocol.contains("PSIPHON") -> "Psiphon"
         currentProtocol.contains("MASQUE") -> "MASQUE"
         currentProtocol.contains("WIREGUARD") -> "WireGuard"

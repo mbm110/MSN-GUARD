@@ -54,13 +54,40 @@ object TorManager {
     const val MODE_PREF = "tor_mode"
 
     /**
+     * Whether Tor should ride inside a WARP tunnel (Tor-over-WARP).
+     *
+     * A separate key from the Psiphon chain's `chain_armed`, deliberately. They
+     * are two independent features that happen to share a mechanism, and one
+     * switch for both would mean arming the chain for Psiphon silently changed
+     * how Tor connects — a setting the user never touched altering a transport
+     * they did not select.
+     *
+     * Defaults ON for the same reason the Psiphon chain does: on the carriers
+     * this app exists for, Tor's own dials are what get blocked, and the WARP
+     * rung that carries them is remembered per device so the search is paid once.
+     */
+    const val CHAIN_ARMED_PREF = "tor_chain_armed"
+    const val CHAIN_ARMED_DEFAULT = true
+
+    /**
      * Which rung of the AUTO ladder last carried a working circuit.
      *
      * Same idea as [CoreConfig.PLAIN_WORKING_TRANSPORT_PREF] for Psiphon: a
      * device on a carrier that blocks direct Tor pays the 30-second direct
      * timeout once, not on every connect.
+     *
+     * Two keys, one per shape of the session — see [winnerPref]. A rung that
+     * works from inside WARP is not evidence that it works on the bare carrier,
+     * or the other way round: the whole reason for chaining is that the carrier
+     * blocks what WARP carries fine. Sharing one key would have each mode
+     * overwrite the other's memory and send the next connect to a rung with no
+     * evidence behind it at all.
      */
     private const val WINNER_PREF = "tor_winning_mode"
+    private const val WINNER_PREF_CHAINED = "tor_winning_mode_chained"
+
+    private fun winnerPref(chained: Boolean): String =
+        if (chained) WINNER_PREF_CHAINED else WINNER_PREF
 
     /**
      * How long to wait for lyrebird's `CMETHODS DONE`.
@@ -164,6 +191,71 @@ object TorManager {
         Rung(TorMode.OBFS4, BRIDGE_TIMEOUT_S),
         Rung(TorMode.SNOWFLAKE, BRIDGE_TIMEOUT_S),
     )
+
+    /**
+     * The modes that may run inside WARP, in ladder order: Direct, then Meek.
+     *
+     * Measured on the VPS through a real SOCKS5 proxy, tor 0.4.6.10 / lyrebird
+     * 0.0.13, with the app's own bridge lines:
+     *
+     * ```
+     *   Direct    via proxy         100% in 12-15s, then 42s with the country picker on
+     *   meek_lite via TOR_PT_PROXY  100% in 36s, 75 CDN dials all crossing the proxy
+     *   obfs4     via proxy          10% / 85% — and 85% vs 10% flipped between two
+     *                                runs of the SAME bridge with no proxy at all
+     *   Snowflake                    never tested through a proxy
+     * ```
+     *
+     * So obfs4 and Snowflake are excluded, and the reason is the absence of
+     * evidence rather than evidence of harm. obfs4 was never shown to be hurt by
+     * the proxy — it was never shown to work reliably *at all* on these bridges,
+     * which is worse: chaining it would put an unpredictable rung inside a
+     * tunnel that costs a second handshake, and any failure would then be
+     * unattributable between the two layers. Snowflake has its own broker and
+     * WebRTC dials that a SOCKS5 CONNECT cannot carry.
+     *
+     * Both remain fully available **unchained** — they are still rungs 3 and 4 of
+     * [ladder], and pinning them in settings still works. This list only decides
+     * what a chained session is allowed to try.
+     */
+    private val chainedLadder = listOf(
+        Rung(TorMode.DIRECT, DIRECT_TIMEOUT_S),
+        Rung(TorMode.MEEK, BRIDGE_TIMEOUT_S),
+    )
+
+    /** Whether [mode] can run inside the WARP chain at all. */
+    fun isChainable(mode: TorMode): Boolean =
+        mode == TorMode.AUTO || chainedLadder.any { it.mode == mode }
+
+    /**
+     * Whether the next Tor connect should ride inside WARP.
+     *
+     * Reads the switch, but also refuses for the two transports that cannot be
+     * chained: with obfs4 or Snowflake pinned there is nothing the chain could
+     * carry, so arming it would either be ignored silently or break the pin. The
+     * UI mirrors this rule so the switch is never lit for a mode it cannot apply
+     * to.
+     */
+    fun chainArmed(context: Context): Boolean =
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getBoolean(CHAIN_ARMED_PREF, CHAIN_ARMED_DEFAULT) &&
+            isChainable(selectedMode(context))
+
+    /**
+     * The SOCKS5 proxy every dial of this session must go through, or null.
+     *
+     * Set once by the service before [start] when the outer WARP leg is up, and
+     * cleared on [stop]. Held here rather than passed through [start] because
+     * [writeTorrc] and [startPt] both need it and neither is on the caller's
+     * side of the API.
+     */
+    @Volatile
+    private var upstreamProxy: String? = null
+
+    /** Point this session's dials at `host:port`, or clear with null. */
+    fun useUpstreamProxy(hostPort: String?) {
+        upstreamProxy = hostPort
+    }
 
     @Volatile
     private var torProcess: Process? = null
@@ -297,15 +389,26 @@ object TorManager {
      *    anonymity and wrong here: one unreachable guard would make every
      *    connect attempt fail identically. Bridge modes do **not** get the
      *    redraw — see [keepTorState].
-     *  - **No `Socks5Proxy`.** Tor refuses to start when both a proxy and a
-     *    `ClientTransportPlugin` are configured (`config.c` logs "external proxy
-     *    with another proxy type" and does `goto err`), so chaining Tor behind
-     *    another tunnel is not wired up here at all.
+     *  - **`Socks5Proxy` only without a transport.** Tor refuses to start when a
+     *    proxy and a **managed** `ClientTransportPlugin` are both configured:
+     *    measured on 0.4.6.10, `You have configured an external proxy with
+     *    another proxy type` then `Invalid client transport line`, exit before
+     *    the first bootstrap line. So on the direct rung the proxy goes in the
+     *    torrc, and on a bridge rung it must NOT — the PT is told instead, via
+     *    `TOR_PT_PROXY` in [startPt]. That is not a workaround but the correct
+     *    layering: with `UseBridges 1` tor's OR connections terminate at the PT's
+     *    local listener and the PT makes the real outbound dial, so the PT is the
+     *    only process that needs to know about the chain. Verified end to end —
+     *    meek reached 100% in 36s with all 75 of its CDN dials crossing the proxy,
+     *    against 0 crossings on the same run without the variable.
      */
     private fun writeTorrc(context: Context, dataDir: File, mode: TorMode): File {
         val torrc = File(dataDir, "torrc")
         val transport = transportFor(mode)
         val bridges = bridgeLinesFor(mode)
+        // No transport means no PT process, which is the only case where the
+        // proxy belongs in the torrc — see the note above.
+        val proxyGoesInTorrc = transport == null && bridges.isEmpty()
 
         val text = buildString {
             appendLine("SocksPort 127.0.0.1:$TOR_SOCKS_PORT")
@@ -339,6 +442,13 @@ object TorManager {
             appendLine("ClientUseIPv4 1")
             appendLine("ClientUseIPv6 1")
             appendLine("ClientPreferIPv6ORPort auto")
+
+            // Tor-over-WARP, direct rung only. On a bridge rung this line makes
+            // tor reject its own transport line and exit, so the proxy is handed
+            // to the PT instead (TOR_PT_PROXY, see startPt).
+            upstreamProxy?.let { proxy ->
+                if (proxyGoesInTorrc) appendLine("Socks5Proxy $proxy")
+            }
 
             // Preferred exit country, when the user picked one.
             //
@@ -404,6 +514,13 @@ object TorManager {
      *    listener, and the next connect fails to bind.
      *  - `TOR_PT_STATE_LOCATION` must end in a separator; lyrebird writes its
      *    obfs4 bridge state there.
+     *  - `TOR_PT_PROXY` is how a bridge rung joins the WARP chain. It is the PT,
+     *    not tor, that makes the real outbound connection when `UseBridges 1` is
+     *    set, so this is the only place a chained bridge rung can be told about
+     *    the outer tunnel — and putting `Socks5Proxy` in the torrc instead makes
+     *    tor refuse to start (see [writeTorrc]). Measured: with the variable set,
+     *    all 75 of meek's CDN dials crossed the proxy and tor bootstrapped in
+     *    36s; without it, 0 crossed.
      *
      * Returns true only when the transport actually registered a SOCKS port. A
      * live process that registered nothing is a failure — it would leave Tor
@@ -427,6 +544,7 @@ object TorManager {
             put("TOR_PT_STATE_LOCATION", stateDir.absolutePath + "/")
             put("TOR_PT_EXIT_ON_STDIN_CLOSE", "1")
             put("HOME", dataDir.absolutePath)
+            upstreamProxy?.let { proxy -> put("TOR_PT_PROXY", "socks5://$proxy") }
         }
 
         val process = try {
@@ -723,6 +841,10 @@ object TorManager {
      *
      * On success [FRONT_SOCKS_PORT] is a live SOCKS5 server for tun2socks to
      * dial, with DNS already wired to Tor's DNSPort.
+     *
+     * When [useUpstreamProxy] has been given a proxy, this is a chained session:
+     * the ladder shrinks to [chainedLadder] (Direct, then Meek) and the winner is
+     * remembered under its own key. Nothing else about the sequence changes.
      */
     fun start(context: Context): Boolean {
         stopping.set(false)
@@ -730,6 +852,11 @@ object TorManager {
 
         val dataDir = File(context.filesDir, "tor_data").apply { mkdirs() }
         val selected = selectedMode(context)
+        val chained = upstreamProxy != null
+        // Direct and Meek only inside the chain. AUTO takes the short ladder;
+        // a pinned obfs4/Snowflake cannot get here at all, because the service
+        // does not raise an outer leg for a mode chainArmed() rejects.
+        val rungs = if (chained) chainedLadder else ladder
 
         val order: List<Rung> = if (selected != TorMode.AUTO) {
             // An explicit choice is exactly that: one attempt, no silent
@@ -741,9 +868,15 @@ object TorManager {
             // first rather than exclusively, so a bridge that has since been
             // blocked still escalates.
             val remembered = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-                .getString(WINNER_PREF, null)
-                ?.let { key -> ladder.firstOrNull { it.mode.key == key } }
-            if (remembered == null) ladder else listOf(remembered) + ladder.filter { it !== remembered }
+                .getString(winnerPref(chained), null)
+                ?.let { key -> rungs.firstOrNull { it.mode.key == key } }
+            if (remembered == null) rungs else listOf(remembered) + rungs.filter { it !== remembered }
+        }
+
+        if (chained) {
+            ConnectionLog.record(
+                "$TAG chained: trying ${order.joinToString(" → ") { it.mode.label }} inside WARP"
+            )
         }
 
         for (rung in order) {
@@ -763,7 +896,7 @@ object TorManager {
             activeMode = rung.mode
             if (selected == TorMode.AUTO) {
                 context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit()
-                    .putString(WINNER_PREF, rung.mode.key).apply()
+                    .putString(winnerPref(chained), rung.mode.key).apply()
             }
             return true
         }
@@ -786,5 +919,9 @@ object TorManager {
         stopPt()
         bootstrapPercent = 0
         activeMode = null
+        // Cleared here, not by the service: a chained session that ends must not
+        // leave the proxy armed for the next connect, which could be an unchained
+        // one — that would write Socks5Proxy pointing at a dead listener.
+        upstreamProxy = null
     }
 }

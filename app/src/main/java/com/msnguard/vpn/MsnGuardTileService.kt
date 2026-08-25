@@ -165,12 +165,16 @@ class MsnGuardTileService : TileService() {
      * Honours the chain card: the tile's whole promise is "reconnect the way I
      * last connected", so if Psiphon-over-WARP is armed the tile must raise the
      * chain, not the bare transport underneath it.
+     *
+     * Tor needs nothing here. Its config is the plain `tor` one either way and the
+     * service decides the chain from `TorManager.chainArmed`, so a tile connect
+     * picks up Tor-over-WARP automatically.
      */
     private fun configJson(): String {
         val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
         val armed = prefs.getBoolean(CHAIN_ARMED, CHAIN_ARMED_DEFAULT)
         val picked = prefs.getString(DEFAULT_PROTOCOL, Protocol.MASQUE.coreName)
-        // Same rule as the main screen: the chain wraps Psiphon, so it only applies
+        // Same rule as the main screen: this marker is Psiphon's, so it only applies
         // when Psiphon is the selected transport.
         return if (armed && picked == Protocol.PSIPHON.coreName) {
             CoreConfig.json(this, MsnGuardVpnService.CHAIN_PROTOCOL_MARKER.lowercase())
