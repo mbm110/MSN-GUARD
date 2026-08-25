@@ -131,14 +131,41 @@ object IpFormatter {
 
     /**
      * Two-letter country code to a flag emoji via regional indicators.
-     * Returns a globe for anything that is not exactly two ASCII letters.
+     *
+     * Returns a globe for anything that is not exactly two ASCII letters, which
+     * is deliberately strict: Cloudflare answers `loc=T1` for every Tor exit
+     * ("T1" is its pseudo-code for the Tor network, measured on four different
+     * exits), and `XX`/`T1`-style pseudo-codes must render as the globe rather
+     * than as two nonsense letter boxes. Callers that want a real country for a
+     * Tor exit must resolve the address through a geo lookup instead — see
+     * [isRealCountry].
      */
     fun flag(countryCode: String?): String {
         val code = countryCode?.trim()?.uppercase() ?: return "\uD83C\uDF10"
-        if (code.length != 2 || code.any { it !in 'A'..'Z' }) return "\uD83C\uDF10"
+        if (!isRealCountry(code)) return "\uD83C\uDF10"
         val base = 0x1F1E6
         val first = base + (code[0] - 'A')
         val second = base + (code[1] - 'A')
         return String(Character.toChars(first)) + String(Character.toChars(second))
+    }
+
+    /**
+     * True when [code] is a country code that can actually be shown as a flag.
+     *
+     * Exists because "the endpoint returned a `loc` field" and "we know the exit
+     * country" are different facts. Cloudflare's `cdn-cgi/trace` returns
+     * `loc=T1` through Tor — verified on 85.93.218.204, 185.220.100.240,
+     * 45.66.35.28 and 185.220.101.20, all `T1` — and `T1` passes a naive
+     * "non-blank" check while being unmappable to a flag. Treating it as a
+     * country is what left the flag as a globe forever in Tor mode while the
+     * address itself was correct.
+     *
+     * `XX` and `T1` are the two pseudo-codes seen in the wild; the letter test
+     * covers the rest by construction.
+     */
+    fun isRealCountry(code: String?): Boolean {
+        val key = code?.trim()?.uppercase() ?: return false
+        if (key.length != 2 || key.any { it !in 'A'..'Z' }) return false
+        return key != "T1" && key != "XX"
     }
 }

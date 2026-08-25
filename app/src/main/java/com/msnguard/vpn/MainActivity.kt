@@ -143,6 +143,9 @@ class MainActivity : Activity() {
     /** Settings row showing the Tor connection mode; repainted after a pick. */
     private var torModeRowRef: OrbitSettingsRow? = null
 
+    /** Settings row showing the preferred Tor exit country. */
+    private var torRegionRowRef: OrbitSettingsRow? = null
+
     private var showingLogs = false
     private var showingScanner = false
     private var showingMode = false
@@ -205,6 +208,15 @@ class MainActivity : Activity() {
     private var coreExitCountry = ""
     /** Generation counter for country lookups, so a stale one cannot repaint. */
     private var countryRequest = 0
+    /**
+     * The address the in-flight country lookup is about.
+     *
+     * Not the same thing as [coreExitIp]: in Tor and Psiphon mode the address
+     * comes from an HTTP fetch through the local SOCKS port, so [coreExitIp] is
+     * blank and could not be used to decide whether a late answer is still
+     * relevant.
+     */
+    private var countryLookupIp = ""
     private val statusHandler = Handler(Looper.getMainLooper())
     private val statusPoll = object : Runnable {
         override fun run() {
@@ -632,19 +644,45 @@ class MainActivity : Activity() {
     }
 
     /**
+     * Per-probe timeout, widened while Tor is the transport.
+     *
+     * Measured through a real three-hop circuit on the server: ten fresh
+     * circuits fetching `google/generate_204` gave a median of 1.19s and a
+     * worst case of 1.62s, and the field log's own successful probes took
+     * 3180ms, 2251ms and 3359ms. So 5s is *almost* enough, which is the worst
+     * kind of budget — it passes in testing and fails on a slow circuit.
+     */
+    private fun pingTimeoutMs(): Int =
+        if (TorManager.isTorActive) TOR_PING_TIMEOUT_MS else PING_TIMEOUT_MS
+
+    /**
+     * How long the gate may keep probing before it declares the tunnel dead.
+     *
+     * Must be comfortably larger than one full sweep of [PING_URLS], or the
+     * sweep itself eats the whole budget and the gate fails after a single
+     * attempt. That is exactly what the 1.4.1 field log recorded on Tor:
+     * `No reachability after 1 probe(s)` — four endpoints × 5s = 20s worst case
+     * against an 18s deadline, so a healthy tunnel was torn down without ever
+     * getting a second try.
+     */
+    private fun verifyTimeoutMs(): Long =
+        if (TorManager.isTorActive) TOR_VERIFY_TIMEOUT_MS else VERIFY_TIMEOUT_MS
+
+    /**
      * Probe every health-check endpoint in turn, returning the first success.
      *
      * Returns null only when all of them failed, which is the one case that
      * genuinely warrants the degraded state.
      */
     private fun pingAnyEndpoint(): Pair<String, Float>? {
+        val timeout = pingTimeoutMs()
         for (url in PING_URLS) {
             val attempt = runCatching {
                 val startedAt = System.nanoTime()
                 val connection = openTunnelConnection(url)
                 try {
-                    connection.connectTimeout = PING_TIMEOUT_MS
-                    connection.readTimeout = PING_TIMEOUT_MS
+                    connection.connectTimeout = timeout
+                    connection.readTimeout = timeout
                     connection.requestMethod = "GET"
                     connection.instanceFollowRedirects = false
                     check(connection.responseCode in 200..399) { "HTTP ${connection.responseCode}" }
@@ -731,7 +769,8 @@ class MainActivity : Activity() {
         val rxAtStart = trafficRx
         showVerifying()
         Thread {
-            val deadline = System.currentTimeMillis() + VERIFY_TIMEOUT_MS
+            val budget = verifyTimeoutMs()
+            val deadline = System.currentTimeMillis() + budget
             // In native TUN mode the HTTP probe rides the carrier link, not the
             // tunnel, so it proves nothing. Gate on in-tunnel bytes instead and
             // use the probe only for the latency figure afterwards.
@@ -757,7 +796,7 @@ class MainActivity : Activity() {
                         }.start()
                     } else {
                         ConnectionLog.record(
-                            "Tunnel moved no bytes in ${VERIFY_TIMEOUT_MS / 1000}s — handshake succeeded but nothing passes"
+                            "Tunnel moved no bytes in ${budget / 1000}s — handshake succeeded but nothing passes"
                         )
                         failFakeConnection()
                     }
@@ -1124,8 +1163,18 @@ class MainActivity : Activity() {
                 }
                 if (request != ipRequest) return@runOnUiThread
                 val (ip, country) = result.getOrElse { "IP unavailable" to "" }
-                exitNodeCard.render(ip, country, isTunnelActive())
-                if (isTunnelActive() && ip != "IP unavailable") updateNotificationHealth(ip = ip)
+                exitNodeCard.render(ip, country.takeIf { it.isNotBlank() }, isTunnelActive())
+                if (isTunnelActive() && ip != "IP unavailable") {
+                    updateNotificationHealth(ip = ip)
+                    // Tor is the case that needs this: Cloudflare reports loc=T1
+                    // for every exit, fetchPublicIp() drops it as unmappable, and
+                    // without a second lookup the card would keep a globe forever
+                    // while showing a perfectly good address. Asking geojs/ipwho
+                    // about the address itself returns the real country (verified
+                    // on live exits: 171.25.193.25 SE, 80.67.167.81 FR,
+                    // 89.58.26.216 DE, 109.70.100.4 AT).
+                    if (country.isBlank()) resolveExitCountry(ip)
+                }
                 exitNodeCard.alpha = 0.45f
                 exitNodeCard.animate().alpha(1f).setDuration(240)
                     .setInterpolator(motionInterpolator).start()
@@ -1149,7 +1198,13 @@ class MainActivity : Activity() {
                     } }.toMap()
                     val ip = values["ip"] ?: body.takeIf { it.matches(IP_ADDRESS) }.orEmpty()
                     check(ip.isNotBlank()) { "IP unavailable" }
-                    return ip to values["loc"].orEmpty()
+                    // Cloudflare answers loc=T1 for every Tor exit — T1 is its
+                    // pseudo-code for the Tor network, not a country — so it maps
+                    // to no flag. Dropping it here (rather than passing it on as a
+                    // "known" country) is what lets the caller fall back to a geo
+                    // lookup on the address, which does return the real country.
+                    val loc = values["loc"].orEmpty()
+                    return ip to (if (IpFormatter.isRealCountry(loc)) loc.uppercase() else "")
                 } finally {
                     connection.disconnect()
                 }
@@ -1256,13 +1311,19 @@ class MainActivity : Activity() {
      * were verified returning IR for the two addresses above.
      */
     private fun resolveExitCountry(ip: String) {
+        if (ip.isBlank()) return
         val request = ++countryRequest
+        // The address this lookup is about. The core-measured path can compare
+        // against coreExitIp, but the HTTP path (Tor and Psiphon, where the
+        // address comes from cdn-cgi/trace rather than from the core) has
+        // coreExitIp blank, so it needs its own record of what was asked.
+        countryLookupIp = ip
         Thread {
             val country = runCatching { fetchCountryFor(ip) }.getOrNull()
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 // A newer measurement (or a disconnect) superseded this lookup.
-                if (request != countryRequest || coreExitIp != ip) return@runOnUiThread
+                if (request != countryRequest || countryLookupIp != ip) return@runOnUiThread
                 if (country.isNullOrBlank()) return@runOnUiThread
                 coreExitCountry = country
                 exitNodeCard.render(ip, country, isTunnelActive())
@@ -2209,6 +2270,17 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
+        // Same control as Psiphon's "Preferred country", same wording, same
+        // preference-not-a-pin semantics — deliberately, because to the user it is
+        // the same question. Underneath it is tor's ExitNodes with StrictNodes 0.
+        val torCountryRow = navRow("Preferred country", torRegionLabel()) {
+            chooseTorRegion { torRegionRowRef?.setValue(torRegionLabel()) }
+        }
+        torRegionRowRef = torCountryRow
+        content.addView(torCountryRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
 
         content.addView(sectionLabel("ABOUT"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2530,6 +2602,61 @@ class MainActivity : Activity() {
                     "Tor connection mode set to Auto"
                 } else {
                     "Tor connection mode pinned to ${chosen.label}"
+                }
+            )
+            after?.invoke()
+        }
+    }
+
+    /**
+     * The preferred Tor exit country, or "auto".
+     */
+    private fun torRegion(): String = TorRegions.selected(this) ?: TorRegions.AUTO
+
+    /** What the settings row shows: "Automatic" or "🇩🇪 Germany". */
+    private fun torRegionLabel(): String {
+        val code = torRegion()
+        return if (code == TorRegions.AUTO) "Automatic" else TorRegions.label(code)
+    }
+
+    /**
+     * Pick the country Tor should try to exit in.
+     *
+     * Worded as a preference throughout, because that is what it is: the torrc
+     * gets `ExitNodes {cc}` with `StrictNodes 0`, so tor leaves the country when
+     * it cannot build a circuit there. A hard pin would mean no connection at all
+     * on a country whose handful of exits are down, which is a worse outcome than
+     * exiting somewhere else.
+     *
+     * Only countries with at least five running exit relays are offered — see
+     * [TorRegions]. Below that the preference is honoured so rarely that the
+     * control would be theatre.
+     */
+    private fun chooseTorRegion(after: (() -> Unit)? = null) {
+        val options = listOf(TorRegions.AUTO) + TorRegions.options()
+        showChoiceSheet(
+            title = "Preferred country",
+            subtitle = "Tor tries to exit here. If it cannot, another country is used.",
+            options = options,
+            selected = torRegion(),
+            label = { code ->
+                if (code == TorRegions.AUTO) "Automatic" else TorRegions.label(code)
+            },
+            description = { code ->
+                if (code == TorRegions.AUTO) {
+                    "Fastest — Tor picks from every exit relay"
+                } else {
+                    TorRegions.detail(code)
+                }
+            },
+            scrollable = true,
+        ) { chosen ->
+            preferences().edit().putString(TorRegions.REGION_PREF, chosen).apply()
+            ConnectionLog.record(
+                if (chosen == TorRegions.AUTO) {
+                    "Tor exit country cleared — Tor chooses"
+                } else {
+                    "Tor exit country set to ${TorRegions.name(chosen)} ($chosen)"
                 }
             )
             after?.invoke()
@@ -2933,6 +3060,7 @@ class MainActivity : Activity() {
         chainOuterRow = null
         egressRegionRow = null
         torModeRowRef = null
+        torRegionRowRef = null
         settingsPage?.let { animatePageClose(it) { settingsPage = null } }
     }
 
@@ -4234,11 +4362,32 @@ class MainActivity : Activity() {
         const val LOG_CLOSE_ANIMATION_MS = 160L
         const val PING_TIMEOUT_MS = 5_000
         /**
+         * Per-probe timeout while Tor carries the traffic.
+         *
+         * A three-hop circuit is simply slower than a single VPN hop: measured
+         * on this project's own server, ten fresh circuits fetching
+         * `generate_204` had a 1.19s median and a 1.62s worst case, and the
+         * field log's successful probes ran 2.2–3.4s. 12s leaves headroom for a
+         * bad circuit without letting a genuinely dead tunnel hang the sweep.
+         */
+        const val TOR_PING_TIMEOUT_MS = 12_000
+        /**
          * How long a freshly handshaken tunnel gets to prove it passes traffic.
          * 18s covers a slow MASQUE gateway pick and Psiphon's own warm-up while
          * still failing fast enough that the user is not staring at a dead dial.
          */
         const val VERIFY_TIMEOUT_MS = 18_000L
+        /**
+         * Verification budget while Tor carries the traffic.
+         *
+         * Sized against the worst-case sweep, not against a guess: four probe
+         * endpoints at [TOR_PING_TIMEOUT_MS] each is 48s if every one of them
+         * times out, so a budget below that can fail after a single attempt.
+         * That is what the 1.4.1 log showed — `No reachability after 1 probe(s)`
+         * on a Tor tunnel that had bootstrapped to 100% — and it tore down a
+         * working tunnel. 60s allows a full sweep plus a retry.
+         */
+        const val TOR_VERIFY_TIMEOUT_MS = 60_000L
         const val VERIFY_RETRY_DELAY_MS = 1_200L
         /**
          * Grace period after the dial goes green before the core's own byte

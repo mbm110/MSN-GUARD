@@ -289,6 +289,23 @@ object TorManager {
             appendLine("ClientUseIPv6 1")
             appendLine("ClientPreferIPv6ORPort auto")
 
+            // Preferred exit country, when the user picked one.
+            //
+            // StrictNodes 0 deliberately: it makes this a preference tor
+            // abandons when it cannot build a circuit in that country, which is
+            // the same contract the Psiphon "Preferred country" row advertises.
+            // StrictNodes 1 would turn a country with a handful of exits into
+            // "no connection at all" whenever those exits are busy or down.
+            //
+            // Verified against live tor: {de} {nl} {se} {at} {ro} each
+            // bootstrapped 100% in ~4s on a warm cache and exited in the asked-for
+            // country; one {de} run exited in SE, which is the fallback working as
+            // designed.
+            TorRegions.selected(context)?.let { region ->
+                appendLine("ExitNodes {${region.lowercase()}}")
+                appendLine("StrictNodes 0")
+            }
+
             if (transport != null && bridges.isNotEmpty()) {
                 appendLine("UseBridges 1")
                 val listener = ptMethods[transport]
@@ -499,7 +516,13 @@ object TorManager {
                         }
                         if (percent >= 100) bootstrapped.countDown()
                     } else if (line.contains("[warn]") || line.contains("[err]")) {
-                        ConnectionLog.record("$TAG ${line.substringAfter("] ").take(160)}")
+                        val text = line.substringAfter("] ").take(160)
+                        // Tor re-emits some notices on a timer, and the in-app log
+                        // is a 100-line ring buffer: fifteen copies of the same
+                        // advisory push out everything that explains the failure.
+                        // The field log lost its whole bootstrap history to the
+                        // SOCKS5-hostname advisory alone, reposted every 5s.
+                        if (!isRepetitiveNotice(text)) ConnectionLog.record("$TAG $text")
                     }
                 }
             } catch (_: Exception) {
@@ -580,6 +603,30 @@ object TorManager {
             state.writeText(lines.joinToString("\n") + "\n")
         }
     }
+
+    // ------------------------------------------------------------- log hygiene
+
+    /**
+     * Notices tor repeats on a timer, which must not be logged every time.
+     *
+     * The in-app log is a 100-entry ring buffer. In the 1.4.1 field log the
+     * SOCKS5-hostname advisory was reposted every five seconds and, within two
+     * minutes, had evicted every line that explained why the earlier rungs
+     * failed. Filtering by prefix rather than deduplicating exact strings
+     * because tor varies the port number inside the same message.
+     *
+     * Only advisories are listed here — anything that names a failure is kept.
+     */
+    private val REPETITIVE_NOTICES = listOf(
+        // Expected by design: tun2socks hands tor an IP, not a hostname, because
+        // DNS is resolved separately through DNSPort. Advisory, not a fault.
+        "Your application (using socks5 to port",
+        // Emitted once per new circuit on some builds.
+        "Tried for 120 seconds to get a connection to",
+    )
+
+    private fun isRepetitiveNotice(text: String): Boolean =
+        REPETITIVE_NOTICES.any { text.startsWith(it) }
 
     private fun stopTorProcess() {
         torProcess?.let { process ->
