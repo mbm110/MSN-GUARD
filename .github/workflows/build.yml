@@ -41,7 +41,7 @@ jobs:
       - name: Fetch Tor binaries
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TOR_RUN_ID: "32675767664"
+          TOR_RUN_ID: "33008595023"
         run: |
           set -euo pipefail
           mkdir -p /tmp/torbin
@@ -70,6 +70,32 @@ jobs:
             OUT=$("$READELF" -h "$f")
             TYPE=$(printf '%s' "$OUT" | sed -n 's/.*Type: *\([A-Z]*\).*/\1/p')
             [ "$TYPE" = "DYN" ] || { echo "ERROR: $f is not PIE"; exit 1; }
+          done
+          # Second gate, because TOR_RUN_ID above is a hand-moved pin: a stale or
+          # mistyped run id can hand us a binary whose PT_GNU_RELRO mprotects past
+          # the end of its LOAD segment, and bionic then refuses to exec it with
+          # "can't enable GNU RELRO protection". That is what shipped in 1.5.0 and
+          # broke Tor on every 4K-page device. The producing workflow asserts this
+          # too; assert it again here so the APK build cannot package a bad binary
+          # no matter which run it pulled from.
+          for f in app/src/main/jniLibs/*/libtor.so; do
+            phdrs=$("$READELF" -lW "$f")
+            RV=$(awk '$1=="GNU_RELRO" {print $3}' <<< "$phdrs")
+            RM=$(awk '$1=="GNU_RELRO" {print $6}' <<< "$phdrs")
+            LM=$(awk -v v="$RV" '$1=="LOAD" && $3==v {print $6}' <<< "$phdrs")
+            [ -n "$RM" ] && [ -n "$LM" ] || { echo "ERROR: cannot read RELRO/LOAD in $f"; exit 1; }
+            V=$((RV)); R=$((RM)); L=$((LM))
+            for P in 4096 16384; do
+              REND=$(( ((V + R + P - 1) / P) * P ))
+              LEND=$(( ((V + L + P - 1) / P) * P ))
+              [ "$REND" -le "$LEND" ] || {
+                echo "ERROR: $f mprotects $((REND - LEND)) bytes past its LOAD at ${P}-byte pages."
+                echo "       bionic will refuse to exec it. Is TOR_RUN_ID pointing at a"
+                echo "       run built without -z common-page-size?"
+                exit 1
+              }
+            done
+            echo "OK: $f RELRO fits at 4K and 16K pages"
           done
           ls -la app/src/main/jniLibs/*/
 
