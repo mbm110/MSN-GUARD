@@ -419,7 +419,19 @@ object TorManager {
             appendLine("ClientOnly 1")
             appendLine("SocksPolicy accept 127.0.0.0/8")
             appendLine("SocksPolicy reject *")
-            appendLine("Log notice stdout")
+            // `info`, not `notice`, deliberately.
+            //
+            // Two field devices reported tor dying at 0% with nothing in the log
+            // but "exited". At `notice` tor is silent about everything it does
+            // between reading the config and opening its first connection, which
+            // is exactly the window where these deaths happen. SlipNet ships
+            // `Log info stdout` and its logs name the failing step; ours did not.
+            //
+            // The volume does not reach the user: info lines are only kept in the
+            // in-memory tail below and replayed into the 100-line in-app log when
+            // a rung actually fails. A successful bootstrap records the same five
+            // percentage lines it always did.
+            appendLine("Log info stdout")
             // Tor's own default is 0 (scrub addresses from logs). SlipNet sets
             // this and it is why its logs name the bridge that failed while ours
             // said only "general SOCKS server failure". Our in-app log is 100
@@ -693,7 +705,7 @@ object TorManager {
         // dynamic-linker abort ("CANNOT LINK EXECUTABLE ...") which carries
         // neither "[warn]" nor "[err]" — filtering those away is how two field
         // devices managed to die at 0% with zero explanation in the log.
-        val rawTail = java.util.ArrayDeque<String>(12)
+        val rawTail = java.util.ArrayDeque<String>(24)
 
         // Timestamp of the last percentage *increase*, which is what the stall
         // detector measures. An atomic rather than a plain `var` because the
@@ -706,7 +718,7 @@ object TorManager {
             try {
                 BufferedReader(InputStreamReader(process.inputStream)).forEachLine { line ->
                     synchronized(rawTail) {
-                        if (rawTail.size >= 12) rawTail.pollFirst()
+                        if (rawTail.size >= 24) rawTail.pollFirst()
                         rawTail.addLast(line)
                     }
                     val match = Regex("Bootstrapped (\\d+)%").find(line)
@@ -792,7 +804,13 @@ object TorManager {
                 if (tail.isEmpty()) {
                     ConnectionLog.record("$TAG tor printed nothing before dying")
                 } else {
-                    tail.takeLast(4).forEach { ConnectionLog.record("$TAG tor: ${it.take(160)}") }
+                    // With `Log info stdout` the tail is mostly routine startup
+                    // chatter. Anything tor itself flagged is what explains the
+                    // death, so those lines are replayed first and the plain tail
+                    // is only used when tor flagged nothing at all.
+                    val flagged = tail.filter { it.contains("[warn]") || it.contains("[err]") }
+                    val replay = if (flagged.isNotEmpty()) flagged.takeLast(6) else tail.takeLast(6)
+                    replay.forEach { ConnectionLog.record("$TAG tor: ${it.take(160)}") }
                 }
             }
             stopTorProcess()
