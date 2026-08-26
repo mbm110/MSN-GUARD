@@ -184,7 +184,23 @@ build_abi() {
     # -ffile-prefix-map keeps the CI runner's absolute paths out of the binary,
     # so two builds of the same source produce the same bytes.
     local CFLAGS_COMMON="-O2 -fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=2 $ARCH_FLAGS -ffile-prefix-map=$WORK=. -ffile-prefix-map=$BUILD_DIR=."
-    local LDFLAGS_COMMON="-Wl,-z,max-page-size=$PAGE_SIZE -Wl,-z,common-page-size=$PAGE_SIZE -Wl,-z,relro -Wl,-z,now"
+    # No -z common-page-size. It tells the linker the runtime page size *is*
+    # $PAGE_SIZE, so ld.lld rounds the PT_GNU_RELRO end up to a 16K boundary
+    # while leaving the PT_LOAD that contains it at its true size. On a 4K-page
+    # device that produces GNU_RELRO memsz > LOAD memsz, and bionic's
+    # _extend_gnu_relro_prot_end() (linker_phdr.cpp) then mprotects past the end
+    # of the mapping into a hole before the next LOAD. mprotect returns ENOMEM
+    # and the linker refuses the binary:
+    #
+    #   CANNOT LINK EXECUTABLE "…/libtor.so":
+    #   can't enable GNU RELRO protection
+    #
+    # Measured on the shipped 1.5.0 arm64 binary: RELRO memsz 0x85c80 vs LOAD
+    # memsz 0x835d0, leaving 8192 bytes unmapped inside the mprotect range.
+    # Every 4K-page device fails; 16K-page devices happen to work because the
+    # boundaries coincide. -z max-page-size stays: it pads segment *alignment*
+    # so the same binary still loads on 16K-page devices.
+    local LDFLAGS_COMMON="-Wl,-z,max-page-size=$PAGE_SIZE -Wl,-z,relro -Wl,-z,now"
 
     export CFLAGS="$CFLAGS_COMMON"
     export CPPFLAGS="-I$PREFIX/include"

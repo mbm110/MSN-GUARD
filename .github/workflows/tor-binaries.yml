@@ -74,6 +74,50 @@ jobs:
           ls -la app/src/main/jniLibs/*/libtor.so
           sha256sum app/src/main/jniLibs/*/libtor.so
 
+      # The bug that broke Tor for every 4K-page device in 1.5.0, as a gate.
+      #
+      # bionic's _extend_gnu_relro_prot_end() only takes the extend path when
+      # GNU_RELRO memsz >= its host LOAD memsz. When -z common-page-size made
+      # ld.lld round RELRO up to 16K without growing the LOAD, that condition
+      # held, and the linker mprotected past the end of the mapping into the
+      # hole before the next LOAD. mprotect returned ENOMEM and the loader
+      # refused the binary with "can't enable GNU RELRO protection". Nothing in
+      # an ELF sanity check catches it: the binary is valid, PIE, and correctly
+      # aligned. Only the segment-size relationship gives it away.
+      #
+      # Require RELRO memsz <= host LOAD memsz. Equality is what a healthy
+      # build produces.
+      - name: Verify GNU_RELRO fits inside its LOAD segment
+        env:
+          NDK: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
+        run: |
+          set -euo pipefail
+          READELF="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          for f in app/src/main/jniLibs/*/libtor.so; do
+            echo "=== $f ==="
+            # Capture whole output before parsing: piping LLVM tools into
+            # anything that closes stdout early trips SIGPIPE -> exit 74.
+            phdrs=$("$READELF" -lW "$f")
+            printf '%s\n' "$phdrs" | grep -E '^ *(LOAD|GNU_RELRO)' || true
+
+            RELRO_VADDR=$(awk '$1=="GNU_RELRO" {print $3}' <<< "$phdrs")
+            RELRO_MEMSZ=$(awk '$1=="GNU_RELRO" {print $6}' <<< "$phdrs")
+            LOAD_MEMSZ=$(awk -v v="$RELRO_VADDR" '$1=="LOAD" && $3==v {print $6}' <<< "$phdrs")
+
+            [ -n "$RELRO_MEMSZ" ] || { echo "ERROR: no PT_GNU_RELRO in $f"; exit 1; }
+            [ -n "$LOAD_MEMSZ" ]  || { echo "ERROR: no LOAD hosts RELRO at $RELRO_VADDR"; exit 1; }
+
+            R=$((RELRO_MEMSZ)); L=$((LOAD_MEMSZ))
+            echo "parsed: relro_memsz=$RELRO_MEMSZ ($R)  load_memsz=$LOAD_MEMSZ ($L)"
+            if [ "$R" -gt "$L" ]; then
+              echo "ERROR: RELRO memsz $R > LOAD memsz $L — bionic will mprotect"
+              echo "       past the mapping and refuse this binary on 4K-page devices."
+              echo "       Check that -z common-page-size is NOT in LDFLAGS."
+              exit 1
+            fi
+            echo "OK: RELRO fits inside its LOAD segment"
+          done
+
       - name: Upload libtor.so
         uses: actions/upload-artifact@v4
         with:
