@@ -10,6 +10,8 @@
 
 سرویس `MsnGuardVpnService` اینترفیس TUN را می‌سازد، به‌عنوان foreground service اجرا می‌شود و مالک چرخهٔ وصل و قطع است. نردبان Psiphon هم همین‌جا مدیریت می‌شود.
 
+کلاس `TorManager` پروسهٔ `tor` و پل‌های lyrebird را بالا می‌آورد و فایل torrc را می‌نویسد، و کلاس `TorSocksFront` پیشانی SOCKS آن است: TCP را به SOCKS خود تور می‌دهد و DNS را به `DNSPort` تور. نردبان حالت‌های تور — یعنی Direct و Meek و obfs4 و Snowflake — و زنجیرهٔ Tor روی WARP هم از همین دو کلاس اداره می‌شوند.
+
 سرویس `MsnGuardTileService` کاشی تنظیمات سریع اندروید را با آخرین تنظیمات ذخیره‌شده در اختیار می‌گذارد.
 
 کلاس `Tun2SocksManager` فرایند بومی tun2socks و پل udpgw را مدیریت می‌کند.
