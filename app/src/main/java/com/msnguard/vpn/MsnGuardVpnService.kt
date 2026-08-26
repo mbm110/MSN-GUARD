@@ -1834,11 +1834,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 if (chained) {
                     NativeCore.attach(this)
                     outer = raiseOuterLeg(inner = "Tor") ?: error(
-                        if (CoreConfig.chainOuterIsAuto(this)) {
+                        if (CoreConfig.chainOuterIsAuto(this, forTor = true)) {
                             "No WARP transport could carry Tor on this network"
                         } else {
                             val pinned = CoreConfig.chainOuterLabel(
-                                CoreConfig.chainOuterCandidates(this).first()
+                                CoreConfig.chainOuterCandidates(this, forTor = true).first()
                             )
                             "$pinned could not carry Tor; try Auto in settings"
                         }
@@ -2182,7 +2182,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // Auto gives the whole ladder; a pinned transport gives just that one, with
         // no fallback — a pin exists to stop the app spending a minute on transports
         // the user already knows their carrier blocks.
-        val ladder = CoreConfig.chainOuterCandidates(this)
+        //
+        // Tor and Psiphon read separate pins: the same outer leg suits them
+        // differently, and the settings screen offers each its own row.
+        val forTor = inner == "Tor"
+        val ladder = CoreConfig.chainOuterCandidates(this, forTor)
         val auto = ladder.size > 1
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         // -1, not 0: absent must be distinguishable from "rung 0 worked", or a fresh

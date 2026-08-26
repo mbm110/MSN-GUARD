@@ -171,6 +171,21 @@ object CoreConfig {
      */
     const val CHAIN_OUTER_MODE_PREF = "chain_outer_mode"
 
+    /**
+     * Tor's own outer-transport pin. Separate key from [CHAIN_OUTER_MODE_PREF].
+     *
+     * The two inner tunnels have genuinely different outer needs, so one shared pin
+     * would be wrong in both directions. Tor bootstraps through a SOCKS proxy and
+     * cares only that it is reachable; Psiphon runs its own protocol ladder inside
+     * and is far more sensitive to the outer leg's latency. A user who pins WoW to
+     * get Psiphon through a hostile carrier should not thereby force every Tor
+     * bootstrap through three stacked tunnels.
+     *
+     * Absent means auto, exactly as for Psiphon, so nothing changes for anyone who
+     * never opens the row.
+     */
+    const val CHAIN_OUTER_MODE_TOR_PREF = "chain_outer_mode_tor"
+
     /** Value of [CHAIN_OUTER_MODE_PREF] meaning "try them all, in order". */
     const val CHAIN_OUTER_AUTO = "auto"
 
@@ -222,10 +237,14 @@ object CoreConfig {
      * silent fallback, because a pin exists precisely to stop the app spending time
      * on transports the user knows are blocked. A stale or unknown pin falls back
      * to auto rather than producing an empty ladder.
+     *
+     * [forTor] selects Tor's pin instead of Psiphon's. The caller has to say which
+     * inner tunnel it is raising the leg for, since the two keys are independent.
      */
-    fun chainOuterCandidates(context: Context): List<String> {
+    fun chainOuterCandidates(context: Context, forTor: Boolean = false): List<String> {
+        val key = if (forTor) CHAIN_OUTER_MODE_TOR_PREF else CHAIN_OUTER_MODE_PREF
         val mode = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-            .getString(CHAIN_OUTER_MODE_PREF, CHAIN_OUTER_AUTO)
+            .getString(key, CHAIN_OUTER_AUTO)
             ?.trim()
             .orEmpty()
         return when {
@@ -236,8 +255,8 @@ object CoreConfig {
     }
 
     /** Whether the outer transport is being chosen automatically. */
-    fun chainOuterIsAuto(context: Context): Boolean =
-        chainOuterCandidates(context).size > 1
+    fun chainOuterIsAuto(context: Context, forTor: Boolean = false): Boolean =
+        chainOuterCandidates(context, forTor).size > 1
 
     /** Human-readable name for a rung of [CHAIN_OUTER_LADDER]. */
     fun chainOuterLabel(protocol: String): String = when (protocol) {

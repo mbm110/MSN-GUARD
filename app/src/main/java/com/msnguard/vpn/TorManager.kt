@@ -758,7 +758,8 @@ object TorManager {
         // was still climbing got killed at a fixed deadline and a rung that was
         // dead on arrival held the ladder for the full budget. Both cases are
         // now decided by whether the percentage is still moving.
-        val deadlineMs = System.currentTimeMillis() + timeoutSeconds * 1_000
+        val startedMs = System.currentTimeMillis()
+        val deadlineMs = startedMs + timeoutSeconds * 1_000
         var stalled = false
         while (!bootstrapped.await(BOOTSTRAP_POLL_MS, TimeUnit.MILLISECONDS)) {
             if (stopping.get()) break
@@ -790,10 +791,16 @@ object TorManager {
             } catch (_: Exception) {
                 null
             }
+            val elapsedS = (System.currentTimeMillis() - startedMs) / 1_000
             val why = when {
                 exitCode != null -> "tor exited at $bootstrapPercent% (exit $exitCode)"
                 stalled -> "stalled ${STALL_TIMEOUT_S}s at $bootstrapPercent%"
-                else -> "hit the ${timeoutSeconds}s ceiling at $bootstrapPercent%"
+                // Report the time actually spent, not the budget. A rung cut short
+                // by stopping.get() or by the outer leg dropping used to be labelled
+                // "hit the 150s ceiling" after 22 seconds, which sent the last
+                // investigation down the wrong path entirely.
+                elapsedS >= timeoutSeconds -> "hit the ${timeoutSeconds}s ceiling at $bootstrapPercent%"
+                else -> "gave up after ${elapsedS}s at $bootstrapPercent% (budget ${timeoutSeconds}s)"
             }
             ConnectionLog.record("$TAG ${mode.label} failed — $why")
             // A tor that never printed a single bootstrap line told us nothing.

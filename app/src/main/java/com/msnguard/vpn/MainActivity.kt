@@ -138,6 +138,7 @@ class MainActivity : Activity() {
     private var connectionModeRow: OrbitSettingsRow? = null
     private var psiphonChainRow: OrbitToggleRow? = null
     private var chainOuterRow: OrbitSettingsRow? = null
+    private var torChainOuterRow: OrbitSettingsRow? = null
     private var egressRegionRow: OrbitSettingsRow? = null
 
     /** Settings row showing the Tor connection mode; repainted after a pick. */
@@ -2337,6 +2338,17 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
+        // Tor's outer transport, mirroring Psiphon's row and in the same position
+        // relative to its switch: which WARP tunnel carries Tor. Writes Tor's own
+        // key, so pinning WoW for Psiphon leaves Tor on Auto.
+        val torOuterRow = navRow("Outer transport", torChainOuterMode().label) {
+            chooseTorChainOuterMode { torChainOuterRow?.setValue(torChainOuterMode().label) }
+        }
+        torChainOuterRow = torOuterRow
+        content.addView(torOuterRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
         // Same control as Psiphon's "Preferred country", same wording, same
         // preference-not-a-pin semantics — deliberately, because to the user it is
         // the same question. Underneath it is tor's ExitNodes with StrictNodes 0.
@@ -2622,6 +2634,44 @@ class MainActivity : Activity() {
         if (candidates.size > 1) return ChainOuterMode.AUTO
         return ChainOuterMode.entries.firstOrNull { it.coreName == candidates.first() }
             ?: ChainOuterMode.AUTO
+    }
+
+    /** Tor's outer-transport pin, read from Tor's own key. */
+    private fun torChainOuterMode(): ChainOuterMode {
+        val candidates = CoreConfig.chainOuterCandidates(this, forTor = true)
+        if (candidates.size > 1) return ChainOuterMode.AUTO
+        return ChainOuterMode.entries.firstOrNull { it.coreName == candidates.first() }
+            ?: ChainOuterMode.AUTO
+    }
+
+    /**
+     * Same sheet as Psiphon's, writing Tor's key.
+     *
+     * Deliberately a separate function rather than a parameterised one: the log line
+     * and the preference key both differ, and threading a boolean through would make
+     * the two call sites read as if they shared state, which is the bug this whole
+     * split exists to avoid.
+     */
+    private fun chooseTorChainOuterMode(after: (() -> Unit)? = null) = showChoiceSheet(
+        title = "Outer transport",
+        subtitle = "Which WARP tunnel carries Tor in Tor over WARP",
+        options = ChainOuterMode.entries.toList(),
+        selected = torChainOuterMode(),
+        label = { it.label },
+        description = { it.description },
+    ) { chosen ->
+        preferences().edit()
+            .putString(CoreConfig.CHAIN_OUTER_MODE_TOR_PREF, chosen.coreName)
+            .apply()
+        ConnectionLog.record(
+            if (chosen == ChainOuterMode.AUTO) {
+                "Tor-over-WARP outer transport set to Auto"
+            } else {
+                "Tor-over-WARP outer transport pinned to ${chosen.label}"
+            }
+        )
+        renderChainCard()
+        after?.invoke()
     }
 
     private fun chooseChainOuterMode(after: (() -> Unit)? = null) = showChoiceSheet(
@@ -3134,6 +3184,7 @@ class MainActivity : Activity() {
         egressRegionRow = null
         torModeRowRef = null
         torChainRowRef = null
+        torChainOuterRow = null
         torRegionRowRef = null
         settingsPage?.let { animatePageClose(it) { settingsPage = null } }
     }
@@ -3190,6 +3241,15 @@ class MainActivity : Activity() {
         torChainRowRef?.apply {
             setChecked(chainArmed(Protocol.TOR) && torSelected && torChainable)
             setAvailable(torSelected && torChainable && modeControlsEnabled)
+        }
+        // Tor's outer transport follows its switch's VISIBLE state, exactly as
+        // Psiphon's does: it only affects a chained Tor connect, so with the chain
+        // off — or with obfs4/Snowflake pinned, which cannot be chained at all — it
+        // is greyed rather than hidden.
+        val torChained = chainArmed(Protocol.TOR) && torSelected && torChainable
+        torChainOuterRow?.apply {
+            setValue(torChainOuterMode().label)
+            setAvailable(torSelected && torChainable && modeControlsEnabled && torChained)
         }
         // Tor's exit-country picker, greyed off the TOR transport for the same
         // reason Psiphon's is: it configures a transport that is not selected, and
@@ -4052,11 +4112,20 @@ class MainActivity : Activity() {
         // Name the pinned transport on the card. Without this, a pin set in settings
         // is invisible here and the card would still read "auto transport" while the
         // connect path used only WireGuard.
+        //
+        // Reads whichever pin belongs to the selected inner tunnel — the two keys are
+        // independent, so showing Psiphon's while Tor is selected would misreport
+        // what the next connect will actually do.
+        val activeOuter = if (selectedProtocol == Protocol.TOR) {
+            torChainOuterMode()
+        } else {
+            chainOuterMode()
+        }
         chainCard.setOuterSummary(
-            if (chainOuterMode() == ChainOuterMode.AUTO) {
+            if (activeOuter == ChainOuterMode.AUTO) {
                 "auto transport"
             } else {
-                "via ${chainOuterMode().label}"
+                "via ${activeOuter.label}"
             }
         )
         chainCard.setArmed(chainArmed())
