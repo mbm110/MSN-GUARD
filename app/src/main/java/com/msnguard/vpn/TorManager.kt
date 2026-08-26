@@ -661,6 +661,17 @@ object TorManager {
             stopPt()
             return false
         }
+        // Once per attempt, and only when something is already wrong, this is the
+        // difference between "tor died" and knowing why. A field device ran all
+        // four rungs in one second with no reason logged; without the ABI and the
+        // on-disk size there is no way to tell a wrong-ABI binary, a truncated
+        // extraction and a killed process apart from a log alone.
+        if (!binary.canExecute()) {
+            ConnectionLog.record(
+                "$TAG tor binary is not executable — ${binary.length()} bytes, " +
+                    "abi ${android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "?"}"
+            )
+        }
 
         val builder = ProcessBuilder(binary.absolutePath, "-f", torrc.absolutePath)
         builder.redirectErrorStream(true)
@@ -677,6 +688,13 @@ object TorManager {
 
         val bootstrapped = CountDownLatch(1)
 
+        // Raw tail of everything the child printed, kept verbatim BEFORE the
+        // warn/err filter. When tor dies at startup the reason is usually a
+        // dynamic-linker abort ("CANNOT LINK EXECUTABLE ...") which carries
+        // neither "[warn]" nor "[err]" — filtering those away is how two field
+        // devices managed to die at 0% with zero explanation in the log.
+        val rawTail = java.util.ArrayDeque<String>(12)
+
         // Timestamp of the last percentage *increase*, which is what the stall
         // detector measures. An atomic rather than a plain `var` because the
         // stdout reader thread writes it and this thread reads it; `@Volatile`
@@ -687,6 +705,10 @@ object TorManager {
         Thread({
             try {
                 BufferedReader(InputStreamReader(process.inputStream)).forEachLine { line ->
+                    synchronized(rawTail) {
+                        if (rawTail.size >= 12) rawTail.pollFirst()
+                        rawTail.addLast(line)
+                    }
                     val match = Regex("Bootstrapped (\\d+)%").find(line)
                     if (match != null) {
                         val percent = match.groupValues[1].toIntOrNull() ?: 0
@@ -740,12 +762,39 @@ object TorManager {
         val reached = bootstrapPercent >= 100
 
         if (!reached || !process.isAlive) {
+            // Give a dying process a moment to be reaped before classifying.
+            //
+            // The stdout thread counts the latch down in its `finally`, so a tor
+            // that dies instantly releases the wait on the FIRST poll — while
+            // `isAlive` can still be true for a few ms. That raced into the
+            // `else` branch and printed "hit the 300s ceiling at 0%" one second
+            // after the rung started, in the field logs from two devices. The
+            // ceiling was never reached; tor had already exited.
+            if (!process.isAlive || bootstrapPercent == 0) {
+                runCatching { process.waitFor(400, TimeUnit.MILLISECONDS) }
+            }
+            val exitCode = try {
+                if (process.isAlive) null else process.exitValue()
+            } catch (_: Exception) {
+                null
+            }
             val why = when {
+                exitCode != null -> "tor exited at $bootstrapPercent% (exit $exitCode)"
                 stalled -> "stalled ${STALL_TIMEOUT_S}s at $bootstrapPercent%"
-                !process.isAlive -> "tor exited at $bootstrapPercent%"
                 else -> "hit the ${timeoutSeconds}s ceiling at $bootstrapPercent%"
             }
             ConnectionLog.record("$TAG ${mode.label} failed — $why")
+            // A tor that never printed a single bootstrap line told us nothing.
+            // Replay what it actually said so the next field log carries the
+            // linker/permission/config error instead of a bare "exited at 0%".
+            if (bootstrapPercent == 0) {
+                val tail = synchronized(rawTail) { rawTail.toList() }
+                if (tail.isEmpty()) {
+                    ConnectionLog.record("$TAG tor printed nothing before dying")
+                } else {
+                    tail.takeLast(4).forEach { ConnectionLog.record("$TAG tor: ${it.take(160)}") }
+                }
+            }
             stopTorProcess()
             stopPt()
             return false
