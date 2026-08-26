@@ -76,18 +76,24 @@ jobs:
 
       # The bug that broke Tor for every 4K-page device in 1.5.0, as a gate.
       #
-      # bionic's _extend_gnu_relro_prot_end() only takes the extend path when
-      # GNU_RELRO memsz >= its host LOAD memsz. When -z common-page-size made
-      # ld.lld round RELRO up to 16K without growing the LOAD, that condition
-      # held, and the linker mprotected past the end of the mapping into the
-      # hole before the next LOAD. mprotect returned ENOMEM and the loader
-      # refused the binary with "can't enable GNU RELRO protection". Nothing in
-      # an ELF sanity check catches it: the binary is valid, PIE, and correctly
-      # aligned. Only the segment-size relationship gives it away.
+      # bionic mprotects page_start(relro_vaddr) .. page_end(relro_vaddr +
+      # relro_memsz) and, when RELRO memsz >= its host LOAD memsz,
+      # _extend_gnu_relro_prot_end() (linker/linker_phdr.cpp) lets that range run
+      # to the end of the LOAD. If the rounded RELRO end exceeds the last page the
+      # LOAD actually maps, mprotect hits a hole, returns ENOMEM, and the loader
+      # refuses the binary with "can't enable GNU RELRO protection".
       #
-      # Require RELRO memsz <= host LOAD memsz. Equality is what a healthy
-      # build produces.
-      - name: Verify GNU_RELRO fits inside its LOAD segment
+      # Compare page-rounded ends, not raw memsz. RELRO memsz is legitimately a
+      # little larger than the LOAD's (it covers .bss-adjacent relro data), and
+      # that is harmless as long as both round to the same page. -z
+      # common-page-size=16384 is what made it round a whole 16K page further on a
+      # 4K device: RELRO ended at 0x840000 while the LOAD mapped only to 0x83e000,
+      # leaving 8192 bytes unmapped inside the range.
+      #
+      # Checked at 4K and 16K, because a binary can be correct at one page size
+      # and broken at the other — that asymmetry is exactly why 1.5.0 worked on a
+      # 16K-page phone and failed on every 4K-page one.
+      - name: Verify GNU_RELRO does not mprotect past its LOAD segment
         env:
           NDK: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
         run: |
@@ -107,15 +113,23 @@ jobs:
             [ -n "$RELRO_MEMSZ" ] || { echo "ERROR: no PT_GNU_RELRO in $f"; exit 1; }
             [ -n "$LOAD_MEMSZ" ]  || { echo "ERROR: no LOAD hosts RELRO at $RELRO_VADDR"; exit 1; }
 
-            R=$((RELRO_MEMSZ)); L=$((LOAD_MEMSZ))
-            echo "parsed: relro_memsz=$RELRO_MEMSZ ($R)  load_memsz=$LOAD_MEMSZ ($L)"
-            if [ "$R" -gt "$L" ]; then
-              echo "ERROR: RELRO memsz $R > LOAD memsz $L — bionic will mprotect"
-              echo "       past the mapping and refuse this binary on 4K-page devices."
-              echo "       Check that -z common-page-size is NOT in LDFLAGS."
-              exit 1
-            fi
-            echo "OK: RELRO fits inside its LOAD segment"
+            V=$((RELRO_VADDR)); R=$((RELRO_MEMSZ)); L=$((LOAD_MEMSZ))
+            echo "parsed: vaddr=$RELRO_VADDR relro_memsz=$RELRO_MEMSZ load_memsz=$LOAD_MEMSZ"
+
+            for P in 4096 16384; do
+              REND=$(( ((V + R + P - 1) / P) * P ))
+              LEND=$(( ((V + L + P - 1) / P) * P ))
+              printf '  %6d-byte pages: mprotect end 0x%x, mapped end 0x%x' "$P" "$REND" "$LEND"
+              if [ "$REND" -gt "$LEND" ]; then
+                echo " -> FAIL"
+                echo "ERROR: $((REND - LEND)) bytes unmapped inside the RELRO mprotect range."
+                echo "       bionic will refuse this binary on ${P}-byte-page devices with"
+                echo "       \"can't enable GNU RELRO protection\"."
+                echo "       Check that -z common-page-size is NOT in LDFLAGS."
+                exit 1
+              fi
+              echo " -> OK"
+            done
           done
 
       - name: Upload libtor.so
