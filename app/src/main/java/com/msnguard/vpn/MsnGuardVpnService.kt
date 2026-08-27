@@ -749,6 +749,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     "LAN sharing is on but this device has no local network address — " +
                         "turn on the hotspot or join a Wi-Fi network"
                 )
+                // The inputs, not just the verdict. Two builds in a row got this
+                // answer wrong and the only evidence was a screenshot of the row.
+                ConnectionLog.record("LAN survey: " + CoreConfig.describeLocalNetworks(this))
             }
         }
     }

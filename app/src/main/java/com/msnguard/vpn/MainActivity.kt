@@ -2327,6 +2327,12 @@ class MainActivity : Activity() {
                     "LAN sharing disabled — applies on the next connect"
                 }
             )
+            // Log the interface survey whenever sharing is switched on. Two builds
+            // in a row advertised an unreachable address and the only evidence was
+            // a screenshot of the result; this records the inputs.
+            if (on) {
+                ConnectionLog.record("LAN survey: " + CoreConfig.describeLocalNetworks(this))
+            }
             lanSharingRow?.setSubtitle(lanSharingSubtitle())
             refreshPsiphonRows()
         }

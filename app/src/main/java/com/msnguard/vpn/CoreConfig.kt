@@ -249,27 +249,32 @@ object CoreConfig {
      * Used to show the user the address to type on the other device, so the only
      * acceptable answer is an address a second device can actually open a socket to.
      *
-     * Selection is by EXCLUSION, not by an allowlist of names, and the exclusion set
-     * comes from the OS rather than from guesswork:
+     * Three rules, in this order, because each of the two previous single-rule
+     * versions of this function got a field report wrong in the OPPOSITE
+     * direction:
      *
-     *  1. Ask ConnectivityManager which interfaces belong to a CELLULAR or VPN
-     *     network and refuse those by name. This is the part that has to be right,
-     *     and it is the only source that is authoritative — vendors name the mobile
-     *     interface rmnet0, rmnet_data0, ccmni0, pdp0, clat4, rev_rmnet0 and more.
-     *  2. Refuse a short list of known-cellular and known-virtual prefixes anyway,
-     *     as a fallback for the case where step 1 returns nothing.
-     *  3. Accept whatever is left, preferring tethering interfaces over Wi-Fi.
+     *  1. POSITIVE, from the OS: if ConnectivityManager says an interface belongs
+     *     to a WIFI or ETHERNET network, any site-local IPv4 on it is the answer.
+     *     This is authoritative and needs no guessing at all. It covers the normal
+     *     case — phone joined to the same Wi-Fi router as the laptop.
      *
-     * Exclusion rather than allowlisting because the hotspot interface name is the
-     * one thing that cannot be enumerated: ap0, swlan0, softap0, wlan1 and plain
-     * wlan0 are all real, vendor-dependent spellings. An allowlist that misses the
-     * device's spelling reports "no local network" while the hotspot is running,
-     * which is the same class of wrong answer in the other direction.
+     *  2. RANGE, for tethering: 192.168/16, 172.16/12 and 169.254/16 are accepted
+     *     on any non-cellular, non-virtual interface even with NO broadcast
+     *     address. This is the rule the broadcast-only build was missing: Android
+     *     configures the softap/rndis address over netlink WITHOUT IFA_BROADCAST
+     *     on many devices, so `getBroadcast()` is null on a perfectly working
+     *     hotspot and the row reported "no local network" while clients were
+     *     already associated. Those three ranges are never handed out by a
+     *     carrier, so accepting them without the broadcast test is safe.
      *
-     * The field report this replaces: with the hotspot ON, the row advertised
-     * 10.100.144.206 — the carrier's CGNAT address on the cellular interface. It was
-     * accepted because 10.0.0.0/8 is site-local, and site-local was the whole test.
-     * No LAN client can reach it.
+     *  3. BROADCAST, for everything else: 10/8 is the one private range Iranian
+     *     carriers DO assign (10.100.144.206 on an Irancell CGNAT link is
+     *     site-local and lives on an interface whose name I did not predict), so a
+     *     10.x address is only trusted when the kernel also gave the address a
+     *     broadcast address — which a point-to-point modem link never has.
+     *
+     * The name blocklist and the CM cellular/VPN exclusion stay in front of all
+     * three as belt and braces, but nothing rests on them alone.
      */
     fun localNetworkAddress(context: Context? = null): String? {
         val interfaces = try {
@@ -277,7 +282,21 @@ object CoreConfig {
         } catch (_: java.net.SocketException) {
             return null
         }
-        val excluded = unreachableInterfaceNames(context)
+        val survey = surveyNetworks(context)
+        val excluded = survey.excludedNames
+        // Rule 1. The OS named the interface itself, so there is nothing to infer.
+        // Checked before the scan below because it is the only source that cannot
+        // be wrong, and on a phone joined to a router it is always available.
+        for (name in survey.lanNames) {
+            val nic = interfaces.firstOrNull { it.name == name } ?: continue
+            for (ifAddr in nic.interfaceAddresses) {
+                val address = ifAddr.address
+                if (address !is java.net.Inet4Address) continue
+                if (address.isLoopbackAddress) continue
+                if (!address.isSiteLocalAddress) continue
+                return address.hostAddress ?: continue
+            }
+        }
         // Tethering first: when a user shares their VPN the client is almost always
         // on the hotspot, so that address is the one that works. Wi-Fi next. Anything
         // unrecognised still ranks last but is NOT rejected — that is what keeps an
@@ -302,13 +321,25 @@ object CoreConfig {
             }
             .sortedBy { rank(it.name.orEmpty()) }
         for (nic in candidates) {
-            for (address in nic.inetAddresses) {
+            // interfaceAddresses, not inetAddresses, because only the former carries
+            // the broadcast address, which rule 3 needs.
+            for (ifAddr in nic.interfaceAddresses) {
+                val address = ifAddr.address
                 if (address !is java.net.Inet4Address) continue
                 if (address.isLoopbackAddress) continue
                 val text = address.hostAddress ?: continue
-                // Link-local is kept: a USB-tethered laptop with no DHCP lease still
-                // reaches a 169.254 address.
-                if (!address.isSiteLocalAddress && !text.startsWith("169.254")) continue
+                // Rule 2: ranges no carrier ever hands out. Accepted with or
+                // without a broadcast address, because Android brings the
+                // hotspot/rndis address up without IFA_BROADCAST on many devices
+                // and the broadcast-only build therefore reported "no local
+                // network" on a working hotspot. 169.254 is here for a USB-tethered
+                // laptop that never got a DHCP lease.
+                if (isDefinitelyLocalRange(text)) return text
+                // Rule 3: everything else — in practice 10/8, which Iranian
+                // carriers do assign on CGNAT links — needs the structural proof
+                // that this is a broadcast domain and not a point-to-point modem.
+                if (ifAddr.broadcast == null) continue
+                if (!address.isSiteLocalAddress) continue
                 return text
             }
         }
@@ -316,16 +347,51 @@ object CoreConfig {
     }
 
     /**
-     * Interface names the OS says belong to a cellular or VPN network.
+     * Ranges that can only be a local network, never a carrier link.
      *
-     * Empty when [context] is null or the query fails, in which case
-     * [isNeverReachablePrefix] is the only defence left.
+     * 192.168/16 is every consumer router and every Android hotspot; 172.16/12 is
+     * the other RFC1918 block used by tethering on some vendors; 169.254/16 is
+     * link-local, which a USB-tethered client reaches with no DHCP at all.
+     * Deliberately excludes 10/8 — that is exactly what an Irancell CGNAT link
+     * hands out, and trusting it by range is the bug this whole function keeps
+     * relapsing into.
      */
-    private fun unreachableInterfaceNames(context: Context?): Set<String> {
-        if (context == null) return emptySet()
+    private fun isDefinitelyLocalRange(text: String): Boolean {
+        if (text.startsWith("192.168.")) return true
+        if (text.startsWith("169.254.")) return true
+        if (text.startsWith("172.")) {
+            val second = text.split('.').getOrNull(1)?.toIntOrNull() ?: return false
+            return second in 16..31
+        }
+        return false
+    }
+
+    /**
+     * What the OS says about the current networks.
+     *
+     * [excludedNames] are interface names behind a cellular or VPN network.
+     * [lanNames] are interface names behind a Wi-Fi or Ethernet network — the
+     * positive half, and the only fully authoritative signal available: when the OS
+     * itself says "this interface is the Wi-Fi network", no range or broadcast
+     * heuristic can improve on it.
+     * [describe] is a one-line, log-safe summary used by the diagnostic line, so a
+     * repeat failure in the field names the interfaces instead of making me guess
+     * a third time.
+     */
+    private class NetworkSurvey(
+        val excludedNames: Set<String>,
+        val lanNames: Set<String>,
+        val describe: String,
+    )
+
+    private fun surveyNetworks(context: Context?): NetworkSurvey {
+        if (context == null) return NetworkSurvey(emptySet(), emptySet(), "no context")
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE)
-            as? android.net.ConnectivityManager ?: return emptySet()
+            as? android.net.ConnectivityManager
+            ?: return NetworkSurvey(emptySet(), emptySet(), "no ConnectivityManager")
         val names = mutableSetOf<String>()
+        val lan = mutableSetOf<String>()
+        val notes = mutableListOf<String>()
         try {
             // getAllNetworks() is deprecated but is the only one-shot enumeration;
             // the callback API would mean holding state for a value read once per
@@ -334,18 +400,72 @@ object CoreConfig {
             @Suppress("DEPRECATION")
             for (network in cm.allNetworks) {
                 val caps = cm.getNetworkCapabilities(network) ?: continue
-                val cellular = caps.hasTransport(
-                    android.net.NetworkCapabilities.TRANSPORT_CELLULAR
-                )
-                val vpn = caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
-                if (!cellular && !vpn) continue
-                cm.getLinkProperties(network)?.interfaceName?.let { names.add(it) }
+                val iface = cm.getLinkProperties(network)?.interfaceName ?: continue
+                val transports = mutableListOf<String>()
+                if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                    transports.add("cell")
+                }
+                if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) {
+                    transports.add("vpn")
+                }
+                if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)) {
+                    transports.add("wifi")
+                }
+                if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)) {
+                    transports.add("eth")
+                }
+                notes.add("$iface=${transports.joinToString("+").ifEmpty { "other" }}")
+                if (transports.contains("cell") || transports.contains("vpn")) {
+                    names.add(iface)
+                } else if (transports.contains("wifi") || transports.contains("eth")) {
+                    // Never both: a VPN network can also report wifi in its
+                    // transport set, and that entry must stay excluded.
+                    lan.add(iface)
+                }
             }
         } catch (_: SecurityException) {
-            // ACCESS_NETWORK_STATE missing. Fall through to the prefix check.
-            return emptySet()
+            // ACCESS_NETWORK_STATE missing. The range and broadcast rules stand
+            // alone in that case.
+            return NetworkSurvey(emptySet(), emptySet(), "ACCESS_NETWORK_STATE denied")
         }
-        return names
+        return NetworkSurvey(
+            names,
+            lan,
+            notes.joinToString(" ").ifEmpty { "no networks" },
+        )
+    }
+
+    /**
+     * One log-safe line describing why [localNetworkAddress] answered as it did.
+     *
+     * Exists because the first two attempts at this picked the wrong address and I
+     * had no way to tell which interface it came from — only the user's screenshot.
+     * Lists every interface with its broadcast flag, which is the deciding test, and
+     * the ConnectivityManager verdict. Addresses are private LAN addresses by
+     * definition here, and the tunnel's public exit IP is already logged elsewhere,
+     * so this leaks nothing new.
+     */
+    fun describeLocalNetworks(context: Context? = null): String {
+        val survey = surveyNetworks(context)
+        val rows = mutableListOf<String>()
+        try {
+            for (nic in java.net.NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()) {
+                val name = nic.name.orEmpty()
+                if (name.isEmpty()) continue
+                if (!runCatching { nic.isUp }.getOrDefault(false)) continue
+                if (runCatching { nic.isLoopback }.getOrDefault(false)) continue
+                for (ifAddr in nic.interfaceAddresses) {
+                    val a = ifAddr.address
+                    if (a !is java.net.Inet4Address) continue
+                    val bcast = if (ifAddr.broadcast != null) "bcast" else "p2p"
+                    rows.add("$name:${a.hostAddress}/$bcast")
+                }
+            }
+        } catch (_: java.net.SocketException) {
+            return "interface scan failed"
+        }
+        val picked = localNetworkAddress(context) ?: "none"
+        return "ifaces[${rows.joinToString(" ")}] cm[${survey.describe}] picked=$picked"
     }
 
     /**
