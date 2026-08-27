@@ -548,6 +548,11 @@ class MainActivity : Activity() {
             autoPingHandler.post(autoPingRunnable)
         }
         renderStatus()
+        // The LAN-sharing subtitle carries a live network address, and the usual way
+        // to get one is to leave for the system Wi-Fi/hotspot screen and come back.
+        // Every row this touches is null unless the settings page is on screen, so
+        // this is a no-op everywhere else.
+        refreshPsiphonRows()
     }
 
     /**
@@ -2685,7 +2690,7 @@ class MainActivity : Activity() {
         if (!lanSharingEnabled()) {
             return "Let other devices use this tunnel · Psiphon only"
         }
-        val host = CoreConfig.localNetworkAddress()
+        val host = CoreConfig.localNetworkAddress(this)
             ?: return "No local network — turn on the hotspot or join Wi-Fi"
         return "SOCKS5 $host:${CoreConfig.SOCKS_PORT} · " +
             "HTTP $host:${CoreConfig.HTTP_PROXY_PORT} · no password"

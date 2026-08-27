@@ -741,7 +741,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         activeSocksPort = port
         ConnectionLog.record("Psiphon SOCKS proxy listening on port $port")
         if (CoreConfig.lanSharingEnabled(this)) {
-            val host = CoreConfig.localNetworkAddress()
+            val host = CoreConfig.localNetworkAddress(this)
             if (host != null) {
                 ConnectionLog.record("LAN sharing: SOCKS5 at $host:$port")
             } else {
@@ -759,7 +759,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * device, and an "it's on" message they cannot act on is worthless.
      */
     override fun onListeningHttpProxyPort(port: Int) {
-        val host = CoreConfig.localNetworkAddress()
+        val host = CoreConfig.localNetworkAddress(this)
         if (host != null) {
             ConnectionLog.record("LAN sharing: HTTP proxy at $host:$port")
         } else {

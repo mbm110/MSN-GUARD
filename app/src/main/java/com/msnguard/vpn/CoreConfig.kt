@@ -244,44 +244,130 @@ object CoreConfig {
             .getBoolean(LAN_SHARING_PREF, false)
 
     /**
-     * The phone's own address on the local network, or null when it has none.
+     * The phone's own address on the LOCAL network, or null when it has none.
      *
-     * Used to show the user the address to type on the other device. Skips loopback
-     * and the app's own TUN addresses — 10.0.0.1 and friends from
-     * [Tun2SocksManager.selectPrivateAddress] are ours, not reachable from the LAN,
-     * and offering one would send the user chasing an address that cannot work.
+     * Used to show the user the address to type on the other device, so the only
+     * acceptable answer is an address a second device can actually open a socket to.
+     *
+     * Selection is by EXCLUSION, not by an allowlist of names, and the exclusion set
+     * comes from the OS rather than from guesswork:
+     *
+     *  1. Ask ConnectivityManager which interfaces belong to a CELLULAR or VPN
+     *     network and refuse those by name. This is the part that has to be right,
+     *     and it is the only source that is authoritative — vendors name the mobile
+     *     interface rmnet0, rmnet_data0, ccmni0, pdp0, clat4, rev_rmnet0 and more.
+     *  2. Refuse a short list of known-cellular and known-virtual prefixes anyway,
+     *     as a fallback for the case where step 1 returns nothing.
+     *  3. Accept whatever is left, preferring tethering interfaces over Wi-Fi.
+     *
+     * Exclusion rather than allowlisting because the hotspot interface name is the
+     * one thing that cannot be enumerated: ap0, swlan0, softap0, wlan1 and plain
+     * wlan0 are all real, vendor-dependent spellings. An allowlist that misses the
+     * device's spelling reports "no local network" while the hotspot is running,
+     * which is the same class of wrong answer in the other direction.
+     *
+     * The field report this replaces: with the hotspot ON, the row advertised
+     * 10.100.144.206 — the carrier's CGNAT address on the cellular interface. It was
+     * accepted because 10.0.0.0/8 is site-local, and site-local was the whole test.
+     * No LAN client can reach it.
      */
-    fun localNetworkAddress(): String? {
+    fun localNetworkAddress(context: Context? = null): String? {
         val interfaces = try {
             java.net.NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
         } catch (_: java.net.SocketException) {
             return null
         }
-        // Tethering interfaces first: when a user shares their VPN, the client is
-        // almost always on the hotspot, and that address is the one that works.
-        val ordered = interfaces.sortedBy { nic ->
-            val name = nic.name.orEmpty()
+        val excluded = unreachableInterfaceNames(context)
+        // Tethering first: when a user shares their VPN the client is almost always
+        // on the hotspot, so that address is the one that works. Wi-Fi next. Anything
+        // unrecognised still ranks last but is NOT rejected — that is what keeps an
+        // unknown hotspot spelling working.
+        val rank = { name: String ->
             when {
-                name.startsWith("ap") || name.startsWith("swlan") || name.startsWith("rndis") -> 0
-                name.startsWith("wlan") -> 1
-                else -> 2
+                name.startsWith("ap") || name.startsWith("swlan") || name.startsWith("softap") -> 0
+                name.startsWith("rndis") || name.startsWith("usb") -> 1
+                name.startsWith("wlan") -> 2
+                name.startsWith("eth") -> 3
+                else -> 4
             }
         }
-        for (nic in ordered) {
-            if (!runCatching { nic.isUp }.getOrDefault(false)) continue
-            if (runCatching { nic.isLoopback }.getOrDefault(true)) continue
-            // Our own TUN. Named tun0 on every Android release that matters here.
-            if (nic.name.orEmpty().startsWith("tun")) continue
+        val candidates = interfaces
+            .filter { nic ->
+                val name = nic.name.orEmpty()
+                name.isNotEmpty() &&
+                    name !in excluded &&
+                    !isNeverReachablePrefix(name) &&
+                    runCatching { nic.isUp }.getOrDefault(false) &&
+                    !runCatching { nic.isLoopback }.getOrDefault(true)
+            }
+            .sortedBy { rank(it.name.orEmpty()) }
+        for (nic in candidates) {
             for (address in nic.inetAddresses) {
                 if (address !is java.net.Inet4Address) continue
                 if (address.isLoopbackAddress) continue
                 val text = address.hostAddress ?: continue
+                // Link-local is kept: a USB-tethered laptop with no DHCP lease still
+                // reaches a 169.254 address.
                 if (!address.isSiteLocalAddress && !text.startsWith("169.254")) continue
                 return text
             }
         }
         return null
     }
+
+    /**
+     * Interface names the OS says belong to a cellular or VPN network.
+     *
+     * Empty when [context] is null or the query fails, in which case
+     * [isNeverReachablePrefix] is the only defence left.
+     */
+    private fun unreachableInterfaceNames(context: Context?): Set<String> {
+        if (context == null) return emptySet()
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as? android.net.ConnectivityManager ?: return emptySet()
+        val names = mutableSetOf<String>()
+        try {
+            // getAllNetworks() is deprecated but is the only one-shot enumeration;
+            // the callback API would mean holding state for a value read once per
+            // repaint. Both cellular and VPN are excluded: the VPN entry is our own
+            // tun, whose address is no more reachable from the LAN than the modem's.
+            @Suppress("DEPRECATION")
+            for (network in cm.allNetworks) {
+                val caps = cm.getNetworkCapabilities(network) ?: continue
+                val cellular = caps.hasTransport(
+                    android.net.NetworkCapabilities.TRANSPORT_CELLULAR
+                )
+                val vpn = caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
+                if (!cellular && !vpn) continue
+                cm.getLinkProperties(network)?.interfaceName?.let { names.add(it) }
+            }
+        } catch (_: SecurityException) {
+            // ACCESS_NETWORK_STATE missing. Fall through to the prefix check.
+            return emptySet()
+        }
+        return names
+    }
+
+    /**
+     * Names that can never carry LAN traffic, as a fallback for when
+     * ConnectivityManager tells us nothing.
+     *
+     * Cellular spellings collected from the wild plus this app's own tun and the
+     * kernel's virtual interfaces. Deliberately narrow: anything not listed here is
+     * accepted, because a false rejection hides a working hotspot.
+     */
+    private fun isNeverReachablePrefix(name: String): Boolean =
+        name.startsWith("rmnet") ||
+            name.startsWith("rev_rmnet") ||
+            name.startsWith("ccmni") ||
+            name.startsWith("pdp") ||
+            name.startsWith("clat") ||
+            name.startsWith("v4-") ||
+            name.startsWith("tun") ||
+            name.startsWith("ppp") ||
+            name.startsWith("dummy") ||
+            name.startsWith("sit") ||
+            name.startsWith("p2p")
 
     /**
      * The preferred egress country, or null when the user has not picked one.

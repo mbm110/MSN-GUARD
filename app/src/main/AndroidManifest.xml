@@ -3,6 +3,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- ACCESS_NETWORK_STATE: LAN sharing asks ConnectivityManager which interfaces
+         belong to a cellular or VPN network, so it can refuse to advertise an
+         address no LAN client can reach. Without it the query throws
+         SecurityException and CoreConfig falls back to matching interface-name
+         prefixes, which is a guess rather than an answer. Read-only, and it is one
+         of the permissions Play Protect does not treat as sensitive. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- REQUEST_INSTALL_PACKAGES is intentionally absent. The updater used to
          download an APK and drive the package installer, which needs this
          permission and is the static signature Play Protect and the OEM scanners
