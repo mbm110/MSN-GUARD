@@ -1,7 +1,19 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!--
+      FOREGROUND_SERVICE_SPECIAL_USE, not ..._DATA_SYNC. A dataSync foreground
+      service is capped at 6 hours per 24 on Android 15+ (targetSdk 36 here):
+      the system calls Service.onTimeout() and then kills the process if the
+      service has not stopped itself. A tunnel that dies after 6 hours is the
+      "app goes to sleep in the background" report, and exempting the app from
+      battery optimisation does NOT lift that cap — the timeout is by design.
+      specialUse carries no runtime timeout. It is also what every upstream VPN
+      settled on after hitting the same crash (Orbot #1263, v2rayNG, WG Tunnel);
+      systemExempted was rejected because it throws when no VPN is active yet,
+      which is exactly the state we are in while connecting.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- ACCESS_NETWORK_STATE: LAN sharing asks ConnectivityManager which interfaces
          belong to a cellular or VPN network, so it can refuse to advertise an
@@ -76,8 +88,15 @@
         <service
             android:name=".MsnGuardVpnService"
             android:exported="false"
-            android:foregroundServiceType="dataSync"
+            android:foregroundServiceType="specialUse"
             android:permission="android.permission.BIND_VPN_SERVICE">
+            <!--
+              Declared subtype is required by Play review for specialUse; it has
+              no effect at runtime, but leaving it out gets the upload rejected.
+            -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn_tunnel" />
             <intent-filter>
                 <action android:name="android.net.VpnService" />
            </intent-filter>
