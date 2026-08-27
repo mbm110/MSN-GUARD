@@ -2293,16 +2293,27 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // network) is this rung's failure, not the chain's.
                 NativeCore.prepare(config)
                 Thread({
-                    val result = NativeCore.startProxy(config)
-                    if (result != 0 && !stopRequested.get()) {
-                        val detail = NativeCore.lastError()
-                            .ifBlank { "exited with code $result" }
-                        ConnectionLog.record("Chain: $label leg ended: $detail")
-                        // Only a failure once this rung was the accepted one is the
-                        // chain's failure. Before that, ending is how a rung is
-                        // rejected and raiseOuterLeg moves on — reporting FAILED
-                        // there would abort the ladder on its first miss.
-                        if (chainOuterCommitted) {
+                    // Guarded for the same reason as the Tor front proxy's relay
+                    // threads: this is a bare thread, so anything escaping it goes
+                    // to the default handler and takes the process down instead of
+                    // failing this one rung.
+                    try {
+                        val result = NativeCore.startProxy(config)
+                        if (result != 0 && !stopRequested.get()) {
+                            val detail = NativeCore.lastError()
+                                .ifBlank { "exited with code $result" }
+                            ConnectionLog.record("Chain: $label leg ended: $detail")
+                            // Only a failure once this rung was the accepted one is the
+                            // chain's failure. Before that, ending is how a rung is
+                            // rejected and raiseOuterLeg moves on — reporting FAILED
+                            // there would abort the ladder on its first miss.
+                            if (chainOuterCommitted) {
+                                failAndStop("The $label tunnel carrying $inner dropped")
+                            }
+                        }
+                    } catch (t: Throwable) {
+                        ConnectionLog.record("Chain: $label leg threw: ${t.message}")
+                        if (chainOuterCommitted && !stopRequested.get()) {
                             failAndStop("The $label tunnel carrying $inner dropped")
                         }
                     }

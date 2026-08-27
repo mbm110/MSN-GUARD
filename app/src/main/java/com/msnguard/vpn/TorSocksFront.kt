@@ -208,24 +208,42 @@ object TorSocksFront {
         running.set(true)
 
         Thread({
-            while (running.get()) {
-                val client = try {
-                    server.accept()
-                } catch (e: Exception) {
-                    if (running.get()) ConnectionLog.record("$TAG accept failed: ${e.message}")
-                    break
+            // The accept loop must outlive anything a single connection can do.
+            // It is a bare thread, so an escape here would reach the default
+            // handler and kill the process rather than merely stop accepting.
+            try {
+                while (running.get()) {
+                    val client = try {
+                        server.accept()
+                    } catch (e: Exception) {
+                        if (running.get()) ConnectionLog.record("$TAG accept failed: ${e.message}")
+                        break
+                    }
+                    val pool = connPool
+                    if (pool == null) {
+                        closeQuietly(client)
+                        break
+                    }
+                    try {
+                        pool.execute {
+                            // A pool task's uncaught exception reaches the worker
+                            // thread's default handler and kills the process, exactly
+                            // like a bare Thread. handleClient guards itself, but the
+                            // guarantee belongs here so it cannot be lost by an edit
+                            // inside it.
+                            try {
+                                handleClient(client)
+                            } catch (_: Throwable) {
+                                closeQuietly(client)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // Pool shut down between accept and submit.
+                        closeQuietly(client)
+                    }
                 }
-                val pool = connPool
-                if (pool == null) {
-                    closeQuietly(client)
-                    break
-                }
-                try {
-                    pool.execute { handleClient(client) }
-                } catch (e: Exception) {
-                    // Pool shut down between accept and submit.
-                    closeQuietly(client)
-                }
+            } catch (t: Throwable) {
+                ConnectionLog.record("$TAG accept loop ended: ${t.message}")
             }
         }, "tor-front-accept").apply { isDaemon = true }.start()
 
@@ -476,10 +494,34 @@ object TorSocksFront {
             // Downstream on this thread, upstream on one more. Closing both
             // sockets when either direction ends is what stops half-open
             // sockets accumulating on a phone.
+            //
+            // getInputStream() is resolved HERE, inside this guarded scope,
+            // and not inside the pump lambda. Socket.getInputStream() throws
+            // SocketException("Socket is closed") the moment the socket is
+            // closed, and as the first statement of a bare Thread body that
+            // throw had nothing above it to catch: a raw thread's uncaught
+            // exception reaches the default handler, which kills the whole
+            // process. A field crash arrived on exactly that line — Tor's
+            // front proxy died and took the app with it — because the flow can
+            // be torn down in the window between start() and the lambda's
+            // first statement: either direction finishing closes both sockets,
+            // and stop() closes every one of them at once.
+            //
+            // Resolved on the owning thread the throw lands in the enclosing
+            // catch instead, which is the correct outcome: one dead flow,
+            // reset by lwIP, and a tunnel that stays up.
+            val clientIn = client.getInputStream()
             val pump = Thread({
-                pipe(client.getInputStream(), upOut, txBytes)
-                closeQuietly(upstream)
-                closeQuietly(client)
+                try {
+                    pipe(clientIn, upOut, txBytes)
+                } catch (_: Throwable) {
+                    // Per-flow and unreportable, but never fatal. A relay
+                    // thread for one TCP flow must not be able to end the
+                    // session, whatever it hits.
+                } finally {
+                    closeQuietly(upstream)
+                    closeQuietly(client)
+                }
             }, "tor-front-up").apply { isDaemon = true }
             pump.start()
 
@@ -577,7 +619,13 @@ object TorSocksFront {
                 val pool = dnsPool ?: break
                 try {
                     pool.execute {
-                        resolveThroughTor(payload, conid, address, isIpv6, output, writeLock)
+                        // Same reason as the connection pool in start(): an
+                        // uncaught throw here would kill the process, not just
+                        // this query.
+                        try {
+                            resolveThroughTor(payload, conid, address, isIpv6, output, writeLock)
+                        } catch (_: Throwable) {
+                        }
                     }
                 } catch (e: Exception) {
                     // Shutting down.
