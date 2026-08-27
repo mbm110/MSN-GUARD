@@ -250,6 +250,7 @@ class OrbitToggleRow(
     private var isOn = checked
     private val track: View
     private val thumb: View
+    private val subtitleView: TextView
     private val trackWidth = dp(46)
     private val trackHeight = dp(27)
     private val thumbSize = dp(21)
@@ -261,6 +262,11 @@ class OrbitToggleRow(
         setPadding(dp(16), dp(12), dp(14), dp(12))
         background = Sculpt.sculptedBackground(density, palette.surfaceVariant, 16, stroke = palette.divider)
 
+        subtitleView = TextView(context).apply {
+            text = subtitle
+            textSize = 12.5f
+            setTextColor(Sculpt.withAlpha(palette.muted, 0.95f))
+        }
         val texts = LinearLayout(context).apply {
             orientation = VERTICAL
             addView(TextView(context).apply {
@@ -269,11 +275,7 @@ class OrbitToggleRow(
                 setTextColor(palette.ink)
                 typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             })
-            addView(TextView(context).apply {
-                text = subtitle
-                textSize = 12.5f
-                setTextColor(Sculpt.withAlpha(palette.muted, 0.95f))
-            }, LayoutParams(
+            addView(subtitleView, LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(2) })
@@ -362,6 +364,18 @@ class OrbitToggleRow(
         isOn = value
         thumb.translationX = restingThumbX()
         renderSwitch()
+    }
+
+    /**
+     * Replace the subtitle after construction.
+     *
+     * LAN sharing needs this: the row's subtitle carries the actual address the
+     * user has to type on the other device, and that address is only known once
+     * the proxy is listening. A static subtitle would either be a lie or would
+     * force the address into a second row.
+     */
+    fun setSubtitle(text: String) {
+        subtitleView.text = text
     }
 
     private fun dp(value: Int): Int = (value * density).roundToInt()

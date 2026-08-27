@@ -213,6 +213,77 @@ object CoreConfig {
     const val EGRESS_REGION_AUTO = "auto"
 
     /**
+     * Whether Psiphon's local proxies listen on 0.0.0.0 instead of 127.0.0.1.
+     *
+     * Off by default, and deliberately so: binding to 0.0.0.0 exposes an OPEN,
+     * UNAUTHENTICATED proxy to every device that can reach the phone. On a hotspot
+     * that is only the tethered clients, but on a public Wi-Fi it is everyone on
+     * the network, and psiphon-tunnel-core has no authentication for its local
+     * proxies. It is a real exposure, not a theoretical one, so it stays an
+     * explicit opt-in with the risk stated in the UI rather than a silent default.
+     *
+     * Psiphon-only. MASQUE, WireGuard and WoW take the `tun_fd` branch in the Rust
+     * core and never bind a local listener at all, so there is nothing to share;
+     * Tor's SOCKS front is TCP-only and stays on loopback.
+     */
+    const val LAN_SHARING_PREF = "psiphon_lan_sharing"
+
+    /**
+     * HTTP proxy port for LAN sharing, alongside SOCKS on [SOCKS_PORT].
+     *
+     * Both are offered because they are not interchangeable to the client: Windows
+     * takes an HTTP proxy system-wide from Internet Options, while SOCKS has to be
+     * configured per-application. 8080 is the conventional choice and does not
+     * collide with anything else this app binds.
+     */
+    const val HTTP_PROXY_PORT = 8080
+
+    /** Whether the user has opted into exposing the local proxies on the LAN. */
+    fun lanSharingEnabled(context: Context): Boolean =
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getBoolean(LAN_SHARING_PREF, false)
+
+    /**
+     * The phone's own address on the local network, or null when it has none.
+     *
+     * Used to show the user the address to type on the other device. Skips loopback
+     * and the app's own TUN addresses — 10.0.0.1 and friends from
+     * [Tun2SocksManager.selectPrivateAddress] are ours, not reachable from the LAN,
+     * and offering one would send the user chasing an address that cannot work.
+     */
+    fun localNetworkAddress(): String? {
+        val interfaces = try {
+            java.net.NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+        } catch (_: java.net.SocketException) {
+            return null
+        }
+        // Tethering interfaces first: when a user shares their VPN, the client is
+        // almost always on the hotspot, and that address is the one that works.
+        val ordered = interfaces.sortedBy { nic ->
+            val name = nic.name.orEmpty()
+            when {
+                name.startsWith("ap") || name.startsWith("swlan") || name.startsWith("rndis") -> 0
+                name.startsWith("wlan") -> 1
+                else -> 2
+            }
+        }
+        for (nic in ordered) {
+            if (!runCatching { nic.isUp }.getOrDefault(false)) continue
+            if (runCatching { nic.isLoopback }.getOrDefault(true)) continue
+            // Our own TUN. Named tun0 on every Android release that matters here.
+            if (nic.name.orEmpty().startsWith("tun")) continue
+            for (address in nic.inetAddresses) {
+                if (address !is java.net.Inet4Address) continue
+                if (address.isLoopbackAddress) continue
+                val text = address.hostAddress ?: continue
+                if (!address.isSiteLocalAddress && !text.startsWith("169.254")) continue
+                return text
+            }
+        }
+        return null
+    }
+
+    /**
      * The preferred egress country, or null when the user has not picked one.
      *
      * Anything that is not two ASCII letters is treated as "auto" rather than

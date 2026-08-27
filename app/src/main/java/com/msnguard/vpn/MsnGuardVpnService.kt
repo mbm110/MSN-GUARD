@@ -740,6 +740,31 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     override fun onListeningSocksProxyPort(port: Int) {
         activeSocksPort = port
         ConnectionLog.record("Psiphon SOCKS proxy listening on port $port")
+        if (CoreConfig.lanSharingEnabled(this)) {
+            val host = CoreConfig.localNetworkAddress()
+            if (host != null) {
+                ConnectionLog.record("LAN sharing: SOCKS5 at $host:$port")
+            } else {
+                ConnectionLog.record(
+                    "LAN sharing is on but this device has no local network address — " +
+                        "turn on the hotspot or join a Wi-Fi network"
+                )
+            }
+        }
+    }
+
+    /**
+     * Only fires when LAN sharing wrote LocalHttpProxyPort — see buildPsiphonConfig.
+     * Logged with the address because that is what the user has to type on the other
+     * device, and an "it's on" message they cannot act on is worthless.
+     */
+    override fun onListeningHttpProxyPort(port: Int) {
+        val host = CoreConfig.localNetworkAddress()
+        if (host != null) {
+            ConnectionLog.record("LAN sharing: HTTP proxy at $host:$port")
+        } else {
+            ConnectionLog.record("LAN sharing: HTTP proxy listening on port $port")
+        }
     }
 
     override fun onConnecting() {
@@ -953,6 +978,21 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             put("TunnelProtocol", "")
             put("RemoteServerListURL", "")
             put("LocalSocksProxyPort", socksPort)
+            // --- LAN sharing, opt-in ---
+            //
+            // "any" is psiphon-tunnel-core's own spelling for 0.0.0.0 (config.go:
+            // "If 'any' is provided then use 0.0.0.0"), so no socket surgery is
+            // needed on our side. The HTTP proxy is only bound when sharing is on:
+            // Windows takes an HTTP proxy system-wide while SOCKS has to be set per
+            // application, so a shared tunnel needs both, but an unshared one has no
+            // use for a second listener and should not open one.
+            //
+            // With sharing off, neither key is written at all — the Go default is
+            // 127.0.0.1 and no HTTP proxy, which is exactly the previous behaviour.
+            if (CoreConfig.lanSharingEnabled(this@MsnGuardVpnService)) {
+                put("ListenInterface", "any")
+                put("LocalHttpProxyPort", CoreConfig.HTTP_PROXY_PORT)
+            }
             put("RemoteServerListSignaturePublicKey", "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42KcotLFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7GstZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1OgeF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xalKxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=")
             put("ServerEntrySignaturePublicKey", "sHuUVTWaRyh5pZwy4UguSgkwmBe0EHtJJkoF5WrxmvA=")
             put("ExchangeObfuscationKey", "DpXzloJk1Hw6aSzmKKky0xcahsEHubch81Mi6K0XMlU=")

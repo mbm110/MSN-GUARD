@@ -141,6 +141,9 @@ class MainActivity : Activity() {
     private var torChainOuterRow: OrbitSettingsRow? = null
     private var egressRegionRow: OrbitSettingsRow? = null
 
+    /** LAN-sharing switch; its subtitle carries the live proxy address. */
+    private var lanSharingRow: OrbitToggleRow? = null
+
     /** Settings row showing the Tor connection mode; repainted after a pick. */
     private var torModeRowRef: OrbitSettingsRow? = null
 
@@ -2297,6 +2300,37 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
 
+        // Share over LAN. Last in the section because it is the only row here that
+        // is not about how Psiphon connects — it is about who else may use it.
+        //
+        // NOT gated on the chain switch: sharing works on a plain Psiphon connect
+        // and on a chained one identically, since both end at the same local SOCKS
+        // listener. It is gated on the PSIPHON transport, because on every other
+        // transport there is no local listener to share at all.
+        val lanRow = OrbitToggleRow(
+            this,
+            palette,
+            "Share over LAN",
+            lanSharingSubtitle(),
+            lanSharingEnabled(),
+        ) { on ->
+            preferences().edit().putBoolean(CoreConfig.LAN_SHARING_PREF, on).apply()
+            ConnectionLog.record(
+                if (on) {
+                    "LAN sharing enabled — applies on the next connect"
+                } else {
+                    "LAN sharing disabled — applies on the next connect"
+                }
+            )
+            lanSharingRow?.setSubtitle(lanSharingSubtitle())
+            refreshPsiphonRows()
+        }
+        lanSharingRow = lanRow
+        content.addView(lanRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+
         // Tor section, mirroring the Psiphon one: the mode picker is the only
         // control, and it is meaningful regardless of what else is set.
         content.addView(sectionLabel("TOR"), LinearLayout.LayoutParams(
@@ -2634,6 +2668,27 @@ class MainActivity : Activity() {
         if (candidates.size > 1) return ChainOuterMode.AUTO
         return ChainOuterMode.entries.firstOrNull { it.coreName == candidates.first() }
             ?: ChainOuterMode.AUTO
+    }
+
+    private fun lanSharingEnabled(): Boolean =
+        preferences().getBoolean(CoreConfig.LAN_SHARING_PREF, false)
+
+    /**
+     * Subtitle for the LAN-sharing switch.
+     *
+     * Carries the actual address and both ports when sharing is on, so the user does
+     * not have to know or remember them — the whole point of the row is that they
+     * can read it off and type it into Windows. States the exposure when off, since
+     * that is the decision they are being asked to make.
+     */
+    private fun lanSharingSubtitle(): String {
+        if (!lanSharingEnabled()) {
+            return "Let other devices use this tunnel · Psiphon only"
+        }
+        val host = CoreConfig.localNetworkAddress()
+            ?: return "No local network — turn on the hotspot or join Wi-Fi"
+        return "SOCKS5 $host:${CoreConfig.SOCKS_PORT} · " +
+            "HTTP $host:${CoreConfig.HTTP_PROXY_PORT} · no password"
     }
 
     /** Tor's outer-transport pin, read from Tor's own key. */
@@ -3182,6 +3237,7 @@ class MainActivity : Activity() {
         psiphonChainRow = null
         chainOuterRow = null
         egressRegionRow = null
+        lanSharingRow = null
         torModeRowRef = null
         torChainRowRef = null
         torChainOuterRow = null
@@ -3231,6 +3287,15 @@ class MainActivity : Activity() {
         egressRegionRow?.apply {
             setValue(egressRegionLabel())
             setAvailable(childrenAvailable)
+        }
+        // LAN sharing is gated on the transport only, NOT on the chain switch: both
+        // a plain and a chained Psiphon connect end at the same local listener, so
+        // sharing applies either way. It stays live while connected on purpose —
+        // flipping it mid-session is legitimate, and the subtitle says the change
+        // lands on the next connect.
+        lanSharingRow?.apply {
+            setSubtitle(lanSharingSubtitle())
+            setAvailable(psiphonSelected)
         }
 
         // Tor's own switch, same rules, plus the mode condition: obfs4 and Snowflake
