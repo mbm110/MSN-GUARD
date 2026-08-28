@@ -190,7 +190,7 @@ class OrbitActionBar(
 
     data class Entry(val caption: String, val glyph: Glyph, val onClick: () -> Unit)
 
-    enum class Glyph { LOG, SPLIT, SCAN }
+    enum class Glyph { LOG, SPLIT, SCAN, CONFIG }
 
     private fun px(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
@@ -568,6 +568,20 @@ private class GlyphView(
                 paint.style = Paint.Style.FILL
                 canvas.drawCircle(cx, cy, 1.5f * d, paint)
                 paint.style = Paint.Style.STROKE
+            }
+            OrbitActionBar.Glyph.CONFIG -> {
+                // A stack of cards, matching the glyph on the home-screen config
+                // card so the two read as the same feature.
+                for (i in 0..2) {
+                    val inset = i * 3f * d
+                    val top = h * 0.16f + inset
+                    val bottom = h * 0.56f + inset
+                    if (bottom > h * 0.96f) break
+                    canvas.drawRoundRect(
+                        w * 0.16f + inset, top, w * 0.84f, bottom,
+                        2.5f * d, 2.5f * d, paint,
+                    )
+                }
             }
         }
     }

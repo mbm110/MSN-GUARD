@@ -72,6 +72,21 @@
         </activity>
 
         <!--
+          The user-config screen (paste / edit / ping V2Ray-family links).
+          Its own activity rather than a page inside MainActivity, which already
+          hosts eleven in-place pages. portrait + the same configChanges as
+          MainActivity so a rotation cannot rebuild it mid-edit and lose the
+          user's half-typed config.
+        -->
+        <activity
+            android:name=".ConfigsActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.MsnGuard" />
+
+        <!--
           Invisible helper whose only job is to let the QS tile collapse the shade.
           Own taskAffinity so it never stacks on top of MainActivity; noHistory +
           excludeFromRecents so it leaves no trace in recents.

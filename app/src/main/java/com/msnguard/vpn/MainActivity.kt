@@ -73,6 +73,9 @@ class MainActivity : Activity() {
     private var modeControlsEnabled = true
     private lateinit var transportRail: TransportRail
     private lateinit var actionBar: OrbitActionBar
+    private lateinit var configCard: ConfigCard
+    /** Set while [ConfigsActivity] is open, so onActivityResult can repaint. */
+    private val configsRequest = 8317
     private lateinit var footerWave: OrbitFooterWave
     private lateinit var statusLed: View
     private lateinit var mainRoot: FrameLayout
@@ -164,6 +167,14 @@ class MainActivity : Activity() {
     private var splitTunnelPage: View? = null
     private var splitTunnelAppsPage: View? = null
     private var splitTunnelSummaryButton: OrbitSettingsRow? = null
+    /**
+     * The settings row that mirrors the scanner's state.
+     *
+     * Nullable and repainted on the way back from the scanner page, exactly like
+     * [splitTunnelSummaryButton]: the settings page is built once, so a row whose
+     * value another page changes has to be reachable from outside its builder.
+     */
+    private var scanModeSummaryRow: OrbitSettingsRow? = null
     private var splitTunnelDraftMode: SplitTunnelSettings.Mode? = null
     private var splitTunnelDraftPackages: MutableSet<String>? = null
     private var trafficMonitorPage: View? = null
@@ -404,9 +415,14 @@ class MainActivity : Activity() {
         renderChainCard()
         actionBar = OrbitActionBar(this, palette, listOf(
             OrbitActionBar.Entry("LOG", OrbitActionBar.Glyph.LOG) { openLogsScreen() },
-            OrbitActionBar.Entry("SPLIT", OrbitActionBar.Glyph.SPLIT) { openSplitTunnelScreen() },
-            OrbitActionBar.Entry("SCAN MODE", OrbitActionBar.Glyph.SCAN) { openScannerScreen() },
+            OrbitActionBar.Entry("MY CONFIGS", OrbitActionBar.Glyph.CONFIG) { openConfigsScreen() },
         ))
+        // The home screen's headline feature, at the same weight as the transport
+        // rail. SPLIT and SCAN MODE used to occupy two of the three action cells;
+        // both moved into Settings (ROUTING & DATA and CONNECTION), because a
+        // once-a-year knob does not earn a third of the first screen while the
+        // feature that differentiates the product had no home at all.
+        configCard = ConfigCard(this, palette) { openConfigsScreen() }
         // The dead space under the action bar looked like a rendering bug. It is
         // now a thin signal trace that idles flat and grey, and ripples in the
         // connected accent once traffic is flowing. One 48-point path repainted at
@@ -548,6 +564,9 @@ class MainActivity : Activity() {
             autoPingHandler.post(autoPingRunnable)
         }
         renderStatus()
+        // The config card shows a name and a latency the configs screen can have
+        // changed while we were away, including from its own ping sweep.
+        renderConfigCard()
         // The LAN-sharing subtitle carries a live network address, and the usual way
         // to get one is to leave for the system Wi-Fi/hotspot screen and come back.
         // Every row this touches is null unless the settings page is on screen, so
@@ -572,12 +591,28 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == configsRequest) {
+            // The configs screen edited the store; repaint the home-screen card so
+            // the name, protocol and latency on it are the ones just chosen.
+            if (resultCode == RESULT_OK) renderConfigCard()
+            return
+        }
         if (requestCode == VPN_REQUEST && resultCode == RESULT_OK) {
             pendingConfig?.let(::connect)
         } else if (requestCode == VPN_REQUEST) {
             showDisconnected("VPN permission required")
         }
         pendingConfig = null
+    }
+
+    private fun openConfigsScreen() {
+        startActivityForResult(ConfigsActivity.intent(this), configsRequest)
+    }
+
+    /** Repaint the home-screen config card from the store. */
+    private fun renderConfigCard() {
+        if (!::configCard.isInitialized) return
+        configCard.render(ConfigStore.active(this), ConfigStore.count(this))
     }
 
     private fun showOpeningOverlay() {
@@ -1155,6 +1190,15 @@ class MainActivity : Activity() {
         addView(chainCard, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
+        ).apply { topMargin = dp(10) })
+
+        // The user-config card, directly under the chain card and above the action
+        // bar: in the first screen's main flow, one tap from launch, showing the
+        // active config's name, protocol and latency without opening anything.
+        // dp(60) rather than dp(56) because this card carries two lines of text.
+        addView(configCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(60),
         ).apply { topMargin = dp(10) })
 
         addView(actionBar, LinearLayout.LayoutParams(
@@ -1942,6 +1986,9 @@ class MainActivity : Activity() {
 
     private fun closeScannerScreen() {
         showingScanner = false
+        // The scanner page writes its choices straight to preferences, so the
+        // settings row that summarises them is stale the moment we pop back.
+        scanModeSummaryRow?.setValue(scanSummary())
         scannerPage?.let { animatePageClose(it) { scannerPage = null } }
     }
 
@@ -2245,6 +2292,16 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
         content.addView(navRow("Tunnel controls", "Shaping · Anti-DPI") { openTunnelControlsScreen() }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+        // Scan mode moved off the home screen's action bar. It is an endpoint-
+        // discovery knob an ordinary user never touches, and it was holding a
+        // third of the first screen that the user-config feature needed. The row
+        // is held in a field so the scanner page can repaint it on the way back,
+        // the same way the split-tunnel row already does.
+        scanModeSummaryRow = navRow("Scan mode", scanSummary()) { openScannerScreen() }
+        content.addView(scanModeSummaryRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
