@@ -121,6 +121,13 @@ struct NativeStartOptions {
     access_email: Option<String>,
     gateway: bool,
     upstream_proxy: Option<String>,
+    /// `ip:port` for the HTTP CONNECT proxy, or empty/absent for none.
+    ///
+    /// Android-only channel for what the CLI reads from `AETHER_HTTP_PROXY`: a
+    /// process cannot set an environment variable on itself before the library is
+    /// already loaded and running, so LAN sharing on the WARP transports had no way
+    /// to ask for the HTTP listener at all before this field existed.
+    http_proxy: Option<String>,
 }
 
 impl Default for NativeStartOptions {
@@ -156,6 +163,7 @@ impl Default for NativeStartOptions {
             access_email: None,
             gateway: false,
             upstream_proxy: None,
+            http_proxy: None,
         }
     }
 }
@@ -210,6 +218,10 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.access_email = value.access_email.filter(|value| !value.trim().is_empty());
         options.gateway = value.gateway;
         options.upstream_proxy = value.upstream_proxy.filter(|v| !v.trim().is_empty());
+        options.http_proxy = match value.http_proxy.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(raw) => Some(parse_address("http_proxy", raw)?),
+        };
         Ok(options)
     }
 }

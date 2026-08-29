@@ -81,14 +81,36 @@ object CoreConfig {
         return JSONObject().apply {
             put("config_path", File(context.filesDir, "aether.toml").absolutePath)
             put("protocol", protocol ?: text("default_protocol", "masque"))
-            // The app is VPN-mode only: the whole device is tunnelled and there is
-            // no user-facing proxy any more. `listen` is still sent because the
-            // core requires the field, but in VPN mode no SOCKS listener is ever
-            // bound from it — MASQUE/WireGuard/WARP-on-WARP take the `tun_fd`
-            // branch in main.rs, and Psiphon owns this port itself via
-            // LocalSocksProxyPort. Fixed at 1819 so the TUN can be pre-created
-            // before Psiphon starts.
-            put("listen", "127.0.0.1:${listenOverride ?: SOCKS_PORT}")
+            // Where the core's own SOCKS listener goes.
+            //
+            // Three cases, and the first two are why this is not a constant any more:
+            //
+            //  - CHAINED OUTER LEG (listenOverride set): always loopback. It is an
+            //    internal pipe between the core and Psiphon/Tor inside this process,
+            //    and publishing it on the LAN would hand strangers the raw WARP leg.
+            //  - SOCKS TUNNEL TYPE on a WARP transport: the listener IS the product,
+            //    so it binds the user's port, and 0.0.0.0 when they asked to share it.
+            //    MASQUE/WireGuard/WoW reach `socks::serve` through the no-tun_fd
+            //    branch in main.rs, which is the same code path the chain's outer leg
+            //    has been using in the field.
+            //  - VPN mode: unused. The core takes the tun_fd branch and never binds,
+            //    but the field is still required by the deserializer.
+            if (listenOverride != null) {
+                // Internal pipe: loopback ALWAYS, whatever the sharing preference
+                // says. Publishing the chain's outer leg would hand anyone on the
+                // network the bare WARP tunnel with no Psiphon or Tor above it.
+                put("listen", "127.0.0.1:$listenOverride")
+            } else {
+                put("listen", "${proxyBindHost(context)}:${sharedSocksPort(context)}")
+            }
+            // HTTP CONNECT proxy, only when sharing is on and this session actually
+            // publishes a listener. Windows takes an HTTP proxy system-wide while
+            // SOCKS has to be set per application, so a shared tunnel needs both.
+            // Never on the chained outer leg, for the same reason its SOCKS stays on
+            // loopback.
+            if (listenOverride == null && proxyOnly(context) && lanSharingEnabled(context)) {
+                put("http_proxy", "0.0.0.0:$HTTP_PROXY_PORT")
+            }
             put("scan_mode", text("default_scan_mode", "balanced"))
             put("ip_scan", text("default_scan", "v4"))
             put("endpoint_cache_path", File(context.filesDir, "masque-gateway-cache.json").absolutePath)
@@ -222,9 +244,17 @@ object CoreConfig {
      * proxies. It is a real exposure, not a theoretical one, so it stays an
      * explicit opt-in with the risk stated in the UI rather than a silent default.
      *
-     * Psiphon-only. MASQUE, WireGuard and WoW take the `tun_fd` branch in the Rust
-     * core and never bind a local listener at all, so there is nothing to share;
-     * Tor's SOCKS front is TCP-only and stays on loopback.
+     * Applies to every transport now, by a different mechanism for each:
+     *
+     *  - PSIPHON: `ListenInterface: "any"` + `LocalHttpProxyPort`, in its own config.
+     *  - MASQUE / WireGuard / WoW: only in SOCKS tunnel type, where the core takes
+     *    the no-`tun_fd` branch and binds `listen` — moved to 0.0.0.0 by
+     *    [proxyBindHost], with `http_proxy` alongside it. In VPN mode these bind
+     *    nothing at all, so there is still nothing to share.
+     *  - TOR: a second `SocksPort`/`HTTPTunnelPort` on 0.0.0.0 in the torrc, guarded
+     *    by a `SocksPolicy` that accepts private ranges only. tor's own listener,
+     *    not TorSocksFront — that one is a udpgw-speaking bridge for tun2socks and
+     *    stays on loopback where only tun2socks can reach it.
      */
     const val LAN_SHARING_PREF = "psiphon_lan_sharing"
 
@@ -318,6 +348,32 @@ object CoreConfig {
             .getInt(PROXY_PORT_PREF, DEFAULT_PROXY_PORT)
         return if (portRejection(stored) == null) stored else DEFAULT_PROXY_PORT
     }
+
+    /**
+     * Host the core's SOCKS listener binds, for a session that publishes one.
+     *
+     * Loopback unless the user opted into LAN sharing AND this is a proxy-mode
+     * session. Both conditions matter: sharing is meaningless without a listener,
+     * and a listener must not silently appear on the LAN because a preference was
+     * left on from a Psiphon session.
+     */
+    fun proxyBindHost(context: Context): String =
+        if (proxyOnly(context) && lanSharingEnabled(context)) "0.0.0.0" else "127.0.0.1"
+
+    /**
+     * The port this session publishes — what [json] binds, and what the user types
+     * on the other device.
+     *
+     * One function for both so the config, the settings subtitle and the connected
+     * line cannot disagree about a number the user has to copy by hand. In SOCKS
+     * mode it is the port they chose; in VPN mode it stays [SOCKS_PORT], which is
+     * both what Psiphon publishes (its LocalSocksProxyPort) and an inert value in
+     * the core's config, since the `tun_fd` branch never binds `listen` at all.
+     * VPN-mode configs therefore stay byte-identical to the shipped whole-device
+     * path.
+     */
+    fun sharedSocksPort(context: Context): Int =
+        if (proxyOnly(context)) proxyListenPort(context) else SOCKS_PORT
 
     /**
      * Why [port] cannot be used, or null when it is fine.

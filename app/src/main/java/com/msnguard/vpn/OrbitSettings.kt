@@ -197,11 +197,22 @@ class OrbitSettingsRow(
      * sheet whose choice has no effect.
      */
     fun setAvailable(available: Boolean) {
-        if (isEnabled == available) return
+        // Deliberately NOT short-circuited on `isEnabled == available`.
+        //
+        // That guard was a real bug: rows are constructed enabled, so the first
+        // setAvailable(true) returned before touching alpha — and the settings page
+        // runs a staggered entrance animation that sets every child to alpha 0 and
+        // animates it back to 1. A row greyed before the animation was therefore
+        // re-lit by it, and the guard then refused to grey it again. The field
+        // symptom was Psiphon's and Tor's rows looking live on a MASQUE page while
+        // taps did nothing, because isClickable was false underneath a full-opacity
+        // row. Re-applying all four properties every time is cheap and idempotent.
         isEnabled = available
         isClickable = available
         isFocusable = available
-        alpha = if (available) 1f else 0.42f
+        // Cancel any entrance animation still in flight, or it lands on 1f after this.
+        animate().cancel()
+        alpha = if (available) 1f else DISABLED_ROW_ALPHA
     }
 
     private fun dp(value: Int): Int = (value * density).roundToInt()
@@ -210,6 +221,15 @@ class OrbitSettingsRow(
         val DESTRUCTIVE = 0xFFFF6B7F.toInt()
     }
 }
+
+/**
+ * Opacity of a row that exists but cannot be used right now.
+ *
+ * One constant instead of a literal in each setAvailable: the settings page reads
+ * as broken when two rows disabled for the same reason are drawn at different
+ * opacities, which is what happened while these were separate 0.42f literals.
+ */
+internal const val DISABLED_ROW_ALPHA = 0.42f
 
 /** A chevron drawn with two strokes; avoids shipping another vector asset. */
 private class ChevronGlyph(context: Context, private val color: Int) : View(context) {
@@ -349,13 +369,16 @@ class OrbitToggleRow(
      * to tell that flipping it did nothing.
      */
     fun setAvailable(available: Boolean) {
-        if (isEnabled == available) return
+        // Not short-circuited, for the reason spelled out in
+        // [OrbitSettingsRow.setAvailable]: the page's entrance animation overwrites
+        // alpha, so this has to be safe to call repeatedly with the same value.
         isEnabled = available
         isClickable = available
         isFocusable = available
         track.isClickable = available
         track.isFocusable = available
-        alpha = if (available) 1f else 0.42f
+        animate().cancel()
+        alpha = if (available) 1f else DISABLED_ROW_ALPHA
     }
 
     /** Repaint to [value] without invoking the toggle callback. */

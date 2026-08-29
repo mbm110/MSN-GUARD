@@ -410,15 +410,47 @@ object TorManager {
         // proxy belongs in the torrc — see the note above.
         val proxyGoesInTorrc = transport == null && bridges.isEmpty()
 
+        // LAN sharing publishes TOR'S OWN SocksPort, not TorSocksFront.
+        //
+        // The front-end is a udpgw-speaking bridge built for tun2socks: it answers
+        // REP_CMD_NOT_SUPPORTED to UDP ASSOCIATE and reserves CONNECT to
+        // 127.0.0.1:7300 for the udpgw stream. A phone or a PC pointed at it would
+        // work for TCP and fail silently on every UDP flow. tor's SocksPort is the
+        // general-purpose server, and it resolves names itself over the circuit —
+        // which is what a remote client needs, since it has no access to DNSPort.
+        val share = CoreConfig.lanSharingEnabled(context)
         val text = buildString {
             appendLine("SocksPort 127.0.0.1:$TOR_SOCKS_PORT")
             appendLine("DNSPort 127.0.0.1:$TOR_DNS_PORT")
+            if (share) {
+                // A SECOND listener, on the port the settings row advertises. The
+                // loopback one above is left exactly as it was so tun2socks and the
+                // front-end are untouched by this setting.
+                appendLine("SocksPort 0.0.0.0:${CoreConfig.SOCKS_PORT}")
+                // Windows takes an HTTP proxy system-wide; SOCKS has to be set per
+                // application. tor speaks both, so both are offered.
+                appendLine("HTTPTunnelPort 0.0.0.0:${CoreConfig.HTTP_PROXY_PORT}")
+            }
             appendLine("DataDirectory ${dataDir.absolutePath}")
             // Everything Tor might otherwise offer to the network. This is a
             // client and only ever a client.
             appendLine("ClientOnly 1")
-            appendLine("SocksPolicy accept 127.0.0.0/8")
-            appendLine("SocksPolicy reject *")
+            if (share) {
+                // PRIVATE RANGES ONLY, and this is the whole security story of the
+                // feature: the listener is unauthenticated, so what keeps it from
+                // being an open proxy is that tor itself refuses any client that is
+                // not on a local network. `reject *` still terminates the policy, so
+                // a public address that somehow reached the socket is dropped by tor
+                // before a circuit is built.
+                appendLine("SocksPolicy accept 127.0.0.0/8")
+                appendLine("SocksPolicy accept 10.0.0.0/8")
+                appendLine("SocksPolicy accept 172.16.0.0/12")
+                appendLine("SocksPolicy accept 192.168.0.0/16")
+                appendLine("SocksPolicy reject *")
+            } else {
+                appendLine("SocksPolicy accept 127.0.0.0/8")
+                appendLine("SocksPolicy reject *")
+            }
             // `info`, not `notice`, deliberately.
             //
             // Two field devices reported tor dying at 0% with nothing in the log

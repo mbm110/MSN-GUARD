@@ -60,6 +60,15 @@ pub struct StartOptions {
     pub access_email: Option<String>,
     pub gateway: bool,
     pub upstream_proxy: Option<String>,
+    /// Where to publish the HTTP CONNECT proxy alongside SOCKS, if anywhere.
+    ///
+    /// Only meaningful on the no-`tun_fd` path: that is the branch that builds the
+    /// userspace netstack and can serve local clients at all. Used to be read
+    /// exclusively from `AETHER_HTTP_PROXY`, which Android has no way to set on its
+    /// own process — so on Android the HTTP proxy could never be turned on even
+    /// though the code to serve it was already here. Carried in the config now, and
+    /// the environment variable is still honoured as a fallback for the CLI.
+    pub http_proxy: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +166,7 @@ impl StartOptions {
             access_email: None,
             gateway: false,
             upstream_proxy: None,
+            http_proxy: None,
         }
     }
 
@@ -1634,7 +1644,7 @@ async fn run_masque_tunnel(
                 }
             }
         });
-        http_task = spawn_http_proxy(&stack);
+        http_task = spawn_http_proxy(&stack, options);
         tokio::spawn(async move {
             log::info!("[+] socks5 server listening on {listen}");
             socks::serve(listen, stack).await
@@ -2182,7 +2192,7 @@ async fn run_wireguard_tunnel(
             inbound_rx,
             outbound_tx,
         )?;
-        http_task = spawn_http_proxy(&stack);
+        http_task = spawn_http_proxy(&stack, options);
         tokio::spawn(async move {
             log::info!("[+] socks5 server listening on {listen}");
             socks::serve(listen, stack).await
@@ -2219,7 +2229,12 @@ async fn run_wireguard_tunnel(
 
 type TunnelExit = tokio::task::JoinHandle<Result<()>>;
 
-fn http_proxy_listen() -> Option<SocketAddr> {
+fn http_proxy_listen(options: &StartOptions) -> Option<SocketAddr> {
+    // The config wins: on Android it is the only channel that exists, because
+    // nothing can set an environment variable on our own already-running process.
+    if let Some(addr) = options.http_proxy {
+        return Some(addr);
+    }
     let raw = std::env::var("AETHER_HTTP_PROXY").ok()?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -2234,8 +2249,11 @@ fn http_proxy_listen() -> Option<SocketAddr> {
     }
 }
 
-fn spawn_http_proxy(stack: &netstack::StackHandle) -> Option<TunnelExit> {
-    let listen = http_proxy_listen()?;
+fn spawn_http_proxy(
+    stack: &netstack::StackHandle,
+    options: &StartOptions,
+) -> Option<TunnelExit> {
+    let listen = http_proxy_listen(options)?;
     let stack = stack.clone();
     Some(tokio::spawn(async move {
         log::info!("[+] http proxy listening on {listen}");
@@ -2592,7 +2610,7 @@ async fn run_warp_in_warp(
         )
         .await?;
         log::info!("[+] socks5 server listening on {listen}");
-        http_task = spawn_http_proxy(&inner_stack);
+        http_task = spawn_http_proxy(&inner_stack, options);
         let local_task = tokio::spawn(async move { socks::serve(listen, inner_stack).await });
         (inner_exit, local_task)
     };

@@ -1783,13 +1783,24 @@ class MainActivity : Activity() {
         top.translationX = 0f
     }
 
+    /**
+     * Fade the children in one after another.
+     *
+     * Animates to each child's OWN target opacity, not to 1f. A disabled row is
+     * drawn at [DISABLED_ROW_ALPHA] and this animation used to overwrite that with
+     * full opacity — so on the settings page every Psiphon and Tor row looked live
+     * while MASQUE was selected, and tapping them did nothing because isClickable
+     * was still false underneath. That mismatch is exactly the "greyed rows are not
+     * grey" bug; the animation was the cause, not the availability logic.
+     */
     private fun staggerListItems(container: ViewGroup) {
         for (i in 0 until container.childCount) {
             val child = container.getChildAt(i)
+            val target = if (child.isEnabled) 1f else DISABLED_ROW_ALPHA
             child.alpha = 0f
             child.translationY = dp(12).toFloat()
             child.animate()
-                .alpha(1f)
+                .alpha(target)
                 .translationY(0f)
                 .setDuration(PAGE_ANIMATION_MS)
                 .setStartDelay(80L + i * 32L)
@@ -2396,6 +2407,43 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
+        // Share over LAN, directly under the port it publishes.
+        //
+        // Moved out of the PSIPHON section: it is not Psiphon's any more. Every
+        // transport can be shared now — Psiphon in both tunnel types, MASQUE/
+        // WireGuard/WoW in SOCKS mode, Tor through its own SocksPort in VPN mode —
+        // so keeping it under a PSIPHON header would say the opposite of what it
+        // does. It belongs next to Tunnel type and SOCKS port, which are the two
+        // rows that decide what actually gets shared.
+        val lanRow = OrbitToggleRow(
+            this,
+            palette,
+            "Share over LAN",
+            lanSharingSubtitle(),
+            lanSharingEnabled() && lanSharingCapable(),
+        ) { on ->
+            preferences().edit().putBoolean(CoreConfig.LAN_SHARING_PREF, on).apply()
+            ConnectionLog.record(
+                if (on) {
+                    "LAN sharing enabled — applies on the next connect"
+                } else {
+                    "LAN sharing disabled — applies on the next connect"
+                }
+            )
+            // Log the interface survey whenever sharing is switched on. Two builds
+            // in a row advertised an unreachable address and the only evidence was
+            // a screenshot of the result; this records the inputs.
+            if (on) {
+                ConnectionLog.record("LAN survey: " + CoreConfig.describeLocalNetworks(this))
+            }
+            lanSharingRow?.setSubtitle(lanSharingSubtitle())
+            refreshPsiphonRows()
+        }
+        lanSharingRow = lanRow
+        content.addView(lanRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
         // Held in a field, not a local: the mode screen is a separate page that
         // writes the preference and pops back here, so the row that shows the
         // current mode has to be repaintable from outside this builder. Without
@@ -2474,43 +2522,6 @@ class MainActivity : Activity() {
         }
         egressRegionRow = countryRow
         content.addView(countryRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-
-        // Share over LAN. Last in the section because it is the only row here that
-        // is not about how Psiphon connects — it is about who else may use it.
-        //
-        // NOT gated on the chain switch: sharing works on a plain Psiphon connect
-        // and on a chained one identically, since both end at the same local SOCKS
-        // listener. It is gated on the PSIPHON transport, because on every other
-        // transport there is no local listener to share at all.
-        val lanRow = OrbitToggleRow(
-            this,
-            palette,
-            "Share over LAN",
-            lanSharingSubtitle(),
-            lanSharingEnabled(),
-        ) { on ->
-            preferences().edit().putBoolean(CoreConfig.LAN_SHARING_PREF, on).apply()
-            ConnectionLog.record(
-                if (on) {
-                    "LAN sharing enabled — applies on the next connect"
-                } else {
-                    "LAN sharing disabled — applies on the next connect"
-                }
-            )
-            // Log the interface survey whenever sharing is switched on. Two builds
-            // in a row advertised an unreachable address and the only evidence was
-            // a screenshot of the result; this records the inputs.
-            if (on) {
-                ConnectionLog.record("LAN survey: " + CoreConfig.describeLocalNetworks(this))
-            }
-            lanSharingRow?.setSubtitle(lanSharingSubtitle())
-            refreshPsiphonRows()
-        }
-        lanSharingRow = lanRow
-        content.addView(lanRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
@@ -2639,6 +2650,13 @@ class MainActivity : Activity() {
         page.requestApplyInsets()
         if (animate) {
             animatePageOpen(page)
+            // Ordering matters and is the whole fix: refreshPsiphonRows() ran at the
+            // end of the builder above, so every row already carries its real
+            // isEnabled state, and staggerListItems reads that state to pick each
+            // row's target opacity. Re-asserting availability AFTER this call would
+            // be worse than redundant — setAvailable cancels a running animation, so
+            // it would snap the enabled rows to full opacity while the ungated ones
+            // (labels, section headers) kept fading, which looks like a broken page.
             staggerListItems(content)
         }
     }
@@ -2866,13 +2884,45 @@ class MainActivity : Activity() {
      * that is the decision they are being asked to make.
      */
     private fun lanSharingSubtitle(): String {
+        if (!lanSharingCapable()) {
+            // Say what to change, not just that it is unavailable. The one transport
+            // that cannot share in SOCKS mode is Tor, and the one combination that
+            // cannot share at all is a WARP transport in VPN mode — where the core
+            // binds no listener because it is driving the TUN directly.
+            return if (selectedProtocol == Protocol.TOR && CoreConfig.proxyOnly(this)) {
+                "Tor cannot run as a SOCKS proxy — set Tunnel type to VPN"
+            } else {
+                "Set Tunnel type to SOCKS proxy to share ${selectedProtocol.label}"
+            }
+        }
         if (!lanSharingEnabled()) {
-            return "Let other devices use this tunnel · Psiphon only"
+            return "Let other devices use this tunnel"
         }
         val host = CoreConfig.localNetworkAddress(this)
             ?: return "No local network — turn on the hotspot or join Wi-Fi"
-        return "SOCKS5 $host:${CoreConfig.SOCKS_PORT} · " +
+        return "SOCKS5 $host:${CoreConfig.sharedSocksPort(this)} · " +
             "HTTP $host:${CoreConfig.HTTP_PROXY_PORT} · no password"
+    }
+
+    /**
+     * Whether the selected transport can publish a listener on the LAN at all.
+     *
+     * Per transport, because each reaches the network differently:
+     *
+     *  - PSIPHON: always. Its Go controller binds the listener in both tunnel types
+     *    (1819 in VPN mode, the user's port in SOCKS mode) and `ListenInterface:
+     *    "any"` moves it off loopback.
+     *  - TOR: only in VPN mode, which is also the only mode Tor supports. The torrc
+     *    adds a second SocksPort plus an HTTPTunnelPort on 0.0.0.0, restricted to
+     *    private ranges by SocksPolicy.
+     *  - MASQUE / WireGuard / WoW: only in SOCKS mode. In VPN mode the core takes the
+     *    `tun_fd` branch and binds nothing, so there is genuinely nothing to share —
+     *    which is what the old "Psiphon only" wording was really describing.
+     */
+    private fun lanSharingCapable(): Boolean = when (selectedProtocol) {
+        Protocol.PSIPHON -> true
+        Protocol.TOR -> !CoreConfig.proxyOnly(this)
+        else -> CoreConfig.proxyOnly(this)
     }
 
     /** Tor's outer-transport pin, read from Tor's own key. */
@@ -3146,15 +3196,28 @@ class MainActivity : Activity() {
                 if (it == CoreConfig.TUNNEL_MODE_VPN) {
                     "Every app goes through the tunnel"
                 } else {
-                    "Only apps you point at the port · Psiphon, alone or over WARP"
+                    // Names the one transport that cannot do it, since that is the
+                    // only way the choice can fail and the user should learn it here
+                    // rather than from a failed connect.
+                    "Only apps you point at the port · every transport except Tor"
                 }
             },
         ) { chosen ->
             preferences().edit().putString(CoreConfig.TUNNEL_MODE_PREF, chosen).apply()
             tunnelTypeRow?.setValue(tunnelTypeLabel())
+            // Tor has no general-purpose local listener to publish: tun2socks talks
+            // to TorSocksFront, which speaks udpgw and refuses UDP ASSOCIATE, so an
+            // app pointed at it would break on its first UDP flow. Say so at the
+            // moment of the choice instead of letting the connect fail later.
+            if (chosen == CoreConfig.TUNNEL_MODE_PROXY && selectedProtocol == Protocol.TOR) {
+                toastShort("Tor cannot run as a SOCKS proxy — pick another transport")
+            }
             // The port row is the thing that visibly reacts to this choice, so it is
-            // repainted and re-enabled in the same gesture.
-            refreshTunnelTypeRows()
+            // repainted and re-enabled in the same gesture, and the LAN row with it:
+            // what can be shared depends on the tunnel type now.
+            // refreshPsiphonRows() ends by calling refreshTunnelTypeRows(), so this
+            // one call repaints the port row, the LAN row and every gated row at once.
+            refreshPsiphonRows()
             ConnectionLog.record(
                 if (chosen == CoreConfig.TUNNEL_MODE_PROXY) {
                     "Tunnel type: SOCKS proxy on port ${CoreConfig.proxyListenPort(this)} — " +
@@ -3258,6 +3321,11 @@ class MainActivity : Activity() {
      */
     private fun refreshTunnelTypeRows() {
         val proxy = CoreConfig.proxyOnly(this)
+        // The transport picker itself. Locked mid-session for the same reason the
+        // rail is: the running tunnel cannot change transport, and a row that opens
+        // a picker whose choice is ignored until the next connect is the same bug as
+        // the greyed-looking-live rows below.
+        connectionModeRow?.setAvailable(modeControlsEnabled)
         tunnelTypeRow?.apply {
             setValue(tunnelTypeLabel())
             setAvailable(modeControlsEnabled)
@@ -3649,14 +3717,17 @@ class MainActivity : Activity() {
             setValue(egressRegionLabel())
             setAvailable(childrenAvailable)
         }
-        // LAN sharing is gated on the transport only, NOT on the chain switch: both
-        // a plain and a chained Psiphon connect end at the same local listener, so
-        // sharing applies either way. It stays live while connected on purpose —
-        // flipping it mid-session is legitimate, and the subtitle says the change
-        // lands on the next connect.
+        // LAN sharing is no longer Psiphon-only: MASQUE/WireGuard/WoW publish a real
+        // SOCKS5 listener in SOCKS tunnel type, and Tor publishes its own SocksPort
+        // in VPN mode. [lanSharingCapable] holds the per-transport rule; the row is
+        // greyed only for the combinations that bind no listener at all.
+        //
+        // Left live while connected on purpose — flipping it mid-session is
+        // legitimate and the subtitle says the change lands on the next connect.
         lanSharingRow?.apply {
+            setChecked(lanSharingEnabled() && lanSharingCapable())
             setSubtitle(lanSharingSubtitle())
-            setAvailable(psiphonSelected)
+            setAvailable(lanSharingCapable())
         }
 
         // Tor's own switch, same rules, plus the mode condition: obfs4 and Snowflake
@@ -3686,6 +3757,12 @@ class MainActivity : Activity() {
         // is written to torrc on every Tor session, chained or not — so the only
         // conditions are "Tor is selected" and "not locked mid-session".
         torRegionRowRef?.setAvailable(torSelected && modeControlsEnabled)
+        // Tor's OWN "Connection mode" row (Direct/Meek/obfs4/Snowflake). It was the
+        // last row in either section with no availability rule at all, so on a page
+        // where MASQUE was selected it stayed fully live and opened a sheet that
+        // configured a transport the next connect would not use. Same rule as every
+        // other Tor row: only on TOR, only while not locked mid-session.
+        torModeRowRef?.setAvailable(torSelected && modeControlsEnabled)
         // Chained onto this repaint rather than wired into all nine call sites
         // separately: every one of them (protocol change, connect, disconnect,
         // returning from a sheet) is also a moment the tunnel-type pair can go stale,
@@ -4336,9 +4413,9 @@ class MainActivity : Activity() {
             // "SOCKS proxy" — while one of them is riding a WARP leg that is the
             // reason it works at all on a blocking carrier.
             CoreConfig.proxyOnly(this) && chainRunning() ->
-                "SOCKS proxy on 127.0.0.1:${CoreConfig.proxyListenPort(this)} · over WARP"
+                "SOCKS proxy on ${proxyReachLine()} · over WARP"
             CoreConfig.proxyOnly(this) ->
-                "SOCKS proxy on 127.0.0.1:${CoreConfig.proxyListenPort(this)}"
+                "SOCKS proxy on ${proxyReachLine()}"
             // Say what is actually carrying traffic. With the chain armed the rail
             // reads PSIPHON or TOR, so "<transport> tunnel is active" hides the WARP
             // leg that is doing the circumvention.
@@ -4490,6 +4567,13 @@ class MainActivity : Activity() {
         // anyway. Locked while connected, like the rail.
         modeControlsEnabled = enabled
         renderChainCard()
+        // The settings page can be open behind the dial while a connect completes,
+        // and every gated row reads this flag. Without this repaint the rows keep
+        // whatever availability they were given when the page was built, so a
+        // session started from the dial left the whole page live and tapping a row
+        // opened a sheet whose choice could not apply. The refs are null when the
+        // page is closed, so this is a no-op then.
+        refreshPsiphonRows()
     }
 
     /**
@@ -4873,6 +4957,24 @@ class MainActivity : Activity() {
      * the TUN is created before Psiphon starts, so the port must be known up
      * front.
      */
+    /**
+     * Where to point a client at this session's SOCKS listener.
+     *
+     * Quotes the LAN address instead of loopback when sharing is on and the phone
+     * has one, because that is the address the user has to type on the OTHER
+     * device — and this line is what they read immediately after connecting. Falls
+     * back to loopback rather than claiming an address that cannot be reached.
+     */
+    private fun proxyReachLine(): String {
+        val port = CoreConfig.sharedSocksPort(this)
+        val host = if (CoreConfig.lanSharingEnabled(this)) {
+            CoreConfig.localNetworkAddress(this) ?: "127.0.0.1"
+        } else {
+            "127.0.0.1"
+        }
+        return "$host:$port"
+    }
+
     private fun socksPort(): Int =
         if (TunnelStatus.isActive() && TorManager.isTorActive) {
             TorManager.FRONT_SOCKS_PORT
