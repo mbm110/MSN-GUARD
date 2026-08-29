@@ -3585,4 +3585,22 @@ object ConnectionLog {
 
     @Synchronized
     fun snapshot(): List<String> = entries.toList()
+
+    /**
+     * Drop every buffered line and truncate the mirror file.
+     *
+     * Exists because the log screen is read while debugging a specific attempt:
+     * with 100 buffered app lines plus the core's own buffer, a fresh connect is
+     * unreadable next to the previous one's noise. Clearing before a retry is the
+     * difference between a usable log and scrolling.
+     *
+     * The core's own buffer (NativeCore.lastLog) is not ours to clear, so a
+     * cleared screen refills with whatever the core still holds. That is honest:
+     * the button clears what this app owns and says so in the toast.
+     */
+    @Synchronized
+    fun clear() {
+        entries.clear()
+        runCatching { sink?.writeText("") }
+    }
 }

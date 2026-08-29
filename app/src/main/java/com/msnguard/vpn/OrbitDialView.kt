@@ -33,7 +33,10 @@ import kotlin.math.sin
  *  5. progress arc — sweeps while connecting, settles at ~85% when connected
  *  6. the glass core: radial specular, body gradient, bevel edge, inner bottom
  *     shadow, and a sheen band that crosses every ~5s
- *  7. contents: shield + "TAP TO CONNECT" when down, session timer when up
+ *  7. contents: shield + "TAP TO CONNECT" when down, an outward radar sweep +
+ *     "CONNECTING" while negotiating, session timer when up. The shield carries
+ *     a checkmark, so it must never appear before CONNECTED — see
+ *     [drawSeekingGlyph].
  *
  * GEOMETRY, and why it matters: the halo and the ripples grow *beyond* the ring.
  * The first Orbit build sized the ring to the full view, so the pulse expanded
@@ -470,6 +473,39 @@ class OrbitDialView(
             return
         }
 
+        // CONNECTING gets its own glyph, never the shield.
+        //
+        // The shield carries a checkmark, and a checkmark means "done" in every
+        // UI a user has ever seen — so during a 20-second Psiphon handshake the
+        // dial was actively lying, and people reported being connected while the
+        // tunnel was still negotiating. Nothing that resolves to a tick may be
+        // drawn before State.CONNECTED.
+        //
+        // What replaces it: three arcs of an expanding radar sweep, drawn in
+        // amber, each one further out and fainter, cycling on the same loop
+        // fraction that already drives the arc and the pulse. It reads as
+        // "reaching out, no answer yet" and cannot be mistaken for a success
+        // mark. Free to animate — the loop animator is already running in this
+        // state, so this adds no timer and no wakeups.
+        if (state == State.CONNECTING) {
+            drawSeekingGlyph(canvas, cx, cy, geo)
+
+            textPaint.typeface = labelTypeface
+            textPaint.textAlign = Paint.Align.CENTER
+            textPaint.textSize = 10.5f * density * geo
+            textPaint.letterSpacing = 0.19f
+            textPaint.color = palette.amber
+            // The percentage stays, appended to the caption instead of occupying
+            // the middle of the dial: it is real information when the transport
+            // reports it, and joining it to the word keeps a number from ever
+            // sitting alone where the tick used to be. Transports that cannot
+            // measure progress print no figure (see progressPercent).
+            val caption = if (progressPercent >= 0) "CONNECTING $progressPercent%" else "CONNECTING"
+            canvas.drawText(caption, cx, cy + dp(26) * geo, textPaint)
+            textPaint.letterSpacing = 0f
+            return
+        }
+
         // Shield glyph + call to action.
         val shieldTop = cy - dp(30) * geo
         val shieldW = dp(30) * geo
@@ -478,35 +514,8 @@ class OrbitDialView(
         paint.strokeWidth = 2f * density
         paint.strokeJoin = Paint.Join.ROUND
         paint.color = when (state) {
-            State.CONNECTING -> palette.amber
             State.FAILED -> palette.danger
             else -> Sculpt.withAlpha(palette.muted, 0.9f)
-        }
-        // While a connect is measurably progressing, the percentage replaces the
-        // shield glyph: the spinner already says "working", so the number is the
-        // only new information. Transports that cannot measure progress keep the
-        // glyph — no fabricated figure (see progressPercent).
-        if (state == State.CONNECTING && progressPercent >= 0) {
-            textPaint.typeface = monoTypeface
-            textPaint.textAlign = Paint.Align.CENTER
-            textPaint.textSize = 22f * density * geo
-            textPaint.color = palette.amber
-            canvas.drawText("$progressPercent%", cx, cy - dp(4) * geo, textPaint)
-            textPaint.typeface = labelTypeface
-            textPaint.textSize = 9f * density * geo
-            textPaint.letterSpacing = 0.19f
-            textPaint.color = Sculpt.withAlpha(palette.faint, 0.95f)
-            canvas.drawText("PROGRESS", cx, cy + dp(12) * geo, textPaint)
-            textPaint.letterSpacing = 0f
-
-            textPaint.typeface = labelTypeface
-            textPaint.textAlign = Paint.Align.CENTER
-            textPaint.textSize = 10.5f * density * geo
-            textPaint.letterSpacing = 0.19f
-            textPaint.color = palette.amber
-            canvas.drawText("CONNECTING", cx, cy + dp(26) * geo, textPaint)
-            textPaint.letterSpacing = 0f
-            return
         }
         val path = Path().apply {
             moveTo(cx, shieldTop)
@@ -539,18 +548,74 @@ class OrbitDialView(
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.textSize = 10.5f * density * geo
         textPaint.letterSpacing = 0.19f
+        // CONNECTING never reaches here — it returned above with its own glyph —
+        // so only the resting and failed captions are left.
         textPaint.color = when (state) {
-            State.CONNECTING -> palette.amber
             State.FAILED -> palette.danger
             else -> Sculpt.withAlpha(palette.faint, 0.95f)
         }
         val cta = when (state) {
-            State.CONNECTING -> "CONNECTING"
             State.FAILED -> "RETRY"
             else -> "TAP TO CONNECT"
         }
         canvas.drawText(cta, cx, cy + dp(26) * geo, textPaint)
         textPaint.letterSpacing = 0f
+    }
+
+    /**
+     * The CONNECTING glyph: an outward radar sweep.
+     *
+     * Replaces the shield-with-tick, which read as "connected" while the tunnel
+     * was still negotiating. Three arcs leave a small solid core and travel
+     * outward, each fading as it goes, so the motion is unmistakably "still
+     * trying" — an open shape with no terminal state, the visual opposite of a
+     * checkmark.
+     *
+     * The arcs are drawn on [loopFraction], which the loop animator already
+     * advances in this state (1150ms per cycle), so nothing new is scheduled and
+     * the cost is three drawArc calls per existing frame.
+     *
+     * Deliberately arcs facing up rather than full circles: a full ring at this
+     * radius collides with the gauge ticks and the progress arc, and a partial
+     * arc also gives the sweep a direction.
+     */
+    private fun drawSeekingGlyph(canvas: Canvas, cx: Float, cy: Float, geo: Float) {
+        val amber = palette.amber
+        // The core dot: breathes on the same pulse as the halo, so the glyph has
+        // a fixed anchor and the eye has something to hold while the arcs move.
+        paint.style = Paint.Style.FILL
+        paint.shader = null
+        paint.color = Sculpt.withAlpha(amber, 0.85f)
+        canvas.drawCircle(cx, cy - dp(6) * geo, (2.6f + pulse * 0.9f) * density * geo, paint)
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeCap = Paint.Cap.ROUND
+        val base = dp(7) * geo
+        val step = 7.5f * density * geo
+        for (index in 0 until 3) {
+            // Each arc is a third of a cycle behind the one inside it, so they
+            // leave the core in sequence instead of pulsing together.
+            val phase = (loopFraction + index / 3f) % 1f
+            val radius = base + step * index + phase * step
+            // Fades with distance AND with its own phase: an arc is brightest as
+            // it leaves and gone by the time it reaches the next arc's start, so
+            // the ring count reads as three no matter where the cycle is.
+            val alpha = (0.72f - index * 0.18f) * (1f - phase)
+            if (alpha <= 0.02f) continue
+            paint.color = Sculpt.withAlpha(amber, alpha)
+            paint.strokeWidth = (2.1f - index * 0.35f) * density
+            bounds.set(
+                cx - radius,
+                cy - dp(6) * geo - radius,
+                cx + radius,
+                cy - dp(6) * geo + radius,
+            )
+            // -128° start over a 76° sweep: an arc centred on straight up, wide
+            // enough to read as a wavefront and narrow enough to stay clear of
+            // the caption below.
+            canvas.drawArc(bounds, -128f, 76f, false, paint)
+        }
+        paint.strokeCap = Paint.Cap.BUTT
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean = when (event.actionMasked) {

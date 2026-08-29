@@ -37,6 +37,7 @@ import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import android.widget.EditText
 import android.widget.CheckBox
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -164,6 +165,8 @@ class MainActivity : Activity() {
     private var splitTunnelPage: View? = null
     private var splitTunnelAppsPage: View? = null
     private var splitTunnelSummaryButton: OrbitSettingsRow? = null
+    /** Repainted when the verbosity sheet picks a new level. */
+    private var logVerbosityRow: OrbitSettingsRow? = null
     private var splitTunnelDraftMode: SplitTunnelSettings.Mode? = null
     private var splitTunnelDraftPackages: MutableSet<String>? = null
     private var trafficMonitorPage: View? = null
@@ -1459,38 +1462,18 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(16) })
-        val logLevelRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val currentLogLevel = logLevel()
-        LogLevel.entries.forEach { level ->
-            val isActive = level == currentLogLevel
-            val chip = label(level.label, 14f, if (isActive) primaryContainer else INK, TypefaceStyle.MEDIUM).apply {
-                gravity = Gravity.CENTER
-                setPadding(dp(15), dp(8), dp(15), dp(8))
-                background = roundedBackground(if (isActive) primary else SURFACE_VARIANT, 14, if (isActive) primary else DIVIDER)
-                isClickable = true
-                isFocusable = true
-                setOnClickListener {
-                    preferences().edit().putString(LOG_LEVEL, level.coreName).apply()
-                    for (i in 0 until logLevelRow.childCount) {
-                        val child = logLevelRow.getChildAt(i) as TextView
-                        val childLevel = LogLevel.entries[i]
-                        val selected = childLevel == level
-                        child.setTextColor(if (selected) primaryContainer else INK)
-                        child.background = roundedBackground(if (selected) primary else SURFACE_VARIANT, 12, if (selected) primary else DIVIDER)
-                    }
-                }
-            }
-            logLevelRow.addView(chip, LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
-            ).apply { rightMargin = dp(4) })
-        }
-        content.addView(logLevelRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(0); rightMargin = dp(0); bottomMargin = dp(12) })
+        // The five ERROR/WARN/INFO/DEBUG/TRACE chips that used to sit here are
+        // gone. They wrote `log_level` to preferences, and CoreConfig does read
+        // that key — but only when a config is BUILT, i.e. at the next connect.
+        // Tapping one while looking at a live log therefore did nothing
+        // observable, which is exactly what it looked like. The verbosity knob
+        // now lives only in Settings, next to the other once-a-year knobs, and
+        // this row carries three controls that act on what is on screen right
+        // now.
+        //
+        // Declared before the row so the button lambdas can flip them.
+        var paused = false
+        var wrapLines = true
         val logTabs = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1526,18 +1509,100 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { bottomMargin = dp(12) })
+
+        // The log text view and its scroller are built before the tool row
+        // because the row's buttons act on them directly (wrap toggles the view's
+        // scrolling mode, clear forces a repaint). They are ADDED to the content
+        // afterwards, so the on-screen order is still tabs → tools → log.
         val events = label(textSize = 13f, color = INK).apply {
             typeface = android.graphics.Typeface.MONOSPACE
             setTextIsSelectable(true)
         }
         var followLatest = true
-        val scroll = ScrollView(this).apply {
+        // Wrap-off needs a horizontal scroller, not just setHorizontallyScrolling:
+        // that call only stops the TextView wrapping, and without a scroller
+        // beside it the long lines are simply clipped at the right edge. The pair
+        // is ScrollView → HorizontalScrollView → TextView, so the log pans in
+        // both axes when wrap is off and behaves exactly as before when it is on.
+        val hScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
             addView(events)
+        }
+        val scroll = ScrollView(this).apply {
+            addView(hScroll)
             setOnScrollChangeListener { _, _, scrollY, _, _ ->
                 val contentHeight = getChildAt(0)?.height ?: 0
                 followLatest = scrollY >= contentHeight - height - dp(8)
             }
         }
+        // Held here rather than inside the refresh Runnable so Clear can null it
+        // and force the next tick to repaint even if the text is unchanged.
+        var renderedLogs: String? = null
+
+        // The three controls that replace the dead verbosity chips. Every one of
+        // them changes something visible immediately, which is the whole test the
+        // old row failed.
+        val toolRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        fun paintChip(chip: TextView, on: Boolean) {
+            chip.setTextColor(if (on) primaryContainer else INK)
+            chip.background = roundedBackground(
+                if (on) primary else SURFACE_VARIANT,
+                14,
+                if (on) primary else DIVIDER,
+            )
+        }
+
+        fun toolChip(caption: String, onClick: (TextView) -> Unit): TextView =
+            label(caption, 13f, INK, TypefaceStyle.MEDIUM).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                background = roundedBackground(SURFACE_VARIANT, 14, DIVIDER)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                    onClick(this)
+                }
+            }
+
+        // PAUSE freezes the view so a line can actually be read. Without it the
+        // 750ms refresh yanks the scroll position away mid-read whenever the core
+        // is chatty, which during a connect is always.
+        val pauseChip = toolChip("Pause") {
+            paused = !paused
+            it.text = if (paused) "Resume" else "Pause"
+            paintChip(it, paused)
+        }
+        // WRAP off makes the text view scroll horizontally instead, so long
+        // Psiphon JSON notices stop wrapping into six-line paragraphs.
+        val wrapChip = toolChip("Wrap") {
+            wrapLines = !wrapLines
+            paintChip(it, wrapLines)
+            events.setHorizontallyScrolling(!wrapLines)
+            events.requestLayout()
+        }
+        val clearChip = toolChip("Clear") {
+            ConnectionLog.clear()
+            renderedLogs = null
+            Toast.makeText(this, "App log cleared", Toast.LENGTH_SHORT).show()
+        }
+        paintChip(wrapChip, true)
+        toolRow.addView(pauseChip, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            rightMargin = dp(4)
+        })
+        toolRow.addView(wrapChip, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            rightMargin = dp(4)
+        })
+        toolRow.addView(clearChip, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        content.addView(toolRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { bottomMargin = dp(12) })
         content.addView(scroll, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             0,
@@ -1561,17 +1626,20 @@ class MainActivity : Activity() {
             insets
         }
         val refreshHandler = Handler(Looper.getMainLooper())
-        var renderedLogs: String? = null
         val refresh = object : Runnable {
             override fun run() {
-                val updatedLogs = connectionLogText(selectedLogTab)
-                if (updatedLogs != renderedLogs) {
-                    val keepAtBottom = followLatest || renderedLogs == null
-                    events.text = updatedLogs
-                    renderedLogs = updatedLogs
-                    if (keepAtBottom) {
-                        scroll.post {
-                            scroll.scrollTo(0, (scroll.getChildAt(0)?.height ?: 0) - scroll.height)
+                // Paused keeps polling but stops touching the view, so the text
+                // and the scroll position both hold still while a line is read.
+                if (!paused) {
+                    val updatedLogs = connectionLogText(selectedLogTab)
+                    if (updatedLogs != renderedLogs) {
+                        val keepAtBottom = followLatest || renderedLogs == null
+                        events.text = updatedLogs
+                        renderedLogs = updatedLogs
+                        if (keepAtBottom) {
+                            scroll.post {
+                                scroll.scrollTo(0, (scroll.getChildAt(0)?.height ?: 0) - scroll.height)
+                            }
                         }
                     }
                 }
@@ -1593,13 +1661,41 @@ class MainActivity : Activity() {
         logsPage?.let { animatePageClose(it) { logsPage = null } }
     }
 
+    /**
+     * Pages whose closing animation is still running.
+     *
+     * [animatePageClose] removes its page inside the animation's end action, so
+     * for the whole animation the view is still a child of [pageHost]. Two pages
+     * closing in the same frame — exactly what the Apps screen's Done button
+     * does, closing itself and the Split page — then both resolved "the page
+     * behind" by child-index arithmetic and landed on the same view, so
+     * [mainRoot] never got its alpha and scale restored. The home screen stayed
+     * dimmed, taps still worked, and only a process restart cleared it.
+     */
+    private val closingPages = mutableSetOf<View>()
+
+    /**
+     * The view that should carry the lit backdrop below [page].
+     *
+     * Searched by identity from the top of the stack rather than by index
+     * arithmetic, and skipping anything already on its way out: restoring a page
+     * that is about to be removed loses the restore entirely.
+     */
+    private fun backdropBelow(page: View): View {
+        for (i in pageHost.childCount - 1 downTo 0) {
+            val child = pageHost.getChildAt(i)
+            if (child !== page && child !in closingPages) return child
+        }
+        return mainRoot
+    }
+
     private fun animatePageOpen(page: View) {
         page.alpha = 0f
         page.translationY = dp(24).toFloat()
         page.scaleX = 0.92f
         page.scaleY = 0.92f
 
-        val behind = if (pageHost.childCount > 1) pageHost.getChildAt(pageHost.childCount - 2) else mainRoot
+        val behind = backdropBelow(page)
         behind.animate()
             .alpha(0.5f)
             .scaleX(0.94f)
@@ -1619,6 +1715,9 @@ class MainActivity : Activity() {
     }
 
     private fun animatePageClose(page: View, onEnd: () -> Unit) {
+        // Marked before the backdrop is resolved so a second page closing in the
+        // same frame cannot pick this one as its backdrop.
+        closingPages.add(page)
         page.animate()
             .alpha(0f)
             .translationY(dp(24).toFloat())
@@ -1627,12 +1726,17 @@ class MainActivity : Activity() {
             .setDuration(LOG_CLOSE_ANIMATION_MS)
             .setInterpolator(motionInterpolator)
             .withEndAction {
+                closingPages.remove(page)
                 if (page.parent == pageHost) pageHost.removeView(page)
                 onEnd()
+                // The stack is only truly known once every closing page is gone:
+                // the last one out restores whatever is left underneath. Without
+                // this, closing two pages at once left the winner dimmed.
+                if (closingPages.isEmpty()) restoreTopBackdrop()
             }
             .start()
 
-        val behind = if (pageHost.childCount > 1) pageHost.getChildAt(pageHost.childCount - 2) else mainRoot
+        val behind = backdropBelow(page)
         behind.animate()
             .alpha(1f)
             .scaleX(1f)
@@ -1640,6 +1744,27 @@ class MainActivity : Activity() {
             .setDuration(LOG_CLOSE_ANIMATION_MS)
             .setInterpolator(motionInterpolator)
             .start()
+    }
+
+    /**
+     * Force the visible top of the stack back to full opacity and scale.
+     *
+     * The safety net for the dimmed-home-screen bug: whatever ends up on top
+     * after a close is asserted lit, without animating, so no ordering of
+     * overlapping page transitions can leave a dimmed view on screen.
+     */
+    private fun restoreTopBackdrop() {
+        val top = if (pageHost.childCount > 0) {
+            pageHost.getChildAt(pageHost.childCount - 1)
+        } else {
+            mainRoot
+        }
+        top.animate().cancel()
+        top.alpha = 1f
+        top.scaleX = 1f
+        top.scaleY = 1f
+        top.translationY = 0f
+        top.translationX = 0f
     }
 
     private fun staggerListItems(container: ViewGroup) {
@@ -2245,6 +2370,16 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
         content.addView(navRow("Tunnel controls", "Shaping · Anti-DPI") { openTunnelControlsScreen() }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+        // Log verbosity: moved here from the Logs screen, where five chips looked
+        // like live filters and were in fact a build-time core setting — a tap did
+        // nothing until the next connect. Here the value is visible in the row and
+        // the "next connection" wording sets the expectation.
+        val logLevelRow = navRow("Log verbosity", logLevel().label) { chooseLogLevel() }
+        logVerbosityRow = logLevelRow
+        content.addView(logLevelRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
@@ -2927,14 +3062,17 @@ class MainActivity : Activity() {
 
 
     private fun chooseLogLevel() = showChoiceSheet(
-        title = "Log level",
-        subtitle = "Control verbosity of logs",
+        title = "Log verbosity",
+        // Says when it takes effect, because it does not take effect now: the
+        // value is read while the core config is assembled, i.e. at connect.
+        subtitle = "How much the core logs · applies next connection",
         options = LogLevel.entries.toList(),
         selected = logLevel(),
         label = { it.label },
         description = { it.description },
     ) { chosen ->
         preferences().edit().putString(LOG_LEVEL, chosen.coreName).apply()
+        logVerbosityRow?.setValue(chosen.label)
     }
 
     private fun manageGatewayCache() = showChoiceSheet(
