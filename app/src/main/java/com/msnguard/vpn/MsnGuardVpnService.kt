@@ -823,8 +823,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // to be done here instead, or the UI sits on "Connecting" over a working
             // proxy: mark connected, replace the placeholder notification, and arm
             // the watchdog.
+            //
+            // Reached by a CHAINED SOCKS session too, and the log says which: the
+            // two are indistinguishable otherwise, and knowing whether a WARP leg
+            // sits under the listener is the first question a support log has to
+            // answer.
             ConnectionLog.record(
-                "SOCKS5 proxy ready at $socksProxy — set it in an app to route that app"
+                if (chainMode) {
+                    "SOCKS5 proxy ready at $socksProxy — Psiphon is riding the WARP leg; " +
+                        "set it in an app to route that app"
+                } else {
+                    "SOCKS5 proxy ready at $socksProxy — set it in an app to route that app"
+                }
             )
             connected.set(true)
             // The one thing that makes every UI surface see this session at all:
@@ -1405,6 +1415,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     /**
+     * The port Psiphon's own listener will bind on the next dial.
+     *
+     * One function because there are now four places that have to agree with
+     * [buildPsiphonConfig]'s `LocalSocksProxyPort`, and three of them used to
+     * hardcode [CoreConfig.SOCKS_PORT]. In SOCKS mode that was a lie the moment a
+     * rung escalated: the config carried the user's port while every consumer of
+     * [activeSocksPort] — the health gate above all — was sent to 1819.
+     */
+    private fun plannedSocksPort(): Int =
+        if (proxyMode) CoreConfig.proxyListenPort(this) else CoreConfig.SOCKS_PORT
+
+    /**
      * Move to the next rung and re-dial, or give up if the ladder is exhausted.
      *
      * The TUN interface is deliberately left up across rungs: it was created
@@ -1435,7 +1457,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 if (stopRequested.get()) return@execute
                 try { psiphonTunnel?.stop() } catch (_: Exception) {}
                 psiphonTunnel = null
-                activeSocksPort = CoreConfig.SOCKS_PORT
+                activeSocksPort = plannedSocksPort()
                 try { Thread.sleep(1200) } catch (_: InterruptedException) {}
                 if (stopRequested.get()) return@execute
                 startPsiphonTunnel()
@@ -1476,7 +1498,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // Tear down only the Psiphon controller. The TUN stays up.
             try { psiphonTunnel?.stop() } catch (_: Exception) {}
             psiphonTunnel = null
-            activeSocksPort = CoreConfig.SOCKS_PORT
+            activeSocksPort = plannedSocksPort()
             try { Thread.sleep(1200) } catch (_: InterruptedException) {}
             if (stopRequested.get()) return@execute
             startPsiphonTunnel()
@@ -1781,7 +1803,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private fun startChainTunnel() {
         chainMode = true
         chainOuterCommitted = false
-        psiphonVpnMode = true
+        // FALSE in SOCKS mode, and this single line is the difference between the
+        // two shapes of a chained run:
+        //
+        //  - VPN:   TUN + tun2socks, Psiphon on the fixed 1819, onConnected() bridges.
+        //  - SOCKS: no TUN at all, Psiphon on the user's port, onConnected() stops at
+        //           "the listener IS the deliverable".
+        //
+        // It was unconditionally true, which is what made the field report's chained
+        // SOCKS session build a TUN, start tun2socks on the user's port and then be
+        // judged dead by a health gate dialling 1819 — 373 KB had already crossed
+        // the tunnel when "No reachability after 15 probes" tore it down.
+        psiphonVpnMode = !proxyMode
         psiphonVpnActivated = false
         // chainMode is set first, so this reads the chained ladder and the chained
         // remembered rung. Reading the unchained key here is what started the very
@@ -1793,26 +1826,39 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
         worker.execute {
             try {
-                val address = Tun2SocksManager.selectPrivateAddress()
-                ConnectionLog.record("Chain: creating TUN before either tunnel starts")
-                tun = Builder()
-                    .setSession("MSN-GUARD")
-                    .setMtu(Tun2SocksManager.VPN_INTERFACE_MTU)
-                    .addAddress(address.ipAddress, address.prefixLength)
-                    .addRoute("0.0.0.0", 0)
-                    .addRoute(address.subnet, address.prefixLength)
-                    .addDnsServer(address.router)
-                    // Same reasoning as the plain Psiphon path: public resolvers
-                    // plus our own exclusion, so both legs can resolve names
-                    // over the carrier link before any tunnel exists.
-                    .addDnsServer("1.1.1.1")
-                    .addDnsServer("8.8.8.8")
-                    // Same reason as the plain Psiphon path: the Split screen's
-                    // choice has to apply to chained runs too, and our own package
-                    // stays off the TUN in every mode.
-                    .applySplitTunneling()
-                    .establish() ?: error("Android could not establish the VPN interface")
-                vpnModeActive.set(true)
+                // No TUN in SOCKS mode. Constraint 1 above (create the TUN before
+                // either tunnel, so Psiphon's NetworkMonitor does not see tun0
+                // appear as a network change) does not apply when there is no TUN
+                // to create — and building one anyway is what asked Android for a
+                // consent this mode deliberately never requests, then handed
+                // tun2socks a device-wide route the user did not choose.
+                if (!proxyMode) {
+                    val address = Tun2SocksManager.selectPrivateAddress()
+                    ConnectionLog.record("Chain: creating TUN before either tunnel starts")
+                    tun = Builder()
+                        .setSession("MSN-GUARD")
+                        .setMtu(Tun2SocksManager.VPN_INTERFACE_MTU)
+                        .addAddress(address.ipAddress, address.prefixLength)
+                        .addRoute("0.0.0.0", 0)
+                        .addRoute(address.subnet, address.prefixLength)
+                        .addDnsServer(address.router)
+                        // Same reasoning as the plain Psiphon path: public resolvers
+                        // plus our own exclusion, so both legs can resolve names
+                        // over the carrier link before any tunnel exists.
+                        .addDnsServer("1.1.1.1")
+                        .addDnsServer("8.8.8.8")
+                        // Same reason as the plain Psiphon path: the Split screen's
+                        // choice has to apply to chained runs too, and our own package
+                        // stays off the TUN in every mode.
+                        .applySplitTunneling()
+                        .establish() ?: error("Android could not establish the VPN interface")
+                    vpnModeActive.set(true)
+                } else {
+                    ConnectionLog.record(
+                        "Chain in SOCKS mode — no VPN interface; WARP carries Psiphon and " +
+                            "Psiphon publishes the listener"
+                    )
+                }
 
                 NativeCore.attach(this)
                 val outer = raiseOuterLeg() ?: error(
@@ -1830,7 +1876,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 ConnectionLog.record("Chain: outer leg ready — starting Psiphon through it")
 
                 // --- Inner leg: Psiphon, dialling out through the outer SOCKS ---
-                activeSocksPort = CoreConfig.SOCKS_PORT
+                //
+                // The port must match what buildPsiphonConfig() puts in
+                // LocalSocksProxyPort, because this is the number every consumer
+                // reads: tun2socks in VPN mode, and the UI's health gate plus the
+                // user's own apps in SOCKS mode. Hardcoding SOCKS_PORT here while
+                // the config carried the user's port is precisely the mismatch that
+                // produced "No reachability after 15 probes" over a live tunnel.
+                activeSocksPort = plannedSocksPort()
                 startPsiphonTunnel()
                 sendStatus(STATUS_CONNECTING, "Connecting Psiphon through $outer…")
             } catch (e: Exception) {
@@ -2116,6 +2169,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // the only thing that can break it. Same test as the VPN path, reached via
         // proxyMode because psiphonVpnMode is false here by construction.
         if ((psiphonVpnMode || proxyMode) && psiphonTunnel == null) return "the Psiphon tunnel is gone"
+        // Chained SOCKS only: Psiphon dials every server through the core's listener
+        // on CHAIN_SOCKS_PORT, so the outer leg dying leaves a Go controller that is
+        // still "running" with no route out. In VPN mode this check is deliberately
+        // NOT applied — that path is unchanged from the shipped build, and its
+        // routing test above is what owns liveness there.
+        if (proxyMode && chainMode && !NativeCore.isRunning()) {
+            return "the WARP leg carrying Psiphon stopped"
+        }
         return null
     }
 
@@ -2547,6 +2608,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // leg) but MASQUE/WireGuard/WoW here take the tun_fd branch, and Tor's
         // front-end is a udpgw-speaking bridge for tun2socks, not a general SOCKS
         // server — pointing Telegram at it would fail on the first UDP flow.
+        //
+        // PSIPHON-OVER-WARP passes this test on purpose: its marker contains
+        // "PSIPHON", and the mode it produces is still a Psiphon listener — the WARP
+        // leg sits *under* it as an upstream proxy rather than replacing it. The
+        // chain's own SOCKS branch in startChainTunnel() is what makes that true.
         if (proxyMode && !currentProtocol.contains("PSIPHON")) {
             connected.set(false)
             failAndStop(

@@ -3146,7 +3146,7 @@ class MainActivity : Activity() {
                 if (it == CoreConfig.TUNNEL_MODE_VPN) {
                     "Every app goes through the tunnel"
                 } else {
-                    "Only apps you point at the port · Psiphon only"
+                    "Only apps you point at the port · Psiphon, alone or over WARP"
                 }
             },
         ) { chosen ->
@@ -4330,6 +4330,13 @@ class MainActivity : Activity() {
             // read as "my phone is protected", which is exactly what it is not. The
             // port is repeated here because this is the line the user looks at right
             // after connecting, and it is what they must type into Telegram.
+            //
+            // The chain is named when it is running, because in SOCKS mode the two
+            // sessions look identical on this line otherwise — same port, same
+            // "SOCKS proxy" — while one of them is riding a WARP leg that is the
+            // reason it works at all on a blocking carrier.
+            CoreConfig.proxyOnly(this) && chainRunning() ->
+                "SOCKS proxy on 127.0.0.1:${CoreConfig.proxyListenPort(this)} · over WARP"
             CoreConfig.proxyOnly(this) ->
                 "SOCKS proxy on 127.0.0.1:${CoreConfig.proxyListenPort(this)}"
             // Say what is actually carrying traffic. With the chain armed the rail
