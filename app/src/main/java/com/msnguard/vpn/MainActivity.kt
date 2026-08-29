@@ -154,6 +154,18 @@ class MainActivity : Activity() {
     /** Settings row showing the preferred Tor exit country. */
     private var torRegionRowRef: OrbitSettingsRow? = null
 
+    /** The Tunnel type picker (VPN vs SOCKS proxy) in the CONNECTION section. */
+    private var tunnelTypeRow: OrbitSettingsRow? = null
+
+    /**
+     * The proxy-port row: greyed while the tunnel type is VPN, live in SOCKS mode.
+     *
+     * Held as a field because the type picker has to enable it in place — the user
+     * chooses SOCKS and the port box under it must light up immediately, which is
+     * the whole interaction the request describes.
+     */
+    private var proxyPortRow: OrbitSettingsRow? = null
+
     private var showingLogs = false
     private var showingScanner = false
     private var showingMode = false
@@ -1326,7 +1338,11 @@ class MainActivity : Activity() {
             // implies a live SOCKS listener on this port. Otherwise the Rust core
             // is running: it only has a SOCKS listener in proxy mode, never when
             // it is driving a TUN directly.
-            (Tun2SocksManager.isRunning || !TunnelStatus.isNativeTunMode)
+            //
+            // Proxy mode is the third case and it MUST go through the proxy: there is
+            // no TUN, so an unproxied request leaves over the carrier link and would
+            // paint the user's real IP on the card while the proxy works fine.
+            (Tun2SocksManager.isRunning || TunnelStatus.isProxyMode || !TunnelStatus.isNativeTunMode)
 
         val target = URL(url)
         val connection = if (useSocksProxy) {
@@ -2358,6 +2374,28 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
+        // Tunnel type comes FIRST in this section, above the transport picker.
+        //
+        // It is the most consequential switch in the app — it decides whether the
+        // whole phone is tunnelled or only the apps the user points at a port — and
+        // it changes what every row below it means. Burying it under Psiphon/Tor
+        // detail would repeat the mistake the log-level chips made: a real decision
+        // parked where nobody looks.
+        val typeRow = navRow("Tunnel type", tunnelTypeLabel()) { chooseTunnelType() }
+        tunnelTypeRow = typeRow
+        content.addView(typeRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
+        // The port box: directly under the type it belongs to, and inert until SOCKS
+        // is chosen. Greyed rather than hidden, so the user can see that choosing
+        // SOCKS is what unlocks it instead of a row appearing out of nowhere.
+        val portRow = navRow("SOCKS port", proxyPortValue()) { editProxyPort() }
+        proxyPortRow = portRow
+        content.addView(portRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
         // Held in a field, not a local: the mode screen is a separate page that
         // writes the preference and pops back here, so the row that shows the
         // current mode has to be repaintable from outside this builder. Without
@@ -3075,6 +3113,175 @@ class MainActivity : Activity() {
         logVerbosityRow?.setValue(chosen.label)
     }
 
+    /** Label for the Tunnel type row: what the whole-phone/one-port choice is set to. */
+    private fun tunnelTypeLabel(): String =
+        if (CoreConfig.proxyOnly(this)) "SOCKS proxy" else "VPN (whole device)"
+
+    /** Value shown on the port row — the port, or why it is inert. */
+    private fun proxyPortValue(): String {
+        val port = CoreConfig.proxyListenPort(this)
+        return if (CoreConfig.proxyOnly(this)) "$port" else "$port · VPN mode"
+    }
+
+    /**
+     * The tunnel-type picker.
+     *
+     * Locked while a session is live, exactly like the transport rail: switching
+     * from VPN to proxy mid-session would mean tearing down a TUN and rebuilding the
+     * data path under the user, and the honest thing is to say "disconnect first"
+     * rather than to half-apply it.
+     */
+    private fun chooseTunnelType() {
+        if (!modeControlsEnabled || TunnelStatus.isActive()) {
+            toastShort("Disconnect first to change the tunnel type")
+            return
+        }
+        showChoiceSheet(
+            title = "Tunnel type",
+            subtitle = "How MSN-GUARD carries your traffic",
+            options = listOf(CoreConfig.TUNNEL_MODE_VPN, CoreConfig.TUNNEL_MODE_PROXY),
+            selected = CoreConfig.tunnelMode(this),
+            label = { if (it == CoreConfig.TUNNEL_MODE_VPN) "VPN (whole device)" else "SOCKS proxy" },
+            description = {
+                if (it == CoreConfig.TUNNEL_MODE_VPN) {
+                    "Every app goes through the tunnel"
+                } else {
+                    "Only apps you point at the port · Psiphon only"
+                }
+            },
+        ) { chosen ->
+            preferences().edit().putString(CoreConfig.TUNNEL_MODE_PREF, chosen).apply()
+            tunnelTypeRow?.setValue(tunnelTypeLabel())
+            // The port row is the thing that visibly reacts to this choice, so it is
+            // repainted and re-enabled in the same gesture.
+            refreshTunnelTypeRows()
+            ConnectionLog.record(
+                if (chosen == CoreConfig.TUNNEL_MODE_PROXY) {
+                    "Tunnel type: SOCKS proxy on port ${CoreConfig.proxyListenPort(this)} — " +
+                        "applies on the next connect"
+                } else {
+                    "Tunnel type: whole-device VPN — applies on the next connect"
+                }
+            )
+        }
+    }
+
+    /**
+     * Port editor for proxy mode, with an explicit Apply.
+     *
+     * Apply rather than save-on-type because the port only means anything once it is
+     * validated: [CoreConfig.portRejection] refuses privileged and internally-used
+     * ports, and a silently-rejected value would leave the user pointing Telegram at
+     * a port nothing is listening on.
+     */
+    private fun editProxyPort() {
+        if (!CoreConfig.proxyOnly(this)) {
+            toastShort("Set Tunnel type to SOCKS proxy first")
+            return
+        }
+        if (TunnelStatus.isActive()) {
+            toastShort("Disconnect first to change the port")
+            return
+        }
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val field = settingsField(
+            value = CoreConfig.proxyListenPort(this).toString(),
+            hintText = "1024–65535",
+        ).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setSingleLine(true)
+        }
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            background = roundedBackground(SURFACE, 28, SURFACE)
+        }
+        sheet.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label("SOCKS port", 22f, INK, TypefaceStyle.MEDIUM))
+        })
+        // The address is stated here because it is the question every user of this
+        // feature actually has, and getting it wrong is the most likely way for the
+        // feature to look broken: an app on THIS phone must dial 127.0.0.1. 0.0.0.0
+        // is a bind address, not a destination — it belongs to LAN sharing, where
+        // another device connects to this phone's LAN IP.
+        sheet.addView(label(
+            "In the app, use host 127.0.0.1 with this port. " +
+                "Applies on the next connect.",
+            14f, MUTED,
+        ), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        val entry = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        entry.addView(field, LinearLayout.LayoutParams(0, dp(56), 1f))
+        entry.addView(createSettingsButton("Apply") {
+            val typed = field.text.toString().trim().toIntOrNull()
+            if (typed == null) {
+                field.error = "Numbers only"
+                return@createSettingsButton
+            }
+            val rejection = CoreConfig.portRejection(typed)
+            if (rejection != null) {
+                field.error = rejection
+                return@createSettingsButton
+            }
+            preferences().edit().putInt(CoreConfig.PROXY_PORT_PREF, typed).apply()
+            proxyPortRow?.setValue(proxyPortValue())
+            ConnectionLog.record("SOCKS port set to $typed — applies on the next connect")
+            toastShort("SOCKS port set to $typed")
+            dialog.dismiss()
+        }, LinearLayout.LayoutParams(dp(112), dp(56)).apply { leftMargin = dp(10) })
+        sheet.addView(entry, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+        dialog.setContentView(FrameLayout(this).apply {
+            setPadding(dp(16), 0, dp(16), dp(16))
+            addView(sheet)
+        })
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.62f)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+        }
+    }
+
+    /**
+     * Repaint the tunnel-type pair for the current setting.
+     *
+     * The port row's enabled state is the visible half of the type choice, so the
+     * two must always be rendered together — a live-looking port box in VPN mode
+     * would be a control that does nothing, which is the class of bug the log-level
+     * chips already were.
+     */
+    private fun refreshTunnelTypeRows() {
+        val proxy = CoreConfig.proxyOnly(this)
+        tunnelTypeRow?.apply {
+            setValue(tunnelTypeLabel())
+            setAvailable(modeControlsEnabled)
+        }
+        proxyPortRow?.apply {
+            setValue(proxyPortValue())
+            setAvailable(proxy && modeControlsEnabled)
+        }
+        // Split tunneling is a property of the TUN — it works by allowing or
+        // disallowing packages on the VpnService. In proxy mode there is no TUN, and
+        // which apps use the proxy is decided by whoever types the port into their
+        // settings, so the row cannot do anything. Greyed for the same reason the
+        // port row is greyed in VPN mode: a control that does nothing is a bug.
+        splitTunnelSummaryButton?.apply {
+            setValue(if (proxy) "Not used in SOCKS mode" else splitTunnelSummary())
+            setAvailable(!proxy)
+        }
+    }
+
+    /** Short toast; `toast(...)` does not exist in this class. */
+    private fun toastShort(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
     private fun manageGatewayCache() = showChoiceSheet(
         title = "Gateway cache",
         subtitle = "Control saved MASQUE gateway discovery data",
@@ -3391,6 +3598,11 @@ class MainActivity : Activity() {
         torChainRowRef = null
         torChainOuterRow = null
         torRegionRowRef = null
+        // Same reason as the rows above: these two point at views that are about to
+        // be destroyed, and a stale reference would have the next repaint writing
+        // into a detached view instead of the new page's row.
+        tunnelTypeRow = null
+        proxyPortRow = null
         settingsPage?.let { animatePageClose(it) { settingsPage = null } }
     }
 
@@ -3474,6 +3686,11 @@ class MainActivity : Activity() {
         // is written to torrc on every Tor session, chained or not — so the only
         // conditions are "Tor is selected" and "not locked mid-session".
         torRegionRowRef?.setAvailable(torSelected && modeControlsEnabled)
+        // Chained onto this repaint rather than wired into all nine call sites
+        // separately: every one of them (protocol change, connect, disconnect,
+        // returning from a sheet) is also a moment the tunnel-type pair can go stale,
+        // and one entry point means the two cannot drift apart.
+        refreshTunnelTypeRows()
     }
 
 
@@ -4003,8 +4220,14 @@ class MainActivity : Activity() {
         }
 
         val config = configJson()
-        // VPN mode is the only mode, so Android's VPN consent is always required
-        // before the service may build a TUN.
+        // Proxy mode needs no VPN consent at all — no TUN is created, so asking for
+        // it would put a system dialog in front of a feature that does not use the
+        // permission. VPN mode still always asks; it is the only mode that builds a
+        // TUN, and Android requires consent before establish().
+        if (CoreConfig.proxyOnly(this)) {
+            connect(config)
+            return
+        }
         val permissionIntent = VpnService.prepare(this)
         if (permissionIntent == null) connect(config) else {
             pendingConfig = config
@@ -4103,6 +4326,12 @@ class MainActivity : Activity() {
         connectionTitle.setTextColor(connected)
         connectionTitle.text = "Connected"
         connectionDetail.text = when {
+            // Proxy mode first: it is the one case where "tunnel is active" would be
+            // read as "my phone is protected", which is exactly what it is not. The
+            // port is repeated here because this is the line the user looks at right
+            // after connecting, and it is what they must type into Telegram.
+            CoreConfig.proxyOnly(this) ->
+                "SOCKS proxy on 127.0.0.1:${CoreConfig.proxyListenPort(this)}"
             // Say what is actually carrying traffic. With the chain armed the rail
             // reads PSIPHON or TOR, so "<transport> tunnel is active" hides the WARP
             // leg that is doing the circumvention.
@@ -4640,6 +4869,11 @@ class MainActivity : Activity() {
     private fun socksPort(): Int =
         if (TunnelStatus.isActive() && TorManager.isTorActive) {
             TorManager.FRONT_SOCKS_PORT
+        } else if (TunnelStatus.isProxyMode) {
+            // Proxy mode moves Psiphon's listener to the user's port, so the fixed
+            // 1819 would be a closed socket here and every IP/ping measurement
+            // would fail — the card would read "IP unavailable" over a working proxy.
+            CoreConfig.proxyListenPort(this)
         } else {
             CoreConfig.SOCKS_PORT
         }

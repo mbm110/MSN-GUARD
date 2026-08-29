@@ -256,6 +256,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var psiphonTunnel: PsiphonTunnel? = null
     private var psiphonConfigJson: String = ""
     private var psiphonVpnMode = false
+
+    /**
+     * Whether THIS session is proxy-only, latched at [startTunnel].
+     *
+     * Latched rather than read from preferences at each use, and that is
+     * load-bearing: the user can open Settings and flip the mode while a tunnel is
+     * live, and every teardown decision below has to belong to the session that is
+     * actually running. Reading the preference in [stopTunnel] would tear down a
+     * VPN session along the proxy path — leaving a TUN open and tun2socks running.
+     */
+    private var proxyMode = false
     private var psiphonVpnActivated = false
     private var activeSocksPort = 0
 
@@ -807,9 +818,23 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         val socksProxy = "127.0.0.1:$port"
 
         if (!psiphonVpnMode) {
-            // PROXY MODE: just expose the SOCKS port — no TUN needed.
-            ConnectionLog.record("Psiphon SOCKS proxy ready at $socksProxy")
+            // PROXY MODE: no TUN, so nothing to bridge — the listener IS the
+            // deliverable. Everything the VPN path gets from tun2socks coming up has
+            // to be done here instead, or the UI sits on "Connecting" over a working
+            // proxy: mark connected, replace the placeholder notification, and arm
+            // the watchdog.
+            ConnectionLog.record(
+                "SOCKS5 proxy ready at $socksProxy — set it in an app to route that app"
+            )
+            connected.set(true)
+            // The one thing that makes every UI surface see this session at all:
+            // neither the Rust core nor tun2socks is running, so without it
+            // TunnelStatus.isActive() is false and the dial, the tile and the
+            // header all read "not connected" over a working proxy.
+            TunnelStatus.isProxyMode = true
+            repostNotification()
             sendStatus(STATUS_CONNECTED)
+            startWatchdog()
             return
         }
 
@@ -862,8 +887,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // routing into nothing, and without this the app would sit there claiming
         // to be connected. Handled here rather than waiting up to 30s for the
         // watchdog tick, because this callback is the definitive signal.
+        //
+        // In proxy mode psiphonVpnActivated is never set (there is no tun2socks to
+        // activate), so `connected` alone is what marks an established session —
+        // otherwise a dead proxy would keep claiming to be up.
         if (!stopRequested.get() && !userInitiatedStop.get() &&
-            psiphonVpnActivated && connected.get()
+            (psiphonVpnActivated || proxyMode) && connected.get()
         ) {
             onTunnelLost("the Psiphon tunnel stopped")
         }
@@ -929,10 +958,15 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     override fun onBytesTransferred(sent: Long, received: Long) {
-        // In VPN mode there is no Rust core in the data path anymore, so Psiphon's
-        // own byte counters are the source of traffic stats. These arrive as
-        // deltas, not totals.
-        if (!psiphonVpnMode) return
+        // Psiphon's own byte counters are the traffic source in both modes: in VPN
+        // mode the Rust core is out of the data path, and in proxy mode there is no
+        // TUN to count at all. These arrive as deltas, not totals.
+        //
+        // The old guard here was `if (!psiphonVpnMode) return`, written when the only
+        // way psiphonVpnMode could be false was "no Psiphon session". With proxy mode
+        // restored that is no longer true, and keeping it would freeze data usage and
+        // the notification at zero for the entire proxy session.
+        if (!psiphonVpnMode && !proxyMode) return
         currentTx += sent
         currentRx += received
         updateTrafficNotification(currentTx, currentRx)
@@ -969,8 +1003,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     override fun getPsiphonConfig(): String = psiphonConfigJson
 
     private fun buildPsiphonConfig(): String {
-        // Fixed port so the TUN can be pre-created before Psiphon starts.
-        val socksPort = CoreConfig.SOCKS_PORT
+        // In VPN mode: fixed 1819, so the TUN can be pre-created before Psiphon
+        // starts. In proxy mode: the port the user typed, because that listener IS
+        // the product — it is what they paste into Telegram.
+        val socksPort = if (CoreConfig.proxyOnly(this)) {
+            CoreConfig.proxyListenPort(this)
+        } else {
+            CoreConfig.SOCKS_PORT
+        }
         val config = org.json.JSONObject().apply {
             put("PropagationChannelId", "FFFFFFFFFFFFFFFF")
             put("SponsorId", "1111111111111111")
@@ -2056,6 +2096,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private fun tunnelIsDead(): String? {
         // Whole-device routing is common to Psiphon, the chain and Tor. Without
         // it, packets from the TUN reach nothing regardless of tunnel state.
+        //
+        // Deliberately NOT required in proxy mode: there is no TUN and no
+        // tun2socks, so demanding it would report a healthy proxy as dead on the
+        // first watchdog tick and auto-reconnect would loop forever.
         val needsRouting = psiphonVpnMode || currentProtocol.contains("TOR")
         if (needsRouting && !Tun2SocksManager.isRunning) return "device routing stopped"
 
@@ -2068,7 +2112,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             if (chainMode && !NativeCore.isRunning()) return "the WARP leg carrying Tor stopped"
             return null
         }
-        if (psiphonVpnMode && psiphonTunnel == null) return "the Psiphon tunnel is gone"
+        // Proxy mode: the Go controller is the entire data path, so its absence is
+        // the only thing that can break it. Same test as the VPN path, reached via
+        // proxyMode because psiphonVpnMode is false here by construction.
+        if ((psiphonVpnMode || proxyMode) && psiphonTunnel == null) return "the Psiphon tunnel is gone"
         return null
     }
 
@@ -2473,7 +2520,15 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // together, before the first sample of the new session arrives.
         resetSessionTraffic()
         stopRequested.set(false)
-        vpnModeActive.set(true)
+        // Latched for the whole session — see [proxyMode]. Read once, here, so a
+        // mid-session change of the setting cannot make teardown take the wrong
+        // path.
+        proxyMode = CoreConfig.proxyOnly(this)
+        // FALSE in proxy mode, and that is what makes protectSocket() a no-op there:
+        // protect() only means anything against a TUN this service established, and
+        // in proxy mode no TUN exists, so calling it would be asking the framework to
+        // exempt sockets from an interface that was never built.
+        vpnModeActive.set(!proxyMode)
         // Belt and braces with the clear in stopTunnel(): a reconnect goes straight
         // from one startTunnel to the next without necessarily passing through the
         // teardown path, and these two flags decide whether this session counts as
@@ -2482,6 +2537,24 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         chainMode = false
         psiphonVpnMode = false
         startAsForeground()
+
+        // PROXY MODE: only Psiphon can do it, and it must be rejected loudly
+        // rather than silently downgraded to a VPN.
+        //
+        // Why only Psiphon: its Go controller binds its own SOCKS listener
+        // (LocalSocksProxyPort), so a proxy is what it natively produces. The Rust
+        // core CAN publish SOCKS (NativeCore.startProxy, used by the chain's outer
+        // leg) but MASQUE/WireGuard/WoW here take the tun_fd branch, and Tor's
+        // front-end is a udpgw-speaking bridge for tun2socks, not a general SOCKS
+        // server — pointing Telegram at it would fail on the first UDP flow.
+        if (proxyMode && !currentProtocol.contains("PSIPHON")) {
+            connected.set(false)
+            failAndStop(
+                "SOCKS proxy mode needs the Psiphon transport — " +
+                    "switch to Psiphon, or set Tunnel type back to VPN"
+            )
+            return
+        }
 
         // PSIPHON-OVER-WARP must be tested before the plain PSIPHON branch: its
         // protocol name contains "PSIPHON" too, so the order of these checks is
@@ -2502,7 +2575,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // PSIPHON: callback-driven lifecycle — MUST NOT enter try/finally.
         // The finally block calls stopSelf() which destroys the service and kills Psiphon.
         if (currentProtocol.contains("PSIPHON")) {
-            psiphonVpnMode = true  // Read by onConnected() to start tun2socks
+            // In proxy mode this must stay FALSE: it is what onConnected() reads to
+            // decide whether to start tun2socks, and the whole point of proxy mode
+            // is that nothing is routed device-wide. The dead `if (!psiphonVpnMode)`
+            // arm in onConnected() is the proxy path — this is what reaches it.
+            psiphonVpnMode = !proxyMode
             psiphonVpnActivated = false
             // Start from the rung that last worked on this device. On the first
             // ever connect, or after a full ladder failure, this is rung 0.
@@ -2514,6 +2591,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             worker.execute {
                 try {
                     ConnectionLog.record("Preparing PSIPHON identity")
+                    // PROXY MODE: no TUN, no consent, no tun2socks. Psiphon binds the
+                    // user's port itself and onConnected() stops at "ready".
+                    if (proxyMode) {
+                        val proxyPort = CoreConfig.proxyListenPort(this@MsnGuardVpnService)
+                        activeSocksPort = proxyPort
+                        ConnectionLog.record(
+                            "SOCKS proxy mode — no VPN interface; Psiphon will listen on 127.0.0.1:$proxyPort"
+                        )
+                        startPsiphonTunnel()
+                        sendStatus(STATUS_CONNECTING, "Psiphon starting...")
+                        return@execute
+                    }
                     // Create the TUN first, then start Psiphon: this stops Psiphon's
                     // NetworkMonitor seeing tun0 appear as a network change, which
                     // used to cause a 13-second restart loop.
@@ -2699,10 +2788,21 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         stopPsiphonTunnel()
         NativeCore.stop()
         TunnelStatus.isNativeTunMode = false
+        // Unconditional, like isNativeTunMode above: this flag is what keeps
+        // isActive() true, so leaving it set after a teardown would make the UI
+        // claim a proxy is up forever. Cleared for every path, including the ones
+        // that never entered proxy mode (where it is already false).
+        TunnelStatus.isProxyMode = false
 
-        if (psiphonVpnMode) {
-            // In VPN mode nothing else owns the service lifecycle now that the
+        if (psiphonVpnMode || proxyMode) {
+            // Psiphon owns the service lifecycle in both of its modes now that the
             // Rust core is out of the data path, so tear down here.
+            //
+            // Proxy mode shares this branch on purpose: stopPsiphonTunnel() above is
+            // what closes the user's listener, and everything below it is either a
+            // no-op there (tun is null, chain flags are false) or required (clearing
+            // the flags, dropping `connected`, stopping the service). A separate
+            // branch would be a second copy of the same teardown, free to drift.
             //
             // This also covers Psiphon-over-WARP: NativeCore.stop() above ends the
             // outer WARP leg, and chainMode must be cleared here so the next
@@ -2719,6 +2819,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // Psiphon one and never record the transport that actually worked.
             psiphonVpnMode = false
             psiphonVpnActivated = false
+            // Cleared here too, so a session that ends leaves the flag matching
+            // reality. startTunnel() latches it again from the preference on the way
+            // in, so a reconnect still honours whatever the user has set now.
+            proxyMode = false
             tun?.close()
             tun = null
             connected.set(false)
@@ -3197,8 +3301,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         val method = prettyProtocol()
         val subtitle = if (currentCountry.isNotBlank()) "$method • $currentCountry" else method
 
+        // Proxy mode must not claim "VPN connected": nothing is tunnelled device-wide,
+        // and a user who reads that and then finds Chrome on their real IP would be
+        // right to call it a lie. The port is in the title because it is the one
+        // thing they need and the only place they can see it while the app is closed.
+        val title = if (proxyMode) {
+            "SOCKS proxy on ${CoreConfig.proxyListenPort(this)}"
+        } else {
+            "VPN connected"
+        }
+
         val builder = Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("VPN connected")
+            .setContentTitle(title)
             .setContentText(subtitle)
             .setSmallIcon(R.drawable.ic_notification)
             .setLargeIcon(appBadge())

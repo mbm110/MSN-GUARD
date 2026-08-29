@@ -19,10 +19,29 @@ package com.msnguard.vpn
  */
 object TunnelStatus {
 
-    /** True when either data path is up: Rust core (proxy/other protocols) or tun2socks (VPN). */
-    fun isActive(): Boolean = NativeCore.isRunning() || Tun2SocksManager.isRunning
+    /**
+     * True while a proxy-only session is live.
+     *
+     * Set by the service, because in proxy mode NOTHING else in this object can
+     * tell: the Rust core is not started and tun2socks is not started, so
+     * [isActive] would answer false over a perfectly working Psiphon proxy and
+     * every UI surface — dial, tile, header, the connect/disconnect decision in
+     * MainActivity — would call it disconnected.
+     */
+    @Volatile
+    var isProxyMode: Boolean = false
+        internal set
 
-    /** True when the whole device is being routed through tun2socks. */
+    /** True when either data path is up: Rust core (proxy/other protocols) or tun2socks (VPN). */
+    fun isActive(): Boolean = NativeCore.isRunning() || Tun2SocksManager.isRunning || isProxyMode
+
+    /**
+     * True when the whole device is being routed through tun2socks.
+     *
+     * Deliberately NOT true in proxy mode — that is the entire distinction the
+     * setting exists to make, and anything asking this question wants the honest
+     * answer (e.g. the header's "all apps protected" claim).
+     */
     val isWholeDeviceRouting: Boolean
         get() = Tun2SocksManager.isRunning
 

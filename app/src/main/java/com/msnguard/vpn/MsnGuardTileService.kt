@@ -72,9 +72,11 @@ class MsnGuardTileService : TileService() {
             return false
         }
 
-        // Connect. VPN mode is the only mode, so Android's VPN consent is
-        // always required before the service may build a TUN.
-        val permissionIntent = VpnService.prepare(this)
+        // Connect. Proxy mode builds no TUN, so it needs no VPN consent — asking
+        // would send the user to the app for a permission the session never uses.
+        // VPN mode still always asks; it is the only mode that establishes a TUN.
+        val permissionIntent =
+            if (CoreConfig.proxyOnly(this)) null else VpnService.prepare(this)
         if (permissionIntent == null) {
             // Already have permission
             val config = configJson()

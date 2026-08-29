@@ -243,6 +243,95 @@ object CoreConfig {
         context.getSharedPreferences("settings", Context.MODE_PRIVATE)
             .getBoolean(LAN_SHARING_PREF, false)
 
+    // ---------------------------------------------------------------------
+    // Tunnel type: whole-device VPN, or a local SOCKS proxy only
+    // ---------------------------------------------------------------------
+
+    /**
+     * How the tunnel is exposed to the device: [TUNNEL_MODE_VPN] (default) or
+     * [TUNNEL_MODE_PROXY].
+     *
+     * This is a restoration, not a new feature. The app used to offer both and the
+     * proxy half was dropped when badvpn tun2socks took over whole-device routing —
+     * the dead `if (!psiphonVpnMode)` arm in `MsnGuardVpnService.onConnected` is what
+     * was left of it. The two modes are mutually exclusive by construction:
+     *
+     *  - VPN: `Builder().establish()` creates a TUN, tun2socks bridges it to the
+     *    tunnel's SOCKS listener, every app on the phone is routed. Untouched by
+     *    this setting being *present* — see [proxyOnly], which is the only thing
+     *    the service branches on.
+     *  - PROXY: no TUN is created at all, so no VPN consent is needed and nothing
+     *    is routed implicitly. The tunnel publishes a SOCKS5 listener on
+     *    [proxyListenPort] and only apps configured to use it go through.
+     */
+    const val TUNNEL_MODE_PREF = "tunnel_mode"
+
+    const val TUNNEL_MODE_VPN = "vpn"
+    const val TUNNEL_MODE_PROXY = "socks"
+
+    /** User-chosen port for [TUNNEL_MODE_PROXY]. */
+    const val PROXY_PORT_PREF = "proxy_listen_port"
+
+    /**
+     * Default SOCKS port offered in the UI.
+     *
+     * 10808 by convention — it is what v2rayNG/Nekobox use on Android, so a user who
+     * has ever configured a proxy in Telegram has probably typed it before. It also
+     * sits well clear of everything this app binds internally ([SOCKS_PORT],
+     * [CHAIN_SOCKS_PORT], Tor's 1822/1823, udpgw 7300, [HTTP_PROXY_PORT]).
+     */
+    const val DEFAULT_PROXY_PORT = 10808
+
+    /**
+     * Ports the app binds for its own internal plumbing.
+     *
+     * Refused for the user's listener because a collision does not fail loudly: the
+     * second bind loses, and the symptom is a tunnel that connects and carries
+     * nothing. Note [SOCKS_PORT] (1819) is NOT here — in proxy mode Psiphon takes
+     * the user's port instead of 1819, so 1819 is genuinely free then.
+     */
+    private val RESERVED_PORTS = setOf(CHAIN_SOCKS_PORT, 1822, 1823, 7300, HTTP_PROXY_PORT)
+
+    /** The stored tunnel mode, defaulting to VPN. */
+    fun tunnelMode(context: Context): String =
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getString(TUNNEL_MODE_PREF, TUNNEL_MODE_VPN)
+            ?.takeIf { it == TUNNEL_MODE_PROXY } ?: TUNNEL_MODE_VPN
+
+    /**
+     * True when the user asked for a local proxy instead of a device-wide VPN.
+     *
+     * The ONE question the service asks. Every proxy-mode branch is gated on this
+     * and nothing else, so with it false the whole-device path is byte-for-byte the
+     * code that shipped in 1.6.2.
+     */
+    fun proxyOnly(context: Context): Boolean = tunnelMode(context) == TUNNEL_MODE_PROXY
+
+    /**
+     * The port the local SOCKS5 listener binds in proxy mode.
+     *
+     * Falls back to [DEFAULT_PROXY_PORT] for anything unusable, so a corrupt or
+     * hand-edited preference cannot leave the tunnel with no listener.
+     */
+    fun proxyListenPort(context: Context): Int {
+        val stored = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getInt(PROXY_PORT_PREF, DEFAULT_PROXY_PORT)
+        return if (portRejection(stored) == null) stored else DEFAULT_PROXY_PORT
+    }
+
+    /**
+     * Why [port] cannot be used, or null when it is fine.
+     *
+     * Returns the message the UI shows, so the rule lives in one place instead of
+     * being restated (and drifting) in the settings screen.
+     */
+    fun portRejection(port: Int): String? = when {
+        port < 1024 -> "Ports below 1024 need root"
+        port > 65535 -> "Highest port is 65535"
+        port in RESERVED_PORTS -> "$port is used internally by MSN-GUARD"
+        else -> null
+    }
+
     /**
      * The phone's own address on the LOCAL network, or null when it has none.
      *
