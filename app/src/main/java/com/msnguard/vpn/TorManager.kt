@@ -163,7 +163,8 @@ object TorManager {
         DIRECT("direct", "Direct", "No bridge; fastest where Tor is not blocked"),
         OBFS4("obfs4", "obfs4", "Bridge that hides Tor's traffic shape"),
         MEEK("meek", "Meek", "Rides a CDN; slow but hard to block"),
-        SNOWFLAKE("snowflake", "Snowflake", "Volunteer WebRTC proxies");
+        SNOWFLAKE("snowflake", "Snowflake", "Volunteer WebRTC proxies"),
+        MANUAL("manual", "Manual bridge", "Bridge lines you entered yourself");
 
         companion object {
             fun from(key: String?): TorMode =
@@ -223,9 +224,81 @@ object TorManager {
         Rung(TorMode.MEEK, BRIDGE_TIMEOUT_S),
     )
 
-    /** Whether [mode] can run inside the WARP chain at all. */
-    fun isChainable(mode: TorMode): Boolean =
-        mode == TorMode.AUTO || chainedLadder.any { it.mode == mode }
+    /**
+     * Whether [mode] can run inside the WARP chain at all.
+     *
+     * Manual bridge is decided per bridge line rather than by the mode, which is
+     * why this takes a context. A pasted obfs4/meek_lite/webtunnel bridge chains
+     * the same way our own bridge rungs do — lyrebird is handed `TOR_PT_PROXY` and
+     * makes every outbound dial through it. Snowflake is the exception, and for
+     * the same reason it is excluded from [chainedLadder]: its broker exchange and
+     * WebRTC dials are not things a SOCKS5 CONNECT can carry, so a chained
+     * snowflake line would fail in a way the user could not diagnose.
+     *
+     * A plain `IP:port` bridge with no transport chains through `Socks5Proxy` in
+     * the torrc instead — verified accepted by `tor --verify-config`, unlike the
+     * PT case which tor refuses outright.
+     */
+    fun isChainable(context: Context, mode: TorMode): Boolean = when (mode) {
+        TorMode.AUTO -> true
+        TorMode.MANUAL -> manualIsChainable(context)
+        else -> chainedLadder.any { it.mode == mode }
+    }
+
+    /**
+     * True when the stored lines can all be carried by one chain mechanism.
+     *
+     * Two refusals, both measured rather than assumed:
+     *
+     *  - **snowflake** anywhere in the box. Its broker exchange and WebRTC dials
+     *    are not things a SOCKS5 CONNECT can carry, which is the same reason it
+     *    is absent from [chainedLadder].
+     *  - **a mix of plain `IP:port` and pluggable-transport lines.** There is
+     *    exactly one proxy channel per session and its shape depends on the line:
+     *    a plain bridge is proxied by `Socks5Proxy` in the torrc, a PT bridge by
+     *    `TOR_PT_PROXY` handed to lyrebird. `tor --verify-config` accepts the two
+     *    kinds of Bridge line together (measured), and it also refuses
+     *    `Socks5Proxy` in the presence of any `ClientTransportPlugin` — so a
+     *    mixed set inside the chain can only be written one way, and whichever
+     *    way it is written the other kind of line dials the carrier directly,
+     *    outside WARP. That is a silent leak, not a degraded session, so the
+     *    chain is refused instead and the UI says which line to remove.
+     */
+    private fun manualIsChainable(context: Context): Boolean {
+        val bridges = TorManualBridges.bridges(context)
+        if (bridges.isEmpty()) return false
+        if (bridges.any { it.transport == "snowflake" }) return false
+        return bridges.all { it.transport == null } || bridges.all { it.transport != null }
+    }
+
+    /**
+     * Why a Manual set cannot be chained, for the UI to show. Null when it can.
+     *
+     * Separate from [manualIsChainable] so the message names the specific line
+     * that blocks the chain — "not available with Manual bridge" would send the
+     * user looking for a setting to change instead of the paste that caused it.
+     */
+    fun manualChainBlocker(context: Context): String? {
+        val bridges = TorManualBridges.bridges(context)
+        if (bridges.isEmpty()) return "no bridge saved"
+        if (bridges.any { it.transport == "snowflake" }) {
+            return "snowflake bridges cannot run inside WARP"
+        }
+        if (bridges.any { it.transport == null } && bridges.any { it.transport != null }) {
+            return "remove either the plain IP bridge or the transport bridge"
+        }
+        return null
+    }
+
+    /**
+     * Whether Manual bridge mode has usable lines.
+     *
+     * Checked by the UI before offering the mode and by the service before
+     * connecting, because a pinned Manual with an empty box would otherwise write
+     * `UseBridges 1` with no `Bridge` line — a torrc tor refuses to read at all
+     * (measured: "If you set UseBridges, you must specify at least one bridge").
+     */
+    fun manualReady(context: Context): Boolean = TorManualBridges.isConfigured(context)
 
     /**
      * Whether the next Tor connect should ride inside WARP.
@@ -239,7 +312,7 @@ object TorManager {
     fun chainArmed(context: Context): Boolean =
         context.getSharedPreferences("settings", Context.MODE_PRIVATE)
             .getBoolean(CHAIN_ARMED_PREF, CHAIN_ARMED_DEFAULT) &&
-            isChainable(selectedMode(context))
+            isChainable(context, selectedMode(context))
 
     /**
      * The SOCKS5 proxy every dial of this session must go through, or null.
@@ -300,20 +373,25 @@ object TorManager {
     /**
      * Which lyrebird transports a mode needs.
      *
-     * Direct needs none. Everything else names exactly one, so lyrebird is not
-     * asked to stand up listeners nobody will dial.
+     * Direct needs none. The fixed bridge modes name exactly one, so lyrebird is
+     * not asked to stand up listeners nobody will dial. Manual can need several at
+     * once: a user may paste an obfs4 line and a webtunnel line together, and
+     * lyrebird serves both from one process — `TOR_PT_CLIENT_TRANSPORTS` takes a
+     * comma-separated list and answers with one `CMETHOD` per transport.
      */
-    private fun transportFor(mode: TorMode): String? = when (mode) {
-        TorMode.DIRECT, TorMode.AUTO -> null
-        TorMode.OBFS4 -> "obfs4"
-        TorMode.MEEK -> "meek_lite"
-        TorMode.SNOWFLAKE -> "snowflake"
+    private fun transportsFor(context: Context, mode: TorMode): List<String> = when (mode) {
+        TorMode.DIRECT, TorMode.AUTO -> emptyList()
+        TorMode.OBFS4 -> listOf("obfs4")
+        TorMode.MEEK -> listOf("meek_lite")
+        TorMode.SNOWFLAKE -> listOf("snowflake")
+        TorMode.MANUAL -> TorManualBridges.transports(context)
     }
 
-    private fun bridgeLinesFor(mode: TorMode): List<String> = when (mode) {
+    private fun bridgeLinesFor(context: Context, mode: TorMode): List<String> = when (mode) {
         TorMode.OBFS4 -> TorBridges.OBFS4
         TorMode.MEEK -> TorBridges.MEEK
         TorMode.SNOWFLAKE -> TorBridges.SNOWFLAKE
+        TorMode.MANUAL -> TorManualBridges.bridges(context).map { it.line }
         else -> emptyList()
     }
 
@@ -404,11 +482,14 @@ object TorManager {
      */
     private fun writeTorrc(context: Context, dataDir: File, mode: TorMode): File {
         val torrc = File(dataDir, "torrc")
-        val transport = transportFor(mode)
-        val bridges = bridgeLinesFor(mode)
+        val transports = transportsFor(context, mode)
+        val bridges = bridgeLinesFor(context, mode)
         // No transport means no PT process, which is the only case where the
-        // proxy belongs in the torrc — see the note above.
-        val proxyGoesInTorrc = transport == null && bridges.isEmpty()
+        // proxy belongs in the torrc — see the note above. A Manual session of
+        // plain `IP:port` bridges lands here too: it uses bridges but no PT, and
+        // `tor --verify-config` accepts Socks5Proxy alongside such a line while
+        // refusing it alongside any ClientTransportPlugin.
+        val proxyGoesInTorrc = transports.isEmpty()
 
         // LAN sharing publishes TOR'S OWN SocksPort, not TorSocksFront.
         //
@@ -478,7 +559,16 @@ object TorManager {
             // Meek pays an HTTP round trip per cell, so the default 60s is not
             // enough for a three-hop handshake over it.
             appendLine(
-                "CircuitBuildTimeout " + if (mode == TorMode.MEEK || mode == TorMode.SNOWFLAKE) 120 else 60
+                "CircuitBuildTimeout " + when {
+                    mode == TorMode.MEEK || mode == TorMode.SNOWFLAKE -> 120
+                    // Manual is judged by what was actually pasted: a webtunnel or
+                    // meek_lite line pays an HTTP round trip per cell exactly like
+                    // our own Meek rung does, so it needs the same allowance.
+                    mode == TorMode.MANUAL && transports.any {
+                        it == "meek_lite" || it == "webtunnel" || it == "snowflake"
+                    } -> 120
+                    else -> 60
+                }
             )
             // Short keepalive so an idle HTTP-based transport does not have its
             // bridge connection closed between Tor's own keepalive cells.
@@ -528,11 +618,17 @@ object TorManager {
                 }
             }
 
-            if (transport != null && bridges.isNotEmpty()) {
+            if (bridges.isNotEmpty()) {
                 appendLine("UseBridges 1")
-                val listener = ptMethods[transport]
-                if (listener != null) {
-                    appendLine("ClientTransportPlugin $transport socks5 $listener")
+                // One ClientTransportPlugin per transport the bridge lines name,
+                // each pointing at the listener lyrebird announced for it. A
+                // transport with no registered listener is skipped rather than
+                // written pointing nowhere — and [attempt] has already refused the
+                // session if none of them registered.
+                transports.forEach { transport ->
+                    ptMethods[transport]?.let { listener ->
+                        appendLine("ClientTransportPlugin $transport socks5 $listener")
+                    }
                 }
                 bridges.forEach { appendLine("Bridge $it") }
             }
@@ -570,7 +666,7 @@ object TorManager {
      * live process that registered nothing is a failure — it would leave Tor
      * with a `ClientTransportPlugin` line pointing nowhere.
      */
-    private fun startPt(context: Context, dataDir: File, transport: String): Boolean {
+    private fun startPt(context: Context, dataDir: File, transports: List<String>): Boolean {
         ptMethods.clear()
 
         val binary = nativeFile(context, "libobfs4proxy.so")
@@ -584,7 +680,11 @@ object TorManager {
         val builder = ProcessBuilder(binary.absolutePath)
         builder.environment().apply {
             put("TOR_PT_MANAGED_TRANSPORT_VER", "1")
-            put("TOR_PT_CLIENT_TRANSPORTS", transport)
+            // Comma-separated, so one process serves every transport the session
+            // needs. Verified against the shipped lyrebird build: asking for
+            // "obfs4,meek_lite,webtunnel,snowflake" answers CMETHOD for each
+            // supported one and CMETHOD-ERROR for the rest, then CMETHODS DONE.
+            put("TOR_PT_CLIENT_TRANSPORTS", transports.joinToString(","))
             put("TOR_PT_STATE_LOCATION", stateDir.absolutePath + "/")
             put("TOR_PT_EXIT_ON_STDIN_CLOSE", "1")
             put("HOME", dataDir.absolutePath)
@@ -611,7 +711,7 @@ object TorManager {
                             val parts = line.split(Regex("\\s+"))
                             if (parts.size >= 4) {
                                 ptMethods[parts[1]] = parts[3]
-                                ConnectionLog.record("$TAG PT $transport on ${parts[3]}")
+                                ConnectionLog.record("$TAG PT ${parts[1]} on ${parts[3]}")
                             }
                         }
                         line == "CMETHODS DONE" -> done.countDown()
@@ -642,8 +742,17 @@ object TorManager {
 
         done.await(PT_HANDSHAKE_TIMEOUT_S, TimeUnit.SECONDS)
 
-        if (ptMethods[transport] == null) {
-            ConnectionLog.record("$TAG PT $transport did not register a listener")
+        // Every requested transport must have registered. A partial answer is a
+        // failure rather than a degraded session: lyrebird reports
+        // `CMETHOD-ERROR <name> no such transport is supported` for anything it
+        // cannot serve, and continuing would leave Tor with bridge lines naming a
+        // transport that has no plugin — which tor accepts into its config and
+        // then cannot dial, so the rung would burn its whole budget for nothing.
+        val missing = transports.filter { ptMethods[it] == null }
+        if (missing.isNotEmpty()) {
+            ConnectionLog.record(
+                "$TAG PT did not register: ${missing.joinToString(", ")}"
+            )
             stopPt()
             return false
         }
@@ -692,8 +801,8 @@ object TorManager {
         // bridge descriptor they point at saves a handshake.
         keepTorState(dataDir, mode)
 
-        val transport = transportFor(mode)
-        if (transport != null && !startPt(context, dataDir, transport)) {
+        val transports = transportsFor(context, mode)
+        if (transports.isNotEmpty() && !startPt(context, dataDir, transports)) {
             return false
         }
 
@@ -958,6 +1067,14 @@ object TorManager {
 
         val dataDir = File(context.filesDir, "tor_data").apply { mkdirs() }
         val selected = selectedMode(context)
+        // Manual with an empty or unusable box cannot produce a torrc tor will
+        // read: `UseBridges 1` with no `Bridge` line makes tor refuse the config
+        // outright. Refused here with a message naming the fix, rather than
+        // letting the rung fail and reporting a network problem.
+        if (selected == TorMode.MANUAL && !manualReady(context)) {
+            ConnectionLog.record("$TAG Manual bridge selected with no bridge lines saved")
+            return false
+        }
         val chained = upstreamProxy != null
         // Direct and Meek only inside the chain. AUTO takes the short ladder;
         // a pinned obfs4/Snowflake cannot get here at all, because the service

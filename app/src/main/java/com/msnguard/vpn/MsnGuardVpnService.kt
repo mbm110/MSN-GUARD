@@ -2012,6 +2012,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 if (!TorManager.start(this)) {
                     error(
                         when {
+                            // Named before the generic messages: this one is a
+                            // settings problem, not a network one, and tor never
+                            // even started — it would reject a torrc that says
+                            // UseBridges with no bridge.
+                            TorManager.selectedMode(this) == TorManager.TorMode.MANUAL &&
+                                !TorManager.manualReady(this) ->
+                                "No bridge saved — open Manual bridge in settings and paste one"
                             // Inside the chain only Direct and Meek are tried, so
                             // "any method" would overstate what was attempted and
                             // send the user looking for a network fault. Disarming
@@ -2021,6 +2028,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                                 "turn Tor over WARP off to try obfs4 and Snowflake"
                             TorManager.selectedMode(this) == TorManager.TorMode.AUTO ->
                                 "Tor could not connect with any method on this network"
+                            // A manual bridge that fails is the user's own line, so
+                            // the fix is that line — not our mode picker.
+                            TorManager.selectedMode(this) == TorManager.TorMode.MANUAL ->
+                                "Your bridge did not connect — check the line, or try Auto"
                             // Name the pinned mode: the fix is to change it or
                             // switch to Auto, not to retry the same thing.
                             else -> "Tor could not connect over " +

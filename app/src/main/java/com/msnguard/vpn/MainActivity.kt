@@ -154,6 +154,9 @@ class MainActivity : Activity() {
     /** Settings row showing the preferred Tor exit country. */
     private var torRegionRowRef: OrbitSettingsRow? = null
 
+    /** Settings row opening the manual bridge editor; shows a count and kinds. */
+    private var torBridgeRowRef: OrbitSettingsRow? = null
+
     /** The Tunnel type picker (VPN vs SOCKS proxy) in the CONNECTION section. */
     private var tunnelTypeRow: OrbitSettingsRow? = null
 
@@ -2547,16 +2550,34 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
+        // The user's own bridges, directly under the mode row that consumes them.
+        //
+        // Placed here rather than behind an "advanced" screen because a user who
+        // has a bridge got it from somewhere and is looking for exactly this box;
+        // burying it is what makes people conclude the app cannot use their bridge.
+        // It stays live on every transport, unlike the rows below: pasting a bridge
+        // before switching Tor on is the normal order of operations, and greying
+        // the box until Tor is selected would make the mode unpickable — the sheet
+        // refuses Manual with nothing saved.
+        val torBridgeRow = navRow("Manual bridge", TorManualBridges.summary(this)) {
+            editTorBridges()
+        }
+        torBridgeRowRef = torBridgeRow
+        content.addView(torBridgeRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
         // Tor's own chain switch, separate from Psiphon's. Placed directly under the
         // mode row because the mode is what decides whether it can apply: Direct and
-        // Meek can be chained, obfs4 and Snowflake cannot.
+        // Meek can be chained, obfs4 and Snowflake cannot, and Manual depends on
+        // what the pasted lines use.
         val torChainRow = OrbitToggleRow(
             this,
             palette,
             "Tor over WARP",
-            "Direct and Meek only, inside a WARP transport",
+            "Direct, Meek and your own bridges, inside a WARP transport",
             chainArmed(Protocol.TOR) && selectedProtocol == Protocol.TOR &&
-                TorManager.isChainable(torMode()),
+                TorManager.isChainable(this, torMode()),
         ) { armed ->
             setChainArmed(armed, Protocol.TOR)
             renderChainCard()
@@ -3006,7 +3027,32 @@ class MainActivity : Activity() {
             options = modes,
             selected = torMode(),
             label = { it.label },
-            description = { it.description },
+            description = { mode ->
+                // Manual's description carries its own state, because picking it
+                // with an empty box is the one choice in this sheet that cannot
+                // work — and the sheet is where the user decides.
+                if (mode == TorManager.TorMode.MANUAL && !TorManualBridges.isConfigured(this)) {
+                    "Enter a bridge first, in the row below this one"
+                } else if (mode == TorManager.TorMode.MANUAL) {
+                    TorManualBridges.summary(this)
+                } else {
+                    mode.description
+                }
+            },
+            scrollable = false,
+            // Refused rather than saved: a pinned Manual with nothing to use makes
+            // tor reject its own config, so the connect would fail with a message
+            // about bridges the user never saw a chance to enter. Refusing here
+            // also leaves the SELECTED marker where it was, so the sheet keeps
+            // telling the truth about which mode is stored.
+            refuse = { chosen ->
+                if (chosen == TorManager.TorMode.MANUAL && !TorManualBridges.isConfigured(this)) {
+                    editTorBridges()
+                    "Enter a bridge in Manual bridge first"
+                } else {
+                    null
+                }
+            },
         ) { chosen ->
             preferences().edit().putString(TorManager.MODE_PREF, chosen.key).apply()
             ConnectionLog.record(
@@ -3017,6 +3063,119 @@ class MainActivity : Activity() {
                 }
             )
             after?.invoke()
+        }
+    }
+
+    /**
+     * The manual bridge editor.
+     *
+     * A multi-line box and nothing else, because that is the shape of the thing
+     * users hold: bridge lines arrive as two or three lines of text from BridgeDB
+     * mail, a Telegram channel or a friend, and any per-field form would have them
+     * dismantling a line by hand. [TorManualBridges.validate] enforces what tor
+     * actually accepts, and its messages name the specific defect — a hostname
+     * where tor demands a numeric address, an obfs4 line whose `cert=` was lost to
+     * a line wrap — because "invalid bridge" tells a user nothing they can act on.
+     *
+     * Saving does not switch Tor to Manual. Storing a bridge and deciding to use it
+     * are separate acts, and silently repinning the transport under someone who was
+     * only pasting for later is the kind of surprise this app avoids; the toast
+     * points at the mode row instead.
+     */
+    private fun editTorBridges() {
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val field = settingsField(
+            value = TorManualBridges.raw(this),
+            hintText = "obfs4 1.2.3.4:443 FINGERPRINT cert=… iat-mode=0",
+            multiline = true,
+        ).apply {
+            // Bridge lines are case-sensitive base64 and hex; autocorrect and
+            // auto-capitalisation would quietly corrupt a pasted cert.
+            inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setHorizontallyScrolling(false)
+            maxLines = 8
+        }
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            background = roundedBackground(SURFACE, 28, SURFACE)
+        }
+        sheet.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label("Manual bridge", 22f, INK, TypefaceStyle.MEDIUM))
+        })
+        sheet.addView(label(
+            "One bridge per line, exactly as you received it. obfs4, meek_lite, " +
+                "webtunnel and snowflake are supported, as is a plain IP:port.",
+            14f, MUTED,
+        ), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(16) })
+        sheet.addView(field, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(132),
+        ))
+        val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        buttons.addView(createSettingsButton("Clear") {
+            TorManualBridges.save(this, "")
+            field.setText("")
+            // A cleared box cannot back a pinned Manual mode, so the pin goes with
+            // it rather than being left to fail at the next connect.
+            if (torMode() == TorManager.TorMode.MANUAL) {
+                preferences().edit()
+                    .putString(TorManager.MODE_PREF, TorManager.TorMode.AUTO.key).apply()
+                ConnectionLog.record("Manual bridges cleared — Tor mode back to Auto")
+            }
+            torBridgeRowRef?.setValue(TorManualBridges.summary(this))
+            torModeRowRef?.setValue(torMode().label)
+            refreshPsiphonRows()
+            renderChainCard()
+        }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        buttons.addView(createSettingsButton(
+            "Save",
+            backgroundOverride = primary,
+            textColorOverride = primaryContainer,
+        ) {
+            val text = field.text.toString()
+            TorManualBridges.validate(text)?.let { problem ->
+                field.error = problem
+                toastShort(problem)
+                return@createSettingsButton
+            }
+            TorManualBridges.save(this, text)
+            val parsed = TorManualBridges.bridges(this)
+            ConnectionLog.record(
+                "Manual bridges saved: ${parsed.size} line(s), " +
+                    parsed.map { it.transport ?: "plain" }.distinct().joinToString(", ")
+            )
+            torBridgeRowRef?.setValue(TorManualBridges.summary(this))
+            // A saved change can make a pinned Manual chainable or not — a pasted
+            // snowflake line cannot ride inside WARP — so both the switch and the
+            // home card are repainted before the sheet closes.
+            refreshPsiphonRows()
+            renderChainCard()
+            dialog.dismiss()
+            if (torMode() != TorManager.TorMode.MANUAL) {
+                toastShort("Saved — set Connection mode to Manual bridge to use it")
+            } else {
+                toastShort("Saved — applies on the next connect")
+            }
+        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+        sheet.addView(buttons, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(52),
+        ).apply { topMargin = dp(16) })
+        dialog.setContentView(ScrollView(this).apply {
+            setPadding(dp(16), 0, dp(16), dp(16))
+            addView(sheet)
+        })
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.62f)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
         }
     }
 
@@ -3551,13 +3710,18 @@ class MainActivity : Activity() {
         label: (T) -> String,
         description: (T) -> String,
         onSelected: (T) -> Unit,
-    ) = showChoiceSheet(title, subtitle, options, selected, label, description, false, onSelected)
+    ) = showChoiceSheet(title, subtitle, options, selected, label, description, false, null, onSelected)
 
     /**
      * @param scrollable caps the option list at 55% of the screen and scrolls it.
      *   Needed once a list can be long — the country picker has 25+ entries, and
      *   without this the sheet grows past the top of the screen and the rows at
      *   both ends become unreachable.
+     * @param refuse consulted before a pick is accepted. Returning a message keeps
+     *   the current selection, shows the message, and does not call [onSelected].
+     *   Needed because the click handler moves the SELECTED marker on its own: a
+     *   caller that merely declined to save would leave the sheet showing a choice
+     *   the app is not using, which is the same lie as a greyed row that looks live.
      */
     private fun <T> showChoiceSheet(
         title: String,
@@ -3567,6 +3731,7 @@ class MainActivity : Activity() {
         label: (T) -> String,
         description: (T) -> String,
         scrollable: Boolean,
+        refuse: ((T) -> String?)? = null,
         onSelected: (T) -> Unit,
     ) {
         // `after` is invoked by the caller's onSelected lambda; see chooseObfuscation
@@ -3606,6 +3771,14 @@ class MainActivity : Activity() {
                 addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 addView(indicator)
                 setOnClickListener {
+                    // Refusal comes first, and nothing moves if it fires: the
+                    // marker, the callback and the stored preference all stay on
+                    // the previous choice.
+                    val refusal = refuse?.invoke(item)
+                    if (refusal != null) {
+                        toastShort(refusal)
+                        return@setOnClickListener
+                    }
                     onSelected(item)
                     rows.forEach { (value, option) -> setSelectionState(option, value == item, animate = true) }
                 }
@@ -3666,6 +3839,7 @@ class MainActivity : Activity() {
         torChainRowRef = null
         torChainOuterRow = null
         torRegionRowRef = null
+        torBridgeRowRef = null
         // Same reason as the rows above: these two point at views that are about to
         // be destroyed, and a stale reference would have the next repaint writing
         // into a detached view instead of the new page's row.
@@ -3734,7 +3908,7 @@ class MainActivity : Activity() {
         // cannot be chained, so with either pinned the switch reads off and greyed
         // instead of promising something the service will refuse.
         val torSelected = selectedProtocol == Protocol.TOR
-        val torChainable = TorManager.isChainable(torMode())
+        val torChainable = TorManager.isChainable(this, torMode())
         torChainRowRef?.apply {
             setChecked(chainArmed(Protocol.TOR) && torSelected && torChainable)
             setAvailable(torSelected && torChainable && modeControlsEnabled)
@@ -3757,6 +3931,18 @@ class MainActivity : Activity() {
         // is written to torrc on every Tor session, chained or not — so the only
         // conditions are "Tor is selected" and "not locked mid-session".
         torRegionRowRef?.setAvailable(torSelected && modeControlsEnabled)
+        // The manual bridge box is deliberately NOT gated on the TOR transport.
+        //
+        // Every other row in this section configures a transport that has to be
+        // selected for the setting to mean anything. This one is different: it is
+        // where a bridge gets stored, and the Connection mode sheet refuses Manual
+        // until something is stored — so greying it off Tor would leave the mode
+        // permanently unreachable for a user who has not selected Tor yet. Only the
+        // mid-session lock applies, since the lines are read when tor starts.
+        torBridgeRowRef?.apply {
+            setValue(TorManualBridges.summary(this@MainActivity))
+            setAvailable(modeControlsEnabled)
+        }
         // Tor's OWN "Connection mode" row (Direct/Meek/obfs4/Snowflake). It was the
         // last row in either section with no availability rule at all, so on a page
         // where MASQUE was selected it stayed fully live and opened a sheet that
@@ -4600,7 +4786,7 @@ class MainActivity : Activity() {
      */
     private fun chainApplies(): Boolean = when (selectedProtocol) {
         Protocol.PSIPHON -> true
-        Protocol.TOR -> TorManager.isChainable(torMode())
+        Protocol.TOR -> TorManager.isChainable(this, torMode())
         else -> false
     }
 
@@ -4629,8 +4815,16 @@ class MainActivity : Activity() {
     private fun renderChainCard() {
         val applies = chainApplies()
         val reason = when {
-            selectedProtocol == Protocol.TOR && !TorManager.isChainable(torMode()) ->
-                "not available with ${torMode().label}"
+            selectedProtocol == Protocol.TOR && !TorManager.isChainable(this, torMode()) ->
+                // Manual is refused for a reason that lives in the pasted lines,
+                // not in the mode, so the blocker names the line to fix. Saying
+                // "not available with Manual bridge" would send the user looking
+                // for a setting to change instead.
+                if (torMode() == TorManager.TorMode.MANUAL) {
+                    TorManager.manualChainBlocker(this) ?: "not available with your bridges"
+                } else {
+                    "not available with ${torMode().label}"
+                }
             !applies -> "only for the PSIPHON and TOR transports"
             !modeControlsEnabled -> "disconnect to change"
             else -> null
