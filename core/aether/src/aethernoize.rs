@@ -180,7 +180,12 @@ fn parse_range(data: &str) -> usize {
 pub fn parse_cps(spec: &str) -> Vec<u8> {
     let mut out = Vec::new();
 
-    let tag_regex = Regex::new(r"<([a-z]+)\s*([^>]*)>").unwrap();
+    // Compiled once for the life of the process. This runs on every junk packet
+    // we build, and recompiling a regex per call is pure CPU (and therefore
+    // battery) for a pattern that never changes.
+    static TAG_REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let tag_regex = TAG_REGEX
+        .get_or_init(|| Regex::new(r"<([a-z]+)\s*([^>]*)>").expect("static tag pattern compiles"));
 
     for cap in tag_regex.captures_iter(spec) {
         let tag_type = cap.get(1).map_or("", |m| m.as_str());

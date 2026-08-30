@@ -151,12 +151,25 @@ pub struct CapsuleParser {
     buf: Vec<u8>,
 }
 
+/// A capsule that never completes must not be allowed to grow the reassembly
+/// buffer without end. A misbehaving or hostile gateway could otherwise walk us
+/// into an OOM kill by streaming a length prefix it never satisfies.
+const MAX_CAPSULE_BUF: usize = 256 * 1024;
+
 impl CapsuleParser {
     pub fn new() -> Self {
         Self { buf: Vec::new() }
     }
 
     pub fn push(&mut self, data: &[u8]) {
+        if self.buf.len().saturating_add(data.len()) > MAX_CAPSULE_BUF {
+            log::warn!(
+                "capsule reassembly buffer would exceed {MAX_CAPSULE_BUF} bytes; dropping {} buffered byte(s)",
+                self.buf.len()
+            );
+            self.buf.clear();
+            return;
+        }
         self.buf.extend_from_slice(data);
     }
 

@@ -1278,9 +1278,13 @@ async fn want_quick_reconnect(cached: &lastconn::LastConnection) -> bool {
 }
 
 fn masque_reconnect_delay() -> std::time::Duration {
+    // A delay of zero is ignored, not honoured: it turns the reconnect loop into
+    // a busy spin that pins a core and drains the battery with nothing to show
+    // for it.
     let secs = std::env::var("AETHER_MASQUE_RECONNECT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
         .unwrap_or(2);
     std::time::Duration::from_secs(secs)
 }
@@ -1831,9 +1835,11 @@ async fn hunt_wg_peer(
 }
 
 fn wg_reconnect_delay() -> std::time::Duration {
+    // Zero is ignored for the same reason as the MASQUE delay: it busy-spins.
     let secs = std::env::var("AETHER_WG_RECONNECT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
         .unwrap_or(2);
     std::time::Duration::from_secs(secs)
 }

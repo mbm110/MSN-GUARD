@@ -1286,22 +1286,38 @@ pub fn parse_request_line(line: &str) -> Option<HttpRequestLine> {
     })
 }
 
-async fn read_head(sock: &mut TcpStream) -> Result<Vec<u8>> {
-    let mut head = Vec::with_capacity(1024);
-    let mut byte = [0u8; 1];
+/// Reads the request head in chunks and hands back anything the client
+/// pipelined behind the blank line.
+///
+/// The old loop read one byte per `read()` call — up to 16384 syscalls for a
+/// single request — because it needed to avoid swallowing bytes that belong to
+/// the body or to the tunnelled stream. Reading in chunks and returning the
+/// overshoot to the caller gets the same guarantee for one syscall per chunk.
+async fn read_head(sock: &mut TcpStream) -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut head = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 2048];
+    let mut searched = 0usize;
 
     loop {
-        let read = sock.read(&mut byte).await?;
+        let read = sock.read(&mut chunk).await?;
         if read == 0 {
             return Err(AetherError::Other(
                 "the http client closed before sending a request".into(),
             ));
         }
-        head.push(byte[0]);
+        head.extend_from_slice(&chunk[..read]);
 
-        if head.len() >= 4 && head[head.len() - 4..] == *b"\r\n\r\n" {
-            return Ok(head);
+        // Rescan only the three-byte overlap with what was already searched,
+        // so a terminator straddling two chunks is still found without
+        // re-walking the whole buffer every time.
+        let from = searched.saturating_sub(3);
+        if let Some(pos) = head[from..].windows(4).position(|w| w == b"\r\n\r\n") {
+            let end = from + pos + 4;
+            let pipelined = head.split_off(end);
+            return Ok((head, pipelined));
         }
+        searched = head.len();
+
         if head.len() > HTTP_HEAD_LIMIT {
             return Err(AetherError::Other("http request head too large".into()));
         }
@@ -1333,7 +1349,7 @@ async fn open_tunneled(
 }
 
 async fn handle_http_client(mut sock: TcpStream, stack: StackHandle) -> Result<()> {
-    let head = read_head(&mut sock).await?;
+    let (head, pipelined) = read_head(&mut sock).await?;
     let text = String::from_utf8_lossy(&head).to_string();
     let first_line = text.lines().next().unwrap_or_default();
 
@@ -1364,7 +1380,7 @@ async fn handle_http_client(mut sock: TcpStream, stack: StackHandle) -> Result<(
         }
         Action::Direct => {
             log::debug!("[route] direct http {}:{}", request.authority, request.port);
-            return relay_http_direct(sock, &request, &head).await;
+            return relay_http_direct(sock, &request, &head, &pipelined).await;
         }
         Action::Proxy => match open_tunneled(&stack, target, request.port).await {
             Ok(channel) => channel,
@@ -1403,6 +1419,13 @@ async fn handle_http_client(mut sock: TcpStream, stack: StackHandle) -> Result<(
         }
     }
 
+    // Anything the client sent behind the blank line — a request body, or the
+    // TLS ClientHello that follows CONNECT without waiting for our 200 — has
+    // already been read off the socket, so it has to be forwarded by hand.
+    if !pipelined.is_empty() && sender.send(pipelined).await.is_err() {
+        return Ok(());
+    }
+
     let up = tokio::spawn(async move {
         let mut buf = vec![0u8; 16384];
         loop {
@@ -1439,6 +1462,7 @@ async fn relay_http_direct(
     mut sock: TcpStream,
     request: &HttpRequestLine,
     head: &[u8],
+    pipelined: &[u8],
 ) -> Result<()> {
     let upstream = tokio::net::TcpStream::connect((
         request.authority.as_str(),
@@ -1470,13 +1494,100 @@ async fn relay_http_direct(
         }
     }
 
+    // Same reason as the tunnelled path: bytes read past the head must be
+    // replayed upstream before the bidirectional copy takes over.
+    if !pipelined.is_empty() {
+        upstream.write_all(pipelined).await?;
+    }
+
     let _ = tokio::io::copy_bidirectional(&mut sock, &mut upstream).await;
     Ok(())
 }
 
 #[cfg(test)]
 mod http_proxy_tests {
-    use super::{parse_authority, parse_request_line};
+    use super::{parse_authority, parse_request_line, read_head};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// Feeds `chunks` to a real socket and returns what `read_head` split out.
+    async fn head_over_socket(chunks: &[&[u8]]) -> (Vec<u8>, Vec<u8>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let owned: Vec<Vec<u8>> = chunks.iter().map(|c| c.to_vec()).collect();
+        let writer = tokio::spawn(async move {
+            let mut client = TcpStream::connect(addr).await.expect("connect");
+            for chunk in owned {
+                client.write_all(&chunk).await.expect("write");
+                client.flush().await.expect("flush");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        });
+
+        let (mut server, _) = listener.accept().await.expect("accept");
+        let result = read_head(&mut server).await.expect("head");
+        writer.abort();
+        result
+    }
+
+    #[tokio::test]
+    async fn a_head_arriving_in_one_piece_is_read_exactly() {
+        let (head, pipelined) =
+            head_over_socket(&[b"CONNECT a:443 HTTP/1.1\r\nHost: a\r\n\r\n"]).await;
+        assert_eq!(head, b"CONNECT a:443 HTTP/1.1\r\nHost: a\r\n\r\n");
+        assert!(pipelined.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_head_split_across_writes_is_still_assembled() {
+        let (head, pipelined) = head_over_socket(&[
+            b"CONNECT a:443 HT",
+            b"TP/1.1\r\nHos",
+            b"t: a\r\n",
+            b"\r\n",
+        ])
+        .await;
+        assert_eq!(head, b"CONNECT a:443 HTTP/1.1\r\nHost: a\r\n\r\n");
+        assert!(pipelined.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_terminator_straddling_two_chunks_is_found() {
+        // The blank line is broken across writes so the overlap rescan is what
+        // has to catch it.
+        let (head, pipelined) =
+            head_over_socket(&[b"GET http://a/ HTTP/1.1\r\nHost: a\r\n\r", b"\nbody"]).await;
+        assert_eq!(head, b"GET http://a/ HTTP/1.1\r\nHost: a\r\n\r\n");
+        assert_eq!(pipelined, b"body");
+    }
+
+    #[tokio::test]
+    async fn bytes_after_the_head_are_handed_back_not_dropped() {
+        let (head, pipelined) =
+            head_over_socket(&[b"CONNECT a:443 HTTP/1.1\r\n\r\n\x16\x03\x01pipelined"]).await;
+        assert_eq!(head, b"CONNECT a:443 HTTP/1.1\r\n\r\n");
+        assert_eq!(pipelined, b"\x16\x03\x01pipelined");
+    }
+
+    #[tokio::test]
+    async fn a_head_over_the_limit_is_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let writer = tokio::spawn(async move {
+            let mut client = TcpStream::connect(addr).await.expect("connect");
+            let junk = vec![b'x'; super::HTTP_HEAD_LIMIT + 4096];
+            let _ = client.write_all(&junk).await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        let (mut server, _) = listener.accept().await.expect("accept");
+        let outcome = read_head(&mut server).await;
+        writer.abort();
+        assert!(outcome.is_err(), "an oversized head must be refused");
+    }
 
     #[test]
     fn a_connect_request_carries_the_host_and_port() {
