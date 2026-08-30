@@ -500,17 +500,10 @@ class MainActivity : Activity() {
         showOpeningOverlay()
         // Reattach to a tunnel that is already up. Without this the dial opens in
         // the disconnected state while the VPN is running, and the session timer
-        // would only start on the next status broadcast. restored = true keeps
-        // the elapsed time honest by reading the service's connect timestamp.
-        if (TunnelStatus.isActive()) {
-            showConnected(restored = true)
-            // showConnected(restored) deliberately skips these so a mid-session
-            // health check does not re-probe on every ping; on a cold start we do
-            // want them, otherwise the IP card and latency stay empty.
-            startAutoPing()
-            pingConnection()
-        }
-        refreshPublicIp()
+        // would only start on the next status broadcast. [adoptRunningTunnel]
+        // keeps the elapsed time honest by reading the service's connect
+        // timestamp, and runs again on every resume — see its own comment.
+        if (!adoptRunningTunnel()) refreshPublicIp()
     }
 
     override fun onStart() {
@@ -566,6 +559,15 @@ class MainActivity : Activity() {
             autoPingHandler.post(autoPingRunnable)
         }
         renderStatus()
+        // A tunnel can be raised while this screen is merely STOPPED rather than
+        // destroyed — the Quick Settings tile is the normal way — and the status
+        // receiver is unregistered between onStop and onStart, so the CONNECTED
+        // broadcast reaches nobody. onCreate's adoption does not help then,
+        // because there is no onCreate: the same activity instance simply resumes
+        // with a dial still painted "Not connected" over a working tunnel that is
+        // visibly passing traffic. Field report, and the exact reason this call is
+        // here and not only in onCreate.
+        adoptRunningTunnel()
         // The LAN-sharing subtitle carries a live network address, and the usual way
         // to get one is to leave for the system Wi-Fi/hotspot screen and come back.
         // Every row this touches is null unless the settings page is on screen, so
@@ -4550,6 +4552,49 @@ class MainActivity : Activity() {
         if (!TunnelStatus.isActive() && isTunnelActive()) {
             NativeCore.lastError().takeIf(String::isNotBlank)?.let(::showFailure) ?: showDisconnected("Tunnel stopped unexpectedly")
         }
+    }
+
+    /**
+     * Paints the screen as connected when a tunnel is already up but this UI never
+     * saw the broadcast that said so.
+     *
+     * Two ways in, and both are normal use rather than edge cases:
+     *  - the activity was destroyed and is being recreated (rotation, process
+     *    restart, launched fresh from the launcher while the service runs);
+     *  - the activity was only STOPPED and is resuming. [statusReceiver] is
+     *    registered in onStart and unregistered in onStop, so a tunnel raised from
+     *    the Quick Settings tile while the app sat in Recents broadcasts CONNECTED
+     *    to nobody. The instance survives, so onCreate does not run again, and the
+     *    dial stayed on "Not connected" while the metrics underneath it counted
+     *    real traffic.
+     *
+     * Deliberately does NOT run the verification gate. That gate exists to catch a
+     * handshake that passes while no payload crosses, and it belongs to the
+     * connect that is in progress; a tunnel that is already established and
+     * carrying traffic has answered the question. Adopting through the gate would
+     * also paint "Verifying" over a working session every time the user opens the
+     * app.
+     *
+     * @return true when it took over the paint, so the caller can skip the
+     *   disconnected-path work it would otherwise do.
+     */
+    private fun adoptRunningTunnel(): Boolean {
+        if (!TunnelStatus.isActive()) return false
+        // A connect this screen started is mid-verification: leave it alone, the
+        // gate owns the paint until it proves or fails the tunnel.
+        if (verifyInFlight || visualState == OrbitDialView.State.CONNECTING) return false
+        // Already painted live — nothing to adopt. DEGRADED counts: the auto-ping
+        // owns recovery from there and must not be reset to CONNECTED here.
+        if (isTunnelActive()) return false
+        showConnected(restored = true)
+        // showConnected(restored = true) deliberately skips these so a mid-session
+        // health check does not re-probe on every ping. Adoption is not that case:
+        // the latency chip and the IP card have never been filled in for this
+        // session, so ask once now and keep the poller running.
+        startAutoPing()
+        pingConnection()
+        refreshPublicIp()
+        return true
     }
 
     private fun showConnecting(detail: String? = null, progress: Int = -1) {
