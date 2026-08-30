@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RadialGradient
@@ -209,7 +210,7 @@ class OrbitDialView(
         }
         drawRings(canvas, cx, cy, ring, geo)
         drawTicks(canvas, cx, cy, ring, accent, geo)
-        drawArc(canvas, cx, cy, ring, accent, geo)
+        drawArc(canvas, cx, cy, ring, geo)
         drawCore(canvas, cx, cy, ring, accent, active)
         drawContents(canvas, cx, cy, ring, accent, active, geo)
     }
@@ -282,6 +283,18 @@ class OrbitDialView(
             State.CONNECTED, State.DEGRADED -> (TICK_LIT * tickReveal).roundToInt()
             else -> 0
         }
+        // Standing wave, CONNECTING only.
+        //
+        // Three lobes of light undulate around the rim instead of the old pale
+        // halo, which was a single rotating white glow and read as generic. It is
+        // the same family as the radar sweep in the middle of the core — waves
+        // rather than a spinner — so the two motions belong to each other.
+        //
+        // Cost: none beyond what the gauge already pays. All 60 ticks are drawn
+        // in every state anyway; the wave only changes each tick's colour, alpha
+        // and length. No new shape, no new animator, no extra invalidate: the
+        // 1150ms loop animator that already runs while CONNECTING drives it.
+        val wavePhase = loopFraction * TWO_PI
         paint.style = Paint.Style.STROKE
         paint.strokeCap = Paint.Cap.ROUND
         val length = dp(7) * geo
@@ -290,28 +303,44 @@ class OrbitDialView(
             val rad = Math.toRadians((i * (360.0 / TICK_COUNT)) - 90.0)
             val cosA = cos(rad).toFloat()
             val sinA = sin(rad).toFloat()
-            val startR = ring - length
             val lit = i < litCount
-            // Every third tick glows amber while connecting — the mock's `.sw`
-            // class — and the whole set breathes with the loop instead of a comet
-            // running around the rim.
-            val sweeping = state == State.CONNECTING && i % 3 == 0
+            var tickLength = length
             paint.strokeWidth = 1.5f * density
             when {
                 lit -> {
                     paint.color = Sculpt.withAlpha(accent, 0.95f)
                     paint.setShadowLayer(3f * density, 0f, 0f, Sculpt.withAlpha(accent, 0.8f))
                 }
-                sweeping -> {
-                    val breath = 0.45f + pulse * 0.5f
-                    paint.color = Sculpt.withAlpha(palette.amber, breath)
-                    paint.setShadowLayer(3f * density, 0f, 0f, Sculpt.withAlpha(palette.amber, 0.75f))
+                state == State.CONNECTING -> {
+                    // Three lobes: sin(3θ - phase), rectified and sharpened so the
+                    // crests are compact and the troughs go properly dark instead
+                    // of leaving the whole rim half-lit.
+                    val theta = (i.toFloat() / TICK_COUNT) * TWO_PI
+                    val raw = sin((theta * WAVE_LOBES - wavePhase).toDouble()).toFloat()
+                    val w = if (raw <= 0f) 0f else Math.pow(raw.toDouble(), WAVE_SHARPNESS).toFloat()
+                    tickLength = (6.4f + 4.6f * w) * density * geo
+                    paint.strokeWidth = (1.5f + 0.8f * w) * density
+                    if (w <= 0.05f) {
+                        paint.color = Sculpt.withAlpha(palette.ink, 0.09f)
+                        paint.clearShadowLayer()
+                    } else {
+                        // Crests tip into mint, so the wave has a hot centre and
+                        // amber shoulders rather than one flat colour.
+                        val hue = if (w > 0.55f) palette.mint else palette.amber
+                        paint.color = Sculpt.withAlpha(hue, 0.09f + 0.78f * w)
+                        if (w > 0.6f) {
+                            paint.setShadowLayer(4f * density * w, 0f, 0f, Sculpt.withAlpha(hue, 0.75f * w))
+                        } else {
+                            paint.clearShadowLayer()
+                        }
+                    }
                 }
                 else -> {
                     paint.color = Sculpt.withAlpha(palette.ink, 0.11f)
                     paint.clearShadowLayer()
                 }
             }
+            val startR = ring - tickLength
             canvas.drawLine(
                 cx + cosA * startR, cy + sinA * startR,
                 cx + cosA * ring, cy + sinA * ring,
@@ -322,7 +351,7 @@ class OrbitDialView(
         paint.strokeCap = Paint.Cap.BUTT
     }
 
-    private fun drawArc(canvas: Canvas, cx: Float, cy: Float, ring: Float, accent: Int, geo: Float) {
+    private fun drawArc(canvas: Canvas, cx: Float, cy: Float, ring: Float, geo: Float) {
         val r = ring - dp(13) * geo
         bounds.set(cx - r, cy - r, cx + r, cy + r)
         paint.style = Paint.Style.STROKE
@@ -332,28 +361,52 @@ class OrbitDialView(
         paint.color = Sculpt.withAlpha(palette.ink, 0.06f)
         canvas.drawArc(bounds, 0f, 360f, false, paint)
 
+        // CONNECTING: two soft crests on a full circle, turning with the wave.
+        //
+        // The old treatment was a single 80–220° arc chasing its own tail, which
+        // is the pale rotating sliver he asked to replace. This is the same
+        // standing-wave idea as the gauge: the stroke covers the whole circle and
+        // the gradient decides where it is visible, so the two crests glide
+        // around instead of one lump sweeping past. Still one drawArc.
+        if (state == State.CONNECTING) {
+            paint.strokeWidth = 2.2f * density
+            val sweepShader = SweepGradient(
+                cx, cy,
+                intArrayOf(
+                    Sculpt.withAlpha(palette.amber, 0.55f),
+                    Sculpt.withAlpha(palette.amber, 0f),
+                    Sculpt.withAlpha(palette.amber, 0f),
+                    Sculpt.withAlpha(palette.amber, 0.55f),
+                ),
+                floatArrayOf(0f, 0.35f, 0.65f, 1f),
+            )
+            // SweepGradient starts at 3 o'clock; rotate it so the crest leads
+            // from the top and travels with loopFraction.
+            sweepShader.setLocalMatrix(
+                Matrix().apply { setRotate(loopFraction * 360f - 90f, cx, cy) },
+            )
+            paint.shader = sweepShader
+            canvas.drawArc(bounds, 0f, 360f, false, paint)
+            paint.shader = null
+            paint.strokeCap = Paint.Cap.BUTT
+            return
+        }
+
         val sweep = when (state) {
             // 798 - 110 of a 798 dasharray in the mock ≈ 86% of the circle.
             State.CONNECTED, State.DEGRADED -> 310f
-            State.CONNECTING -> 80f + pulse * 140f
             else -> 0f
         }
         if (sweep <= 0f) {
             paint.strokeCap = Paint.Cap.BUTT
             return
         }
-        val start = if (state == State.CONNECTING) loopFraction * 360f - 90f else -90f
         paint.shader = SweepGradient(
             cx, cy,
             intArrayOf(palette.connected, palette.mint, palette.connected),
             floatArrayOf(0f, 0.5f, 1f),
-        ).takeIf { state == State.CONNECTED || state == State.DEGRADED }
-            ?: SweepGradient(
-                cx, cy,
-                intArrayOf(accent, Sculpt.lighten(accent, 0.35f), accent),
-                floatArrayOf(0f, 0.5f, 1f),
-            )
-        canvas.drawArc(bounds, start, sweep, false, paint)
+        )
+        canvas.drawArc(bounds, -90f, sweep, false, paint)
         paint.shader = null
         paint.strokeCap = Paint.Cap.BUTT
     }
@@ -758,5 +811,28 @@ class OrbitDialView(
         const val MIN_SIZE_SCALE = 0.78f
         /** Core radius as a fraction of the ring: 99dp core / 133dp ring. */
         const val CORE_RATIO = 0.744f
+        /**
+         * 2π as a float.
+         *
+         * A literal rather than `(Math.PI * 2).toFloat()`: `const val` needs a
+         * compile-time constant, and a Java static field is not one.
+         */
+        private const val TWO_PI = 6.2831855f
+        /**
+         * Lobes in the CONNECTING standing wave.
+         *
+         * Three is deliberate: one lobe is a spinner, two reads as a propeller,
+         * and four or more makes the 60-tick gauge look like it is flickering
+         * because each crest gets too few ticks to resolve.
+         */
+        private const val WAVE_LOBES = 3f
+        /**
+         * Exponent applied to the rectified sine.
+         *
+         * A raw sine leaves the whole rim at half brightness, which is exactly
+         * the flat pale glow this replaces. 2.4 pulls the troughs down to the
+         * resting tick colour and keeps the crests compact.
+         */
+        private const val WAVE_SHARPNESS = 2.4
     }
 }
