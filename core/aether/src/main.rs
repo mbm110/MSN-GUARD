@@ -838,7 +838,20 @@ async fn select_peer(
                     enable_restricted_h2();
                     let mut h2_probe = probe.clone();
                     h2_probe.ports = masque_h2_ports(&probe.ports);
-                    prober::hunt_best_gateway(&h2_probe, ScanMode::Balanced).await?
+                    match prober::verify_cached_gateways(&h2_probe, masque_gateway_peers()).await {
+                        Some(best) => best,
+                        None => {
+                            // See `hunt_masque_peer`: a wide HTTP/2 sweep cannot
+                            // find connect-ip on the public edge, so we clear
+                            // the fallback and report the HTTP/3 failure instead
+                            // of burning another two minutes.
+                            masque_h2::clear_fallback();
+                            crate::ffi::record_log(
+                                "HTTP/2 found no gateway either; retrying HTTP/3",
+                            );
+                            return Err(error);
+                        }
+                    }
                 }
                 Err(error) => return Err(error),
             };
@@ -1369,8 +1382,19 @@ async fn hunt_masque_peer(
                 ));
                 return Ok(SocketAddr::new(best.ip, best.port));
             }
-            crate::ffi::record_log("Scanning MASQUE gateways via HTTP/2 (balanced)");
-            prober::hunt_best_gateway(&h2_probe, ScanMode::Balanced).await?
+            // No wide HTTP/2 sweep here, deliberately.
+            //
+            // connect-ip is not served over HTTP/2 by the public Cloudflare
+            // edge, so sweeping thousands of addresses on it cannot succeed:
+            // the Irancell log shows 4433 HTTP/2 probes producing 2853
+            // `:status 400` and 622 `ACCESS_DENIED` and zero acceptances, two
+            // minutes at a time. The bounded anycast check above is worth
+            // keeping because a Zero-Trust org edge can answer it; past that we
+            // give up on HTTP/2 and let the caller come back on HTTP/3, where
+            // the alternate UDP ports now get their turn.
+            masque_h2::clear_fallback();
+            crate::ffi::record_log("HTTP/2 found no gateway either; retrying HTTP/3");
+            return Err(error);
         }
         Err(error) => return Err(error),
     };
@@ -1502,6 +1526,16 @@ async fn run_masque(
                 }
                 PassOutcome::Exhausted => {}
             }
+
+            // Hand the scan loop back to HTTP/3.
+            //
+            // Leaving the fallback latched here meant every later scan and every
+            // reconnect for the life of the process ran on HTTP/2 — which the
+            // public edge does not serve connect-ip on — so a carrier that only
+            // blocks UDP/443 could never be reached on UDP/500 or UDP/4500.
+            if quick_peer.is_none() {
+                masque_h2::clear_fallback();
+            }
         }
     }
 
@@ -1552,9 +1586,14 @@ async fn run_masque(
                             crate::ffi::record_log(format!(
                                 "No usable MASQUE gateway ({e}); retrying shortly"
                             ));
-                            if !masque_h2::enabled() {
-                                enable_restricted_h2();
-                            }
+                            // Deliberately no `enable_restricted_h2()` here.
+                            //
+                            // `hunt_masque_peer` already tries the bounded HTTP/2
+                            // anycast check inside a single attempt and clears the
+                            // flag again on the way out. Latching it here made the
+                            // next rescan HTTP/2-only for good, which is how the
+                            // Irancell log ended up with nine minutes of scanning
+                            // and no gateway. Every rescan now starts on HTTP/3.
                             tokio::time::sleep(masque_reconnect_delay()).await;
                             continue;
                         }

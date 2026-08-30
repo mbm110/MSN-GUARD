@@ -104,6 +104,22 @@ pub fn enable_fallback() {
     H2_FALLBACK.store(true, Ordering::Release);
 }
 
+/// Undo [enable_fallback], leaving an explicit user choice alone.
+///
+/// The fallback used to be a one-way door: once an HTTP/3 scan came up empty the
+/// flag stayed set for the life of the process, so every later reconnect went
+/// straight to HTTP/2 and never asked UDP again. On a carrier that drops UDP/443
+/// but leaves other UDP ports open that is the difference between connecting and
+/// never connecting — the field log from Irancell showed nine minutes of HTTP/2
+/// scanning after a single failed HTTP/3 pass, while plain WireGuard on the same
+/// network worked immediately.
+///
+/// `H2_PREFERRED` is deliberately untouched: that is the user pinning HTTP/2 in
+/// settings, not a fallback we chose for them.
+pub fn clear_fallback() {
+    H2_FALLBACK.store(false, Ordering::Release);
+}
+
 pub fn h2_peer(quic_peer: SocketAddr) -> SocketAddr {
     if let Ok(v) = std::env::var("AETHER_MASQUE_H2_PEER") {
         if let Ok(addr) = v.trim().parse::<SocketAddr>() {
@@ -701,10 +717,29 @@ fn bytes_to_ip(version: u8, bytes: &[u8]) -> Option<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::data_check_enabled_for;
+    use super::{clear_fallback, enable_fallback, enabled, set_preferred};
 
     #[test]
     fn h2_data_validation_is_on_by_default() {
         assert!(data_check_enabled_for(None));
         assert!(!data_check_enabled_for(Some("1")));
+    }
+
+    #[test]
+    fn a_fallback_can_be_undone_but_the_users_own_choice_survives() {
+        // One test, not two: these flags are process-globals and the test
+        // harness runs threads in parallel, so splitting them would let the two
+        // halves interleave.
+        set_preferred(false);
+        assert!(!enabled(), "no fallback and no preference means HTTP/3");
+        enable_fallback();
+        assert!(enabled());
+        clear_fallback();
+        assert!(!enabled(), "clearing the fallback must return us to HTTP/3");
+
+        set_preferred(true);
+        clear_fallback();
+        assert!(enabled(), "a user who pinned HTTP/2 keeps HTTP/2");
+        set_preferred(false);
     }
 }

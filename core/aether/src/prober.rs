@@ -540,12 +540,54 @@ fn build_candidates(st: &Strategy, ports: &[u16], ip: IpScan) -> Vec<(IpAddr, u1
         .filter_map(|s| s.parse().ok())
         .collect();
 
+    // Seeds on the primary port, then the same seeds on every alternate port,
+    // and only then the wide CIDR sweep.
+    //
+    // The alternate ports used to sit at the very end of the queue, behind
+    // thousands of addresses on 443. A carrier that drops UDP/443 but leaves
+    // UDP/500 and UDP/4500 alone therefore never reached them: the 120 s scan
+    // deadline expired mid-sweep. A field log from Irancell showed 4433 probes
+    // across 2735 addresses without a single non-443 port being tried, while
+    // WireGuard — which starts at 2408 — connected immediately on the same SIM.
+    //
+    // Eight seeds times six alternate ports is 48 extra probes at concurrency
+    // 16-20, so a network where 443 works still selects a gateway from the
+    // first batch and never pays for them.
     if ip.want_v4() {
         for a in &seeds {
             if seen.insert((IpAddr::V4(*a), primary)) {
                 out.push((IpAddr::V4(*a), primary));
             }
         }
+    }
+    if ip.want_v6() {
+        for a in &seeds6 {
+            if seen.insert((IpAddr::V6(*a), primary)) {
+                out.push((IpAddr::V6(*a), primary));
+            }
+        }
+    }
+
+    if ip.want_v4() {
+        for a in &seeds {
+            for &port in ports {
+                if port != primary && seen.insert((IpAddr::V4(*a), port)) {
+                    out.push((IpAddr::V4(*a), port));
+                }
+            }
+        }
+    }
+    if ip.want_v6() {
+        for a in &seeds6 {
+            for &port in ports {
+                if port != primary && seen.insert((IpAddr::V6(*a), port)) {
+                    out.push((IpAddr::V6(*a), port));
+                }
+            }
+        }
+    }
+
+    if ip.want_v4() {
         let cidr_hosts: Vec<Vec<Ipv4Addr>> = masque_cidrs_v4()
             .iter()
             .map(|c| {
@@ -569,11 +611,6 @@ fn build_candidates(st: &Strategy, ports: &[u16], ip: IpScan) -> Vec<(IpAddr, u1
     }
 
     if ip.want_v6() {
-        for a in &seeds6 {
-            if seen.insert((IpAddr::V6(*a), primary)) {
-                out.push((IpAddr::V6(*a), primary));
-            }
-        }
         let per = if st.sample_per_cidr == 0 {
             96
         } else {
@@ -590,25 +627,6 @@ fn build_candidates(st: &Strategy, ports: &[u16], ip: IpScan) -> Vec<(IpAddr, u1
                     if seen.insert((IpAddr::V6(*a), primary)) {
                         out.push((IpAddr::V6(*a), primary));
                     }
-                }
-            }
-        }
-    }
-
-    if ip.want_v4() {
-        for a in &seeds {
-            for &port in ports {
-                if port != primary && seen.insert((IpAddr::V4(*a), port)) {
-                    out.push((IpAddr::V4(*a), port));
-                }
-            }
-        }
-    }
-    if ip.want_v6() {
-        for a in &seeds6 {
-            for &port in ports {
-                if port != primary && seen.insert((IpAddr::V6(*a), port)) {
-                    out.push((IpAddr::V6(*a), port));
                 }
             }
         }
@@ -738,6 +756,57 @@ mod tests {
     #[test]
     fn the_documented_masque_fallback_ports_keep_their_documented_order() {
         assert_eq!(MASQUE_PORTS, &[443, 500, 1701, 4500, 4443, 8443, 8095]);
+    }
+
+    #[test]
+    fn every_seed_is_tried_on_every_alternate_port_before_the_cidr_sweep() {
+        let st = ScanMode::Balanced.strategy();
+        let candidates = build_candidates(&st, MASQUE_PORTS, IpScan::V4);
+        let seeds: Vec<Ipv4Addr> = MASQUE_SEEDS.iter().filter_map(|s| s.parse().ok()).collect();
+
+        // The head of the queue is the seeds on 443, then the seeds on the
+        // alternate ports. Nothing from the wide sweep may come before them.
+        let head = seeds.len() * MASQUE_PORTS.len();
+        assert!(candidates.len() > head, "the sweep should still be there");
+        for (i, (ip, port)) in candidates.iter().take(head).enumerate() {
+            let ip = match ip {
+                IpAddr::V4(v4) => *v4,
+                IpAddr::V6(_) => panic!("v4-only scan produced a v6 candidate at {i}"),
+            };
+            assert!(seeds.contains(&ip), "{ip}:{port} at {i} is not a seed");
+        }
+        for &port in MASQUE_PORTS {
+            for seed in &seeds {
+                let want = (IpAddr::V4(*seed), port);
+                let at = candidates.iter().position(|c| *c == want);
+                assert!(at.is_some_and(|at| at < head), "{seed}:{port} is not early");
+            }
+        }
+    }
+
+    #[test]
+    fn the_primary_port_still_wins_the_very_first_probes() {
+        // A network where UDP/443 works must not pay for the alternate ports:
+        // the first batch the scanner dispatches is still seeds on 443.
+        let st = ScanMode::Balanced.strategy();
+        let candidates = build_candidates(&st, MASQUE_PORTS, IpScan::V4);
+        let seeds = MASQUE_SEEDS.len();
+        for (ip, port) in candidates.iter().take(seeds) {
+            assert_eq!(*port, 443, "{ip}:{port} should be on the primary port");
+        }
+    }
+
+    #[test]
+    fn the_cidr_sweep_only_ever_uses_the_primary_port() {
+        let st = ScanMode::Balanced.strategy();
+        let candidates = build_candidates(&st, MASQUE_PORTS, IpScan::V4);
+        let seeds: Vec<Ipv4Addr> = MASQUE_SEEDS.iter().filter_map(|s| s.parse().ok()).collect();
+        for (ip, port) in &candidates {
+            let IpAddr::V4(v4) = ip else { continue };
+            if !seeds.contains(v4) {
+                assert_eq!(*port, 443, "swept {ip} on {port}, which multiplies the scan");
+            }
+        }
     }
 
     #[test]
