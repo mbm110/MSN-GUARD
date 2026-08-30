@@ -2555,10 +2555,15 @@ class MainActivity : Activity() {
         // Placed here rather than behind an "advanced" screen because a user who
         // has a bridge got it from somewhere and is looking for exactly this box;
         // burying it is what makes people conclude the app cannot use their bridge.
-        // It stays live on every transport, unlike the rows below: pasting a bridge
-        // before switching Tor on is the normal order of operations, and greying
-        // the box until Tor is selected would make the mode unpickable — the sheet
-        // refuses Manual with nothing saved.
+        //
+        // Gated on the TOR transport exactly like every other row in this section.
+        // It was briefly left live everywhere, on the theory that pasting a bridge
+        // before switching Tor on is the normal order of operations — but that made
+        // it the one row on a MASQUE page that looked fully interactive while
+        // configuring a transport the next connect would not use, which is the same
+        // lie the greyed rows exist to prevent. Nothing is lost: the mode row above
+        // is gated the same way, so a user who cannot reach this box cannot reach
+        // the mode that consumes it either.
         val torBridgeRow = navRow("Manual bridge", TorManualBridges.summary(this)) {
             editTorBridges()
         }
@@ -3931,17 +3936,17 @@ class MainActivity : Activity() {
         // is written to torrc on every Tor session, chained or not — so the only
         // conditions are "Tor is selected" and "not locked mid-session".
         torRegionRowRef?.setAvailable(torSelected && modeControlsEnabled)
-        // The manual bridge box is deliberately NOT gated on the TOR transport.
+        // The manual bridge box, gated exactly like the mode row that consumes it.
         //
-        // Every other row in this section configures a transport that has to be
-        // selected for the setting to mean anything. This one is different: it is
-        // where a bridge gets stored, and the Connection mode sheet refuses Manual
-        // until something is stored — so greying it off Tor would leave the mode
-        // permanently unreachable for a user who has not selected Tor yet. Only the
-        // mid-session lock applies, since the lines are read when tor starts.
+        // It was initially left live on every transport so a bridge could be pasted
+        // before selecting Tor. Field report: on a MASQUE page the row was the only
+        // one in the section that looked fully interactive, which reads as "this
+        // setting applies now" when it does not. Same rule as the rest of the
+        // section: only on TOR, only while not locked mid-session. The stored lines
+        // are untouched by the greying, so switching back to Tor shows them again.
         torBridgeRowRef?.apply {
             setValue(TorManualBridges.summary(this@MainActivity))
-            setAvailable(modeControlsEnabled)
+            setAvailable(torSelected && modeControlsEnabled)
         }
         // Tor's OWN "Connection mode" row (Direct/Meek/obfs4/Snowflake). It was the
         // last row in either section with no availability rule at all, so on a page
