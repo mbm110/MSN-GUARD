@@ -233,12 +233,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     /**
      * Passive bandwidth observation for the active SHARD node.
      *
+     * Deliberately separate from the watchdog's [shardLastRx]: that one is
+     * sampled every 30 s to answer "did anything move at all", this one every
+     * second to answer "how fast". Sharing a field would make each one's
+     * interval corrupt the other's answer.
+     *
      * See [observeShardThroughput]. All four are reset at the start of every
      * SHARD session so a new node is never credited with the previous one's peak.
      */
     private var shardPeakKbps = 0
-    private var shardLastRx = 0L
-    private var shardLastSampleAt = 0L
+    private var shardSampleRx = 0L
+    private var shardSampleAt = 0L
     private var shardThroughputWrittenAt = 0L
 
     /** Byte counters at the previous watchdog tick, to detect movement. */
@@ -2290,8 +2295,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private fun startShardTrafficPolling() {
         torTrafficTask?.cancel(false)
         shardPeakKbps = 0
-        shardLastRx = 0L
-        shardLastSampleAt = 0L
+        shardSampleRx = 0L
+        shardSampleAt = 0L
         shardThroughputWrittenAt = 0L
         torTrafficTask = ladderScheduler.scheduleAtFixedRate({
             try {
@@ -2340,16 +2345,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private fun observeShardThroughput(rx: Long) {
         val now = SystemClock.elapsedRealtime()
-        val previousRx = shardLastRx
-        val previousAt = shardLastSampleAt
-        shardLastRx = rx
-        shardLastSampleAt = now
+        val previousRx = shardSampleRx
+        val previousAt = shardSampleAt
+        shardSampleRx = rx
+        shardSampleAt = now
         if (previousAt == 0L) return
 
         val elapsedMs = now - previousAt
         // Screen-off sampling stretches the window; a gap that long averages away
         // any peak, so it is not a usable measurement.
-        if (elapsedMs !in 500..3_000) return
+        if (elapsedMs !in 500L..3_000L) return
         val delta = rx - previousRx
         if (delta <= 0) return
 
