@@ -99,6 +99,38 @@ jobs:
           done
           ls -la app/src/main/jniLibs/*/
 
+      # The xray binary the SHARD transport execs, pinned the same way and for the
+      # same reasons as the Tor binaries above: a Go build that has no business
+      # running on every APK push, and a pin that makes "which binary shipped" an
+      # auditable fact rather than "whatever main built that morning".
+      #
+      # Only the PIE gate is repeated here, not the RELRO one. That gate exists
+      # because Tor's binary was once built with -z common-page-size and bionic
+      # refused to exec it; the xray workflow asserts the same thing on the way
+      # out, and it is built without that flag by construction.
+      - name: Fetch xray binary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          XRAY_RUN_ID: "33398699164"
+        run: |
+          set -euo pipefail
+          ID=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${XRAY_RUN_ID}/artifacts" \
+            --jq '.artifacts[] | select(.name=="libxray") | .id')
+          [ -n "$ID" ] || { echo "artifact libxray not found in run $XRAY_RUN_ID"; exit 1; }
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/$ID/zip" > /tmp/libxray.zip
+          # Keep the per-ABI directories; -j would flatten both onto one name.
+          unzip -o /tmp/libxray.zip -d /tmp/xraybin
+          cp /tmp/xraybin/arm64-v8a/libxray.so   app/src/main/jniLibs/arm64-v8a/
+          cp /tmp/xraybin/armeabi-v7a/libxray.so app/src/main/jniLibs/armeabi-v7a/
+          READELF="$ANDROID_HOME/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          for f in app/src/main/jniLibs/*/libxray.so; do
+            OUT=$("$READELF" -h "$f")
+            TYPE=$(printf '%s' "$OUT" | sed -n 's/.*Type: *\([A-Z]*\).*/\1/p')
+            [ "$TYPE" = "DYN" ] || { echo "ERROR: $f is not PIE"; exit 1; }
+            echo "OK: $f is PIE"
+          done
+          ls -la app/src/main/jniLibs/*/
+
       - name: Make scripts executable
         run: chmod +x ./gradlew ./core/build-android.sh
 
