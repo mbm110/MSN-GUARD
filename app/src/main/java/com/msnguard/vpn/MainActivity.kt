@@ -5357,14 +5357,19 @@ class MainActivity : Activity() {
         val count = ShardSubscription.cachedCount(this)
         val last = ShardSubscription.lastCheckMillis(this)
         if (count <= 0) return "Tap to download"
-        if (last <= 0L) return "$count nodes · built in"
+        // Paths, not nodes: each node is tried through several CDN edges, and the
+        // number of distinct routes is what actually decides whether a connect
+        // finds something. Taken from the refresh rather than multiplied here,
+        // because nodes that are not CDN-fronted are not fanned out at all.
+        val paths = ShardSubscription.cachedPathCount(this)
+        if (last <= 0L) return "$count nodes · $paths paths · built in"
         val ageMs = System.currentTimeMillis() - last
         val age = when {
             ageMs < 60 * 60 * 1000L -> "just now"
             ageMs < 24 * 60 * 60 * 1000L -> "${ageMs / (60 * 60 * 1000L)}h ago"
             else -> "${ageMs / (24 * 60 * 60 * 1000L)}d ago"
         }
-        return "$count nodes · $age"
+        return "$count nodes · $paths paths · $age"
     }
 
     /**

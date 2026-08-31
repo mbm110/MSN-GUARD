@@ -51,6 +51,7 @@ object ShardSubscription {
     private const val ETAG_PREF = "shard_etag"
     private const val LAST_CHECK_PREF = "shard_last_check"
     private const val LAST_COUNT_PREF = "shard_last_count"
+    private const val LAST_PATHS_PREF = "shard_last_paths"
 
     /**
      * Floor between two network checks.
@@ -77,6 +78,20 @@ object ShardSubscription {
 
     /** How many nodes the cache last yielded. Shown in settings as a subtitle. */
     fun cachedCount(context: Context): Int = prefs(context).getInt(LAST_COUNT_PREF, 0)
+
+    /**
+     * How many distinct paths those nodes expand to across the CDN edges.
+     *
+     * Stored at refresh time rather than computed on demand: the settings screen
+     * would otherwise re-read and re-parse the 41 KB cache on the main thread just
+     * to render a subtitle. Falls back to a multiply when the value predates this
+     * field, which is only ever the first run after an update.
+     */
+    fun cachedPathCount(context: Context): Int {
+        val stored = prefs(context).getInt(LAST_PATHS_PREF, 0)
+        if (stored > 0) return stored
+        return cachedCount(context) * ShardEdges.EDGES.size
+    }
 
     /**
      * The pool to connect from, best available source.
@@ -176,13 +191,15 @@ object ShardSubscription {
                 return cachedCount(context)
             }
 
+            val paths = ShardEdges.expand(parsed).size
             cacheFile(context).writeText(body)
             prefs(context).edit()
                 .putString(ETAG_PREF, connection.getHeaderField("ETag").orEmpty())
                 .putLong(LAST_CHECK_PREF, System.currentTimeMillis())
                 .putInt(LAST_COUNT_PREF, parsed.size)
+                .putInt(LAST_PATHS_PREF, paths)
                 .apply()
-            ConnectionLog.record("$TAG updated — ${parsed.size} nodes")
+            ConnectionLog.record("$TAG updated — ${parsed.size} nodes, $paths paths")
             return parsed.size
         } finally {
             connection.disconnect()

@@ -91,6 +91,16 @@ object ShardManager {
     /** Overall budget for the race, after which we take whatever we have. */
     private const val RACE_BUDGET_MS = 12_000L
 
+    /**
+     * How many [RACE_WIDTH]-sized slices a connect will try before giving up.
+     *
+     * Three, i.e. up to 36 paths and a worst case of ~36 s before the connect
+     * reports failure. Two was enough when the pool was 28 entries; with the edge
+     * expansion it is 100+, and the whole point of those extra paths is that a
+     * blocked edge can be raced past rather than fallen at.
+     */
+    private const val MAX_RACE_SLICES = 3
+
     private val running = AtomicBoolean(false)
 
     @Volatile
@@ -223,7 +233,10 @@ object ShardManager {
         lastError = ""
         listenPort = port
 
-        val pool = ShardSubscription.nodes(context)
+        // Expanded across the known-good CDN edges before anything else looks at
+        // it: see [ShardEdges]. The subscription's own address is kept, so this can
+        // only add paths, never remove one that was working.
+        val pool = ShardEdges.expand(ShardSubscription.nodes(context))
         if (pool.isEmpty()) {
             lastError = "no nodes available"
             ConnectionLog.record("$TAG pool empty — cache and seed both unusable")
@@ -232,14 +245,23 @@ object ShardManager {
         ShardHealth.prune(context, pool)
 
         // Ranked, then sliced: the race is over the nodes most likely to work, in
-        // the order most likely to be fast.
-        val candidates = ShardHealth.rank(context, pool).take(RACE_WIDTH)
-        val winner = race(context, candidates)
-            // Nothing in the ranked slice answered. Rather than fail the connect,
-            // try the rest of the pool once: on a bad day the good nodes may all
-            // be saturated while an unranked one is fine.
-            ?: race(context, ShardHealth.rank(context, pool).drop(RACE_WIDTH).take(RACE_WIDTH))
-            ?: return false
+        // the order most likely to be fast. Diversified so one endpoint's variants
+        // cannot occupy the whole slice — see [diversify].
+        val ranked = diversify(ShardHealth.rank(context, pool))
+        // Nothing in a slice answering is not a failed connect: on a bad day the
+        // known-good nodes may all be saturated while an untried one is fine, and
+        // since the pool is now edge-expanded there are several times more slices
+        // available than before. Bounded at [MAX_RACE_SLICES] so a genuinely dead
+        // network fails in a predictable time rather than grinding through
+        // everything — each slice costs up to RACE_BUDGET_MS.
+        var raced: ShardNode? = null
+        for (slice in 0 until MAX_RACE_SLICES) {
+            val candidates = ranked.drop(slice * RACE_WIDTH).take(RACE_WIDTH)
+            if (candidates.isEmpty()) break
+            raced = race(context, candidates)
+            if (raced != null) break
+        }
+        val winner = raced ?: return false
 
         // Wildcard only when the user asked for LAN sharing. The port is fixed
         // either way: unlike the Rust core and Psiphon, SHARD's listener is also
@@ -278,6 +300,47 @@ object ShardManager {
         ConnectionLog.record("$TAG tunnel port $port never opened")
         stop()
         return false
+    }
+
+    /**
+     * Reorder a ranked pool so consecutive entries are different endpoints.
+     *
+     * Necessary because [ShardEdges] turns one endpoint into several entries that
+     * share a credential and differ only by edge IP. Their health scores are
+     * naturally similar, so a plain ranking clusters them — and a 12-wide race
+     * would then spend all twelve slots on two or three endpoints. If those
+     * endpoints are dead (a revoked UUID, a deleted worker), every slot is wasted
+     * and the connect fails with a pool that had dozens of live alternatives.
+     *
+     * Round-robins by endpoint identity instead: the best variant of endpoint A,
+     * then of B, then of C, and only after every endpoint has had a turn does the
+     * second variant of A appear. Relative order within an endpoint is preserved,
+     * so the health memory still decides which edge is tried first for it.
+     */
+    private fun diversify(ranked: List<ShardNode>): List<ShardNode> {
+        // Identity excludes the address deliberately — that is what varies between
+        // variants of the same endpoint. Port is included because 443 and 8080 on
+        // one host are genuinely different paths through the CDN.
+        val groups = LinkedHashMap<String, MutableList<ShardNode>>()
+        ranked.forEach { node ->
+            val identity = "${node.protocol}|${node.credential}|${node.host}|${node.path}|${node.port}"
+            groups.getOrPut(identity) { mutableListOf() }.add(node)
+        }
+        val out = ArrayList<ShardNode>(ranked.size)
+        var round = 0
+        while (out.size < ranked.size) {
+            var addedThisRound = false
+            groups.values.forEach { variants ->
+                variants.getOrNull(round)?.let {
+                    out.add(it)
+                    addedThisRound = true
+                }
+            }
+            // Guards against an infinite loop if the accounting is ever wrong.
+            if (!addedThisRound) break
+            round++
+        }
+        return out
     }
 
     /**
