@@ -408,7 +408,10 @@ object ShardConfigs {
             // connections by design, and at any higher level every one of those
             // writes several lines — tens of thousands of lines of log for a
             // measurement nobody reads, on a phone.
-            put("log", JSONObject().put("loglevel", "none"))
+            put("log", JSONObject().apply {
+                put("loglevel", "none")
+                put("access", "none")
+            })
             put("inbounds", inbounds)
             put("outbounds", outbounds)
             put("routing", JSONObject().put("rules", rules))
@@ -453,7 +456,21 @@ object ShardConfigs {
                 }
             )
         return JSONObject().apply {
-            put("log", JSONObject().put("loglevel", logLevel))
+            put(
+                "log",
+                JSONObject().apply {
+                    put("loglevel", logLevel)
+                    // The access log is the single loudest thing in a SHARD session
+                    // and it is pure cost. Measured on a 32-minute field log: 2936
+                    // `accepted tcp:/udp:` lines, i.e. every DNS query and every TCP
+                    // flow, each one crossing the process pipe, timestamped, appended
+                    // to the log file and pushed through the ring buffer — while the
+                    // 100-entry buffer meant the user could never read any of it
+                    // anyway. Verified against the real binary: `access:"none"` drops
+                    // them and leaves the warnings that matter.
+                    if (logLevel != "info" && logLevel != "debug") put("access", "none")
+                }
+            )
             val inbounds = JSONArray().put(
                 JSONObject().apply {
                     put("tag", "in")

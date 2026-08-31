@@ -15,6 +15,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import org.json.JSONArray
@@ -213,6 +214,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * which does report and does back off.
      */
     private var shardRotations = 0
+
+    /**
+     * Consecutive probe failures on an idle SHARD session.
+     *
+     * Reset by any byte movement or any passing probe. Only [SHARD_STRIKES_BEFORE_ROTATE]
+     * in a row justifies replacing the node, because a rotation costs every open
+     * connection.
+     */
+    private var shardStrikes = 0
+
+    /** Ticks skipped by [shouldSampleTraffic] while the screen is off. */
+    private var sleepSampleTick = 0
+
+    /** Watchdog ticks skipped before probing an idle SHARD session asleep. */
+    private var shardIdleProbeTick = 0
+
+    /** Byte counters at the previous watchdog tick, to detect movement. */
+    private var shardLastTx = -1L
+    private var shardLastRx = -1L
     private var currentVpnIp = ""
     private var currentPing = ""
 
@@ -552,6 +572,24 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
          * minutes of trying before the session is reported as lost.
          */
         private const val MAX_SHARD_ROTATIONS = 6
+
+        /**
+         * Probe misses in a row before the node is replaced.
+         *
+         * Two, i.e. a full minute of an idle tunnel failing to answer, at the 30 s
+         * watchdog interval. One was measured to be far too eager: see the
+         * traffic-beats-probes note in [tunnelIsDead].
+         */
+        private const val SHARD_STRIKES_BEFORE_ROTATE = 2
+
+        /** Traffic-sample interval with the screen off, in seconds. */
+        private const val SLEEP_SAMPLE_TICKS = 15
+
+        /**
+         * Watchdog ticks between SHARD probes when the screen is off and the
+         * tunnel is idle. 10 × 30 s = one probe every five minutes.
+         */
+        private const val SHARD_SLEEP_PROBE_TICKS = 10
 
         const val ACTION_CONNECT = "com.msnguard.vpn.CONNECT"
         const val ACTION_DISCONNECT = "com.msnguard.vpn.DISCONNECT"
@@ -2226,10 +2264,45 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         torTrafficTask = ladderScheduler.scheduleAtFixedRate({
             try {
                 if (!ShardSocksFront.isRunning) return@scheduleAtFixedRate
+                if (!shouldSampleTraffic()) return@scheduleAtFixedRate
                 updateTrafficNotification(ShardSocksFront.sessionTx, ShardSocksFront.sessionRx)
             } catch (_: Exception) {
             }
         }, 1L, 1L, TimeUnit.SECONDS)
+    }
+
+    /**
+     * Should this tick actually sample and broadcast?
+     *
+     * Once a second is right while the user is watching the dial move, and pure
+     * waste while the screen is off — every sample builds an Intent, crosses
+     * Binder to a broadcast nobody is registered for, and touches the monthly
+     * accounting. Over a night that is ~29,000 broadcasts for numbers no one reads.
+     *
+     * With the screen off it drops to one sample every [SLEEP_SAMPLE_TICKS]
+     * seconds. Nothing is lost by doing so: the front-ends expose cumulative
+     * counters, and the monthly total is computed as a difference against the last
+     * accounted value, so a longer gap yields exactly the same total. Only the
+     * displayed instantaneous speed is averaged over a longer window, and there is
+     * nobody looking at it.
+     */
+    private fun isScreenInteractive(): Boolean = try {
+        getSystemService(PowerManager::class.java)?.isInteractive ?: true
+    } catch (_: Exception) {
+        // Unknown: assume awake, i.e. keep the more responsive behaviour.
+        true
+    }
+
+    private fun shouldSampleTraffic(): Boolean {
+        val interactive = isScreenInteractive()
+        if (interactive) {
+            sleepSampleTick = 0
+            return true
+        }
+        sleepSampleTick++
+        if (sleepSampleTick < SLEEP_SAMPLE_TICKS) return false
+        sleepSampleTick = 0
+        return true
     }
 
     /**
@@ -2250,6 +2323,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         torTrafficTask = ladderScheduler.scheduleAtFixedRate({
             try {
                 if (!TorSocksFront.isRunning) return@scheduleAtFixedRate
+                if (!shouldSampleTraffic()) return@scheduleAtFixedRate
                 updateTrafficNotification(TorSocksFront.sessionTx, TorSocksFront.sessionRx)
             } catch (_: Exception) {
             }
@@ -2351,6 +2425,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             false
         }
         if (!ok) return false
+        // A fresh baseline: the next tick must compare against post-rotation
+        // counters, not the ones that were current when the old node died.
+        shardLastTx = ShardSocksFront.sessionTx
+        shardLastRx = ShardSocksFront.sessionRx
+        shardStrikes = 0
         val node = ShardManager.activeNode?.displayName ?: "a public node"
         // The exit changed, so the previous session's measurement is now wrong.
         currentVpnIp = ""
@@ -2390,13 +2469,63 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         if (currentProtocol.contains("SHARD")) {
             if (!ShardManager.isRunning) return "the node process exited"
             if (!ShardSocksFront.isRunning) return "the SHARD front-end stopped"
-            // A real request through the real port. Unlike every other transport
-            // here, liveness is not enough: the process stays up and the port keeps
-            // accepting when a node's UUID is rotated or its worker is deleted, and
-            // that silent death is the single most likely SHARD failure. Cheap
-            // enough at 30s intervals — one 204 through an already-open tunnel.
-            if (!ShardManager.isHealthy()) return "the node stopped answering"
-            return null
+
+            // Traffic beats probes. If the session moved bytes since the last tick,
+            // the node is carrying traffic by definition and no probe result can
+            // outvote that.
+            //
+            // This is what made 1.7.2 feel unstable. In the field log every one of
+            // the five rotations happened in the *same second* as real traffic
+            // through the tunnel — the last access line before "stopped answering"
+            // was at 17:55:02 for a 17:55:07 rotation, and at 21:40:29 for a
+            // 21:40:29 one. A single probe timeout was replacing the whole xray
+            // process, which kills every open TCP flow: that is precisely the
+            // "speed jumps, then drops, then a cut in the middle" the user
+            // reported, and the node was never the problem.
+            val tx = ShardSocksFront.sessionTx
+            val rx = ShardSocksFront.sessionRx
+            val moved = tx != shardLastTx || rx != shardLastRx
+            shardLastTx = tx
+            shardLastRx = rx
+            if (moved) {
+                shardStrikes = 0
+                return null
+            }
+
+            // Idle session with the screen off: do not probe at all on most ticks.
+            //
+            // The probe is a real HTTP request through the tunnel, so at the 30 s
+            // watchdog interval it wakes the radio 120 times an hour to check a
+            // tunnel that nothing is using. Nothing is lost by waiting: with no
+            // traffic there is no user to inconvenience, and the moment an app does
+            // send something the branch above sees the counters move. The liveness
+            // flags checked above (process alive, front-end up, routing up) are
+            // local and still evaluated every tick.
+            if (!isScreenInteractive()) {
+                shardIdleProbeTick++
+                if (shardIdleProbeTick < SHARD_SLEEP_PROBE_TICKS) return null
+                shardIdleProbeTick = 0
+            } else {
+                shardIdleProbeTick = 0
+            }
+
+            // Idle session: now a probe is the only signal available. Two
+            // consecutive failures required, because one 5 s timeout on a congested
+            // carrier link is normal and is not worth dropping every open
+            // connection for.
+            if (ShardManager.isHealthy()) {
+                shardStrikes = 0
+                return null
+            }
+            shardStrikes++
+            if (shardStrikes < SHARD_STRIKES_BEFORE_ROTATE) {
+                ConnectionLog.record(
+                    "SHARD: probe missed ($shardStrikes/$SHARD_STRIKES_BEFORE_ROTATE) — waiting, traffic is idle"
+                )
+                return null
+            }
+            shardStrikes = 0
+            return "the node stopped answering"
         }
 
         if (currentProtocol.contains("TOR")) {
@@ -2835,6 +2964,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // startTunnel to the next, and carrying the previous session's count over
         // would spend the rotation budget before the new session had used any of it.
         shardRotations = 0
+        shardStrikes = 0
+        shardLastTx = -1L
+        shardLastRx = -1L
         stopRequested.set(false)
         // Latched for the whole session — see [proxyMode]. Read once, here, so a
         // mid-session change of the setting cannot make teardown take the wrong
@@ -3274,6 +3406,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             ShardSocksFront.stop()
             ShardManager.stop()
             shardRotations = 0
+            shardStrikes = 0
+            shardLastTx = -1L
+            shardLastRx = -1L
             vpnModeActive.set(false)
             tun?.close()
             tun = null

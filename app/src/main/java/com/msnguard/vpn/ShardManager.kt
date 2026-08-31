@@ -159,10 +159,22 @@ object ShardManager {
         // Drained on a thread whatever the log level: a process whose stdout fills
         // the pipe buffer blocks in write() and stops forwarding traffic. That is
         // a silent stall, so the reader is not optional.
+        //
+        // Drained is not the same as recorded. Two classes of line are read and
+        // thrown away rather than logged:
+        //
+        //  * xray's start-up deprecation warnings, which it emits before the log
+        //    level applies — one per outbound, so 45 of them per race — and which
+        //    say nothing about this session.
+        //  * anything left over from the access log if a future config re-enables it.
+        //
+        // Verified against the real binary: with `access:"none"` the only remaining
+        // repeat offenders are these warnings, and a field log showed 168 of them
+        // from probe processes alone.
         logThread = Thread({
             try {
                 BufferedReader(InputStreamReader(started.inputStream)).forEachLine { line ->
-                    if (line.isNotBlank()) ConnectionLog.record("$tag $line")
+                    if (line.isNotBlank() && !isNoise(line)) ConnectionLog.record("$tag $line")
                 }
             } catch (_: Exception) {
                 // Process gone; nothing to report.
@@ -171,6 +183,20 @@ object ShardManager {
 
         return true
     }
+
+    /**
+     * xray output that is noise by construction.
+     *
+     * Matched on substrings rather than log level because the deprecation warnings
+     * are emitted during config parsing, before `loglevel` takes effect — so no
+     * setting suppresses them and they have to be dropped on this side.
+     */
+    private fun isNoise(line: String): Boolean =
+        line.contains("is deprecated, not recommended") ||
+            line.contains("deprecated, will be removed soon") ||
+            line.contains("[in >> proxy]") ||
+            line.contains("A unified platform for anti-censorship") ||
+            line.contains("infra/conf/serial: Reading config")
 
     /** Stop the process and forget the session. */
     @Synchronized

@@ -133,7 +133,102 @@ object ShardSocksFront {
      */
     private const val MAX_ASSOCIATIONS = 192
 
+    /**
+     * How long a DNS query waits before it is retried on the other resolver.
+     *
+     * Measured against the live pool from a server: which public resolver a node
+     * can reach is not a property of the pool, it is per node and it changes.
+     * `update.asshole.eu.cc` answered through 8.8.8.8 and timed out on 1.1.1.1 in
+     * the same minute; `www.calmlunch.com` did the exact opposite. Picking one
+     * resolver per flow and waiting 5 s for it therefore stalls a page load
+     * roughly half the time on an otherwise healthy node.
+     *
+     * 1.2 s is above the measured good case (237–802 ms through a shared channel)
+     * and far below anything a user would call a stall.
+     */
+    private const val DNS_RETRY_MS = 1_200L
+
+    /** After this, a query is abandoned and its slot released. */
+    private const val DNS_PENDING_TTL_MS = 5_000L
+
     private val running = AtomicBoolean(false)
+
+    /**
+     * The live udpgw stream, so the DNS channel can answer on it.
+     *
+     * There is exactly one at a time — tun2socks opens a single CONNECT to
+     * 127.0.0.1:7300 for the whole session — so a field is honest here, and it
+     * saves threading the stream through every DNS call.
+     */
+    @Volatile
+    private var udpgwOut: OutputStream? = null
+
+    @Volatile
+    private var udpgwLock: Any? = null
+
+    /**
+     * One shared UDP relay per resolver, instead of one per DNS flow.
+     *
+     * Measured against a live node from a server, five sequential lookups:
+     *
+     * ```
+     *   fresh associate per query : timeout, 4805, 2816, 717, 758 ms
+     *   one shared associate      :     802,  253,  259, 291, 237 ms
+     * ```
+     *
+     * Every `UDP ASSOCIATE` on xray's SOCKS inbound opens its own outbound
+     * connection to the node — confirmed by counting the process's sockets while
+     * issuing associates: 1, 2, 3, 4, 5, 6. So the old per-conid model paid a full
+     * WebSocket+TLS handshake for each DNS query, and a phone resolving names at
+     * the rate this log shows (96 queries/minute) was rebuilding roughly that many
+     * tunnels a minute. That is both the stutter and a large part of the battery.
+     */
+    private val dnsChannels = ConcurrentHashMap<Int, Association>()
+
+    /** In-flight queries, keyed by the id we rewrote into them. */
+    private val dnsPending = ConcurrentHashMap<Int, DnsPending>()
+
+    private val dnsSeq = java.util.concurrent.atomic.AtomicInteger(0)
+
+    @Volatile
+    private var dnsRetryThread: Thread? = null
+
+    /**
+     * Which resolver to ask first.
+     *
+     * Learned, because reachability is per node and neither resolver is reliably
+     * better. Measured on one live node: 1.1.1.1 answered nothing while 8.8.8.8
+     * answered every query — and on another node in the same minute it was the
+     * other way round. Without this the first query of every flow goes to a
+     * resolver that may be dead for this node and eats the full [DNS_RETRY_MS]
+     * before the working one is tried; with it, only the first query of the
+     * session pays that.
+     */
+    @Volatile
+    private var dnsPreferred = 0
+
+    /** Monitor the retry thread parks on while no query is in flight. */
+    private val dnsPendingGate = Object()
+
+    /**
+     * A query waiting for an answer.
+     *
+     * [originalId] is restored before the reply reaches tun2socks: the resolver
+     * echoes the id we sent, and the app that asked is matching on its own.
+     */
+    private class DnsPending(
+        val conid: Int,
+        val isIpv6: Boolean,
+        val clientAddress: ByteArray,
+        val originalId: Int,
+        val query: ByteArray,
+        @Volatile var sentAt: Long,
+        @Volatile var tried: Int,
+    ) {
+        /** Index of the resolver this query was sent to first. */
+        @Volatile
+        var order: Int = 0
+    }
 
     /**
      * Session byte counters.
@@ -235,6 +330,11 @@ object ShardSocksFront {
         serverSocket = null
         connPool?.shutdownNow()
         connPool = null
+        dnsRetryThread?.interrupt()
+        dnsRetryThread = null
+        dnsPending.clear()
+        dnsChannels.values.forEach { it.close() }
+        dnsChannels.clear()
         ConnectionLog.record("$TAG stopped")
     }
 
@@ -467,8 +567,337 @@ object ShardSocksFront {
      * while a fresh conid can land on the other resolver — cheap redundancy when
      * one of them is having a bad minute at the exit.
      */
-    private fun dnsUpstream(conid: Int): InetAddress =
-        InetAddress.getByName(DNS_UPSTREAMS[(conid and 0x7FFFFFFF) % DNS_UPSTREAMS.size])
+    private fun dnsUpstream(index: Int): InetAddress =
+        InetAddress.getByName(DNS_UPSTREAMS[index % DNS_UPSTREAMS.size])
+
+    // -------------------------------------------------------------- DNS channel
+
+    /**
+     * Send one query down the shared relay, and race it across resolvers.
+     *
+     * The query's transaction id is rewritten to a token of ours so that replies
+     * arriving on a channel shared by every flow can be matched back to the conid
+     * that asked. The original id is restored on the way out; the asking app never
+     * sees the substitution.
+     *
+     * Sent to the first resolver immediately, and to the next one after
+     * [DNS_RETRY_MS] if that has not answered — which is what the measurements
+     * demand, because reachability of a given resolver is per node and unstable.
+     */
+    private fun submitDnsQuery(
+        conid: Int,
+        isIpv6: Boolean,
+        clientAddress: ByteArray,
+        payload: ByteArray,
+    ) {
+        if (payload.size < 12) return
+        val originalId = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
+        val token = dnsSeq.incrementAndGet() and 0xFFFF
+        val query = payload.copyOf()
+        query[0] = ((token shr 8) and 0xFF).toByte()
+        query[1] = (token and 0xFF).toByte()
+
+        val pending = DnsPending(
+            conid = conid,
+            isIpv6 = isIpv6,
+            clientAddress = clientAddress.copyOf(),
+            originalId = originalId,
+            query = query,
+            sentAt = System.currentTimeMillis(),
+            tried = 1,
+        )
+        // Bounded by the same ceiling as associations: a flood of unanswerable
+        // queries must not grow this map without limit.
+        if (dnsPending.size >= MAX_ASSOCIATIONS) {
+            dnsPending.entries.minByOrNull { it.value.sentAt }?.let { dnsPending.remove(it.key) }
+        }
+        dnsPending[token] = pending
+        pending.order = dnsPreferred
+        sendDnsQuery(pending, pending.order)
+        ensureDnsRetryThread()
+        synchronized(dnsPendingGate) { dnsPendingGate.notifyAll() }
+    }
+
+    private fun sendDnsQuery(pending: DnsPending, upstreamIndex: Int) {
+        val channel = dnsChannel(upstreamIndex) ?: return
+        val resolver = try {
+            dnsUpstream(upstreamIndex)
+        } catch (e: Exception) {
+            return
+        }
+        val datagram = encapsulate(resolver, 53, pending.query)
+        try {
+            channel.udp.send(
+                DatagramPacket(datagram, datagram.size, channel.relayHost, channel.relayPort)
+            )
+            channel.lastUsed = System.currentTimeMillis()
+        } catch (e: Exception) {
+            // The relay died; drop it so the next query rebuilds one.
+            dnsChannels.remove(upstreamIndex)?.close()
+        }
+    }
+
+    /**
+     * The shared relay for one resolver, opened on first use.
+     *
+     * Deliberately not expired by the reaper: this is one socket pair per resolver
+     * for the whole session, and rebuilding it costs the handshake the old code was
+     * paying per query. It is closed with the session, or when a send fails.
+     */
+    private fun dnsChannel(upstreamIndex: Int): Association? {
+        dnsChannels[upstreamIndex]?.let { if (!it.udp.isClosed) return it }
+        synchronized(dnsChannels) {
+            dnsChannels[upstreamIndex]?.let { if (!it.udp.isClosed) return it }
+            val fresh = openDnsChannel(upstreamIndex) ?: return null
+            dnsChannels[upstreamIndex] = fresh
+            return fresh
+        }
+    }
+
+    private fun openDnsChannel(upstreamIndex: Int): Association? {
+        val control = try {
+            Socket().apply {
+                tcpNoDelay = true
+                connect(InetSocketAddress("127.0.0.1", upstreamPort), UPSTREAM_CONNECT_TIMEOUT_MS)
+            }
+        } catch (e: Exception) {
+            return null
+        }
+        return try {
+            val upIn = DataInputStream(BufferedInputStream(control.getInputStream()))
+            val upOut = BufferedOutputStream(control.getOutputStream())
+
+            upOut.write(byteArrayOf(SOCKS_VERSION.toByte(), 1, 0x00))
+            upOut.flush()
+            if (upIn.read() != SOCKS_VERSION || upIn.read() != 0x00) {
+                closeQuietly(control)
+                return null
+            }
+            upOut.write(buildRequest(CMD_UDP_ASSOCIATE, "0.0.0.0", 0))
+            upOut.flush()
+            if (upIn.read() != SOCKS_VERSION) {
+                closeQuietly(control)
+                return null
+            }
+            val reply = upIn.read()
+            upIn.read()
+            if (reply != REP_SUCCESS) {
+                closeQuietly(control)
+                return null
+            }
+            var relayHost = InetAddress.getByName("127.0.0.1")
+            when (upIn.read()) {
+                ATYP_IPV4 -> {
+                    val bytes = ByteArray(4)
+                    upIn.readFully(bytes)
+                    if (bytes.any { it != 0.toByte() }) relayHost = InetAddress.getByAddress(bytes)
+                }
+                ATYP_IPV6 -> {
+                    val bytes = ByteArray(16)
+                    upIn.readFully(bytes)
+                    if (bytes.any { it != 0.toByte() }) relayHost = InetAddress.getByAddress(bytes)
+                }
+                ATYP_DOMAIN -> {
+                    val length = upIn.read()
+                    if (length > 0) {
+                        val bytes = ByteArray(length)
+                        upIn.readFully(bytes)
+                        relayHost = runCatching {
+                            InetAddress.getByName(String(bytes, Charsets.US_ASCII))
+                        }.getOrDefault(relayHost)
+                    }
+                }
+                else -> {
+                    closeQuietly(control)
+                    return null
+                }
+            }
+            val relayPort = ((upIn.read() and 0xFF) shl 8) or (upIn.read() and 0xFF)
+            if (relayPort <= 0) {
+                closeQuietly(control)
+                return null
+            }
+            val udp = DatagramSocket()
+            udp.soTimeout = 0
+            val channel = Association(control, udp, relayHost, relayPort)
+
+            Thread({
+                try {
+                    pumpDnsChannel(channel, upstreamIndex)
+                } catch (_: Throwable) {
+                } finally {
+                    dnsChannels.remove(upstreamIndex, channel)
+                    channel.close()
+                }
+            }, "shard-front-dns-$upstreamIndex").apply { isDaemon = true }.start()
+
+            Thread({
+                try {
+                    while (upIn.read() >= 0) {
+                        // No payload expected on the control socket.
+                    }
+                } catch (_: Throwable) {
+                } finally {
+                    dnsChannels.remove(upstreamIndex, channel)
+                    channel.close()
+                }
+            }, "shard-front-dns-ctl-$upstreamIndex").apply { isDaemon = true }.start()
+
+            channel
+        } catch (e: Exception) {
+            closeQuietly(control)
+            null
+        }
+    }
+
+    /**
+     * One throwaway query down [upstreamIndex]'s channel.
+     *
+     * Its reply is matched by [pumpDnsChannel] like any other and simply finds no
+     * pending entry, which is the point: the side effect wanted here is the
+     * [dnsPreferred] update and the warmed outbound, not the answer.
+     */
+    private fun probeDnsChannel(upstreamIndex: Int) {
+        val channel = dnsChannels[upstreamIndex] ?: return
+        val token = dnsSeq.incrementAndGet() and 0xFFFF
+        // A name that certainly exists and is cheap for any resolver to answer.
+        val query = buildDnsQuery(token, "cloudflare.com")
+        val resolver = runCatching { dnsUpstream(upstreamIndex) }.getOrNull() ?: return
+        val datagram = encapsulate(resolver, 53, query)
+        runCatching {
+            channel.udp.send(
+                DatagramPacket(datagram, datagram.size, channel.relayHost, channel.relayPort)
+            )
+        }
+    }
+
+    /** A minimal A query for [name], so the warm-up does not need a caller's packet. */
+    private fun buildDnsQuery(token: Int, name: String): ByteArray {
+        val labels = name.split('.').filter { it.isNotEmpty() }
+        val size = 12 + labels.sumOf { it.length + 1 } + 1 + 4
+        val out = ByteArray(size)
+        out[0] = ((token shr 8) and 0xFF).toByte()
+        out[1] = (token and 0xFF).toByte()
+        out[2] = 0x01 // standard query, recursion desired
+        out[5] = 0x01 // one question
+        var at = 12
+        labels.forEach { label ->
+            out[at++] = label.length.toByte()
+            label.forEach { out[at++] = it.code.toByte() }
+        }
+        out[at++] = 0
+        out[at++] = 0
+        out[at++] = 1 // A
+        out[at++] = 0
+        out[at] = 1 // IN
+        return out
+    }
+
+    /** Match replies back to the flow that asked and write them to tun2socks. */
+    private fun pumpDnsChannel(channel: Association, upstreamIndex: Int) {
+        val buffer = ByteArray(UDP_BUFFER)
+        while (running.get() && !channel.udp.isClosed) {
+            val packet = DatagramPacket(buffer, buffer.size)
+            try {
+                channel.udp.receive(packet)
+            } catch (e: Exception) {
+                return
+            }
+            val payload = decapsulate(buffer, packet.length) ?: continue
+            if (payload.size < 12) continue
+            val token = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
+            // remove, not get: the first resolver to answer owns the reply, and the
+            // loser's late answer is dropped instead of reaching the app twice.
+            val pending = dnsPending.remove(token) ?: continue
+            // Whoever answered is the resolver this node can actually reach; ask it
+            // first next time. One volatile write, and it converges after one query.
+            if (upstreamIndex != dnsPreferred) dnsPreferred = upstreamIndex
+            payload[0] = ((pending.originalId shr 8) and 0xFF).toByte()
+            payload[1] = (pending.originalId and 0xFF).toByte()
+            writeUdpgw(pending.conid, pending.isIpv6, pending.clientAddress, payload)
+        }
+    }
+
+    /**
+     * Retry unanswered queries on the next resolver, and expire dead ones.
+     *
+     * One thread for the whole session, started on first DNS use. It wakes 3× per
+     * second and does nothing at all when the map is empty, which is the common
+     * case between page loads.
+     */
+    private fun ensureDnsRetryThread() {
+        if (dnsRetryThread?.isAlive == true) {
+            // Something is pending now, so wake the thread if it parked.
+            synchronized(dnsPendingGate) { dnsPendingGate.notifyAll() }
+            return
+        }
+        synchronized(this) {
+            if (dnsRetryThread?.isAlive == true) return
+            val thread = Thread({
+                while (running.get()) {
+                    try {
+                        // Parked, not polled, while nothing is in flight — which is
+                        // the state between page loads, i.e. most of the time. A
+                        // fixed 3-per-second tick would keep the CPU out of deep
+                        // idle for the whole session for no work.
+                        synchronized(dnsPendingGate) {
+                            if (dnsPending.isEmpty()) dnsPendingGate.wait(30_000)
+                        }
+                        if (dnsPending.isEmpty()) continue
+                        Thread.sleep(150)
+                    } catch (e: InterruptedException) {
+                        return@Thread
+                    }
+                    val now = System.currentTimeMillis()
+                    dnsPending.entries.forEach { entry ->
+                        val pending = entry.value
+                        val age = now - pending.sentAt
+                        when {
+                            age > DNS_PENDING_TTL_MS -> dnsPending.remove(entry.key)
+                            age > DNS_RETRY_MS && pending.tried < DNS_UPSTREAMS.size -> {
+                                // Relative to where this query started, so a learned
+                                // preference of 8.8.8.8 retries on 1.1.1.1 and not
+                                // on itself.
+                                val next = (pending.order + pending.tried) % DNS_UPSTREAMS.size
+                                pending.tried += 1
+                                pending.sentAt = now
+                                sendDnsQuery(pending, next)
+                            }
+                        }
+                    }
+                }
+            }, "shard-front-dns-retry").apply { isDaemon = true }
+            dnsRetryThread = thread
+            thread.start()
+        }
+    }
+
+    /** Frame one datagram back to tun2socks on the shared udpgw stream. */
+    private fun writeUdpgw(
+        conid: Int,
+        isIpv6: Boolean,
+        clientAddress: ByteArray,
+        payload: ByteArray,
+    ) {
+        val output = udpgwOut ?: return
+        val lock = udpgwLock ?: return
+        val body = ByteArray(3 + clientAddress.size + payload.size)
+        body[0] = (if (isIpv6) FLAG_IPV6 else 0).toByte()
+        body[1] = (conid and 0xFF).toByte()
+        body[2] = ((conid shr 8) and 0xFF).toByte()
+        System.arraycopy(clientAddress, 0, body, 3, clientAddress.size)
+        System.arraycopy(payload, 0, body, 3 + clientAddress.size, payload.size)
+        synchronized(lock) {
+            try {
+                output.write(body.size and 0xFF)
+                output.write((body.size shr 8) and 0xFF)
+                output.write(body)
+                output.flush()
+            } catch (e: Exception) {
+                // Stream gone; the udpgw read loop will notice and tear down.
+            }
+        }
+    }
 
     private fun isIpLiteral(host: String): Boolean =
         host.indexOf(':') >= 0 || Regex("^\\d{1,3}(\\.\\d{1,3}){3}$").matches(host)
@@ -557,14 +986,43 @@ object ShardSocksFront {
         val writeLock = Any()
         associations.values.forEach { it.close() }
         associations.clear()
+        // The DNS channel writes on this same stream, from its own threads.
+        udpgwOut = output
+        udpgwLock = writeLock
+        dnsPending.clear()
+
+        // Warm the DNS relays now, not on the user's first lookup. Measured against
+        // a live node: the first datagram down a fresh channel takes 669–905 ms
+        // because xray builds the outbound lazily, while later ones take 202–249 ms.
+        // Paying that once here, while the connect animation is still on screen,
+        // is the difference between a first page that opens and one that hangs.
+        Thread({
+            DNS_UPSTREAMS.indices.forEach { index ->
+                runCatching { dnsChannel(index) }
+            }
+            // A real query down each channel, not just the associate. This both
+            // pays the lazy-outbound cost up front and lets the reply set
+            // [dnsPreferred] — so the user's first lookup already goes to the
+            // resolver this node can reach.
+            DNS_UPSTREAMS.indices.forEach { index ->
+                runCatching { probeDnsChannel(index) }
+            }
+        }, "shard-front-dns-warm").apply { isDaemon = true }.start()
 
         val reaper = Thread({
             while (running.get() && !socket.isClosed) {
                 try {
-                    Thread.sleep(5_000)
+                    // 20 s, not 5 s. The table it walks is bounded at
+                    // [MAX_ASSOCIATIONS] and entries expire on a 60 s timer, so a
+                    // 5 s tick did the same work four times before anything could
+                    // possibly have changed — and DNS no longer creates entries
+                    // here at all, so in a typical session the table is nearly
+                    // empty.
+                    Thread.sleep(20_000)
                 } catch (e: InterruptedException) {
                     return@Thread
                 }
+                if (associations.isEmpty()) continue
                 val now = System.currentTimeMillis()
                 associations.entries.removeAll { entry ->
                     val stale = now - entry.value.lastUsed > UDP_IDLE_TIMEOUT_MS
@@ -629,12 +1087,15 @@ object ShardSocksFront {
                 // Which of the two resolvers is picked from the conid, so a flow is
                 // stable while a retry (new conid) can land on the other one.
                 val isDns = (flags and FLAG_DNS != 0) || destinationPort == 53
-                val sendTo = if (isDns) {
-                    dnsUpstream(conid)
-                } else {
-                    destination
+                if (isDns) {
+                    // Not an association at all: DNS goes down a shared, long-lived
+                    // relay per resolver, and is raced across resolvers rather than
+                    // pinned to one. See [dnsChannels] and [submitDnsQuery].
+                    submitDnsQuery(conid, isIpv6, address, payload)
+                    continue
                 }
-                val sendToPort = if (isDns) 53 else destinationPort
+                val sendTo = destination
+                val sendToPort = destinationPort
 
                 val association = associations[conid] ?: run {
                     if (associations.size >= MAX_ASSOCIATIONS) {
@@ -668,6 +1129,11 @@ object ShardSocksFront {
             reaper.interrupt()
             associations.values.forEach { it.close() }
             associations.clear()
+            udpgwOut = null
+            udpgwLock = null
+            dnsPending.clear()
+            dnsChannels.values.forEach { it.close() }
+            dnsChannels.clear()
             closeQuietly(socket)
             ConnectionLog.record("$TAG udpgw stream closed")
         }
