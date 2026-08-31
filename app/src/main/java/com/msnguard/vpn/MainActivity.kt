@@ -73,7 +73,9 @@ class MainActivity : Activity() {
      */
     private var modeControlsEnabled = true
     private lateinit var transportRail: TransportRail
-    private lateinit var actionBar: OrbitActionBar
+
+    /** Measured once from the rail's own row count; see where it is assigned. */
+    private var transportRailHeight = 0
     private lateinit var footerWave: OrbitFooterWave
     private lateinit var statusLed: View
     private lateinit var mainRoot: FrameLayout
@@ -182,6 +184,18 @@ class MainActivity : Activity() {
     private var splitTunnelSummaryButton: OrbitSettingsRow? = null
     /** Repainted when the verbosity sheet picks a new level. */
     private var logVerbosityRow: OrbitSettingsRow? = null
+
+    /**
+     * The endpoint-scanner row, kept so it can be greyed per transport.
+     *
+     * Only MASQUE and WireGuard have endpoints to scan. Psiphon, Tor and SHARD each
+     * find their own paths, so on those the row would open a screen whose every
+     * setting is ignored.
+     */
+    private var scannerRow: OrbitSettingsRow? = null
+
+    /** SHARD's node-list row; its subtitle carries the pool count and staleness. */
+    private var shardPoolRow: OrbitSettingsRow? = null
     private var splitTunnelDraftMode: SplitTunnelSettings.Mode? = null
     private var splitTunnelDraftPackages: MutableSet<String>? = null
     private var trafficMonitorPage: View? = null
@@ -378,6 +392,14 @@ class MainActivity : Activity() {
         requestNotificationPermission()
         ConnectionLog.bind(File(filesDir, "connection.log"))
         appUpdater = AppUpdater(this)
+        // Registers the periodic SHARD list refresh. Idempotent, so calling it on
+        // every launch is how the job gets re-registered after an app update — a
+        // package replace clears JobScheduler's registrations for the app.
+        ShardRefreshJob.schedule(this)
+        // And one opportunistic refresh now. The job's window is up to six hours
+        // wide; someone who installs the app and taps SHARD immediately should not
+        // have to wait for it. Returns without I/O if the list is already fresh.
+        ShardSubscription.refreshIfDue(this)
 
         // Orbit console. Every control below is built in onCreate so a single
         // pass wires the whole screen; no XML layouts exist in this app.
@@ -418,13 +440,11 @@ class MainActivity : Activity() {
         transportRail = TransportRail(this, palette, Protocol.entries.map { railLabel(it) }) { index ->
             updateConnectionMode(Protocol.entries[index])
         }
+        // Height follows the grid rather than being a constant: the rail decides how
+        // many rows six transports need, and a hardcoded dp(46) would squash them.
+        transportRailHeight = dp(8) + transportRail.rowCount * dp(38)
         transportRail.select(Protocol.entries.indexOf(selectedProtocol), animate = false)
         renderChainCard()
-        actionBar = OrbitActionBar(this, palette, listOf(
-            OrbitActionBar.Entry("LOG", OrbitActionBar.Glyph.LOG) { openLogsScreen() },
-            OrbitActionBar.Entry("SPLIT", OrbitActionBar.Glyph.SPLIT) { openSplitTunnelScreen() },
-            OrbitActionBar.Entry("SCAN MODE", OrbitActionBar.Glyph.SCAN) { openScannerScreen() },
-        ))
         // The dead space under the action bar looked like a rendering bug. It is
         // now a thin signal trace that idles flat and grey, and ripples in the
         // connected accent once traffic is flowing. One 48-point path repainted at
@@ -1166,7 +1186,7 @@ class MainActivity : Activity() {
 
         addView(transportRail, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(46),
+            transportRailHeight,
         ).apply { topMargin = dp(12) })
 
         // Below the rail, not on it: the rail picks the transport, this wraps the
@@ -1177,10 +1197,14 @@ class MainActivity : Activity() {
             dp(56),
         ).apply { topMargin = dp(10) })
 
-        addView(actionBar, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(56),
-        ).apply { topMargin = dp(10) })
+        // The LOG / SPLIT / SCAN MODE action bar used to sit here. Its three
+        // destinations are now rows in Settings, next to the other things that
+        // configure a session, and the space it occupied is what the transport
+        // rail's second row uses — so adding SHARD cost the home screen no height.
+        //
+        // None of the three belonged on the first screen: SPLIT was already
+        // duplicated as a Settings row, SCAN MODE only applies to MASQUE and
+        // WireGuard, and LOG is where you go after something has gone wrong.
 
         // Fills the gap that used to sit between the action bar and the bottom
         // inset. Weight is one Path; it only animates while connected.
@@ -2474,6 +2498,22 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
+        // Both rows came off the home screen's action bar, which was removed to make
+        // room for a six-transport rail. They sit under Log verbosity because that is
+        // the row that decides what the log will contain.
+        content.addView(navRow("Connection log", "What the tunnel did") { openLogsScreen() }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+        // Names the two transports it applies to. As an unlabelled action-bar button
+        // it looked global, and on Psiphon, Tor or SHARD there is nothing to scan —
+        // those transports find their own paths.
+        val scanRow = navRow("Endpoint scanner", scanModeSummary()) { openScannerScreen() }
+        scannerRow = scanRow
+        content.addView(scanRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
 
         // Psiphon gets its own section: all three controls below are meaningless
         // unless the chain is armed, and grouping them says that structurally
@@ -2623,6 +2663,40 @@ class MainActivity : Activity() {
         // never had their availability applied, and both stayed fully live on a
         // page where MASQUE or Psiphon was the selected transport.
         refreshPsiphonRows()
+
+        // SHARD has exactly one setting, and it is not really a setting: the node
+        // list. Everything else about this transport is automatic by design — the
+        // user asked for a button that connects, not a config screen — so the only
+        // thing worth surfacing is whether the list is current and a way to
+        // refresh it by hand when someone is standing in front of a fresh block.
+        //
+        // No "Over WARP" row here, unlike Psiphon and Tor. It was considered and
+        // rejected: SHARD's nodes are reached over TLS on 443 through Cloudflare,
+        // which is what the chain exists to achieve for Psiphon, and wrapping
+        // fragmented TLS inside a second tunnel both doubles the latency and
+        // destroys the fragmentation's effect — the DPI sees the outer tunnel.
+        content.addView(sectionLabel("SHARD"), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(26) })
+        val shardRow = navRow("Node list", shardPoolSummary()) {
+            // force = true: the whole point of tapping this is to bypass the
+            // six-hour interval the background job honours.
+            shardPoolRow?.setValue("Updating…")
+            ShardSubscription.refreshIfDue(this, force = true) { count ->
+                runOnUiThread {
+                    shardPoolRow?.setValue(shardPoolSummary())
+                    toastShort(
+                        if (count > 0) "$count nodes available" else "Could not update the list"
+                    )
+                }
+            }
+        }
+        shardPoolRow = shardRow
+        content.addView(shardRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
 
         content.addView(sectionLabel("ABOUT"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2919,6 +2993,8 @@ class MainActivity : Activity() {
             // binds no listener because it is driving the TUN directly.
             return if (selectedProtocol == Protocol.TOR && CoreConfig.proxyOnly(this)) {
                 "Tor cannot run as a SOCKS proxy — set Tunnel type to VPN"
+            } else if (selectedProtocol == Protocol.SHARD) {
+                "SHARD shares from VPN mode — set Tunnel type to VPN"
             } else {
                 "Set Tunnel type to SOCKS proxy to share ${selectedProtocol.label}"
             }
@@ -2928,7 +3004,16 @@ class MainActivity : Activity() {
         }
         val host = CoreConfig.localNetworkAddress(this)
             ?: return "No local network — turn on the hotspot or join Wi-Fi"
-        return "SOCKS5 $host:${CoreConfig.sharedSocksPort(this)} · " +
+        // SHARD's listener is xray's own, on its own port. CoreConfig.sharedSocksPort
+        // answers for the Rust core and Psiphon and would print 1819 here — a port
+        // nothing is listening on during a SHARD session, so anyone who typed it
+        // into another device would get a refused connection and no explanation.
+        val socksPort = if (selectedProtocol == Protocol.SHARD) {
+            ShardManager.SOCKS_PORT
+        } else {
+            CoreConfig.sharedSocksPort(this)
+        }
+        return "SOCKS5 $host:$socksPort · " +
             "HTTP $host:${CoreConfig.HTTP_PROXY_PORT} · no password"
     }
 
@@ -2950,6 +3035,12 @@ class MainActivity : Activity() {
     private fun lanSharingCapable(): Boolean = when (selectedProtocol) {
         Protocol.PSIPHON -> true
         Protocol.TOR -> !CoreConfig.proxyOnly(this)
+        // VPN mode only, and that is not a limitation — SHARD has no proxy mode at
+        // all (the service refuses it, for want of a byte counter in the path).
+        // xray binds its SOCKS and HTTP inbounds to 0.0.0.0 while tun2socks keeps
+        // dialling loopback, so the phone stays fully routed while a Windows machine
+        // uses the same tunnel.
+        Protocol.SHARD -> !CoreConfig.proxyOnly(this)
         else -> CoreConfig.proxyOnly(this)
     }
 
@@ -3362,10 +3453,10 @@ class MainActivity : Activity() {
                 if (it == CoreConfig.TUNNEL_MODE_VPN) {
                     "Every app goes through the tunnel"
                 } else {
-                    // Names the one transport that cannot do it, since that is the
-                    // only way the choice can fail and the user should learn it here
+                    // Names the transports that cannot do it, since that is the only
+                    // way the choice can fail and the user should learn it here
                     // rather than from a failed connect.
-                    "Only apps you point at the port · every transport except Tor"
+                    "Only apps you point at the port · not Tor or SHARD"
                 }
             },
         ) { chosen ->
@@ -3377,6 +3468,11 @@ class MainActivity : Activity() {
             // moment of the choice instead of letting the connect fail later.
             if (chosen == CoreConfig.TUNNEL_MODE_PROXY && selectedProtocol == Protocol.TOR) {
                 toastShort("Tor cannot run as a SOCKS proxy — pick another transport")
+            } else if (chosen == CoreConfig.TUNNEL_MODE_PROXY && selectedProtocol == Protocol.SHARD) {
+                // SHARD's refusal has a different cause — no byte counter in a proxy
+                // data path — but the same remedy, and it also has a better answer:
+                // Share over LAN already works in VPN mode.
+                toastShort("SHARD runs as a VPN — use Share over LAN instead")
             }
             // The port row is the thing that visibly reacts to this choice, so it is
             // repainted and re-enabled in the same gesture, and the LAN row with it:
@@ -3508,6 +3604,16 @@ class MainActivity : Activity() {
         splitTunnelSummaryButton?.apply {
             setValue(if (proxy) "Not used in SOCKS mode" else splitTunnelSummary())
             setAvailable(!proxy)
+        }
+        // Repainted here rather than only at build time: the transport can change
+        // while this screen is open (the Connection mode row is right above it), and
+        // the row's subtitle names the transports it applies to.
+        val scannable = selectedProtocol == Protocol.MASQUE ||
+            selectedProtocol == Protocol.WIREGUARD ||
+            selectedProtocol == Protocol.WARP_IN_WARP
+        scannerRow?.apply {
+            setValue(scanModeSummary())
+            setAvailable(scannable)
         }
     }
 
@@ -3852,6 +3958,9 @@ class MainActivity : Activity() {
         // into a detached view instead of the new page's row.
         tunnelTypeRow = null
         proxyPortRow = null
+        logVerbosityRow = null
+        scannerRow = null
+        shardPoolRow = null
         settingsPage?.let { animatePageClose(it) { settingsPage = null } }
     }
 
@@ -5222,6 +5331,11 @@ class MainActivity : Activity() {
     private fun socksPort(): Int =
         if (TunnelStatus.isActive() && TorManager.isTorActive) {
             TorManager.FRONT_SOCKS_PORT
+        } else if (TunnelStatus.isActive() && ShardSocksFront.isRunning) {
+            // The front-end, not xray's own 1824. Both would work for a CONNECT, but
+            // this is also the port whose byte counters feed the tiles, so probing it
+            // keeps the measurement and the traffic display on the same object.
+            ShardSocksFront.LISTEN_PORT
         } else if (TunnelStatus.isProxyMode) {
             // Proxy mode moves Psiphon's listener to the user's port, so the fixed
             // 1819 would be a closed socket here and every IP/ping measurement
@@ -5230,6 +5344,41 @@ class MainActivity : Activity() {
         } else {
             CoreConfig.SOCKS_PORT
         }
+
+    /**
+     * Subtitle for SHARD's node-list row: how many nodes, and how old the list is.
+     *
+     * Ages are rounded to the coarsest useful unit. The number that matters to a
+     * user deciding whether to hit refresh is "hours ago" or "days ago", and a
+     * precise minute count on a list the publisher rebuilds once a day would be
+     * false precision.
+     */
+    private fun shardPoolSummary(): String {
+        val count = ShardSubscription.cachedCount(this)
+        val last = ShardSubscription.lastCheckMillis(this)
+        if (count <= 0) return "Tap to download"
+        if (last <= 0L) return "$count nodes · built in"
+        val ageMs = System.currentTimeMillis() - last
+        val age = when {
+            ageMs < 60 * 60 * 1000L -> "just now"
+            ageMs < 24 * 60 * 60 * 1000L -> "${ageMs / (60 * 60 * 1000L)}h ago"
+            else -> "${ageMs / (24 * 60 * 60 * 1000L)}d ago"
+        }
+        return "$count nodes · $age"
+    }
+
+    /**
+     * Subtitle for the scanner row: the current mode, or why it does not apply.
+     *
+     * Naming the two transports that use it is the point — as an action-bar button
+     * labelled "SCAN MODE" it looked like a global setting, and a user on Psiphon
+     * could set it and reasonably expect something to change.
+     */
+    private fun scanModeSummary(): String = when (selectedProtocol) {
+        Protocol.MASQUE, Protocol.WIREGUARD, Protocol.WARP_IN_WARP ->
+            "${defaultScanMode().label} · ${defaultScan().label}"
+        else -> "Only for MASQUE and WireGuard"
+    }
 
     private fun splitTunnelSummary(): String {
         val settings = SplitTunnelSettings(this)
@@ -5252,6 +5401,15 @@ class MainActivity : Activity() {
         WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel"),
         PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel"),
         TOR("Tor", "tor", "Onion routing; slowest but hardest to block"),
+
+        /**
+         * Public proxy nodes, picked automatically.
+         *
+         * Its core name is not a core transport at all: the Rust core is never
+         * started for SHARD. The service branches on it before touching
+         * NativeCore, the same way the Psiphon and Tor names do.
+         */
+        SHARD("SHARD", "shard", "Public nodes, auto-selected; no setup"),
     }
 
     private enum class ScanTarget(

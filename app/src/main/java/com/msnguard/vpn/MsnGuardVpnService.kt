@@ -201,6 +201,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var plainTransportRecorded = false
     private var storedConfig: String? = null
     private var currentProtocol = "Tunnel"
+
+    /**
+     * In-place node swaps performed during this SHARD session.
+     *
+     * Bounded, because rotation is only the right answer while the failure is one
+     * node's. A pool-wide outage or a carrier that has started blocking the whole
+     * transport would otherwise have the watchdog swapping nodes every 30 seconds
+     * forever, which looks to the user like a tunnel that never settles and never
+     * reports anything. After the ceiling the ordinary reconnect path takes over,
+     * which does report and does back off.
+     */
+    private var shardRotations = 0
     private var currentVpnIp = ""
     private var currentPing = ""
 
@@ -531,6 +543,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     companion object {
         const val LOG_TAG = "MsnGuardVpnService"
+        /**
+         * Ceiling on in-place SHARD node swaps per session.
+         *
+         * 6 covers the case this exists for — a handful of dead entries in a pool
+         * that is otherwise fine — without letting a pool-wide outage hide behind
+         * endless rotation. At the 30-second watchdog interval that is three
+         * minutes of trying before the session is reported as lost.
+         */
+        private const val MAX_SHARD_ROTATIONS = 6
+
         const val ACTION_CONNECT = "com.msnguard.vpn.CONNECT"
         const val ACTION_DISCONNECT = "com.msnguard.vpn.DISCONNECT"
         const val ACTION_RECONNECT = "com.msnguard.vpn.RECONNECT"
@@ -2078,6 +2100,125 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     /**
+     * Bring up a SHARD session: TUN → tun2socks → [ShardSocksFront] → xray → node.
+     *
+     * Shaped like [startTorTunnel] rather than the Psiphon path, and for the same
+     * reason: [ShardManager.start] blocks until the node is chosen and its listener
+     * accepts, so there is no callback to wait on and tun2socks is started right
+     * here once it returns true.
+     *
+     * ## Order, and why it is this order
+     *
+     *  1. TUN first. Same constraint as every other transport here — a TUN that
+     *     appears after the tunnel process starts looks like a network change to it.
+     *  2. xray next ([ShardManager.start]), which races the pool and leaves one
+     *     node's listener on [ShardManager.SOCKS_PORT].
+     *  3. [ShardSocksFront] on 1825, pointed at that listener.
+     *  4. tun2socks last, pointed at 1825 — never at xray directly, because
+     *     tun2socks sends UDP to a udpgw server and xray does not speak udpgw.
+     *
+     * ## No dnsOnlyUdpgw
+     *
+     * The opposite of Tor. [ShardSocksFront] forwards every UDP flow through a real
+     * SOCKS5 UDP ASSOCIATE — verified against the live pool, 19 of 28 nodes answered
+     * DNS over it — so QUIC, Telegram calls and games work. Setting the flag would
+     * throw away the one capability this transport has that Tor does not.
+     *
+     * ## No chain, no ladder, no region phase
+     *
+     * SHARD's own pool is its ladder: [ShardManager] races a slice of it on every
+     * connect and the watchdog rotates within it. Wrapping it in WARP is not offered
+     * — the nodes are reached over TLS on 443 through Cloudflare, which is what the
+     * chain exists to achieve for Psiphon.
+     */
+    private fun startShardTunnel() {
+        worker.execute {
+            try {
+                val address = Tun2SocksManager.selectPrivateAddress()
+                ConnectionLog.record("SHARD: creating TUN before xray starts")
+                tun = Builder()
+                    .setSession("MSN-GUARD")
+                    .setMtu(Tun2SocksManager.VPN_INTERFACE_MTU)
+                    .addAddress(address.ipAddress, address.prefixLength)
+                    .addRoute("0.0.0.0", 0)
+                    .addRoute(address.subnet, address.prefixLength)
+                    // lwIP's resolver is the only one listed, exactly as on the Tor
+                    // path and for the same reason: every DNS query must go through
+                    // the node. Adding 1.1.1.1 here would send app DNS out over the
+                    // carrier link in the clear, which on this transport is both a
+                    // leak and a censorship hole — the resolver Iranian carriers
+                    // poison is the one we would be handing queries to.
+                    //
+                    // Unlike Psiphon there is no bootstrap deadlock to break: xray
+                    // dials its node by hostname over the carrier link (our own UID
+                    // is off the TUN), so nothing in the connect path needs the
+                    // TUN's resolver before the tunnel exists.
+                    .addDnsServer(address.router)
+                    .applySplitTunneling()
+                    .establish() ?: error("Android could not establish the VPN interface")
+                vpnModeActive.set(true)
+
+                sendStatus(STATUS_CONNECTING, "Finding a fast node…", 15)
+                ConnectionLog.record("SHARD: TUN ready — racing the pool")
+
+                if (!ShardManager.start(this, verboseShardLog())) {
+                    error(
+                        ShardManager.lastError.ifBlank { "No public node could be reached" }
+                    )
+                }
+
+                sendStatus(STATUS_CONNECTING, "Starting device routing…", 70)
+                if (!ShardSocksFront.start(ShardManager.SOCKS_PORT)) {
+                    error("Could not start the UDP front-end")
+                }
+                activeSocksPort = ShardSocksFront.LISTEN_PORT
+                if (!Tun2SocksManager.start(tun!!, ShardSocksFront.LISTEN_PORT)) {
+                    error("Could not start device routing")
+                }
+
+                currentVpnIp = ""
+                val node = ShardManager.activeNode?.displayName ?: "a public node"
+                sendStatus(STATUS_CONNECTED, "SHARD connected via $node")
+                ConnectionLog.record("SHARD: connected via $node")
+                repostNotification()
+                startShardTrafficPolling()
+                startWatchdog()
+            } catch (e: Exception) {
+                ConnectionLog.record("SHARD start failed: ${e.message}")
+                ShardSocksFront.stop()
+                ShardManager.stop()
+                failAndStop(e.message ?: "SHARD start failed")
+            }
+        }
+    }
+
+    /** Whether the user asked for a verbose log; xray's level follows it. */
+    private fun verboseShardLog(): Boolean =
+        getSharedPreferences("settings", MODE_PRIVATE)
+            .getString("log_level", "info")
+            .let { it == "debug" || it == "trace" }
+
+    /**
+     * Feeds [ShardSocksFront]'s counters into the traffic pipeline.
+     *
+     * Separate task from [startTrafficPolling] only because the source object
+     * differs; everything downstream — speed deltas, monthly totals, the
+     * notification throttle — is the same [updateTrafficNotification] the other
+     * transports use. Shares [torTrafficTask] as its handle so [stopTrafficPolling]
+     * cancels whichever one is armed and no session can leave two pollers running.
+     */
+    private fun startShardTrafficPolling() {
+        torTrafficTask?.cancel(false)
+        torTrafficTask = ladderScheduler.scheduleAtFixedRate({
+            try {
+                if (!ShardSocksFront.isRunning) return@scheduleAtFixedRate
+                updateTrafficNotification(ShardSocksFront.sessionTx, ShardSocksFront.sessionRx)
+            } catch (_: Exception) {
+            }
+        }, 1L, 1L, TimeUnit.SECONDS)
+    }
+
+    /**
      * Feeds [TorSocksFront]'s counters into the same traffic pipeline the other
      * transports use.
      *
@@ -2150,11 +2291,61 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 if (stopRequested.get() || userInitiatedStop.get()) return@scheduleWithFixedDelay
                 if (!connected.get()) return@scheduleWithFixedDelay
                 val dead = tunnelIsDead() ?: return@scheduleWithFixedDelay
+                // SHARD can usually be repaired without a disconnect: the pool has
+                // other nodes and the TUN, tun2socks and the front-end are all still
+                // healthy, so only the process behind the port needs replacing. This
+                // is the "keep testing after connecting" behaviour — a race winner
+                // can die a minute later when its owner rotates the UUID, and that
+                // must not end the session.
+                if (currentProtocol.contains("SHARD") && rotateShardNode(dead)) {
+                    return@scheduleWithFixedDelay
+                }
                 ConnectionLog.record("Watchdog: $dead — reconnecting")
                 onTunnelLost(dead)
             } catch (_: Exception) {
             }
         }, WATCHDOG_INTERVAL_S, WATCHDOG_INTERVAL_S, TimeUnit.SECONDS)
+    }
+
+    /**
+     * Replace the dead node under a live SHARD session.
+     *
+     * Only when the parts that would need a full reconnect are still up. tun2socks
+     * holds the TUN fd and dials [ShardSocksFront] on a fixed port, and the front-end
+     * dials xray on another fixed port, so swapping the xray process behind that port
+     * is invisible to both — the user sees a stall of a second or two instead of a
+     * disconnect.
+     *
+     * Returns false when the failure is not the node's (the front-end or routing
+     * died), leaving the caller to take the ordinary reconnect path.
+     */
+    private fun rotateShardNode(reason: String): Boolean {
+        if (!Tun2SocksManager.isRunning || !ShardSocksFront.isRunning) return false
+        if (shardRotations >= MAX_SHARD_ROTATIONS) {
+            ConnectionLog.record(
+                "SHARD: $shardRotations rotations without a stable node — falling back to a full reconnect"
+            )
+            return false
+        }
+        shardRotations++
+        ConnectionLog.record("SHARD: $reason — rotating node ($shardRotations)")
+        sendStatus(STATUS_CONNECTING, "Switching to another node…", 60)
+        val ok = try {
+            ShardManager.rotate(this, verboseShardLog())
+        } catch (e: Exception) {
+            ConnectionLog.record("SHARD rotate failed: ${e.message}")
+            false
+        }
+        if (!ok) return false
+        val node = ShardManager.activeNode?.displayName ?: "a public node"
+        // The exit changed, so the previous session's measurement is now wrong.
+        currentVpnIp = ""
+        lastExitIp = ""
+        currentCountry = ""
+        sendStatus(STATUS_CONNECTED, "SHARD connected via $node")
+        ConnectionLog.record("SHARD: now on $node")
+        repostNotification()
+        return true
     }
 
     private fun stopWatchdog() {
@@ -2175,8 +2366,24 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // Deliberately NOT required in proxy mode: there is no TUN and no
         // tun2socks, so demanding it would report a healthy proxy as dead on the
         // first watchdog tick and auto-reconnect would loop forever.
-        val needsRouting = psiphonVpnMode || currentProtocol.contains("TOR")
+        val needsRouting = psiphonVpnMode || currentProtocol.contains("TOR") ||
+            currentProtocol.contains("SHARD")
         if (needsRouting && !Tun2SocksManager.isRunning) return "device routing stopped"
+
+        // SHARD: three things can die independently, and they are reported in the
+        // order that decides what the caller does about it — the two repairable ones
+        // (xray, and the node behind it) before the front-end, which is not.
+        if (currentProtocol.contains("SHARD")) {
+            if (!ShardManager.isRunning) return "the node process exited"
+            if (!ShardSocksFront.isRunning) return "the SHARD front-end stopped"
+            // A real request through the real port. Unlike every other transport
+            // here, liveness is not enough: the process stays up and the port keeps
+            // accepting when a node's UUID is rotated or its worker is deleted, and
+            // that silent death is the single most likely SHARD failure. Cheap
+            // enough at 30s intervals — one 204 through an already-open tunnel.
+            if (!ShardManager.isHealthy()) return "the node stopped answering"
+            return null
+        }
 
         if (currentProtocol.contains("TOR")) {
             if (!TorManager.isRunning) return "the Tor process exited"
@@ -2610,6 +2817,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // against a counter that just went backwards, so it all has to be reset
         // together, before the first sample of the new session arrives.
         resetSessionTraffic()
+        // Per-session, like the traffic counters: a reconnect goes straight from one
+        // startTunnel to the next, and carrying the previous session's count over
+        // would spend the rotation budget before the new session had used any of it.
+        shardRotations = 0
         stopRequested.set(false)
         // Latched for the whole session — see [proxyMode]. Read once, here, so a
         // mid-session change of the setting cannot make teardown take the wrong
@@ -2660,11 +2871,41 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             return
         }
 
+        // SHARD IS REFUSED IN PROXY MODE TOO, for a different reason than Tor.
+        //
+        // xray could serve a proxy perfectly well — it speaks general SOCKS5 with
+        // UDP ASSOCIATE, which is precisely what Tor's front-end cannot. What is
+        // missing is a byte counter: nothing in this app would be in that data
+        // path, so the session would report 0 B forever and MainActivity's own
+        // byte watch would paint a working proxy as "no traffic is passing". In VPN
+        // mode ShardSocksFront sits in the path and counts.
+        //
+        // Nothing is lost by refusing: Share over LAN is what proxy mode is really
+        // wanted for, and SHARD publishes its listener on the LAN from VPN mode —
+        // xray binds 0.0.0.0 while tun2socks keeps using loopback — so a Windows
+        // machine can use the tunnel with the whole phone still routed.
+        if (proxyMode && currentProtocol.contains("SHARD")) {
+            connected.set(false)
+            failAndStop(
+                "SHARD runs as a VPN, not a SOCKS proxy — set Tunnel type back to " +
+                    "VPN; Share over LAN works there"
+            )
+            return
+        }
+
         // PSIPHON-OVER-WARP must be tested before the plain PSIPHON branch: its
         // protocol name contains "PSIPHON" too, so the order of these checks is
         // what keeps the chain from being started as an ordinary Psiphon tunnel.
         if (currentProtocol.contains(CHAIN_PROTOCOL_MARKER)) {
             startChainTunnel()
+            return
+        }
+
+        // SHARD before TOR and PSIPHON for the same reason those two come before
+        // the core: the Rust core is never started on this path, so it must not
+        // fall through to NativeCore.attach().
+        if (currentProtocol.contains("SHARD")) {
+            startShardTunnel()
             return
         }
 
@@ -3005,6 +3246,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             if (notify) sendStatus(STATUS_DISCONNECTED)
             // A reconnect re-enters startTunnel() on the worker thread, so the
             // service must survive; only a real disconnect stops it.
+            if (teardownService) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+            return
+        }
+
+        if (currentProtocol.contains("SHARD")) {
+            // Front-end before the process: it holds sockets on xray's port, and
+            // tearing xray down first would leave every association reading from a
+            // dead upstream. Tun2SocksManager.stop() above already stopped feeding it.
+            ShardSocksFront.stop()
+            ShardManager.stop()
+            shardRotations = 0
+            vpnModeActive.set(false)
+            tun?.close()
+            tun = null
+            connected.set(false)
+            if (notify) sendStatus(STATUS_DISCONNECTED)
             if (teardownService) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -3550,6 +3810,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             if (chainMode) "Tor$mode over WARP" else "Tor$mode"
         }
         currentProtocol.contains("PSIPHON") -> "Psiphon"
+        // Names the node, because on this transport the exit is not ours and changes
+        // between sessions — and the watchdog can change it mid-session.
+        currentProtocol.contains("SHARD") ->
+            ShardManager.activeNode?.let { "SHARD (${it.displayName})" } ?: "SHARD"
         currentProtocol.contains("MASQUE") -> "MASQUE"
         currentProtocol.contains("WIREGUARD") -> "WireGuard"
         currentProtocol.contains("GOOL") -> "WARP-on-WARP"

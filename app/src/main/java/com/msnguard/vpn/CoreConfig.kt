@@ -320,7 +320,16 @@ object CoreConfig {
      * nothing. Note [SOCKS_PORT] (1819) is NOT here — in proxy mode Psiphon takes
      * the user's port instead of 1819, so 1819 is genuinely free then.
      */
-    private val RESERVED_PORTS = setOf(CHAIN_SOCKS_PORT, 1822, 1823, 7300, HTTP_PROXY_PORT)
+    /**
+     * Ports the user's proxy-mode port box must refuse.
+     *
+     * 1822 and 1823 are Tor's; 1824 is xray's under SHARD and 1825 is the SHARD
+     * front-end tun2socks dials — both were missing, so a user could type either
+     * into the port box and get a SHARD session whose listener collides with the
+     * one the tunnel needs. 7300 is udpgw, and [HTTP_PROXY_PORT] is the LAN HTTP
+     * listener.
+     */
+    private val RESERVED_PORTS = setOf(CHAIN_SOCKS_PORT, 1822, 1823, 1824, 1825, 7300, HTTP_PROXY_PORT)
 
     /** The stored tunnel mode, defaulting to VPN. */
     fun tunnelMode(context: Context): String =

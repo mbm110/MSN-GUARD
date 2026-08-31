@@ -113,6 +113,16 @@
            </intent-filter>
        </service>
 
+        <!--
+            Keeps the SHARD node list current whether or not a tunnel is up. Not
+            exported, and JobScheduler is the only caller; BIND_JOB_SERVICE is the
+            permission the platform requires so nothing else can start it.
+        -->
+        <service
+            android:name=".ShardRefreshJob"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

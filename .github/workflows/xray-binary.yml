@@ -1,0 +1,197 @@
+name: Xray binary
+
+# Builds the xray executable the SHARD transport needs, for both shipping ABIs,
+# and uploads it as an artifact. It is then pinned by run id in build.yml and
+# copied into app/src/main/jniLibs/ there — exactly the arrangement the Tor
+# binaries use, and for the same reason: this is a Go build that has no business
+# running on every APK push.
+#
+#   libxray.so   the xray client itself, renamed
+#
+# Renamed to lib*.so because Android only grants the execute bit to files the APK
+# packager recognises as native libraries. It is launched with ProcessBuilder,
+# never dlopen'd — which is also why useLegacyPackaging must stay true.
+#
+# ## Why patterniha's fork and not XTLS/Xray-core
+#
+# Three things this transport is built on exist only in the fork:
+#   * `finalmask` TCP masks — record-layer fragmentation with explicit lengths
+#   * `cipherSuites` on tlsSettings, which pins the ClientHello length so those
+#     fragment offsets mean anything
+#   * `fingerprint: "unsafe"`, i.e. uTLS off — no GREASE, no extension shuffling,
+#     no padding, so the length is stable
+# Upstream also refuses VLESS-without-TLS to a public address in
+# validateOutboundTransportSecurity, and a large share of the subscription's
+# nodes are exactly that (port 8080, security=none) — measured 20 of 45 lines,
+# 28 unique after dedupe.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/xray-binary.yml'
+      - 'tools/xray-smoke.json'
+
+jobs:
+  xray:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout (for the smoke-test config)
+        uses: actions/checkout@v4
+
+      # Pinned to a tag, not a branch. This binary terminates the user's traffic,
+      # so it does not get to float.
+      - name: Clone the fork
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v26.8.28 \
+            https://github.com/patterniha/Xray-core.git xray
+          cd xray
+          echo "Pinned commit: $(git rev-parse HEAD)"
+          # Confirm the three features we are here for are in this tree, so a
+          # mis-tagged clone fails now rather than on a user's phone with an
+          # "unknown mask type" at connect time.
+          test -f transport/internet/finalmask/fragment/conn.go \
+            || { echo "ERROR: no finalmask/fragment in this tree"; exit 1; }
+          grep -q 'CipherSuites' infra/conf/transport_security.go \
+            || { echo "ERROR: no cipherSuites in TLSConfig"; exit 1; }
+          grep -q '"finalmask"' infra/conf/transport_internet.go \
+            || { echo "ERROR: no finalmask key on StreamConfig"; exit 1; }
+          echo "OK: finalmask + cipherSuites present"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+
+      - name: Setup Android NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'ndk;26.3.11579264'
+
+      - name: Build for both ABIs
+        env:
+          NDK: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
+        run: |
+          set -euo pipefail
+          trap 'rc=$?; echo "!!! FAILED rc=$rc line=$LINENO cmd: $BASH_COMMAND" >&2' ERR
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cd xray
+
+          build() {
+            local ABI="$1" GOARCH="$2" GOARM="${3:-}" CC="$4"
+            local OUT="../out/$ABI/libxray.so"
+            mkdir -p "$(dirname "$OUT")"
+            echo "==> $ABI ($GOARCH)"
+            # Every flag is load-bearing; the lyrebird job in tor-binaries.yml
+            # learned each of these the hard way.
+            #
+            # -buildmode=pie   Android refuses to exec a non-PIE binary on API 21+.
+            # CGO_ENABLED=1    -buildmode=pie needs an external linker, which is
+            #                  also how the page-size flag gets through.
+            # max-page-size=16384  Pixel 8 and later use 16 KB pages and will not
+            #                  load a 4 KB-aligned binary at all.
+            # NO common-page-size. That flag is what broke Tor for every 4 KB-page
+            #                  device in 1.5.0, by rounding GNU_RELRO past the end
+            #                  of its LOAD segment. Do not add it.
+            # -s -w -trimpath  strip symbols and DWARF, keep runner paths out.
+            env GOOS=android GOARCH="$GOARCH" ${GOARM:+GOARM=$GOARM} \
+                CGO_ENABLED=1 CC="$TOOLCHAIN/$CC" \
+                go build -trimpath -buildmode=pie \
+                  -ldflags "-s -w -extldflags '-Wl,-z,max-page-size=16384 -Wl,-z,relro -Wl,-z,now'" \
+                  -o "$OUT" ./main
+            "$TOOLCHAIN/llvm-strip" --strip-unneeded "$OUT" || true
+            # Confirm the file materialised before the next ABI overwrites the
+            # shell state; a silent go build failure would otherwise only surface
+            # two steps later.
+            ls -la "$OUT"
+          }
+
+          build arm64-v8a   arm64 ""  aarch64-linux-android26-clang
+          build armeabi-v7a arm   7   armv7a-linux-androideabi26-clang
+
+          echo "==> both ABIs built"
+          ls -la ../out/*/libxray.so
+
+      # The same gates the Tor binaries pass, for the same silent runtime
+      # failures: a non-PIE binary will not launch, 4 KB alignment fails on
+      # 16 KB-page devices, and a RELRO range that overruns its LOAD makes bionic
+      # refuse the file outright.
+      - name: Verify PIE, page alignment and RELRO
+        env:
+          NDK: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
+        run: |
+          set -euo pipefail
+          READELF="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+
+          # Never pipe an LLVM tool into anything that can close stdout early
+          # (awk with exit, head, grep -m). LLVM handles SIGPIPE and exits
+          # EX_IOERR (74); pipefail propagates it and set -e then kills the step
+          # with no error message — that failed two tor runs on binaries that were
+          # already correct. Capture whole outputs, then parse the strings.
+          ls -la out/*/libxray.so
+
+          for f in out/*/libxray.so; do
+            echo "=== $f ==="
+            hdr=$("$READELF" -h "$f")
+            phdrs=$("$READELF" -lW "$f")
+            printf '%s\n' "$phdrs" | grep -E '^ *(LOAD|GNU_RELRO)' || true
+
+            TYPE=$(awk -F: '/^ *Type:/ {print $2}' <<< "$hdr" | awk '{print $1}')
+            ALIGN=$(awk '$1 == "LOAD" && !seen {a = $NF; seen = 1} END {print a}' <<< "$phdrs")
+            echo "parsed: type=[$TYPE] align=[$ALIGN] size=$(stat -c%s "$f")"
+
+            [ "$TYPE" = "DYN" ] || { echo "ERROR: $f is not PIE (type=$TYPE)"; exit 1; }
+            [ "$ALIGN" = "0x4000" ] || { echo "ERROR: $f align=$ALIGN, want 0x4000"; exit 1; }
+
+            RELRO_VADDR=$(awk '$1=="GNU_RELRO" {print $3}' <<< "$phdrs")
+            RELRO_MEMSZ=$(awk '$1=="GNU_RELRO" {print $6}' <<< "$phdrs")
+            LOAD_MEMSZ=$(awk -v v="$RELRO_VADDR" '$1=="LOAD" && $3==v {print $6}' <<< "$phdrs")
+            if [ -n "$RELRO_MEMSZ" ] && [ -n "$LOAD_MEMSZ" ]; then
+              V=$((RELRO_VADDR)); R=$((RELRO_MEMSZ)); L=$((LOAD_MEMSZ))
+              for P in 4096 16384; do
+                REND=$(( ((V + R + P - 1) / P) * P ))
+                LEND=$(( ((V + L + P - 1) / P) * P ))
+                printf '  %6d-byte pages: mprotect end 0x%x, mapped end 0x%x' "$P" "$REND" "$LEND"
+                if [ "$REND" -gt "$LEND" ]; then
+                  echo " -> FAIL"
+                  echo "ERROR: $((REND - LEND)) bytes unmapped inside the RELRO range."
+                  echo "       Check that -z common-page-size is NOT in LDFLAGS."
+                  exit 1
+                fi
+                echo " -> OK"
+              done
+            fi
+          done
+          sha256sum out/*/libxray.so
+
+      # Proves the binary is a working xray and not just a well-formed ELF: build
+      # the same tree for the host and check it accepts a config shaped exactly
+      # like the ones ShardConfigs.kt emits. A config the fork cannot parse is the
+      # most likely way this transport breaks, and it would otherwise only show up
+      # on a phone. `run -test` builds the whole config and dials nothing.
+      - name: Smoke-test config parsing
+        run: |
+          set -euo pipefail
+          cd xray
+          env GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+            go build -trimpath -o /tmp/xray-host ./main
+          OUTPUT=$(/tmp/xray-host run -test -c ../tools/xray-smoke.json 2>&1) || {
+            echo "$OUTPUT"
+            echo "ERROR: the fork rejected a config shape we emit"
+            exit 1
+          }
+          echo "$OUTPUT"
+          grep -q "Configuration OK" <<< "$OUTPUT" \
+            || { echo "ERROR: no 'Configuration OK'"; exit 1; }
+          echo "OK: both node shapes parse — tls+finalmask+cipherSuites+unsafe,"
+          echo "    and the security=none port-8080 form"
+
+      - name: Upload libxray.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: libxray
+          path: out/*/libxray.so
+          if-no-files-found: error

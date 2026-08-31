@@ -1,0 +1,259 @@
+{
+  "_comment": [
+    "Gate config for the xray-binary workflow. Not shipped and never read at runtime.",
+    "It is shaped exactly like what ShardConfigs.kt emits, so a config the fork cannot",
+    "parse fails in CI instead of on a phone. Credentials are placeholders."
+  ],
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "in-0",
+      "listen": "127.0.0.1",
+      "port": 21100,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "in-1",
+      "listen": "127.0.0.1",
+      "port": 21101,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "in-2",
+      "listen": "127.0.0.1",
+      "port": 21102,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "in-live",
+      "listen": "127.0.0.1",
+      "port": 1824,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true,
+        "ip": "127.0.0.1"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "blackhole",
+      "protocol": "blackhole"
+    },
+    {
+      "tag": "out-0",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.70.21",
+            "port": 443,
+            "users": [
+              {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "finalmask": {
+          "tcp": [
+            {
+              "type": "fragment",
+              "settings": {
+                "packets": "tlshello",
+                "lengths": [
+                  "5",
+                  "94",
+                  "1"
+                ],
+                "delays": [
+                  "0"
+                ],
+                "maxSplit": "0"
+              }
+            },
+            {
+              "type": "fragment",
+              "settings": {
+                "packets": "1-1",
+                "lengths": [
+                  "109",
+                  "1"
+                ],
+                "delays": [
+                  "1"
+                ],
+                "maxSplit": "355"
+              }
+            }
+          ]
+        },
+        "tlsSettings": {
+          "serverName": "update.asshole.eu.cc",
+          "allowInsecure": false,
+          "fingerprint": "unsafe",
+          "cipherSuites": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA:TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256:TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"
+        },
+        "wsSettings": {
+          "path": "/",
+          "host": "update.asshole.eu.cc"
+        }
+      }
+    },
+    {
+      "tag": "out-1",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.70.21",
+            "port": 8080,
+            "users": [
+              {
+                "id": "00000000-0000-0000-0000-000000000002",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "finalmask": {
+          "tcp": [
+            {
+              "type": "fragment",
+              "settings": {
+                "packets": "1-1",
+                "lengths": [
+                  "1"
+                ],
+                "delays": [
+                  "4"
+                ],
+                "maxSplit": "355"
+              }
+            }
+          ]
+        },
+        "wsSettings": {
+          "path": "/?ed=2560",
+          "host": "c7h4v.mnkl.d8e.hh.vavava.kdns.fr"
+        }
+      }
+    },
+    {
+      "tag": "out-2",
+      "protocol": "trojan",
+      "settings": {
+        "servers": [
+          {
+            "address": "104.21.70.21",
+            "port": 443,
+            "password": "smoke-test-password"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "finalmask": {
+          "tcp": [
+            {
+              "type": "fragment",
+              "settings": {
+                "packets": "tlshello",
+                "lengths": [
+                  "5",
+                  "94",
+                  "1"
+                ],
+                "delays": [
+                  "0"
+                ],
+                "maxSplit": "0"
+              }
+            },
+            {
+              "type": "fragment",
+              "settings": {
+                "packets": "1-1",
+                "lengths": [
+                  "109",
+                  "1"
+                ],
+                "delays": [
+                  "1"
+                ],
+                "maxSplit": "355"
+              }
+            }
+          ]
+        },
+        "tlsSettings": {
+          "serverName": "www.calmlunch.com",
+          "allowInsecure": false,
+          "fingerprint": "unsafe",
+          "cipherSuites": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA:TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256:TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"
+        },
+        "wsSettings": {
+          "path": "/assignment",
+          "host": "www.calmlunch.com"
+        }
+      }
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-0"
+        ],
+        "outboundTag": "out-0"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-1"
+        ],
+        "outboundTag": "out-1"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-2"
+        ],
+        "outboundTag": "out-2"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "in-live"
+        ],
+        "outboundTag": "out-0"
+      }
+    ]
+  }
+}
