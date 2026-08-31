@@ -156,6 +156,14 @@ object ShardConfigs {
     private val SUPPORTED = setOf("vless", "trojan")
 
     /**
+     * Streams per multiplexed connection, and per XUDP connection.
+     *
+     * See [muxFor] for why mux is used at all and why UDP needs its own setting.
+     */
+    private const val MUX_CONCURRENCY = 8
+    private const val XUDP_CONCURRENCY = 16
+
+    /**
      * Parse a subscription body into nodes, in file order.
      *
      * The file is plain text, one URL per line, with `#`-prefixed metadata lines
@@ -264,7 +272,7 @@ object ShardConfigs {
      *
      * @param tag the outbound tag routing rules will point at.
      */
-    private fun outbound(node: ShardNode, tag: String): JSONObject {
+    private fun outbound(node: ShardNode, tag: String, mux: Boolean = true): JSONObject {
         val settings = JSONObject()
         when (node.protocol) {
             "vless" -> settings.put(
@@ -349,6 +357,68 @@ object ShardConfigs {
             put("protocol", node.protocol)
             put("settings", settings)
             put("streamSettings", stream)
+            if (mux) muxFor(node)?.let { put("mux", it) }
+        }
+    }
+
+    /**
+     * Connection multiplexing for [node], or null when it must not be used.
+     *
+     * ## Why this is the single biggest speed win available here
+     *
+     * Without mux every TCP flow the phone opens becomes its own WebSocket over
+     * its own TLS handshake to the node, and each of those handshakes is
+     * deliberately slowed down by the `fm` fragmenter — the published profile
+     * splits the ClientHello into ~110 one-byte TCP segments with a 1 ms delay
+     * between them, so the handshake alone costs the better part of a second
+     * before any request is sent. That cost is paid per flow, and a single web
+     * page opens ten of them.
+     *
+     * Measured against the live pool with the real pinned binary (one node,
+     * 10 parallel 32 KB fetches, three rounds):
+     *
+     * ```
+     *   without mux   1096 / 1045 / 1014 ms      20 TCP connections to the node
+     *   with mux       914 /  181 /  180 ms       2 TCP connections to the node
+     * ```
+     *
+     * The first round is equal because the shared connection is still being
+     * built; everything after it reuses it. On a captured session the count of
+     * one-byte fragmented segments fell from 6797 to 672 for identical work,
+     * which is also why this helps battery: those segments are radio wake-ups.
+     *
+     * Interactive latency while a bulk download is running (the case the user
+     * described as "speed jumps around") improved in the same test from a
+     * median of 824 ms to 117 ms, because a new request no longer has to
+     * complete a fresh fragmented handshake behind the transfer.
+     *
+     * ## Why VLESS only
+     *
+     * Trojan nodes break outright. Verified three times over the whole live
+     * pool: with mux enabled the three reachable Trojan nodes (indices 4, 5 and
+     * 40 of the seed) failed every probe while all twenty VLESS nodes kept
+     * working, and xray logged nothing — the flows simply never complete. So
+     * mux is applied per protocol rather than globally.
+     *
+     * ## Why xudpConcurrency is not optional
+     *
+     * `mux.enabled` alone routes UDP through the mux too, and the fork's plain
+     * UDP-over-mux path did not deliver a single DNS answer in testing
+     * (12 queries, all timed out). Setting `xudpConcurrency` switches UDP to
+     * XUDP, which was verified to answer 10 of 12 — better than the no-mux
+     * baseline on the same node in the same minute. Since SHARD carries all DNS
+     * and QUIC over SOCKS UDP, shipping mux without this would trade speed for
+     * a tunnel that cannot resolve names.
+     */
+    private fun muxFor(node: ShardNode): JSONObject? {
+        if (node.protocol != "vless") return null
+        return JSONObject().apply {
+            put("enabled", true)
+            // 8 streams per connection: enough that a page's flows share one
+            // handshake, low enough that one stalled stream cannot hold the
+            // whole page. Above this xray opens a second connection anyway.
+            put("concurrency", MUX_CONCURRENCY)
+            put("xudpConcurrency", XUDP_CONCURRENCY)
         }
     }
 
@@ -394,7 +464,10 @@ object ShardConfigs {
                     )
                 }
             )
-            outbounds.put(outbound(node, tag))
+            // No mux during the race: the probe is a single short flow, so a
+            // multiplexed connection would add its own setup for no benefit, and
+            // the number being measured must be the node's own latency.
+            outbounds.put(outbound(node, tag, mux = false))
             rules.put(
                 JSONObject().apply {
                     put("type", "field")

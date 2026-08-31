@@ -40,6 +40,17 @@ object ShardHealth {
     /** How many consecutive failures before a node drops behind untried ones. */
     private const val FAILURE_TOLERANCE = 2
 
+    /**
+     * Ceiling and exchange rate for the measured-bandwidth bonus in [Score.rank].
+     *
+     * 30 Mbps × 50 ms = 1500 ms, i.e. a fast node may jump ahead of one whose
+     * probe was up to 1.5 s quicker. Chosen so the bonus can overcome the
+     * latency spread actually seen among working nodes (727–1773 ms) without
+     * overwhelming the failure and streak terms, which are about reliability.
+     */
+    private const val THROUGHPUT_BONUS_CEILING_MBPS = 30
+    private const val THROUGHPUT_BONUS_PER_MBPS = 50
+
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -49,8 +60,15 @@ object ShardHealth {
      * @param latencyMs last successful probe, 0 if never measured.
      * @param streak consecutive successes, reset to 0 by any failure.
      * @param failures consecutive failures, reset to 0 by any success.
+     * @param kbps last measured download rate, 0 if never measured. See
+     *   [recordThroughput] for why latency alone is not enough.
      */
-    data class Score(val latencyMs: Int, val streak: Int, val failures: Int) {
+    data class Score(
+        val latencyMs: Int,
+        val streak: Int,
+        val failures: Int,
+        val kbps: Int = 0,
+    ) {
         val everWorked: Boolean get() = latencyMs > 0
 
         /**
@@ -67,7 +85,30 @@ object ShardHealth {
             // Two consecutive successes are worth roughly a second of latency:
             // enough to prefer a steady 2 s node over a flaky 1.2 s one, not
             // enough to bury a genuinely fast newcomer.
-            else -> latencyMs - (streak.coerceAtMost(5) * 500)
+            else -> latencyMs - (streak.coerceAtMost(5) * 500) - throughputBonus()
+        }
+
+        /**
+         * How much measured bandwidth is allowed to outweigh probe latency.
+         *
+         * Needed because the two are close to unrelated. Measured across the 23
+         * reachable nodes of the live pool, probe latency against the rate of a
+         * 4 MB download through the same node in the same minute:
+         *
+         * ```
+         *   probe  778 ms -> 108 Mbps        probe 1488 ms ->   5.1 Mbps
+         *   probe  942 ms ->  25 Mbps        probe 1773 ms ->  98.5 Mbps
+         * ```
+         *
+         * A pure latency ranking therefore prefers the 5 Mbps node to the
+         * 98 Mbps one. The bonus is capped at 30 Mbps' worth (1500 ms) so a
+         * genuinely fast link cannot bury a node that is merely well-connected,
+         * and so the ordering stays dominated by "does it work at all".
+         */
+        private fun throughputBonus(): Int {
+            if (kbps <= 0) return 0
+            val mbps = kbps / 1000
+            return mbps.coerceAtMost(THROUGHPUT_BONUS_CEILING_MBPS) * THROUGHPUT_BONUS_PER_MBPS
         }
     }
 
@@ -78,6 +119,9 @@ object ShardHealth {
             latencyMs = parts.getOrNull(0)?.toIntOrNull() ?: 0,
             streak = parts.getOrNull(1)?.toIntOrNull() ?: 0,
             failures = parts.getOrNull(2)?.toIntOrNull() ?: 0,
+            // Absent in entries written by older versions, which read back as 0
+            // and simply score no bonus until the node is measured again.
+            kbps = parts.getOrNull(3)?.toIntOrNull() ?: 0,
         )
     }
 
@@ -97,14 +141,44 @@ object ShardHealth {
             latencyMs
         }
         prefs(context).edit()
-            .putString(node.key, "$blended:${previous.streak + 1}:0")
+            .putString(node.key, "$blended:${previous.streak + 1}:0:${previous.kbps}")
+            .apply()
+    }
+
+    /**
+     * Record how fast [node] actually carried data, in kbit/s.
+     *
+     * Kept separate from [recordSuccess] because the two are measured at
+     * different moments: latency comes from the race, which must stay cheap,
+     * while this comes from a real transfer over the live tunnel once it is up.
+     * A missing or failed measurement leaves the previous value alone rather
+     * than clearing it — an interrupted sample says nothing about the node.
+     */
+    fun recordThroughput(context: Context, node: ShardNode, kbps: Int) {
+        if (kbps <= 0) return
+        val previous = score(context, node)
+        // Same smoothing as latency, and for the same reason: one sample taken
+        // while the user was streaming video is not the node's capability.
+        val blended = if (previous.kbps > 0) {
+            ((previous.kbps + kbps * 2) / 3)
+        } else {
+            kbps
+        }
+        prefs(context).edit()
+            .putString(
+                node.key,
+                "${previous.latencyMs}:${previous.streak}:${previous.failures}:$blended"
+            )
             .apply()
     }
 
     fun recordFailure(context: Context, node: ShardNode) {
         val previous = score(context, node)
         prefs(context).edit()
-            .putString(node.key, "${previous.latencyMs}:0:${previous.failures + 1}")
+            .putString(
+                node.key,
+                "${previous.latencyMs}:0:${previous.failures + 1}:${previous.kbps}"
+            )
             .apply()
     }
 

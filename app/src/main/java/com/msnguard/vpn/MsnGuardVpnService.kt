@@ -230,6 +230,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     /** Watchdog ticks skipped before probing an idle SHARD session asleep. */
     private var shardIdleProbeTick = 0
 
+    /**
+     * Passive bandwidth observation for the active SHARD node.
+     *
+     * See [observeShardThroughput]. All four are reset at the start of every
+     * SHARD session so a new node is never credited with the previous one's peak.
+     */
+    private var shardPeakKbps = 0
+    private var shardLastRx = 0L
+    private var shardLastSampleAt = 0L
+    private var shardThroughputWrittenAt = 0L
+
     /** Byte counters at the previous watchdog tick, to detect movement. */
     private var shardLastTx = -1L
     private var shardLastRx = -1L
@@ -590,6 +601,23 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
          * tunnel is idle. 10 × 30 s = one probe every five minutes.
          */
         private const val SHARD_SLEEP_PROBE_TICKS = 10
+
+        /**
+         * Lowest one-second rate accepted as a bandwidth measurement, in kbit/s.
+         *
+         * 500 kbit/s is about 60 KB in a second: more than keepalives and chat
+         * traffic, less than any real page load or download, so the observation
+         * only fires when the user actually asked the node for something.
+         */
+        private const val SHARD_THROUGHPUT_FLOOR_KBPS = 500
+
+        /**
+         * How often the observed peak may be written to [ShardHealth], in ms.
+         *
+         * The peak is tracked in memory on every sample; only the persist is
+         * rate-limited, so nothing is lost by making this generous.
+         */
+        private const val SHARD_THROUGHPUT_WRITE_INTERVAL_MS = 60_000L
 
         const val ACTION_CONNECT = "com.msnguard.vpn.CONNECT"
         const val ACTION_DISCONNECT = "com.msnguard.vpn.DISCONNECT"
@@ -2261,14 +2289,82 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private fun startShardTrafficPolling() {
         torTrafficTask?.cancel(false)
+        shardPeakKbps = 0
+        shardLastRx = 0L
+        shardLastSampleAt = 0L
+        shardThroughputWrittenAt = 0L
         torTrafficTask = ladderScheduler.scheduleAtFixedRate({
             try {
                 if (!ShardSocksFront.isRunning) return@scheduleAtFixedRate
                 if (!shouldSampleTraffic()) return@scheduleAtFixedRate
-                updateTrafficNotification(ShardSocksFront.sessionTx, ShardSocksFront.sessionRx)
+                val rx = ShardSocksFront.sessionRx
+                observeShardThroughput(rx)
+                updateTrafficNotification(ShardSocksFront.sessionTx, rx)
             } catch (_: Exception) {
             }
         }, 1L, 1L, TimeUnit.SECONDS)
+    }
+
+    /**
+     * Learn the active node's real download rate from traffic that is happening
+     * anyway, and hand it to [ShardHealth] so the next race can prefer fast nodes.
+     *
+     * ## Why passive rather than a speed test
+     *
+     * Probe latency turns out to say almost nothing about bandwidth. Measured
+     * across the 23 reachable nodes of the live pool, probe time against a 4 MB
+     * download through the same node in the same minute: 778 ms → 108 Mbps, but
+     * 1488 ms → 5.1 Mbps and 1773 ms → 98.5 Mbps. Ranking on latency alone
+     * therefore puts a 5 Mbps node ahead of a 98 Mbps one, which is exactly the
+     * "why is it slow" complaint.
+     *
+     * The honest fix would be to measure bandwidth during the race, but that
+     * means downloading megabytes through a dozen nodes on the user's mobile data
+     * at every connect. Instead the peak rate of the user's own traffic is
+     * observed: when they load something large, that sample is the node's
+     * capability, and it costs nothing.
+     *
+     * ## Why the peak and not the average
+     *
+     * The average over a session mostly measures how idle the user was. The peak
+     * over a one-second window is the closest thing to "how fast can this node
+     * go" that free observation can produce. It is an underestimate whenever the
+     * user never asked for much, which is the safe direction: a node is only
+     * promoted on evidence, never demoted for lack of it.
+     *
+     * Samples below [SHARD_THROUGHPUT_FLOOR_KBPS] are ignored — a few kilobytes
+     * of keepalive traffic in a second is not a measurement — and the result is
+     * written at most once per [SHARD_THROUGHPUT_WRITE_INTERVAL_MS] to keep this
+     * off the flash. [ShardHealth.recordThroughput] smooths it into the previous
+     * value, so one sample taken during congestion cannot mislabel a good node.
+     */
+    private fun observeShardThroughput(rx: Long) {
+        val now = SystemClock.elapsedRealtime()
+        val previousRx = shardLastRx
+        val previousAt = shardLastSampleAt
+        shardLastRx = rx
+        shardLastSampleAt = now
+        if (previousAt == 0L) return
+
+        val elapsedMs = now - previousAt
+        // Screen-off sampling stretches the window; a gap that long averages away
+        // any peak, so it is not a usable measurement.
+        if (elapsedMs !in 500..3_000) return
+        val delta = rx - previousRx
+        if (delta <= 0) return
+
+        val kbps = (delta * 8 / elapsedMs).toInt()
+        if (kbps < SHARD_THROUGHPUT_FLOOR_KBPS) return
+        if (kbps > shardPeakKbps) shardPeakKbps = kbps
+
+        if (shardThroughputWrittenAt != 0L &&
+            now - shardThroughputWrittenAt < SHARD_THROUGHPUT_WRITE_INTERVAL_MS
+        ) {
+            return
+        }
+        val node = ShardManager.activeNode ?: return
+        shardThroughputWrittenAt = now
+        ShardHealth.recordThroughput(this, node, shardPeakKbps)
     }
 
     /**
