@@ -89,6 +89,57 @@ data class ShardNode(
     /** What the UI may show. Never the raw label, which carries other people's channel ads. */
     val displayName: String
         get() = "$address:$port"
+
+    /**
+     * Two-letter country of the exit, or empty when the publisher did not say.
+     *
+     * Read out of [label], which is the only place the information exists: every
+     * node in this pool resolves to a Cloudflare edge, so the address tells us
+     * nothing about where traffic actually leaves. Two shapes appear in the live
+     * subscription and both are handled:
+     *
+     * ```
+     *   CA 🇨🇦 | @Raydikalx | 5897B0 | 443 | 5e719c   → leading ISO code
+     *   🇺🇸 | @WhiteDNS | US983|2.6MB/s|…            → flag emoji only
+     * ```
+     *
+     * A flag emoji is two regional-indicator code points, each exactly 0x1F1E6
+     * above its ASCII letter, so it decodes back to the ISO pair arithmetically.
+     * Nodes labelled only with a channel handle (`@DeltaKroneckerGithub`) have no
+     * country at all and yield an empty string — the caller falls back to the
+     * measured exit rather than inventing one.
+     */
+    val countryCode: String
+        get() {
+            val trimmed = label.trimStart()
+            // Leading ISO pair, e.g. "CA 🇨🇦 | …". Must be followed by a
+            // separator so a handle like "USAvpn" cannot masquerade as one.
+            if (trimmed.length >= 2 &&
+                trimmed[0] in 'A'..'Z' && trimmed[1] in 'A'..'Z' &&
+                (trimmed.length == 2 || trimmed[2] == ' ' || trimmed[2] == '|')
+            ) {
+                return trimmed.substring(0, 2)
+            }
+            // Otherwise the first regional-indicator pair anywhere in the label.
+            var index = 0
+            while (index < trimmed.length) {
+                val point = trimmed.codePointAt(index)
+                if (point in 0x1F1E6..0x1F1FF) {
+                    val next = index + Character.charCount(point)
+                    if (next < trimmed.length) {
+                        val second = trimmed.codePointAt(next)
+                        if (second in 0x1F1E6..0x1F1FF) {
+                            return charArrayOf(
+                                ('A' + (point - 0x1F1E6)),
+                                ('A' + (second - 0x1F1E6)),
+                            ).concatToString()
+                        }
+                    }
+                }
+                index += Character.charCount(point)
+            }
+            return ""
+        }
 }
 
 /**

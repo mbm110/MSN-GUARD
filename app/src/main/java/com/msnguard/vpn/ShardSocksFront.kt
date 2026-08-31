@@ -76,6 +76,27 @@ object ShardSocksFront {
     private const val UDPGW_HOST = "127.0.0.1"
     private const val UDPGW_PORT = 7300
 
+    /**
+     * Where a transparent-DNS query is actually sent.
+     *
+     * udpgw's `FLAG_DNS` means "route this to your own resolver, not to the address
+     * in the header". tun2socks sets it for every datagram aimed at the TUN's own
+     * resolver address (10.0.0.2), and that address is what lands in the header.
+     *
+     * Forwarding it verbatim is what broke browsing in 1.7.1: xray dutifully asked
+     * the node to reach `10.0.0.2:53`, a private address that exists only on the
+     * phone, so every lookup died. Apps with hardcoded server IPs (Telegram) were
+     * unaffected, which is exactly the symptom that was reported — Telegram fine,
+     * Chrome unable to open even unfiltered sites. The dead flows also consumed the
+     * association table: 256 of them in one 100-second window.
+     *
+     * A public resolver reached *through the node* is the correct destination: the
+     * query leaves from the exit, so it is neither visible to nor answerable by the
+     * carrier. 1.1.1.1 with 8.8.8.8 behind it, the same pair the rest of the app
+     * forces.
+     */
+    private val DNS_UPSTREAMS = listOf("1.1.1.1", "8.8.8.8")
+
     private const val SOCKS_VERSION = 5
     private const val CMD_CONNECT = 1
     private const val CMD_UDP_ASSOCIATE = 3
@@ -439,6 +460,16 @@ object ShardSocksFront {
         }
     }
 
+    /**
+     * Which public resolver a DNS flow uses, chosen from its conid.
+     *
+     * Deterministic per flow so a query and its retransmissions go to one place,
+     * while a fresh conid can land on the other resolver — cheap redundancy when
+     * one of them is having a bad minute at the exit.
+     */
+    private fun dnsUpstream(conid: Int): InetAddress =
+        InetAddress.getByName(DNS_UPSTREAMS[(conid and 0x7FFFFFFF) % DNS_UPSTREAMS.size])
+
     private fun isIpLiteral(host: String): Boolean =
         host.indexOf(':') >= 0 || Regex("^\\d{1,3}(\\.\\d{1,3}){3}$").matches(host)
 
@@ -586,6 +617,25 @@ object ShardSocksFront {
                 val destinationPort = ((address[addressLength - 2].toInt() and 0xFF) shl 8) or
                     (address[addressLength - 1].toInt() and 0xFF)
 
+                // Transparent DNS: the header address is the TUN's own resolver, a
+                // private address the node cannot reach. Substitute a public
+                // resolver — reached through the node, so it is neither visible to
+                // nor answerable by the carrier. See [DNS_UPSTREAMS].
+                //
+                // Port 53 alone also qualifies, for apps that hardcode 8.8.8.8 and
+                // therefore never trip the flag; sending those through the same
+                // path costs nothing and keeps them off the carrier resolver.
+                //
+                // Which of the two resolvers is picked from the conid, so a flow is
+                // stable while a retry (new conid) can land on the other one.
+                val isDns = (flags and FLAG_DNS != 0) || destinationPort == 53
+                val sendTo = if (isDns) {
+                    dnsUpstream(conid)
+                } else {
+                    destination
+                }
+                val sendToPort = if (isDns) 53 else destinationPort
+
                 val association = associations[conid] ?: run {
                     if (associations.size >= MAX_ASSOCIATIONS) {
                         // Evict the least recently used rather than refusing: a
@@ -600,7 +650,7 @@ object ShardSocksFront {
                 } ?: continue
 
                 association.lastUsed = System.currentTimeMillis()
-                val datagram = encapsulate(destination, destinationPort, payload)
+                val datagram = encapsulate(sendTo, sendToPort, payload)
                 try {
                     association.udp.send(
                         DatagramPacket(

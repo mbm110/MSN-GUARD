@@ -2501,14 +2501,14 @@ class MainActivity : Activity() {
         // Both rows came off the home screen's action bar, which was removed to make
         // room for a six-transport rail. They sit under Log verbosity because that is
         // the row that decides what the log will contain.
-        content.addView(navRow("Connection log", "What the tunnel did") { openLogsScreen() }, LinearLayout.LayoutParams(
+        content.addView(navRow("Log", "What the tunnel did") { openLogsScreen() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
         // Names the two transports it applies to. As an unlabelled action-bar button
         // it looked global, and on Psiphon, Tor or SHARD there is nothing to scan —
         // those transports find their own paths.
-        val scanRow = navRow("Endpoint scanner", scanModeSummary()) { openScannerScreen() }
+        val scanRow = navRow("Scan Mode", scanModeSummary()) { openScannerScreen() }
         scannerRow = scanRow
         content.addView(scanRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,

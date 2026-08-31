@@ -2,6 +2,8 @@ package com.msnguard.vpn
 
 import android.animation.ValueAnimator
 import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.text.TextUtils
 import android.view.Gravity
@@ -152,6 +154,13 @@ class TransportRail(
     private var selectedIndex = 0
     private var thumbAnimator: ValueAnimator? = null
 
+    /** Hairline separators between cells. See [onDraw]. */
+    private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = context.resources.displayMetrics.density * 0.75f
+        color = Sculpt.withAlpha(palette.faint, 0.22f)
+    }
+
     /** How many rows the labels need at [perRow] columns. */
     val rowCount: Int = if (labels.isEmpty()) {
         1
@@ -186,6 +195,8 @@ class TransportRail(
         val radius = if (rowCount > 1) 24 else 999
         background = Sculpt.recessedBackground(resources.displayMetrics.density, fill, radius)
         setPadding(context.px(5), context.px(5), context.px(5), context.px(5))
+        // ViewGroups skip onDraw by default; the separators are drawn there.
+        setWillNotDraw(false)
 
         thumb = View(context).apply {
             background = Sculpt.sculptedBackground(
@@ -263,18 +274,63 @@ class TransportRail(
         ))
     }
 
+    /**
+     * Sizes the thumb here, before children are measured — not in
+     * [onSizeChanged].
+     *
+     * onSizeChanged runs *during* a layout pass, and a requestLayout() issued from
+     * inside one is swallowed: the thumb kept its initial 0×0 and stayed invisible
+     * until some later, unrelated pass happened to remeasure it. That is why the
+     * default selection had no frame around it on a cold start while tapping any
+     * cell made one appear — the tap's pressed-state background change was the
+     * unrelated pass. Setting the size before super.onMeasure() means the thumb is
+     * measured correctly on the very first pass.
+     */
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val innerWidth = MeasureSpec.getSize(widthMeasureSpec) - paddingLeft - paddingRight
+        val innerHeight = MeasureSpec.getSize(heightMeasureSpec) - paddingTop - paddingBottom
+        if (innerWidth > 0 && innerHeight > 0) {
+            val cw = (innerWidth.toFloat() / columns).roundToInt()
+            val ch = (innerHeight.toFloat() / rowCount).roundToInt()
+            val params = thumb.layoutParams
+            if (params.width != cw || params.height != ch) {
+                params.width = cw
+                params.height = ch
+            }
+        }
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+    }
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        val cw = cellWidth.roundToInt()
-        val ch = cellHeight.roundToInt()
-        if (cw <= 0 || ch <= 0) return
-        thumb.layoutParams = (thumb.layoutParams as LayoutParams).apply {
-            width = cw
-            height = ch
-        }
-        thumb.requestLayout()
+        if (cellWidth <= 0f || cellHeight <= 0f) return
         thumb.translationX = (selectedIndex % columns) * cellWidth
         thumb.translationY = (selectedIndex / columns) * cellHeight
+    }
+
+    /**
+     * Hairlines between the cells.
+     *
+     * Drawn before children (so the lit thumb and the labels sit on top of them)
+     * and inset from the control's own edges, which is what makes six labels in one
+     * recessed box read as a grid rather than a word soup. Inner edges only —
+     * a line flush against the rounded border would clip against it.
+     */
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val cw = cellWidth
+        val ch = cellHeight
+        if (cw <= 0f || ch <= 0f) return
+        val inset = ch * 0.22f
+        val insetX = cw * 0.18f
+        for (column in 1 until columns) {
+            val x = paddingLeft + column * cw
+            canvas.drawLine(x, paddingTop + inset, x, (height - paddingBottom) - inset, gridPaint)
+        }
+        for (row in 1 until rowCount) {
+            val y = paddingTop + row * ch
+            canvas.drawLine(paddingLeft + insetX, y, (width - paddingRight) - insetX, y, gridPaint)
+        }
     }
 
     fun select(index: Int, animate: Boolean) {

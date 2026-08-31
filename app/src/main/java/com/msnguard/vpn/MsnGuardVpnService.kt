@@ -2192,6 +2192,20 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         }
     }
 
+    /**
+     * The active SHARD node's country, or empty when this is not a SHARD session.
+     *
+     * Empty is also the answer for nodes the publisher labelled with only a channel
+     * handle — roughly a quarter of the pool. The caller then falls back to the
+     * activity's geolocation lookup, which is slower but always produces something.
+     */
+    private fun shardCountry(): String =
+        if (currentProtocol.contains("SHARD")) {
+            ShardManager.activeNode?.countryCode.orEmpty()
+        } else {
+            ""
+        }
+
     /** Whether the user asked for a verbose log; xray's level follows it. */
     private fun verboseShardLog(): Boolean =
         getSharedPreferences("settings", MODE_PRIVATE)
@@ -3735,7 +3749,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // [updateTrafficNotification] for why they were the cause of the
         // lock-screen wakeups, not just clutter.
         val method = prettyProtocol()
-        val subtitle = if (currentCountry.isNotBlank()) "$method • $currentCountry" else method
+        // SHARD's own label is the authority for its country: the publisher states
+        // it per node, and it is known the instant a node wins the race — before
+        // any geolocation lookup could have run, and it stays correct across a
+        // mid-session rotation because rotateShardNode() clears currentCountry.
+        val country = shardCountry().ifBlank { currentCountry }
+        val subtitle = if (country.isNotBlank()) "$method • $country" else method
 
         // Proxy mode must not claim "VPN connected": nothing is tunnelled device-wide,
         // and a user who reads that and then finds Chrome on their real IP would be
@@ -3810,10 +3829,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             if (chainMode) "Tor$mode over WARP" else "Tor$mode"
         }
         currentProtocol.contains("PSIPHON") -> "Psiphon"
-        // Names the node, because on this transport the exit is not ours and changes
-        // between sessions — and the watchdog can change it mid-session.
-        currentProtocol.contains("SHARD") ->
-            ShardManager.activeNode?.let { "SHARD (${it.displayName})" } ?: "SHARD"
+        // Plain "SHARD", exactly like the other transports. The exit is named in
+        // the notification's country field instead — see [shardCountry]. The
+        // address used to be printed here, but it is the Cloudflare edge every
+        // node in the pool shares, so it told the user nothing while looking like
+        // it told them something.
+        currentProtocol.contains("SHARD") -> "SHARD"
         currentProtocol.contains("MASQUE") -> "MASQUE"
         currentProtocol.contains("WIREGUARD") -> "WireGuard"
         currentProtocol.contains("GOOL") -> "WARP-on-WARP"
