@@ -96,11 +96,24 @@ jobs:
             # NO common-page-size. That flag is what broke Tor for every 4 KB-page
             #                  device in 1.5.0, by rounding GNU_RELRO past the end
             #                  of its LOAD segment. Do not add it.
+            # -checklinkname=0 MANDATORY on Go 1.23+. Xray depends on
+            #                  github.com/wlynxg/anet, which reaches into the
+            #                  standard library with //go:linkname to read
+            #                  net.zoneCache — that is how it enumerates
+            #                  interfaces on Android, where the normal
+            #                  net.Interfaces() path is blocked by the
+            #                  /proc/net restrictions of API 30+. Go 1.23 made
+            #                  pull-only linknames to unexported stdlib symbols a
+            #                  hard link error, so without this the build dies
+            #                  with "invalid reference to net.zoneCache" — which
+            #                  is exactly how the first run of this workflow
+            #                  failed. Upstream Xray sets the same flag in its
+            #                  own release workflow.
             # -s -w -trimpath  strip symbols and DWARF, keep runner paths out.
             env GOOS=android GOARCH="$GOARCH" ${GOARM:+GOARM=$GOARM} \
                 CGO_ENABLED=1 CC="$TOOLCHAIN/$CC" \
                 go build -trimpath -buildmode=pie \
-                  -ldflags "-s -w -extldflags '-Wl,-z,max-page-size=16384 -Wl,-z,relro -Wl,-z,now'" \
+                  -ldflags "-s -w -checklinkname=0 -extldflags '-Wl,-z,max-page-size=16384 -Wl,-z,relro -Wl,-z,now'" \
                   -o "$OUT" ./main
             "$TOOLCHAIN/llvm-strip" --strip-unneeded "$OUT" || true
             # Confirm the file materialised before the next ABI overwrites the
