@@ -66,4 +66,45 @@
     <style name="ShapeAppearance.MsnGuard.Dialog" parent="ShapeAppearance.Material3.MediumComponent">
         <item name="cornerSize">28dp</item>
    </style>
+
+    <!--
+      Porcelain: the light half of the theme switch.
+
+      This is a second explicit theme, NOT a values-night/ split. The palette is
+      the user's choice inside the app, not the phone's night setting, so a
+      resource qualifier would pick the wrong one whenever the two disagree.
+      MainActivity applies whichever of these matches AppAppearance.mode()
+      before super.onCreate().
+
+      Values mirror AppAppearance.PORCELAIN exactly. Anything the framework
+      paints for us — dialogs, edit-text handles, ripple defaults, the pre-inflate
+      window — reads from here, and a mismatch here is how a white app ends up
+      with one black dialog.
+    -->
+    <style name="Theme.MsnGuard.Light" parent="Theme.Material3.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="colorPrimary">#0E9C82</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSecondary">#6B5BD6</item>
+        <item name="colorError">#B3261E</item>
+        <item name="android:colorBackground">#EEF1F4</item>
+        <item name="colorSurface">#FFFFFF</item>
+        <item name="colorOnSurface">#111A1F</item>
+        <item name="colorSurfaceVariant">#FFFFFF</item>
+        <item name="colorOnSurfaceVariant">#4E6069</item>
+        <item name="colorOutline">#E0E6EA</item>
+        <item name="android:navigationBarColor">#EEF1F4</item>
+        <item name="android:statusBarColor">#EEF1F4</item>
+        <!-- Dark icons in the bars: the bars are now near-white. -->
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.MsnGuard.Light.AlertDialog</item>
+   </style>
+
+    <style name="ThemeOverlay.MsnGuard.Light.AlertDialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.MsnGuard.Dialog</item>
+        <item name="colorSurface">#FFFFFF</item>
+        <item name="colorOnSurface">#111A1F</item>
+        <item name="colorPrimary">#087060</item>
+   </style>
 </resources>

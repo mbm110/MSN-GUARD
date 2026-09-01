@@ -105,7 +105,7 @@ class OrbitSettingsRow(
         isClickable = true
         isFocusable = true
 
-        val accent = if (destructive) DESTRUCTIVE else palette.primary
+        val accent = if (destructive) destructiveColor else palette.primary
         background = Sculpt.sculptedBackground(
             density,
             palette.surfaceVariant,
@@ -123,7 +123,7 @@ class OrbitSettingsRow(
         titleView = TextView(context).apply {
             text = title
             textSize = 15f
-            setTextColor(if (destructive) DESTRUCTIVE else palette.ink)
+            setTextColor(if (destructive) destructiveColor else palette.ink)
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             setSingleLine(true)
             ellipsize = android.text.TextUtils.TruncateAt.END
@@ -158,7 +158,17 @@ class OrbitSettingsRow(
         super.setPressed(pressed)
         background = Sculpt.sculptedBackground(
             density,
-            if (pressed) Sculpt.lighten(palette.surfaceVariant, 0.06f) else palette.surfaceVariant,
+            // A press must read as a change on both palettes. Lightening white by
+            // 6% is a no-op, so the light palette sinks the row instead.
+            if (pressed) {
+                if (Sculpt.lighting.elevationDp > 0f) {
+                    Sculpt.recess(palette.surfaceVariant, 0.30f)
+                } else {
+                    Sculpt.lighten(palette.surfaceVariant, 0.06f)
+                }
+            } else {
+                palette.surfaceVariant
+            },
             16,
             stroke = if (pressed) Sculpt.withAlpha(palette.primary, 0.55f) else palette.divider,
             pressed = pressed,
@@ -217,9 +227,7 @@ class OrbitSettingsRow(
 
     private fun dp(value: Int): Int = (value * density).roundToInt()
 
-    private companion object {
-        val DESTRUCTIVE = 0xFFFF6B7F.toInt()
-    }
+    private val destructiveColor: Int get() = palette.dangerText
 }
 
 /**
@@ -348,11 +356,18 @@ class OrbitToggleRow(
             accent = if (isOn) Sculpt.lighten(palette.primary, 0.45f) else null,
             pressed = !isOn,
         )
+        // The lit thumb is palette.primaryContainer, not a hardcoded white: it is
+        // the colour that sits ON primary, so it is white on the dark palette and
+        // still white here — but the OFF thumb has to move. `lighten(muted)` on a
+        // light palette produces a pale grey thumb on a pale grey track, i.e. an
+        // invisible switch, so the unlit thumb is the card colour with a real
+        // border instead.
         thumb.background = Sculpt.sculptedBackground(
             density,
-            if (isOn) 0xFFFFFFFF.toInt() else Sculpt.lighten(palette.muted, 0.15f),
+            if (isOn) palette.primaryContainer else Sculpt.blend(palette.surface, palette.muted, 0.10f),
             999,
-            accent = if (isOn) 0xFFFFFFFF.toInt() else null,
+            stroke = if (isOn) null else palette.divider,
+            accent = if (isOn) palette.primaryContainer else null,
         )
     }
 

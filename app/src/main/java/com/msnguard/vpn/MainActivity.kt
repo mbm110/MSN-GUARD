@@ -84,6 +84,15 @@ class MainActivity : Activity() {
     private var predictiveBackCallback: Any? = null
     private var selectedProtocol = Protocol.MASQUE
     private var pendingConfig: String? = null
+    /**
+     * The backup JSON built before the file picker opened.
+     *
+     * Held here because `ACTION_CREATE_DOCUMENT` returns asynchronously and the
+     * snapshot must be the one the user saw when they tapped, not whatever the
+     * preferences hold when the picker finally comes back.
+     */
+    private var pendingBackupJson: String? = null
+    private var settingsBackupRow: OrbitSettingsRow? = null
     private var visualState = OrbitDialView.State.DISCONNECTED
     private var receiverRegistered = false
     private var autoPingRunning = false
@@ -252,6 +261,20 @@ class MainActivity : Activity() {
     @Volatile private var ipRefreshInFlight = false
     @Volatile private var ipRefreshPending = false
     /**
+     * Retry bookkeeping for the window right after a teardown.
+     *
+     * A disconnect does not restore the carrier link immediately — on the
+     * tun2socks paths (SHARD, Psiphon VPN, Tor) the native thread unwinds and the
+     * TUN is closed after it, and Android only re-plumbs the default network when
+     * that interface is gone. The three fast attempts inside [refreshPublicIp] all
+     * fall inside that window, so the card used to settle on "IP unavailable" and
+     * stay there until the user tapped it. These retries are spaced for the
+     * interface teardown rather than for a flaky endpoint.
+     */
+    private var ipRetryAttempt = 0
+    private val ipRetryHandler = Handler(Looper.getMainLooper())
+    private val ipRetryRunnable = Runnable { refreshPublicIp(resetRetry = false) }
+    /**
      * Exit address as measured by the core from inside the tunnel, and its
      * country. Empty until the core reports one.
      *
@@ -284,6 +307,11 @@ class MainActivity : Activity() {
     }
     private lateinit var palette: AppAppearance.Palette
     private val CANVAS get() = palette.canvas
+    // Accents split in two on a light palette: the vivid value paints shapes,
+    // the *_TEXT value paints letters. See AppAppearance.Palette.
+    private val PRIMARY_TEXT get() = palette.primaryText
+    private val AMBER_TEXT get() = palette.amberText
+    private val ERROR_TEXT get() = palette.error
     private val SURFACE get() = palette.surface
     private val SURFACE_VARIANT get() = palette.surfaceVariant
     private val INK get() = palette.ink
@@ -291,6 +319,7 @@ class MainActivity : Activity() {
     private val DIVIDER get() = palette.divider
     private val primary get() = palette.primary
     private val primaryContainer get() = palette.primaryContainer
+    private val selectedSurface get() = palette.selectedSurface
     private val connected get() = palette.connected
     private val connectedContainer get() = palette.connectedContainer
     private val motionInterpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
@@ -354,11 +383,18 @@ class MainActivity : Activity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // No DynamicColors. The approved Orbit palette is fixed, and letting the
-        // OS inject Material You colours repainted theme-derived surfaces (ripple
+        // No DynamicColors. The two Orbit palettes are fixed, and letting the OS
+        // inject Material You colours repainted theme-derived surfaces (ripple
         // tints, dialog backgrounds) in the phone's wallpaper hues, which is
-        // exactly the multi-palette behaviour that was removed with the theme
-        // picker.
+        // exactly the multi-palette behaviour that was removed with the old theme
+        // picker. A user-chosen dark/light switch is not that: it selects one of
+        // two designed palettes, and nothing is derived from the wallpaper.
+        //
+        // setTheme() BEFORE super.onCreate(): the framework resolves the window's
+        // background, decor and system-bar attributes while the window is being
+        // attached inside super.onCreate(). Called after, the light theme would
+        // apply to dialogs but the window itself would stay dark.
+        if (!AppAppearance.isNight(this)) setTheme(R.style.Theme_MsnGuard_Light)
         super.onCreate(savedInstanceState)
         palette = AppAppearance.load(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -426,15 +462,18 @@ class MainActivity : Activity() {
         // One accent per tile, as in the approved mock: download mint, upload
         // violet, speed amber. They were all `primary` before, which is why every
         // sparkline looked identical.
-        tileDown = MetricTile(this, palette, "↓ DOWN", palette.mint, Sculpt.lighten(palette.mint, 0.30f)) {
-            openTrafficMonitorScreen()
-        }
-        tileUp = MetricTile(this, palette, "↑ UP", palette.violet, Sculpt.lighten(palette.violet, 0.30f)) {
-            openTrafficMonitorScreen()
-        }
-        tileSpeed = MetricTile(this, palette, "SPEED", palette.amber, Sculpt.lighten(palette.amber, 0.30f)) {
-            openTrafficMonitorScreen()
-        }
+        tileDown = MetricTile(
+            this, palette, "↓ DOWN",
+            palette.mint, Sculpt.lighten(palette.mint, 0.30f), palette.mintText,
+        ) { openTrafficMonitorScreen() }
+        tileUp = MetricTile(
+            this, palette, "↑ UP",
+            palette.violet, Sculpt.lighten(palette.violet, 0.30f), palette.violetText,
+        ) { openTrafficMonitorScreen() }
+        tileSpeed = MetricTile(
+            this, palette, "SPEED",
+            palette.amber, Sculpt.lighten(palette.amber, 0.30f), palette.amberText,
+        ) { openTrafficMonitorScreen() }
         exitNodeCard = ExitNodeCard(this, palette) { refreshPublicIp() }
         chainCard = ChainModeCard(this, palette) { armed -> setChainArmed(armed) }
         transportRail = TransportRail(this, palette, Protocol.entries.map { railLabel(it) }) { index ->
@@ -552,6 +591,7 @@ class MainActivity : Activity() {
         // onDetachedFromWindow.
         sessionHandler.removeCallbacks(sessionTicker)
         autoPingHandler.removeCallbacks(autoPingRunnable)
+        ipRetryHandler.removeCallbacks(ipRetryRunnable)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             (predictiveBackCallback as? OnBackInvokedCallback)?.let {
                 onBackInvokedDispatcher.unregisterOnBackInvokedCallback(it)
@@ -612,6 +652,17 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == BACKUP_EXPORT_REQUEST) {
+            // A cancelled picker must drop the pending payload, or the next
+            // successful export would write a snapshot taken before whatever the
+            // user changed in between.
+            if (resultCode == RESULT_OK) data?.data?.let(::writeBackup) else pendingBackupJson = null
+            return
+        }
+        if (requestCode == BACKUP_IMPORT_REQUEST) {
+            if (resultCode == RESULT_OK) data?.data?.let(::readBackup)
+            return
+        }
         if (requestCode == VPN_REQUEST && resultCode == RESULT_OK) {
             pendingConfig?.let(::connect)
         } else if (requestCode == VPN_REQUEST) {
@@ -979,7 +1030,7 @@ class MainActivity : Activity() {
             ConnectionLog.record("Tunnel moved no bytes in ${BYTE_WATCH_MS / 1000}s — reporting degraded")
             visualState = OrbitDialView.State.DEGRADED
             orbitDial.state = OrbitDialView.State.DEGRADED
-            connectionTitle.setTextColor(palette.amber)
+            connectionTitle.setTextColor(AMBER_TEXT)
             connectionDetail.text = "Tunnel is up but no traffic is passing"
             renderStatusLed()
         }, BYTE_WATCH_MS)
@@ -1047,9 +1098,9 @@ class MainActivity : Activity() {
     private fun renderStatusLed() {
         val (fill, glow) = when (visualState) {
             OrbitDialView.State.CONNECTED -> connected to true
-            OrbitDialView.State.DEGRADED -> 0xFFFFC46B.toInt() to true
+            OrbitDialView.State.DEGRADED -> palette.amber to true
             OrbitDialView.State.CONNECTING -> primary to true
-            OrbitDialView.State.FAILED -> 0xFFFF6B7F.toInt() to false
+            OrbitDialView.State.FAILED -> palette.danger to false
             OrbitDialView.State.DISCONNECTED -> MUTED to false
         }
         statusLed.background = Sculpt.sculptedBackground(
@@ -1214,7 +1265,11 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(8) })
     }
 
-    private fun refreshPublicIp() {
+    private fun refreshPublicIp(resetRetry: Boolean = true) {
+        // Any retry armed by a previous failure belongs to that attempt; this call
+        // supersedes it.
+        ipRetryHandler.removeCallbacks(ipRetryRunnable)
+        if (resetRetry) ipRetryAttempt = 0
         // A tunnel raised from the Quick Settings tile measured its exit before
         // this activity existed, and that broadcast is long gone — the receiver
         // only lives between onStart and onStop. The service kept the answer, so
@@ -1273,6 +1328,33 @@ class MainActivity : Activity() {
                 }
                 if (request != ipRequest) return@runOnUiThread
                 val (ip, country) = result.getOrElse { "IP unavailable" to "" }
+                if (ip == "IP unavailable" && !isTunnelActive() && ipRetryAttempt < IP_POST_TEARDOWN_RETRIES) {
+                    // THE SHARD-DISCONNECT CASE. A teardown does not hand the
+                    // carrier link back instantly: tun2socks unwinds on its own
+                    // native thread, the VpnService's TUN is closed after it, and
+                    // Android only restores the default network once that
+                    // interface is really gone. The SHARD path is the slow one in
+                    // this log — "tun2socks stopping (native thread unwinding)"
+                    // is followed by a burst of BConnection/BSocksClient failures
+                    // and only then "tun2socks exited", ~1s later — so our three
+                    // attempts at 300 ms all land inside the gap and every one of
+                    // them fails. MASQUE has no tun2socks at all: NativeCore.stop()
+                    // returns and the link is back before the card even repaints,
+                    // which is exactly why the bug looks protocol-specific.
+                    //
+                    // "IP unavailable / tap to retry" here is the app telling the
+                    // user to do by hand what it should have done itself. Wait for
+                    // the interface teardown to finish and ask again.
+                    ipRetryAttempt++
+                    exitNodeCard.render(
+                        "", null, false,
+                        measuring = true,
+                        note = "waiting for the network to come back",
+                    )
+                    ipRetryHandler.postDelayed(ipRetryRunnable, IP_POST_TEARDOWN_DELAY_MS)
+                    return@runOnUiThread
+                }
+                ipRetryAttempt = 0
                 exitNodeCard.render(ip, country.takeIf { it.isNotBlank() }, isTunnelActive())
                 if (isTunnelActive() && ip != "IP unavailable") {
                     updateNotificationHealth(ip = ip)
@@ -1857,7 +1939,7 @@ class MainActivity : Activity() {
      * next to the title.
      */
     private fun createLogActionButton(caption: String, onClick: () -> Unit): TextView =
-        label(caption, 11f, primary, TypefaceStyle.MEDIUM).apply {
+        label(caption, 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply {
             letterSpacing = 0.1f
             gravity = Gravity.CENTER
             setPadding(dp(12), dp(7), dp(12), dp(7))
@@ -1976,6 +2058,178 @@ class MainActivity : Activity() {
                 }
             }
         }, "log-share").start()
+    }
+
+    /**
+     * Subtitle for the backup row: how many stored values a file would carry.
+     *
+     * A count, not a date: nothing is written until the user picks a location, so
+     * there is no "last backup" to report, and a plain number is what tells them
+     * the file is not empty.
+     */
+    private fun backupSummary(): String {
+        val count = SettingsBackup.valueCount(this)
+        return if (count == 0) "Nothing saved yet" else "$count settings"
+    }
+
+    /**
+     * Writes a settings backup to a location the user chooses.
+     *
+     * `ACTION_CREATE_DOCUMENT` rather than an app-private file plus a share
+     * sheet: the point of a backup is to survive uninstall, and anything under
+     * `filesDir` or `cacheDir` is deleted with the app. The system picker puts
+     * the file in Downloads or Drive, which does not need a storage permission on
+     * any supported API level.
+     */
+    private fun exportSettings() {
+        pendingBackupJson = runCatching { SettingsBackup.export(this, appVersion()) }
+            .getOrElse {
+                toastShort("Could not read the settings: ${it.message}")
+                return
+            }
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("application/json")
+            .putExtra(Intent.EXTRA_TITLE, SettingsBackup.suggestedFileName(appVersion()))
+        runCatching { startActivityForResult(intent, BACKUP_EXPORT_REQUEST) }
+            .onFailure {
+                pendingBackupJson = null
+                toastShort("This device has no file picker")
+            }
+    }
+
+    /**
+     * Reads a settings backup the user picks and applies it.
+     *
+     * A wildcard MIME filter, not `application/json`: files that arrived through
+     * Telegram or a mail client are frequently stored as
+     * `application/octet-stream` or with no type at all, and a strict filter hides
+     * exactly the file the user is looking for. [SettingsBackup.restore] validates
+     * the content, which is the honest place to reject a wrong pick.
+     */
+    private fun importSettings() {
+        if (TunnelStatus.isActive() || visualState == OrbitDialView.State.CONNECTING) {
+            toastShort("Disconnect first — a restore changes what the tunnel uses")
+            return
+        }
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("*/*")
+        runCatching { startActivityForResult(intent, BACKUP_IMPORT_REQUEST) }
+            .onFailure { toastShort("This device has no file picker") }
+    }
+
+    /** Writes [pendingBackupJson] into the document the picker returned. */
+    private fun writeBackup(uri: Uri) {
+        val payload = pendingBackupJson
+        pendingBackupJson = null
+        if (payload == null) {
+            toastShort("The backup was not ready — try again")
+            return
+        }
+        val result = runCatching {
+            contentResolver.openOutputStream(uri, "wt")
+                ?.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+                ?: error("the file could not be opened for writing")
+        }
+        result.onSuccess {
+            ConnectionLog.record("Settings backed up (${SettingsBackup.valueCount(this)} values)")
+            toastShort("Settings saved — this file holds no passwords")
+            settingsBackupRow?.setValue(backupSummary())
+        }.onFailure {
+            toastShort("Could not write the backup: ${it.message}")
+        }
+    }
+
+    /**
+     * Applies the backup in [uri], then rebuilds the screen from the new values.
+     *
+     * `recreate()` is the honest way to repaint: settings are read into fields
+     * and row subtitles all over this activity (the protocol rail, the chain
+     * card, every summary line), and refreshing them one by one after a wholesale
+     * replacement would leave whichever one was forgotten showing the old value.
+     */
+    private fun readBackup(uri: Uri) {
+        val text = runCatching {
+            contentResolver.openInputStream(uri)?.use { stream ->
+                stream.bufferedReader().readText()
+            } ?: error("the file could not be opened")
+        }.getOrElse {
+            toastShort("Could not read the file: ${it.message}")
+            return
+        }
+        val outcome = runCatching { SettingsBackup.restore(this, text) }.getOrElse {
+            toastShort(it.message ?: "This file is not a settings backup")
+            return
+        }
+        ConnectionLog.record(
+            "Settings restored from a v${outcome.version} backup: " +
+                "${outcome.restored} value(s)" +
+                if (outcome.skipped > 0) ", ${outcome.skipped} skipped" else ""
+        )
+        toastShort("Restored ${outcome.restored} settings from v${outcome.version}")
+        recreate()
+    }
+
+    /**
+     * Confirms, then clears every setting.
+     *
+     * Confirmed because it is not undoable and the row sits one tap away from the
+     * backup rows. The sheet names what survives — monthly traffic totals — so
+     * the user is not left wondering whether their data counter was wiped too.
+     */
+    private fun confirmResetSettings() {
+        if (TunnelStatus.isActive() || visualState == OrbitDialView.State.CONNECTING) {
+            toastShort("Disconnect first — a reset changes what the tunnel uses")
+            return
+        }
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            background = roundedBackground(SURFACE, 28, SURFACE)
+        }
+        sheet.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label("Reset to defaults", 22f, INK, TypefaceStyle.MEDIUM))
+        })
+        sheet.addView(label(
+            "Every setting goes back to how the app arrived: connection mode, " +
+                "tunnel type, SOCKS port, countries, manual bridges, split " +
+                "tunnelling and anti-DPI shaping. Your monthly data total is kept. " +
+                "Back up first if you may want these choices again.",
+            14f, MUTED,
+        ), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        buttons.addView(createSettingsButton("Cancel") { dialog.dismiss() }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        buttons.addView(createSettingsButton(
+            "Reset",
+            backgroundOverride = primary,
+            textColorOverride = primaryContainer,
+        ) {
+            SettingsBackup.resetToDefaults(this)
+            ConnectionLog.record("Settings reset to defaults")
+            dialog.dismiss()
+            toastShort("Settings reset to defaults")
+            recreate()
+        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+        sheet.addView(buttons, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(52),
+        ).apply { topMargin = dp(16) })
+        dialog.setContentView(ScrollView(this).apply {
+            setPadding(dp(16), 0, dp(16), dp(16))
+            addView(sheet)
+        })
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.62f)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+        }
     }
 
     private fun openScannerScreen(animate: Boolean = true) {
@@ -2129,7 +2383,7 @@ class MainActivity : Activity() {
     private fun createScannerOption(target: ScanTarget, onSelect: (ScanTarget) -> Unit): SelectionOption {
         val selected = target == defaultScan()
         val title = label(target.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label("SELECTED", 11f, primary, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label("SELECTED", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -2156,7 +2410,7 @@ class MainActivity : Activity() {
     ): SelectionOption {
         val selected = discovery == defaultEndpointDiscovery()
         val title = label(discovery.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label("SELECTED", 11f, primary, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label("SELECTED", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -2180,7 +2434,7 @@ class MainActivity : Activity() {
     private fun createScanModeOption(mode: ScanMode, onSelect: (ScanMode) -> Unit): SelectionOption {
         val selected = mode == defaultScanMode()
         val title = label(mode.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label("SELECTED", 11f, primary, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label("SELECTED", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -2207,7 +2461,7 @@ class MainActivity : Activity() {
     ): SelectionOption {
         val selected = transport == defaultMasqueTransport()
         val title = label(transport.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label("SELECTED", 11f, primary, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label("SELECTED", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -2301,7 +2555,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(20), 0, dp(20), 0)
             background = roundedBackground(
-                if (selected) primaryContainer else SURFACE_VARIANT,
+                if (selected) selectedSurface else SURFACE_VARIANT,
                 20,
                 if (selected) primary else SURFACE_VARIANT,
             )
@@ -2322,7 +2576,7 @@ class MainActivity : Activity() {
             ).apply { topMargin = dp(2) })
 
             addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            if (selected) addView(label("CURRENT", 11f, primary, TypefaceStyle.MEDIUM).apply {
+            if (selected) addView(label("CURRENT", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply {
                 letterSpacing = 0.08f
             }) else if (!protocol.androidAvailable) addView(label("DESKTOP ONLY", 11f, MUTED, TypefaceStyle.MEDIUM).apply {
                 letterSpacing = 0.05f
@@ -2698,6 +2952,42 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
 
+        // APPEARANCE, like BACKUP below it, is about the app rather than about a
+        // tunnel, so it sits out here and not under Tunnel Controls.
+        content.addView(sectionLabel("APPEARANCE"), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(26) })
+        // No stored reference: picking a theme calls recreate(), so the row is
+        // rebuilt with the new value rather than being repainted in place.
+        content.addView(navRow("Theme", AppAppearance.mode(this).label) { chooseTheme() }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
+
+        // BACKUP sits outside Tunnel Controls, next to ABOUT: it is about the
+        // app's own state, not about how a tunnel is shaped, and burying it in a
+        // troubleshooting sub-page is where a user would never look for it after
+        // reinstalling.
+        content.addView(sectionLabel("BACKUP"), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(26) })
+        val backupRow = navRow("Back up settings", backupSummary()) { exportSettings() }
+        settingsBackupRow = backupRow
+        content.addView(backupRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
+        content.addView(navRow("Restore settings", "From a backup file") { importSettings() }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+        content.addView(navRow("Reset to defaults", "Forget every setting") { confirmResetSettings() }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+
         content.addView(sectionLabel("ABOUT"), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2895,7 +3185,7 @@ class MainActivity : Activity() {
         val options = mutableMapOf<ObfuscationProfile, SelectionOption>()
         ObfuscationProfile.entries.forEachIndexed { index, profile ->
             val title = label(profile.label, 16f, INK, TypefaceStyle.MEDIUM)
-            val indicator = label("SELECTED", 11f, primary, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+            val indicator = label("SELECTED", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
             val row = LinearLayout(this).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 orientation = LinearLayout.HORIZONTAL
@@ -3374,6 +3664,37 @@ class MainActivity : Activity() {
      * (armRegionPhase reads the preference only when chained), and this row is
      * disabled with the chain off so the two can never disagree.
      */
+    /**
+     * Dark or light.
+     *
+     * `recreate()` rather than repainting in place: the palette is read into
+     * fields and baked into ~200 drawables at construction time, plus
+     * [Sculpt.lighting] which decides how every surface is lit. Walking the tree
+     * to re-tint all of it would leave whatever the walk missed in the old
+     * palette, and the app already uses recreate() for the same reason after a
+     * settings restore.
+     *
+     * The tunnel is untouched by this: the VPN lives in a foreground service, not
+     * in the activity, so a connected session survives the recreate. Worth being
+     * sure of before shipping a switch a user might tap mid-session.
+     */
+    private fun chooseTheme(after: (() -> Unit)? = null) {
+        showChoiceSheet(
+            title = "Theme",
+            subtitle = "Applies straight away. A running tunnel is not interrupted.",
+            options = AppAppearance.Mode.entries.toList(),
+            selected = AppAppearance.mode(this),
+            label = { mode -> mode.label },
+            description = { mode -> mode.description },
+        ) { chosen ->
+            if (chosen == AppAppearance.mode(this)) return@showChoiceSheet
+            AppAppearance.setMode(this, chosen)
+            ConnectionLog.record("Theme set to ${chosen.label}")
+            after?.invoke()
+            recreate()
+        }
+    }
+
     private fun chooseEgressRegion(after: (() -> Unit)? = null) {
         val options = listOf(CoreConfig.EGRESS_REGION_AUTO) + PsiphonRegions.options(this)
         showChoiceSheet(
@@ -3869,7 +4190,7 @@ class MainActivity : Activity() {
         val rows = mutableMapOf<T, SelectionOption>()
         options.forEachIndexed { index, item ->
             val optionTitle = label(label(item), 16f, INK, TypefaceStyle.MEDIUM)
-            val indicator = label("SELECTED", 11f, primary, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+            val indicator = label("SELECTED", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
             val row = LinearLayout(this).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 orientation = LinearLayout.HORIZONTAL
@@ -3961,6 +4282,7 @@ class MainActivity : Activity() {
         logVerbosityRow = null
         scannerRow = null
         shardPoolRow = null
+        settingsBackupRow = null
         settingsPage?.let { animatePageClose(it) { settingsPage = null } }
     }
 
@@ -4285,10 +4607,32 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             addView(progressBar, LinearLayout.LayoutParams(dp(44), dp(44)))
+            // Explicit WRAP_CONTENT width, and that alone is the fix for the
+            // caption appearing on device as "Scanni" — the string was never
+            // misspelled, it was being laid out 44dp wide.
+            //
+            // addView() with no params hands out generateDefaultLayoutParams(),
+            // which for a VERTICAL LinearLayout is MATCH_PARENT x WRAP_CONTENT.
+            // This box is WRAP_CONTENT itself (see the FrameLayout below), so its
+            // width spec is AT_MOST, and measureVertical() then takes the
+            // alternativeMaxWidth branch: `!allFillParent && widthMode != EXACTLY`
+            // makes the box's width come from alternativeMaxWidth, where a
+            // MATCH_PARENT child contributes its margins only (0) instead of its
+            // measured text width. The only real contribution left was the 44dp
+            // spinner, so the box became 44dp, and the second pass remeasured the
+            // caption at EXACTLY 44dp — about six characters at 14sp, i.e. exactly
+            // "Scanni" on the first line with the rest wrapped out of sight.
+            //
+            // WRAP_CONTENT keeps the caption out of that branch: it is measured
+            // AT_MOST the page width, counts its real width toward the box, and a
+            // longer translation still wraps normally instead of being clipped.
             addView(label("Scanning installed apps…", 14f, MUTED).apply {
                 gravity = Gravity.CENTER
                 setPadding(0, dp(16), 0, 0)
-            })
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
         }
         val listScroll = ScrollView(this).apply {
             alpha = 0f
@@ -4388,7 +4732,7 @@ class MainActivity : Activity() {
         lateinit var row: LinearLayout
         fun updateSelection(checked: Boolean, animate: Boolean) {
             row.background = roundedBackground(
-                if (checked) primaryContainer else SURFACE_VARIANT,
+                if (checked) selectedSurface else SURFACE_VARIANT,
                 16,
                 if (checked) primary else SURFACE_VARIANT,
             )
@@ -4457,7 +4801,7 @@ class MainActivity : Activity() {
         onSelect: (SplitTunnelSettings.Mode) -> Unit,
     ): SelectionOption {
         val title = label(mode.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label("SELECTED", 11f, primary, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label("SELECTED", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(18), 0, dp(18), 0)
@@ -4472,7 +4816,7 @@ class MainActivity : Activity() {
 
     private fun setSelectionState(option: SelectionOption, selected: Boolean, animate: Boolean) {
         option.row.background = roundedBackground(
-            if (selected) primaryContainer else SURFACE_VARIANT,
+            if (selected) selectedSurface else SURFACE_VARIANT,
             option.radius,
             if (selected) primary else SURFACE_VARIANT,
         )
@@ -4732,7 +5076,9 @@ class MainActivity : Activity() {
         visualState = OrbitDialView.State.CONNECTING
         orbitDial.state = visualState
         renderStatusLed()
-        connectionTitle.setTextColor(primary)
+        // The headline is text, so it takes the text-safe accent. On the dark
+        // palette PRIMARY_TEXT == primary, so this is a no-op there.
+        connectionTitle.setTextColor(PRIMARY_TEXT)
         connectionTitle.text = title
         connectionDetail.text = detail
         footerWave.setLit(false)
@@ -4745,7 +5091,7 @@ class MainActivity : Activity() {
         orbitDial.progressPercent = -1
         renderStatusLed()
         pingFailureStreak = 0
-        connectionTitle.setTextColor(connected)
+        connectionTitle.setTextColor(palette.connectedText)
         connectionTitle.text = "Connected"
         connectionDetail.text = when {
             // Proxy mode first: it is the one case where "tunnel is active" would be
@@ -4785,7 +5131,9 @@ class MainActivity : Activity() {
         visualState = OrbitDialView.State.DEGRADED
         orbitDial.state = visualState
         renderStatusLed()
-        connectionTitle.setTextColor(0xFFFFD180.toInt())
+        // Amber, but the readable amber: this is text on the card, and on the
+        // light palette the vivid amber sits at 4.4:1 while the text amber is 7.3:1.
+        connectionTitle.setTextColor(AMBER_TEXT)
         connectionTitle.text = "Connection degraded"
         connectionDetail.text = "Tunnel is active; HTTP health check failed"
         footerWave.setLit(false)
@@ -4803,7 +5151,7 @@ class MainActivity : Activity() {
         orbitDial.state = visualState
         renderStatusLed()
         stopSessionTimer()
-        connectionTitle.setTextColor(ERROR)
+        connectionTitle.setTextColor(ERROR_TEXT)
         connectionTitle.text = "Connection failed"
         footerWave.setLit(false)
         connectionDetail.text = detail ?: "Check the server and try again"
@@ -5532,6 +5880,8 @@ class MainActivity : Activity() {
     private companion object {
         const val VPN_REQUEST = 100
         const val NOTIFICATION_PERMISSION_REQUEST = 101
+        const val BACKUP_EXPORT_REQUEST = 102
+        const val BACKUP_IMPORT_REQUEST = 103
         const val LOG_REFRESH_MS = 750L
         const val STATUS_POLL_MS = 2_000L
         const val PAGE_ANIMATION_MS = 220L
@@ -5659,6 +6009,16 @@ class MainActivity : Activity() {
         const val IP_TIMEOUT_MS = 5_000
         const val IP_FETCH_ATTEMPTS = 3
         const val IP_RETRY_DELAY_MS = 300L
+        /**
+         * Retries after a teardown, and the gap between them.
+         *
+         * 1.2 s × 4 covers roughly five seconds, which is comfortably past the
+         * ~1 s tun2socks unwind measured in the field log while still ending
+         * rather than retrying forever on a phone that genuinely has no
+         * connectivity — there, "IP unavailable" is the truth and should be shown.
+         */
+        const val IP_POST_TEARDOWN_RETRIES = 4
+        const val IP_POST_TEARDOWN_DELAY_MS = 1_200L
         const val SETTINGS = "settings"
         const val DEFAULT_SCAN = "default_scan"
         const val DEFAULT_SCAN_MODE = "default_scan_mode"
@@ -5693,15 +6053,12 @@ class MainActivity : Activity() {
         const val LOG_LEVEL = "log_level"
         const val PERF_PROFILE = "perf_profile"
         const val H2_FRAGMENTATION = "h2_fragmentation"
-        const val FALLBACK_CANVAS = 0xFF101411.toInt()
-        const val FALLBACK_SURFACE = 0xFF171C18.toInt()
-        const val FALLBACK_SURFACE_VARIANT = 0xFF222A24.toInt()
-        const val FALLBACK_INK = 0xFFE8F1EA.toInt()
-        const val FALLBACK_MUTED = 0xFFB9C6BB.toInt()
-        const val FALLBACK_DIVIDER = 0xFF3B473E.toInt()
-        const val FALLBACK_PRIMARY = 0xFFA4D8BB.toInt()
-        const val FALLBACK_PRIMARY_CONTAINER = 0xFF1F4030.toInt()
-        const val ERROR = 0xFFFFB4AB.toInt()
+        // The FALLBACK_* colours that used to live here are gone: they were the
+        // last copy of the retired green-grey palette, unreferenced since the
+        // Orbit palette landed, and with a second palette in play a stray hex
+        // constant is a light-theme bug waiting to be reintroduced. ERROR went
+        // the same way — it is AppAppearance.Palette.error now, so it changes with
+        // the theme instead of staying a dark-theme pink on a white card.
         const val DISABLED_ALPHA = 0.48f
     }
 }

@@ -57,6 +57,13 @@ class MetricTile(
     keyText: String,
     private val accent: Int,
     private val accentSecondary: Int = accent,
+    /**
+     * The readable sibling of [accent], used for the key label only.
+     *
+     * Defaults to [accent] so the dark palette and any existing call site are
+     * unchanged; the light palette passes a darkened value.
+     */
+    private val accentText: Int = accent,
     onClick: () -> Unit,
 ) : LinearLayout(context) {
 
@@ -77,7 +84,11 @@ class MetricTile(
         setOnClickListener { onClick() }
 
         // Caption in the tile's own accent: the mock coloured .k per tile.
-        addView(context.orbitLabel(keyText, 8.5f, Sculpt.withAlpha(accent, 0.92f), medium = true, spacing = 0.13f))
+        // accentText, not accent: this is 8.5sp bold lettering, the strictest
+        // contrast case in the app. On the light palette the vivid accent sits at
+        // 3.4:1 (fine for the bars below, not for letters); accentText is 6:1.
+        // The sparkline keeps `accent`, which is where the colour identity lives.
+        addView(context.orbitLabel(keyText, 8.5f, Sculpt.withAlpha(accentText, 0.92f), medium = true, spacing = 0.13f))
 
         val row = LinearLayout(context).apply {
             orientation = HORIZONTAL
@@ -188,7 +199,7 @@ class TransportRail(
         }
 
     init {
-        val fill = Sculpt.darken(palette.surface, 0.30f)
+        val fill = Sculpt.recess(palette.surface, 0.30f)
         // 24dp rather than the pill radius: a two-row control with a 999 radius
         // reads as a lozenge with dead corners. Kept at 999 when there is only one
         // row, so nothing about the single-row look changes.
@@ -231,7 +242,7 @@ class TransportRail(
                         background = if (pressed) {
                             Sculpt.sculptedBackground(
                                 resources.displayMetrics.density,
-                                Sculpt.darken(palette.surface, 0.18f),
+                                Sculpt.recess(palette.surface, 0.18f),
                                 if (rowCount > 1) 20 else 999,
                                 pressed = true,
                             )

@@ -80,7 +80,7 @@ class ExitNodeCard(
             gravity = Gravity.CENTER
             background = Sculpt.sculptedBackground(
                 resources.displayMetrics.density,
-                Sculpt.darken(palette.surface, 0.12f),
+                Sculpt.recess(palette.surface, 0.12f),
                 14,
                 Sculpt.withAlpha(palette.ink, 0.10f),
             )
@@ -121,6 +121,7 @@ class ExitNodeCard(
         countryCode: String?,
         tunnelled: Boolean,
         measuring: Boolean = false,
+        note: String? = null,
     ) {
         keyView.text = if (tunnelled) "EXIT NODE" else "YOUR IP"
         if (address.isBlank() || address == UNAVAILABLE) {
@@ -132,9 +133,14 @@ class ExitNodeCard(
             if (measuring) {
                 ipView.text = MEASURING
                 ipView.textSize = 13f
-                locView.text = "reading from inside the tunnel"
+                // The caption is the caller's, because the same "measuring" visual
+                // covers two different truths: reading the exit from inside a live
+                // tunnel, and waiting for the carrier link to come back after a
+                // teardown. Saying "inside the tunnel" during the second one would
+                // describe a tunnel that no longer exists.
+                locView.text = note ?: "reading from inside the tunnel"
                 flagView.text = "\uD83C\uDF10"
-                contentDescription = "Measuring the tunnel exit address"
+                contentDescription = note ?: "Measuring the tunnel exit address"
                 return
             }
             ipView.text = UNAVAILABLE
@@ -204,7 +210,7 @@ class OrbitActionBar(
                     super.setPressed(pressed)
                     background = Sculpt.sculptedBackground(
                         density,
-                        if (pressed) Sculpt.darken(fill, 0.10f) else fill,
+                        if (pressed) Sculpt.recess(fill, 0.10f) else fill,
                         18,
                         accent = Sculpt.withAlpha(
                             if (pressed) palette.primary else palette.ink,
@@ -464,10 +470,12 @@ class ChainModeCard(
             value -> "CHAINED"
             else -> "OFF"
         }
-        badgeView.setTextColor(if (lit) palette.violet else palette.faint)
+        // 10sp bold on a 16%-violet pill: the strictest badge in the app, so the
+        // text ramp rather than the vivid violet.
+        badgeView.setTextColor(if (lit) palette.violetText else palette.faint)
         badgeView.background = Sculpt.sculptedBackground(
             density,
-            if (lit) Sculpt.withAlpha(palette.violet, 0.16f) else Sculpt.darken(palette.surface, 0.16f),
+            if (lit) Sculpt.withAlpha(palette.violet, 0.16f) else Sculpt.recess(palette.surface, 0.16f),
             999,
             Sculpt.withAlpha(if (lit) palette.violet else palette.ink, if (lit) 0.4f else 0.10f),
         )

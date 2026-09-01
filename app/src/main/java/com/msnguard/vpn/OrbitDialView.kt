@@ -102,6 +102,10 @@ class OrbitDialView(
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
+    // The dial is hand-drawn glass, so it needs the same lighting model as the
+    // card backgrounds: white speculars over a dark canvas, dark speculars over
+    // a light one. Read once — the palette cannot change without recreate().
+    private val light = Sculpt.lighting
     private val density = resources.displayMetrics.density
     private val bounds = RectF()
     private val corePath = Path()
@@ -418,7 +422,11 @@ class OrbitDialView(
         // Drop shadow under the glass; accent-tinted when the tunnel is up.
         paint.style = Paint.Style.FILL
         paint.color = base
-        val shadowColor = if (active) Sculpt.withAlpha(accent, 0.38f) else Sculpt.withAlpha(Color.BLACK, 0.65f)
+        val shadowColor = if (active) {
+            Sculpt.withAlpha(accent, 0.38f)
+        } else {
+            Sculpt.withAlpha(Color.BLACK, light.dialShadowAlpha)
+        }
         paint.setShadowLayer(dp(if (active) 22 else 16).toFloat(), 0f, dp(6).toFloat(), shadowColor)
         canvas.drawCircle(cx, cy, r, paint)
         paint.clearShadowLayer()
@@ -426,7 +434,11 @@ class OrbitDialView(
         // Body gradient, lit from the top-left.
         paint.shader = LinearGradient(
             cx - r, cy - r, cx + r * 0.6f, cy + r,
-            intArrayOf(Sculpt.lighten(base, 0.11f), base, Sculpt.darken(base, 0.16f)),
+            intArrayOf(
+                Sculpt.lighten(base, light.dialBodyLift),
+                base,
+                Sculpt.darken(base, light.dialBodyDrop),
+            ),
             floatArrayOf(0f, 0.46f, 1f),
             Shader.TileMode.CLAMP,
         )
@@ -436,7 +448,10 @@ class OrbitDialView(
         // Specular highlight near the top-left — this is what sells "glass".
         paint.shader = RadialGradient(
             cx - r * 0.34f, cy - r * 0.42f, r * 0.95f,
-            intArrayOf(Sculpt.withAlpha(Color.WHITE, 0.16f), Sculpt.withAlpha(Color.WHITE, 0f)),
+            intArrayOf(
+                Sculpt.withAlpha(light.bevelColor, light.dialSpecular),
+                Sculpt.withAlpha(light.bevelColor, 0f),
+            ),
             floatArrayOf(0f, 1f),
             Shader.TileMode.CLAMP,
         )
@@ -454,9 +469,9 @@ class OrbitDialView(
             paint.shader = LinearGradient(
                 bandX - r * 0.30f, cy - r, bandX + r * 0.30f, cy + r,
                 intArrayOf(
-                    Sculpt.withAlpha(Color.WHITE, 0f),
-                    Sculpt.withAlpha(Color.WHITE, 0.085f),
-                    Sculpt.withAlpha(Color.WHITE, 0f),
+                    Sculpt.withAlpha(light.bevelColor, 0f),
+                    Sculpt.withAlpha(light.bevelColor, light.dialSheen),
+                    Sculpt.withAlpha(light.bevelColor, 0f),
                 ),
                 floatArrayOf(0f, 0.5f, 1f),
                 Shader.TileMode.CLAMP,
@@ -469,7 +484,10 @@ class OrbitDialView(
         // Inner bottom shadow: the fourth sculpt layer, inside the glass.
         paint.shader = RadialGradient(
             cx, cy + r * 0.62f, r * 0.95f,
-            intArrayOf(Sculpt.withAlpha(Color.BLACK, 0.30f), Sculpt.withAlpha(Color.BLACK, 0f)),
+            intArrayOf(
+                Sculpt.withAlpha(light.dialInnerShadowColor, light.dialInnerShadow),
+                Sculpt.withAlpha(light.dialInnerShadowColor, 0f),
+            ),
             floatArrayOf(0f, 1f),
             Shader.TileMode.CLAMP,
         )
@@ -481,7 +499,10 @@ class OrbitDialView(
         paint.strokeWidth = 1.4f * density
         paint.shader = LinearGradient(
             cx, cy - r, cx, cy + r,
-            intArrayOf(Sculpt.withAlpha(Color.WHITE, 0.24f), Sculpt.withAlpha(Color.WHITE, 0.05f)),
+            intArrayOf(
+                Sculpt.withAlpha(light.bevelColor, light.dialEdgeStrong),
+                Sculpt.withAlpha(light.bevelColor, light.dialEdgeSoft),
+            ),
             floatArrayOf(0f, 1f),
             Shader.TileMode.CLAMP,
         )
@@ -512,8 +533,12 @@ class OrbitDialView(
             textPaint.typeface = monoTypeface
             textPaint.textAlign = Paint.Align.CENTER
             textPaint.textSize = 26f * density * geo
-            textPaint.color = Sculpt.lighten(accent, 0.55f)
-            textPaint.setShadowLayer(dp(14) * geo, 0f, 0f, Sculpt.withAlpha(accent, 0.5f))
+            textPaint.color = Sculpt.onGlass(accent)
+            // The glow is the dark theme's; on a light dial a 14dp accent halo
+            // behind dark digits just muddies them, so it is dropped there.
+            if (light.elevationDp == 0f) {
+                textPaint.setShadowLayer(dp(14) * geo, 0f, 0f, Sculpt.withAlpha(accent, 0.5f))
+            }
             canvas.drawText(timerText, cx, cy + 7f * density * geo, textPaint)
             textPaint.clearShadowLayer()
 
@@ -547,7 +572,7 @@ class OrbitDialView(
             textPaint.textAlign = Paint.Align.CENTER
             textPaint.textSize = 10.5f * density * geo
             textPaint.letterSpacing = 0.19f
-            textPaint.color = palette.amber
+            textPaint.color = palette.amberText
             // The percentage stays, appended to the caption instead of occupying
             // the middle of the dial: it is real information when the transport
             // reports it, and joining it to the word keeps a number from ever
@@ -604,7 +629,7 @@ class OrbitDialView(
         // CONNECTING never reaches here — it returned above with its own glyph —
         // so only the resting and failed captions are left.
         textPaint.color = when (state) {
-            State.FAILED -> palette.danger
+            State.FAILED -> palette.dangerText
             else -> Sculpt.withAlpha(palette.faint, 0.95f)
         }
         val cta = when (state) {

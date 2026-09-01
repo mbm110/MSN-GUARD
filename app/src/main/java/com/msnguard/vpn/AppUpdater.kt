@@ -187,7 +187,14 @@ class AppUpdater(private val activity: Activity) {
         dialogBuilder().setTitle(title).setMessage(message).setPositiveButton("OK", null).show()
     }
 
-    private fun dialogBuilder() = MaterialAlertDialogBuilder(activity, R.style.ThemeOverlay_MsnGuard_AlertDialog)
+    // The overlay is picked per palette. Passing a fixed one here overrides the
+    // activity theme's own `materialAlertDialogTheme`, so on Porcelain the
+    // updater was the one black dialog in an otherwise white app.
+    private fun dialogBuilder() = MaterialAlertDialogBuilder(
+        activity,
+        if (AppAppearance.isNight(activity)) R.style.ThemeOverlay_MsnGuard_AlertDialog
+        else R.style.ThemeOverlay_MsnGuard_Light_AlertDialog,
+    )
 
     private fun appVersion(): String = activity.packageManager
         .getPackageInfo(activity.packageName, 0).versionName ?: "0.0.0"
