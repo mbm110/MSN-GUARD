@@ -513,12 +513,23 @@ object ShardConfigs {
      * equivalent of Tor's SocksPolicy, so there is no private-range restriction
      * available here — on an untrusted Wi-Fi the whole segment can use the tunnel
      * while the switch is on.
+     *
+     * ## [smartSplit]
+     *
+     * Null — the default — is the historical behaviour: no routing rules at all,
+     * `proxy` first in the outbound list and therefore the default outbound, so
+     * every packet goes through the node.
+     *
+     * Non-null turns on Smart Split, and then this config grows a second and third
+     * outbound and the rule table in [smartSplitRules]. See [SmartSplit] for why
+     * the profile has to be measured rather than chosen.
      */
     fun tunnelConfig(
         node: ShardNode,
         listenHost: String,
         listenPort: Int,
         logLevel: String,
+        smartSplit: SmartSplit.FragmentProfile? = null,
     ): String {
         val outbounds = JSONArray()
             .put(outbound(node, "proxy"))
@@ -528,6 +539,22 @@ object ShardConfigs {
                     put("protocol", "blackhole")
                 }
             )
+        if (smartSplit != null) {
+            outbounds.put(fragmentedDirect(smartSplit))
+                .put(JSONObject().apply {
+                    put("tag", "direct-plain")
+                    put("protocol", "freedom")
+                })
+                .put(JSONObject().apply {
+                    put("tag", "dns-out")
+                    put("protocol", "dns")
+                    // Non-IP queries (HTTPS/SVCB records, mostly) are dropped rather
+                    // than forwarded: they would be answered by whichever resolver
+                    // this outbound happens to reach, and an ECH-bearing HTTPS record
+                    // arriving over the wrong path is worse than no record.
+                    put("settings", JSONObject().put("nonIPQuery", "drop"))
+                })
+        }
         return JSONObject().apply {
             put(
                 "log",
@@ -561,6 +588,28 @@ object ShardConfigs {
                             put("ip", "127.0.0.1")
                         }
                     )
+                    // Sniffing is not an optimisation here, it is the mechanism.
+                    // tun2socks hands xray an IP and never a hostname, so without
+                    // this every `domain:`/`geosite:` rule below is dead and 100% of
+                    // traffic would take the fragmented direct path — Telegram
+                    // included, which would break it.
+                    //
+                    // `routeOnly: true`: the sniffed name decides the route, but the
+                    // original IP is still dialled. With it false xray re-resolves at
+                    // the outbound, which on the node path means the node resolves
+                    // the name — an extra failure mode and a DNS leak surface. Both
+                    // were tested against the real binary; both route correctly, and
+                    // this is the safer one.
+                    if (smartSplit != null) {
+                        put(
+                            "sniffing",
+                            JSONObject().apply {
+                                put("enabled", true)
+                                put("destOverride", JSONArray().put("tls").put("http"))
+                                put("routeOnly", true)
+                            }
+                        )
+                    }
                 }
             )
             if (listenHost != "127.0.0.1") {
@@ -578,11 +627,291 @@ object ShardConfigs {
                 )
             }
             put("inbounds", inbounds)
-            // No routing rules at all: with "proxy" first it is the default
-            // outbound and everything goes through the node. blackhole is present
-            // only so a future rule has something to point at.
+            // Without Smart Split: no routing rules at all: with "proxy" first it is
+            // the default outbound and everything goes through the node. blackhole is
+            // present only so a future rule has something to point at.
             put("outbounds", outbounds)
+            if (smartSplit != null) {
+                put("dns", smartSplitDns())
+                put("routing", JSONObject().put("rules", smartSplitRules()))
+            }
         }.toString()
+    }
+
+    /**
+     * The fragmented direct outbound: Serverless-for-Iran's mechanism, our config.
+     *
+     * Two masks, and the numbers are not adjustable knobs. `lengths: ["5","94","1"]`
+     * puts the first fragment boundary at byte 99 of the ClientHello payload, which
+     * is exactly the end of the cipher-suite list — see the [ShardNode] doc for the
+     * byte-by-byte derivation. The second mask's `109` is the two records the first
+     * mask produced, counted with their headers.
+     *
+     * `delays` is the one value that varies, and it is the profile: see [SmartSplit].
+     *
+     * `happyEyeballs` races up to 20 addresses from the A/AAAA set 300 ms apart,
+     * IPv6 first. On Cloudflare-hosted destinations several edge IPs are reachable
+     * while others are hijacked or throttled, and racing them avoids a bad one
+     * without maintaining an IP list. The fork's defaults are 4 and 1; 20 and 2 is
+     * a deliberate widening, copied from upstream because the failure it prevents
+     * is common on Iranian carriers.
+     */
+    private fun fragmentedDirect(profile: SmartSplit.FragmentProfile): JSONObject {
+        val delays = JSONArray().apply { profile.delays.forEach { put(it) } }
+        val happyEyeballs = JSONObject().apply {
+            put("tryDelayMs", 300)
+            put("prioritizeIPv6", true)
+            put("interleave", 2)
+            put("maxConcurrentTry", 20)
+        }
+        return JSONObject().apply {
+            put("tag", "direct-frag")
+            put("protocol", "freedom")
+            put("settings", JSONObject().put("domainStrategy", "UseIP"))
+            put(
+                "streamSettings",
+                JSONObject().apply {
+                    put(
+                        "finalmask",
+                        JSONObject().put(
+                            "tcp",
+                            JSONArray()
+                                .put(fragmentMask("tlshello", listOf("5", "94", "1"), JSONArray().put("0"), "0"))
+                                .put(fragmentMask("1-1", listOf("109", "1"), delays, "355"))
+                        )
+                    )
+                    put(
+                        "sockopt",
+                        JSONObject().apply {
+                            put("domainStrategy", "ForceIP")
+                            put("happyEyeballs", happyEyeballs)
+                        }
+                    )
+                }
+            )
+        }
+    }
+
+    private fun fragmentMask(
+        packets: String,
+        lengths: List<String>,
+        delays: JSONArray,
+        maxSplit: String,
+    ): JSONObject = JSONObject().apply {
+        put("type", "fragment")
+        put(
+            "settings",
+            JSONObject().apply {
+                put("packets", packets)
+                put("lengths", JSONArray().apply { lengths.forEach { put(it) } })
+                put("delays", delays)
+                put("maxSplit", maxSplit)
+            }
+        )
+    }
+
+    /**
+     * Domains that must never take the direct path, because an Iranian exit IP is
+     * refused at the far end rather than blocked on the way out.
+     *
+     * This list is static and deliberately generous, and it cannot be replaced by a
+     * health check. A sanctioned service does not fail at the TCP or TLS layer — it
+     * completes the handshake and answers a valid HTTP 403, which is indistinguishable
+     * from a working response to any latency- or reachability-based prober. Measured:
+     * `chatgpt.com` through an Iranian-style exit connects, negotiates TLS, and
+     * returns 403; `api.openai.com` returns 401, which is exactly what it returns
+     * when it is working.
+     *
+     * A wrongly-classified host therefore does not get slower, it dies. Erring
+     * towards the node is the only safe direction.
+     */
+    private val SANCTIONED_DOMAINS = listOf(
+        "geosite:openai",
+        "geosite:anthropic",
+        "geosite:xai",
+        "geosite:google-deepmind",
+        // Telegram is here for a different reason: it is not sanctioned, it is
+        // blocked so thoroughly that only the node reaches it.
+        "geosite:telegram",
+    )
+
+    /**
+     * DNS for Smart Split, and every clause is load-bearing.
+     *
+     * **`shard-dns` is DoH over TCP, not UDP to a resolver.** The first attempt sent
+     * sanctioned names to `1.1.1.1:53` over UDP with a rule pointing that at the
+     * node, and it failed: 12 queries, all timed out — UDP-over-mux is the known-weak
+     * path, which is the same reason `xudpConcurrency` exists in [muxFor]. DoH over
+     * TCP through the node resolves them in ~900 ms.
+     *
+     * **`full:challenges.cloudflare.com` in the localhost server is not optional.**
+     * `hosts` maps `cloudflare-dns.com` onto it (domain-fronting the resolver, so the
+     * DoH endpoint is not itself a blocked name). Without giving the bootstrap name to
+     * the system resolver, DoH tries to resolve its own endpoint through itself:
+     * observed as every foreign lookup timing out after 12 s with
+     * `failed to retrieve response for challenges.cloudflare.com`.
+     *
+     * **`skipFallback: true`** on the scoped servers stops a miss from silently
+     * falling through to the wrong resolver, which would put a sanctioned name's
+     * lookup on the direct path.
+     */
+    private fun smartSplitDns(): JSONObject {
+        val sanctioned = JSONArray().apply { SANCTIONED_DOMAINS.forEach { put(it) } }
+        val iranian = JSONArray()
+            .put("domain:ir")
+            .put("geosite:category-ir")
+            .put("full:challenges.cloudflare.com")
+        return JSONObject().apply {
+            put("queryStrategy", "UseIP")
+            // A stale answer beats no answer on a carrier that drops DNS under load;
+            // the alternative is a page that fails while a usable record is in hand.
+            put("serveStale", true)
+            put("hosts", JSONObject().put("cloudflare-dns.com", "challenges.cloudflare.com"))
+            put(
+                "servers",
+                JSONArray()
+                    .put(
+                        JSONObject().apply {
+                            put("tag", "shard-dns")
+                            put("address", "https://1.1.1.1/dns-query")
+                            put("domains", sanctioned)
+                            put("skipFallback", true)
+                            put("finalQuery", true)
+                            put("timeoutMs", 12000)
+                        }
+                    )
+                    .put(
+                        JSONObject().apply {
+                            put("address", "localhost")
+                            put("domains", iranian)
+                            put("skipFallback", true)
+                            put("finalQuery", true)
+                        }
+                    )
+                    .put(
+                        JSONObject().apply {
+                            put("tag", "doh")
+                            put("address", "https://cloudflare-dns.com/dns-query")
+                            put("timeoutMs", 12000)
+                        }
+                    )
+            )
+        }
+    }
+
+    /**
+     * The rule table. Order IS the behaviour — every line's position was decided by
+     * a failure, and the sequence was verified end to end against the real binary.
+     *
+     * ```
+     *   www.cloudflare.com  200  -> direct-frag   (local exit)
+     *   www.youtube.com     200  -> direct-frag
+     *   www.instagram.com   200  -> direct-frag
+     *   web.whatsapp.com    200  -> direct-frag
+     *   www.aparat.com      301  -> direct-plain  (never fragmented)
+     *   chatgpt.com              -> shard         (node exit)
+     *   core.telegram.org   200  -> shard
+     *   149.154.167.51           -> shard         via geoip, no hostname needed
+     * ```
+     *
+     * Notable positions:
+     *
+     * - **DoH's own connection is fragmented** (rule 1). Otherwise the resolver's
+     *   TLS session is one unfragmented handshake to a known IP and the censor
+     *   closes it — the resolver would be the one thing the DPI could still see.
+     * - **`geoip:telegram` is separate from `geosite:telegram`** (rules 4 and 5).
+     *   MTProto dials bare IPs with no SNI, so sniffing yields nothing and the
+     *   domain rule never matches. Verified: `curl` at `149.154.167.51` logged
+     *   `taking detour [shard]` with the geoip rule and `[direct-frag]` without it.
+     * - **Sanctioned before Iranian** (rules 4-5 before 6-7), or a sanctioned host
+     *   served from an Iranian CDN would be swallowed by `geoip:ir`.
+     * - **The QUIC block is scoped to TCP-fallback, and it comes AFTER the node
+     *   rules** (rule 9). Foreign UDP/443 has no TCP segments to split, so QUIC
+     *   walks past the fragmenter unfragmented and must be killed to force Chrome
+     *   onto TCP. But SHARD deliberately forwards all UDP — that is the feature
+     *   [ShardSocksFront] has that Tor does not — so this rule must never see
+     *   traffic already destined for the node, or Telegram calls and games die.
+     * - **`10.10.34.0/24` is the block-page host** (rule 8). Blackholing it turns
+     *   "you are shown a fake page" into a clean failure, which clients retry
+     *   instead of caching.
+     * - **No default-deny tail.** Upstream ends with `block port 0-65535`; here the
+     *   last two rules send anything unmatched to `direct-plain` instead. A phone
+     *   is not a browser: a default-deny would break every app whose protocol the
+     *   sniffer does not recognise, and this config is carrying the whole device.
+     */
+    private fun smartSplitRules(): JSONArray {
+        fun rule(build: JSONObject.() -> Unit) = JSONObject().apply {
+            put("type", "field")
+            build()
+        }
+        return JSONArray()
+            // 1. The DoH resolver's own TLS, back through the fragmenter.
+            .put(rule {
+                put("inboundTag", JSONArray().put("doh"))
+                put("outboundTag", "direct-frag")
+            })
+            // 2. Sanctioned names' DoH lookups leave through the node.
+            .put(rule {
+                put("inboundTag", JSONArray().put("shard-dns"))
+                put("outboundTag", "proxy")
+            })
+            // 3. Everything else on port 53 is answered by the dns module, which is
+            //    what makes the servers above apply at all.
+            .put(rule {
+                put("port", 53)
+                put("outboundTag", "dns-out")
+            })
+            // 4-5. Sanctioned + Telegram, by name and by address.
+            .put(rule {
+                put("domain", JSONArray().apply { SANCTIONED_DOMAINS.forEach { put(it) } })
+                put("outboundTag", "proxy")
+            })
+            .put(rule {
+                put("ip", JSONArray().put("geoip:telegram"))
+                put("outboundTag", "proxy")
+            })
+            // 6-7. Iranian and private: direct, and never fragmented. Fragmenting an
+            //      Iranian CDN wastes 520 radio wake-ups against a DPI box that is
+            //      not inspecting this traffic in the first place.
+            .put(rule {
+                put("domain", JSONArray().put("domain:ir").put("geosite:category-ir"))
+                put("outboundTag", "direct-plain")
+            })
+            .put(rule {
+                put("ip", JSONArray().put("geoip:ir").put("geoip:private"))
+                put("outboundTag", "direct-plain")
+            })
+            // 8. The censor's own block-page host.
+            .put(rule {
+                put("ip", JSONArray().put("10.10.34.0/24"))
+                put("outboundTag", "blackhole")
+            })
+            // 9. Foreign QUIC, so the fragmenter cannot be bypassed.
+            .put(rule {
+                put("network", "udp")
+                put("port", "443")
+                put("outboundTag", "blackhole")
+            })
+            // 10-11. Foreign TLS: the fragmenter's actual job.
+            .put(rule {
+                put("network", "tcp")
+                put("protocol", JSONArray().put("tls"))
+                put("outboundTag", "direct-frag")
+            })
+            .put(rule {
+                put("network", "tcp")
+                put("port", "443")
+                put("outboundTag", "direct-frag")
+            })
+            // 12-13. Anything else: direct and unfragmented, not blocked.
+            .put(rule {
+                put("network", "tcp")
+                put("outboundTag", "direct-plain")
+            })
+            .put(rule {
+                put("network", "udp")
+                put("outboundTag", "direct-plain")
+            })
     }
 
     /** Write [config] to the process's private dir and return the file. */

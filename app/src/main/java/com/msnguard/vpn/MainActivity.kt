@@ -64,6 +64,14 @@ class MainActivity : Activity() {
     private lateinit var tileSpeed: MetricTile
     private lateinit var exitNodeCard: ExitNodeCard
     private lateinit var chainCard: ChainModeCard
+
+    /**
+     * The SHARD twin of [chainCard], in the same slot.
+     *
+     * Only one of the two is ever applicable — the chain wraps Psiphon/Tor, this
+     * splits SHARD — so they share the row and the layout never grows.
+     */
+    private lateinit var smartSplitCard: SmartSplitCard
     /**
      * Whether the transport controls accept input, i.e. no tunnel is up.
      *
@@ -205,6 +213,15 @@ class MainActivity : Activity() {
 
     /** SHARD's node-list row; its subtitle carries the pool count and staleness. */
     private var shardPoolRow: OrbitSettingsRow? = null
+
+    /**
+     * The settings mirror of the home-screen Smart Split card.
+     *
+     * Nullable and re-read on every settings build, like [psiphonChainRow]: the
+     * settings page is constructed on demand and thrown away, so a strong reference
+     * held across pages would repaint a detached view.
+     */
+    private var smartSplitRow: OrbitToggleRow? = null
     private var splitTunnelDraftMode: SplitTunnelSettings.Mode? = null
     private var splitTunnelDraftPackages: MutableSet<String>? = null
     private var trafficMonitorPage: View? = null
@@ -476,6 +493,7 @@ class MainActivity : Activity() {
         ) { openTrafficMonitorScreen() }
         exitNodeCard = ExitNodeCard(this, palette) { refreshPublicIp() }
         chainCard = ChainModeCard(this, palette) { armed -> setChainArmed(armed) }
+        smartSplitCard = SmartSplitCard(this, palette) { on -> setSmartSplitEnabled(on) }
         transportRail = TransportRail(this, palette, Protocol.entries.map { railLabel(it) }) { index ->
             updateConnectionMode(Protocol.entries[index])
         }
@@ -1244,6 +1262,15 @@ class MainActivity : Activity() {
         // Psiphon one in WARP. Same dp(56) as the action bar so every full-width
         // control on this screen is the same height.
         addView(chainCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(56),
+        ).apply { topMargin = dp(10) })
+
+        // Smart Split occupies the same slot, and exactly one of the two is ever
+        // visible: the chain card applies to Psiphon/Tor, this one to SHARD.
+        // [renderChainCard] does the swap, so the home screen keeps its height
+        // whichever transport is selected.
+        addView(smartSplitCard, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
         ).apply { topMargin = dp(10) })
@@ -2952,6 +2979,46 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
 
+        // The home-screen card's mirror, for the same reason the Psiphon chain has
+        // one: someone looking for a feature they saw on the main screen looks in
+        // settings, and a control that exists in only one of the two places reads as
+        // a bug. Both write the same key through [setSmartSplitEnabled].
+        // Built as an OrbitToggleRow directly, not through createToggleRow(): that
+        // helper returns LinearLayout, and this row's subtitle has to be rewritten
+        // from outside the builder — the measurement it reports changes on connect
+        // and when the user clears it.
+        val splitRow = OrbitToggleRow(
+            this,
+            palette,
+            "Smart Split",
+            SmartSplit.summary(this),
+            SmartSplit.enabled(this),
+        ) { on ->
+            setSmartSplitEnabled(on)
+            smartSplitRow?.setSubtitle(SmartSplit.summary(this))
+            renderChainCard()
+        }
+        smartSplitRow = splitRow
+        content.addView(splitRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
+
+        // The escape hatch for a wrong measurement, and the only reason the user
+        // ever needs to know a measurement happened at all. A carrier that changes
+        // its DPI, or a cached "not effective here" from a bad minute on the
+        // network, would otherwise be sticky until the app's data is cleared.
+        val remeasureRow = navRow("Re-measure network", "") {
+            SmartSplit.forgetMeasurements(this)
+            smartSplitRow?.setSubtitle(SmartSplit.summary(this))
+            renderChainCard()
+            toastShort("Will re-measure on the next connect")
+        }
+        content.addView(remeasureRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
+
         // APPEARANCE, like BACKUP below it, is about the app rather than about a
         // tunnel, so it sits out here and not under Tunnel Controls.
         content.addView(sectionLabel("APPEARANCE"), LinearLayout.LayoutParams(
@@ -4266,6 +4333,7 @@ class MainActivity : Activity() {
         // destroyed hierarchy alive for as long as the activity lives.
         connectionModeRow = null
         psiphonChainRow = null
+        smartSplitRow = null
         chainOuterRow = null
         egressRegionRow = null
         lanSharingRow = null
@@ -5364,6 +5432,14 @@ class MainActivity : Activity() {
             }
         )
         chainCard.setArmed(chainArmed())
+        // Exactly one of the two cards is shown, and the swap happens here so there
+        // is a single place that decides which control the SHARD user sees. GONE and
+        // not merely disabled: a permanently-N/A card in the SHARD case would be
+        // dead furniture on the app's most-used screen.
+        val shardSelected = selectedProtocol == Protocol.SHARD
+        chainCard.visibility = if (shardSelected) View.GONE else View.VISIBLE
+        smartSplitCard.visibility = if (shardSelected) View.VISIBLE else View.GONE
+        renderSmartSplitCard()
         // The settings page carries the same switch, so keep it in step whenever the
         // card is repainted — arming from the home screen must not leave a stale
         // "off" behind in settings.
@@ -5402,6 +5478,52 @@ class MainActivity : Activity() {
             ConnectionLog.record("$inner-over-WARP armed: outer MASQUE, $inner inside it")
         } else {
             ConnectionLog.record("$inner-over-WARP disarmed")
+        }
+    }
+
+    /**
+     * Paints the Smart Split card. Only meaningful on SHARD.
+     *
+     * Two reasons it can be unavailable, in the order the user can act on them:
+     *
+     *  - not on SHARD: the split needs the node as one of its two legs, so there
+     *    is nothing to split on the other transports.
+     *  - connected: the same lock the transport rail and the chain card get, since
+     *    the routing table is fixed when the config is written.
+     */
+    private fun renderSmartSplitCard() {
+        val applies = selectedProtocol == Protocol.SHARD
+        val reason = when {
+            !applies -> "only for the SHARD transport"
+            !modeControlsEnabled -> "disconnect to change"
+            else -> null
+        }
+        smartSplitCard.setUnavailable(reason, applicable = applies)
+        // Whether this network has been measured, in the user's terms — never which
+        // fragment profile won. See [SmartSplit] for why the profile is not shown.
+        smartSplitCard.setTuningSummary(
+            if (SmartSplit.cachedProfile(this) != null) "tuned for this network" else ""
+        )
+        smartSplitCard.setSplitEnabled(SmartSplit.enabled(this))
+    }
+
+    /**
+     * Records the Smart Split choice. Takes effect on the next connect.
+     *
+     * On by default. What makes that safe is that the feature gates itself on a
+     * measurement: if neither fragment profile can carry a blocked SNI on this
+     * network, [SmartSplit.recordNoProfile] remembers it and the session silently
+     * uses the historical all-through-the-node config. So the worst case is the old
+     * behaviour, reached automatically — see [SmartSplit.ENABLED_PREF].
+     */
+    private fun setSmartSplitEnabled(on: Boolean) {
+        SmartSplit.setEnabled(this, on)
+        if (on) {
+            ConnectionLog.record(
+                "Smart Split on: Iranian sites direct, sanctioned and Telegram via node"
+            )
+        } else {
+            ConnectionLog.record("Smart Split off: everything via node")
         }
     }
 

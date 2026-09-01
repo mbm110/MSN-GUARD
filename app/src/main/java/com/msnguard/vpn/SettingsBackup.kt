@@ -111,6 +111,22 @@ object SettingsBackup {
     )
 
     /**
+     * Key prefixes inside the settings file that are measurements, not choices.
+     *
+     * Smart Split stores one entry per network (`smart_split_profile_cell:43211`,
+     * `…_wifi`), so the set of keys is not knowable in advance and an exact list
+     * cannot express it.
+     *
+     * These must not travel in a backup even though they look like settings. The
+     * value is a fact about one SIM on one carrier's DPI; restoring it onto another
+     * device — or the same device after a SIM change — would pin a fragment profile
+     * that was never measured there, and the wrong profile means sites that do not
+     * open rather than sites that are slow. `smart_split_enabled` is a real choice
+     * and is deliberately NOT covered by this prefix.
+     */
+    private val TRANSIENT_PREFIXES = listOf("smart_split_profile_")
+
+    /**
      * Preference files cleared by [resetToDefaults] but never exported.
      *
      * Learned data: a factory reset should forget it, a backup should not carry
@@ -124,7 +140,10 @@ object SettingsBackup {
 
     private fun exportable(context: Context, file: String): Map<String, Any?> =
         context.getSharedPreferences(file, Context.MODE_PRIVATE).all
-            .filterKeys { key -> !(file == SETTINGS_FILE && key in TRANSIENT_KEYS) }
+            .filterKeys { key -> !(file == SETTINGS_FILE && transient(key)) }
+
+    private fun transient(key: String): Boolean =
+        key in TRANSIENT_KEYS || TRANSIENT_PREFIXES.any { key.startsWith(it) }
 
     /**
      * The whole backup as JSON text, ready to be written to a file.
@@ -200,7 +219,7 @@ object SettingsBackup {
             val editor = context.getSharedPreferences(file, Context.MODE_PRIVATE).edit()
             editor.clear()
             values.keys().forEach { key ->
-                if (file == SETTINGS_FILE && key in TRANSIENT_KEYS) {
+                if (file == SETTINGS_FILE && transient(key)) {
                     // A backup written by a build that exported these; drop them
                     // here too rather than trusting the file.
                     skipped++
