@@ -138,14 +138,28 @@ object LogRedactor {
      * Call sites now log [nodeTag] instead of a label, but this stays as the net
      * underneath: a label can also arrive second-hand inside an engine error
      * string, and one that slips through is an advertisement for someone's channel.
+     *
+     * Fields deliberately contain no internal spaces. An earlier version allowed
+     * them and the match ran away to the left, swallowing the prose in front of the
+     * label — `ShardManager winner AL … | @x | …` was coded whole, so the line lost
+     * which subsystem had spoken. [FLAG] is stripped before this runs, which is what
+     * leaves `AL 🇦🇱` as a single spaceless field.
      */
-    private val LABEL_RUN = Regex("""(?:[^\s|]+(?: [^\s|]+)*\s*\|\s*){2,}[^\s|]+""")
+    private val LABEL_RUN = Regex("""[^\s|]+(?:\s*\|\s*[^\s|]+){2,}""")
 
     /** A bare channel handle, for labels that carry a handle and no pipes at all. */
     private val HANDLE = Regex("""@[A-Za-z0-9_]{3,}""")
 
-    /** Regional-indicator pairs. A flag names the exit country as plainly as text. */
-    private val FLAG = Regex("""[\uD83C][\uDDE6-\uDDFF][\uD83C][\uDDE6-\uDDFF]""")
+    /**
+     * Regional-indicator pairs — a flag names the exit country as plainly as text.
+     *
+     * Written as `\x{...}` code points, not as surrogate pairs. `[\uD83C][\uDDE6-…]`
+     * looks equivalent and silently never matches: Java's regex engine scans the
+     * input by code point, so a lone high surrogate in a character class has nothing
+     * to match against. That failure was not theoretical — it left `AL 🇦🇱` in the
+     * log and shifted [LABEL_RUN]'s match one field to the right.
+     */
+    private val FLAG = Regex("""[\x{1F1E6}-\x{1F1FF}]{2}""")
 
     private val URL = Regex("""https?://[^\s"',)]+""")
 
@@ -219,7 +233,7 @@ object LogRedactor {
         "Tun2Socks" to "t2",
         "tun2socks" to "t2",
         // engine and its modules
-        "xray SOCKS" to "u",
+        "xray SOCKS" to "u0",
         "Xray" to "E1",
         "xray" to "E1",
         "app/dispatcher" to "d2",
@@ -234,7 +248,7 @@ object LogRedactor {
         "seed list" to "src0",
         "udpgw" to "g7",
         "SOCKS5" to "s5",
-        "SOCKS" to "s",
+        "SOCKS" to "s0",
         "winner" to "sel",
         "rotations" to "sw",
         "rotating" to "swap",
@@ -253,8 +267,16 @@ object LogRedactor {
         "account" to "ac",
     )
 
+    /**
+     * Left-anchored on a word boundary, so `race` cannot match inside `traceroute`
+     * and `node` cannot match inside a longer word. Not anchored on the right: some
+     * keys end in `:` or `/`, where a trailing `\b` would need a word character
+     * after the punctuation and the key would never match at all.
+     */
     private val CODE_RE = Regex(
-        CODEBOOK.keys.sortedByDescending { it.length }.joinToString("|") { Regex.escape(it) }
+        """\b(?:""" +
+            CODEBOOK.keys.sortedByDescending { it.length }.joinToString("|") { Regex.escape(it) } +
+            ")"
     )
 
     // --- the pass ----------------------------------------------------------
@@ -269,10 +291,12 @@ object LogRedactor {
     fun redact(line: String): String {
         if (line.isEmpty()) return line
         var out = PATH.replace(line) { "f" + digest(it.value, 4) }
-        // Before anything else splits it up: a label is one unit and is coded whole.
+        // Flags first: that collapses `AL 🇦🇱` to one spaceless field, which is what
+        // lets LABEL_RUN match the label without reaching back into the prose.
+        out = FLAG.replace(out) { "" }
+        // Then the label as one unit, before anything else splits it up.
         out = LABEL_RUN.replace(out) { "n" + digest(it.value, 4) }
         out = HANDLE.replace(out) { "p" + digest(it.value, 3) }
-        out = FLAG.replace(out) { "" }
         out = URL.replace(out) { "u" + digest(it.value, 4) }
         out = IPV4.replace(out) { m ->
             val a = m.groupValues[1].toIntOrNull() ?: 0
