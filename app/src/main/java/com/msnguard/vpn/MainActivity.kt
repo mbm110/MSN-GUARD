@@ -443,7 +443,18 @@ class MainActivity : Activity() {
             }
         }
         requestNotificationPermission()
-        ConnectionLog.bind(File(filesDir, "connection.log"))
+        // Version stamped in, so an update drops the previous build's mirror: its
+        // lines were coded by that build's rules, and a mixed log is a leak.
+        // Read from PackageManager rather than BuildConfig, which this module does
+        // not generate — same pattern as ShardManager's geo-asset stamp.
+        ConnectionLog.bind(
+            File(filesDir, "connection.log"),
+            runCatching {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(packageName, 0).versionCode.toString()
+            }.getOrDefault(""),
+        )
+
         appUpdater = AppUpdater(this)
         // Registers the periodic SHARD list refresh. Idempotent, so calling it on
         // every launch is how the job gets re-registered after an app update — a

@@ -4376,12 +4376,25 @@ object ConnectionLog {
      * Ported from upstream v0.8.0: mirror the ring buffer to a file so logs
      * survive the process being killed. Required — the merged MainActivity calls
      * this on startup. Capped and self-truncating so it cannot grow unbounded.
+     *
+     * The mirror is also dropped whenever the app's version changed since it was
+     * written. That is not housekeeping: lines are coded by [LogRedactor] at the
+     * moment they are recorded, so a mirror written by an older build still holds
+     * that build's *plain* lines. A field log forwarded after an update was half
+     * coded and half readable, which defeats the point of coding it at all.
      */
     @Synchronized
-    fun bind(file: java.io.File) {
+    fun bind(file: java.io.File, versionStamp: String = "") {
         sink = file
-        if (file.exists() && file.length() > MAX_FILE_BYTES) {
+        val stampFile = java.io.File(file.parentFile, file.name + ".v")
+        val previous = runCatching { stampFile.readText().trim() }.getOrDefault("")
+        val stale = versionStamp.isNotEmpty() && previous != versionStamp
+        if (stale || (file.exists() && file.length() > MAX_FILE_BYTES)) {
             file.delete()
+            entries.clear()
+        }
+        if (versionStamp.isNotEmpty() && previous != versionStamp) {
+            runCatching { stampFile.writeText(versionStamp) }
         }
     }
 

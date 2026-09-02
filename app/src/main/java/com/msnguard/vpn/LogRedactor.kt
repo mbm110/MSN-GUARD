@@ -219,6 +219,7 @@ object LogRedactor {
         "ShardRefreshJob" to "R5",
         "ShardHealth" to "H4",
         "ShardEdges" to "G8",
+        "ShardReach" to "X6",
         "SmartSplit" to "Q9",
         "Smart Split" to "Q9",
         "SHARD" to "K0",
@@ -262,6 +263,9 @@ object LogRedactor {
         "geosite" to "ga",
         "geoip" to "ga",
         "geo assets" to "ga",
+        // The exit-country check. Coded, or a forwarded log would state both that
+        // the app tests its exits and which destination it tests them against.
+        "reach check" to "rc",
         "HTTP/3" to "z3",
         "QUIC" to "z9",
         "account" to "ac",
