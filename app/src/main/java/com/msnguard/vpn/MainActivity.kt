@@ -5278,7 +5278,7 @@ class MainActivity : Activity() {
     private fun resetMetrics() {
         tileDown.setValue("0", "B")
         tileUp.setValue("0", "B")
-        tileSpeed.setValue("0", "KB/S")
+        tileSpeed.setValue("0", "B/S")
         tileDown.resetBars()
         tileUp.resetBars()
         tileSpeed.resetBars()
@@ -5293,6 +5293,20 @@ class MainActivity : Activity() {
         else -> String.format(java.util.Locale.US, "%.2f", bytes / 1_073_741_824.0) to "GB"
     }
 
+    /**
+     * Splits a byte-per-second rate into a scaled number and its unit.
+     *
+     * Separate from [scaleBytes] only in its unit strings, but the bottom tier is
+     * the point: at Iranian mobile speeds a KB/s-floored tile spent most of its
+     * time reading a flat `0` on a tunnel that was moving data, so idle and broken
+     * looked identical. Showing B/S under a kilobyte keeps a live number on screen.
+     */
+    private fun scaleSpeed(bytesPerSecond: Long): Pair<String, String> = when {
+        bytesPerSecond < 1_024L -> bytesPerSecond.toString() to "B/S"
+        bytesPerSecond < 1_048_576L -> (bytesPerSecond / 1_024L).toString() to "KB/S"
+        else -> String.format(java.util.Locale.US, "%.1f", bytesPerSecond / 1_048_576.0) to "MB/S"
+    }
+
     /** Pushes the latest traffic sample into the three home-screen tiles. */
     private fun renderHomeMetrics() {
         val (downValue, downUnit) = scaleBytes(trafficRx)
@@ -5300,21 +5314,13 @@ class MainActivity : Activity() {
         tileDown.setValue(downValue, downUnit)
         tileUp.setValue(upValue, upUnit)
         val combined = trafficSpeedRx + trafficSpeedTx
-        // Speed is shown in KB/s, not MB/s. On Iranian mobile carriers a normal
-        // session sits in the tens or low hundreds of KB/s, and "%.1f MB/S"
-        // rendered every one of those as a flat 0.0 — the tile looked broken on a
-        // working tunnel. KB/s keeps two useful digits at real speeds and only
-        // switches to MB/s once there is a whole megabyte to show.
-        val kbPerSecond = combined / 1_024.0
-        if (kbPerSecond >= 1_024.0) {
-            tileSpeed.setValue(String.format(java.util.Locale.US, "%.1f", kbPerSecond / 1_024.0), "MB/S")
-        } else {
-            tileSpeed.setValue(String.format(java.util.Locale.US, "%.0f", kbPerSecond), "KB/S")
-        }
+        val (speedValue, speedUnit) = scaleSpeed(combined)
+        tileSpeed.setValue(speedValue, speedUnit)
         // Bars are relative to a 512 KB/s ceiling — a realistic mobile-tunnel
         // full scale. The old 4 MB/s ceiling squashed every real sample into the
         // bottom 5% of the sparkline, so the bars never visibly moved.
         val ceiling = 512.0
+        val kbPerSecond = combined / 1_024.0
         tileDown.push((trafficSpeedRx / 1_024.0 / ceiling).toFloat().coerceIn(0.04f, 1f))
         tileUp.push((trafficSpeedTx / 1_024.0 / ceiling).toFloat().coerceIn(0.04f, 1f))
         tileSpeed.push((kbPerSecond / ceiling).toFloat().coerceIn(0.04f, 1f))

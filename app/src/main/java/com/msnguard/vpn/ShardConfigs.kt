@@ -730,9 +730,58 @@ object ShardConfigs {
         "geosite:anthropic",
         "geosite:xai",
         "geosite:google-deepmind",
-        // Telegram is here for a different reason: it is not sanctioned, it is
-        // blocked so thoroughly that only the node reaches it.
+        // Gemini's own hostnames are inside `google-deepmind` and were already on
+        // this list, yet the site still failed: the HTML arrived through the node
+        // and then the page's RPC backend was fetched over the direct path from an
+        // Iranian address, which Google refuses. Decoded from the served page, the
+        // calls it cannot boot without are `geminiweb-pa`, `waa-pa` (attestation),
+        // `push-pa` and `content.googleapis.com`.
+        //
+        // The whole `clients6` host rather than those four names: it is Google's
+        // internal RPC frontend and nothing else, every surface names its endpoint
+        // `<service>-pa.clients6.google.com`, and the traffic is JSON. So one
+        // suffix costs almost nothing and survives Gemini renaming its endpoint —
+        // which is the failure this entry exists to prevent.
+        "domain:clients6.google.com",
+        "full:content.googleapis.com",
+        // Telegram and WhatsApp are here for a different reason: neither is
+        // sanctioned, both are blocked hard enough that only the node reaches them.
         "geosite:telegram",
+        "geosite:whatsapp",
+    )
+
+    /**
+     * Meta's address space, for the parts of WhatsApp that carry no hostname.
+     *
+     * `geosite:whatsapp` alone does not fix WhatsApp, for exactly the reason
+     * `geosite:telegram` alone did not fix Telegram. The chat socket is not TLS:
+     * probing `g.whatsapp.net:443` returns `write:errno=104` after 0 bytes read —
+     * the server never answers a ClientHello, because the protocol is Noise, not
+     * TLS. So `destOverride: [tls, http]` sniffs nothing and only the web
+     * origins ever match by name.
+     *
+     * Two blocks are needed because WhatsApp's edge is split across two providers:
+     *
+     * - `geoip:facebook` covers `g.whatsapp.net` (157.240.0.0/17) and the
+     *   `web/static/dit/pps` hosts (57.144.0.0/14) — verified by decoding the
+     *   shipped table and testing each resolved address against it.
+     * - `e1..e16.whatsapp.net` live on **AWS Global Accelerator**, not on Meta's
+     *   own ranges: every resolver tried, and an Iranian ECS subnet, returned one
+     *   of four addresses inside `15.197.128.0/17` and `3.33.128.0/17`, both
+     *   confirmed `GLOBALACCELERATOR` in Amazon's published `ip-ranges.json`.
+     *   Those two prefixes are shared anycast, so unrelated services fronted by
+     *   Global Accelerator also take the node. That is the deliberate trade: they
+     *   keep working and merely pay an extra hop, whereas a WhatsApp edge address
+     *   left on the direct path is a dead app.
+     *
+     * Pinning the four observed /32s instead was rejected: Global Accelerator
+     * hands out per-accelerator static IPs, so a region we did not sample would
+     * silently miss.
+     */
+    private val WHATSAPP_TRANSPORT_IPS = listOf(
+        "geoip:facebook",
+        "15.197.128.0/17",
+        "3.33.128.0/17",
     )
 
     /**
@@ -861,16 +910,34 @@ object ShardConfigs {
                 put("port", 53)
                 put("outboundTag", "dns-out")
             })
-            // 4-5. Sanctioned + Telegram, by name and by address.
+            // 4-6. Sanctioned + Telegram + WhatsApp, by name and then by address.
             .put(rule {
                 put("domain", JSONArray().apply { SANCTIONED_DOMAINS.forEach { put(it) } })
                 put("outboundTag", "proxy")
             })
+            // 5 exists only to protect 6 from itself. `geoip:facebook` is Meta's
+            // whole address space, so Instagram and Facebook — which are supposed
+            // to take the fast direct path — would be swallowed by the WhatsApp
+            // rule below. Anything Meta-owned that arrives WITH a sniffed hostname
+            // is therefore claimed here first; what falls through to 6 is Meta
+            // traffic carrying no hostname at all, which in practice is WhatsApp's
+            // Noise sockets. If a Meta app ever fails to sniff it lands on the
+            // node: slower, still working, which is the safe direction.
             .put(rule {
-                put("ip", JSONArray().put("geoip:telegram"))
+                put(
+                    "domain",
+                    JSONArray().put("geosite:instagram").put("geosite:facebook")
+                )
+                put("outboundTag", "direct-frag")
+            })
+            .put(rule {
+                put("ip", JSONArray().apply {
+                    put("geoip:telegram")
+                    WHATSAPP_TRANSPORT_IPS.forEach { put(it) }
+                })
                 put("outboundTag", "proxy")
             })
-            // 6-7. Iranian and private: direct, and never fragmented. Fragmenting an
+            // 7-8. Iranian and private: direct, and never fragmented. Fragmenting an
             //      Iranian CDN wastes 520 radio wake-ups against a DPI box that is
             //      not inspecting this traffic in the first place.
             .put(rule {
@@ -881,18 +948,18 @@ object ShardConfigs {
                 put("ip", JSONArray().put("geoip:ir").put("geoip:private"))
                 put("outboundTag", "direct-plain")
             })
-            // 8. The censor's own block-page host.
+            // 9. The censor's own block-page host.
             .put(rule {
                 put("ip", JSONArray().put("10.10.34.0/24"))
                 put("outboundTag", "blackhole")
             })
-            // 9. Foreign QUIC, so the fragmenter cannot be bypassed.
+            // 10. Foreign QUIC, so the fragmenter cannot be bypassed.
             .put(rule {
                 put("network", "udp")
                 put("port", "443")
                 put("outboundTag", "blackhole")
             })
-            // 10-11. Foreign TLS: the fragmenter's actual job.
+            // 11-12. Foreign TLS: the fragmenter's actual job.
             .put(rule {
                 put("network", "tcp")
                 put("protocol", JSONArray().put("tls"))
@@ -903,7 +970,7 @@ object ShardConfigs {
                 put("port", "443")
                 put("outboundTag", "direct-frag")
             })
-            // 12-13. Anything else: direct and unfragmented, not blocked.
+            // 13-14. Anything else: direct and unfragmented, not blocked.
             .put(rule {
                 put("network", "tcp")
                 put("outboundTag", "direct-plain")
