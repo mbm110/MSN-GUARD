@@ -1099,12 +1099,22 @@ fn masque_gateway_peers() -> Vec<SocketAddr> {
         push(&mut out, *ip, consts::QUIC_PORT);
     }
 
-    // Port-major, not gateway-major: one port across both gateways before moving
+    // Port-major, not gateway-major: one port across the gateways before moving
     // on. Blocking is a property of the port on this path, not of the address, so
-    // trying both gateways on 500 discriminates a blocked port in two attempts
-    // instead of walking one gateway through every port first.
+    // trying several gateways on 1701 discriminates a blocked port in two
+    // attempts instead of walking one gateway through every port first.
+    //
+    // Capped so the whole ladder still fits MASQUE_H3_PROBE_LIMIT. With four
+    // verified gateways on 443 and four alternate ports, that leaves two
+    // gateways' worth of alternates — the two that answered 4/4 when measured.
+    // The connect budget is what the user waits on, so it does not grow.
+    let alt_gateways = MASQUE_H3_PROBE_LIMIT
+        .saturating_sub(verified.len())
+        .checked_div(prober::MASQUE_ALT_PORTS.len())
+        .unwrap_or(0);
+
     for &port in prober::MASQUE_ALT_PORTS {
-        for ip in &verified {
+        for ip in verified.iter().take(alt_gateways) {
             push(&mut out, *ip, port);
         }
     }
@@ -3316,11 +3326,13 @@ mod tests {
     fn http2_anycast_peers_only_target_real_masque_gateways() {
         let peers = masque_gateway_peers();
 
-        // 162.159.198.2 leads: it is the only address measured answering
-        // :status 200 to connect-ip, and the one the account API assigns once a
-        // MASQUE key is enrolled.
-        assert_eq!(peers.first(), Some(&"162.159.198.2:443".parse().unwrap()));
-        assert_eq!(peers.get(1), Some(&"162.159.198.1:443".parse().unwrap()));
+        // 162.159.199.1 leads: it answered connect-ip on 4 of 4 attempts at
+        // 80 ms, the best of any address measured. 162.159.198.2 stays on the
+        // ladder — it is what the account API assigns once a MASQUE key is
+        // enrolled — but it measured 3/4, so it no longer leads.
+        assert_eq!(peers.first(), Some(&"162.159.199.1:443".parse().unwrap()));
+        assert_eq!(peers.get(1), Some(&"162.159.199.2:443".parse().unwrap()));
+        assert!(peers.contains(&"162.159.198.2:443".parse().unwrap()));
 
         // Every /24 in the MASQUE list contributes its .1 and .2.
         assert!(peers.contains(&"162.159.192.1:443".parse().unwrap()));
@@ -3356,19 +3368,21 @@ mod tests {
             peers.iter().position(|p| *p == want)
         };
 
-        // 443 on both verified gateways first, then port-major across the
+        // 443 on every verified gateway first, then port-major across the
         // alternates, then the unmeasured seeds.
         let last_443 = index("162.159.198.1:443").expect("verified gateway on 443");
-        let first_alt = index("162.159.198.2:500").expect("verified gateway on 500");
+        let first_alt = index("162.159.199.1:1701").expect("verified gateway on 1701");
         let first_seed = index("162.159.197.1:443").expect("seed on 443");
         assert!(last_443 < first_alt);
         assert!(first_alt < first_seed);
 
-        // Port-major: both gateways on 500 before either reaches 1701.
-        assert!(index("162.159.198.1:500").unwrap() < index("162.159.198.2:1701").unwrap());
+        // Port-major: the second gateway on 1701 comes before the first reaches
+        // the next alternate port.
+        assert!(index("162.159.199.2:1701").unwrap() < index("162.159.199.1:8095").unwrap());
 
+        // Every alternate port must appear, on the gateways that measured 4/4.
         for &port in prober::MASQUE_ALT_PORTS {
-            for gateway in prober::MASQUE_VERIFIED_GATEWAYS {
+            for gateway in ["162.159.199.1", "162.159.199.2"] {
                 assert!(
                     index(&format!("{gateway}:{port}")).is_some(),
                     "{gateway}:{port} must be on the ladder"
@@ -3376,15 +3390,19 @@ mod tests {
             }
         }
 
-        // Ports never measured serving connect-ip must not cost a user-visible
-        // verify timeout on the start path.
-        for text in ["162.159.198.2:4443", "162.159.198.2:8443", "162.159.198.2:2408"] {
+        // Ports left off the ladder must not cost a user-visible verify timeout
+        // on the start path, even though the sweep may still reach them.
+        for text in ["162.159.199.1:4443", "162.159.199.1:8443", "162.159.199.1:2408"] {
             assert!(index(text).is_none(), "{text} must not be on the ladder");
         }
 
-        // The whole ladder still fits the rungs the HTTP/3 pass will walk.
-        let ladder = prober::MASQUE_VERIFIED_GATEWAYS.len() * (1 + prober::MASQUE_ALT_PORTS.len());
-        assert!(ladder <= MASQUE_H3_PROBE_LIMIT);
+        // The ladder must not outgrow the rungs the HTTP/3 pass will walk —
+        // otherwise adding a gateway silently lengthens the user's wait.
+        let ladder_end = index("162.159.197.1:443").expect("seed on 443");
+        assert!(
+            ladder_end <= MASQUE_H3_PROBE_LIMIT,
+            "verified ladder spans {ladder_end} rungs, budget is {MASQUE_H3_PROBE_LIMIT}"
+        );
     }
 
     /// The HTTP/2 pass must never dial a UDP-only port over TCP.
@@ -3395,7 +3413,7 @@ mod tests {
         for peer in &peers {
             assert_eq!(peer.port(), consts::QUIC_PORT, "{peer} is not a TCP port");
         }
-        assert_eq!(peers.first(), Some(&"162.159.198.2:443".parse().unwrap()));
+        assert_eq!(peers.first(), Some(&"162.159.199.1:443".parse().unwrap()));
     }
 
     /// The gateway the enrollment response names must win over the stale

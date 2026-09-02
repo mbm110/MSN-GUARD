@@ -15,9 +15,13 @@ pub const MASQUE_DOCUMENTED_CIDRS_V4: &[&str] = &["162.159.197.0/24", "162.159.1
 pub const MASQUE_DOH_CIDRS_V4: &[&str] = &["162.159.36.0/24", "162.159.46.0/24"];
 
 pub const MASQUE_CIDRS_V4: &[&str] = &[
-    // 162.159.198.0/24 first: measured probing showed it is the only range whose
-    // hosts answer connect-ip (198.2 and 198.1 both return :status 200), and the
-    // account API assigns 162.159.198.2 after a MASQUE key is enrolled.
+    // 162.159.199.0/24 leads: its .1 and .2 answered connect-ip on 4 of 4
+    // attempts at 80 ms, the best result of any range measured. This range was
+    // missing from the list entirely, so the two most reliable gateways on the
+    // fleet were unreachable by seed and by sweep alike.
+    "162.159.199.0/24",
+    // 162.159.198.0/24 second: .2 and .1 also answer connect-ip, and the account
+    // API assigns 162.159.198.2 after a MASQUE key is enrolled.
     "162.159.198.0/24",
     "162.159.197.0/24",
     "162.159.196.0/24",
@@ -36,73 +40,120 @@ pub const MASQUE_CIDRS_V4: &[&str] = &[
 
 /// MASQUE gateway seeds, in dial order.
 ///
-/// Order is measured, not guessed. Re-measured 2026-09-02 from an uncensored
-/// host against a **freshly enrolled** device certificate, judging each address
-/// by the only verdict that matters — did it answer the connect-ip CONNECT:
+/// Order is measured, not guessed, and the measurement had to be repeated
+/// before it was trustworthy. Probed 2026-09-02 from an uncensored host with a
+/// **freshly enrolled** device certificate, judging each address only by whether
+/// it answered the connect-ip CONNECT, **four attempts each**:
 ///
 /// ```text
-/// 162.159.198.2   -> :status 200   (also the endpoint the account API assigns)
-/// 162.159.198.1   -> :status 200
-/// 162.159.197.1   -> QUIC+TLS complete, connect-ip never answered
-/// 162.159.197.2   -> QUIC+TLS complete, connect-ip never answered
-/// 162.159.204.2   -> QUIC+TLS complete, connect-ip never answered
-/// 162.159.204.3   -> QUIC+TLS complete, connect-ip never answered
-/// 162.159.196.1   -> QUIC Initial answered, handshake never completes
-/// 162.159.195.1   -> QUIC Initial answered, handshake never completes
-/// 162.159.192.1   -> QUIC Initial answered, handshake never completes
-/// 162.159.193.1   -> QUIC Initial answered, handshake never completes
-/// 162.159.197.3   -> QUIC Initial answered, handshake never completes
-/// 188.114.96..99  -> QUIC Initial answered (this is the WireGuard edge)
-/// 172.65.251.1    -> nothing at all
+/// 162.159.199.1   4/4 :status 200   best 80ms
+/// 162.159.199.2   4/4 :status 200   best 87ms
+/// 162.159.198.2   3/4 :status 200   best 81ms  (the endpoint the API assigns)
+/// 162.159.198.1   2/4 :status 200   best 113ms
+/// 162.159.197.1   0/4
+/// 162.159.197.2   0/4
+/// 162.159.197.3   0/4
+/// 162.159.204.2   0/4
+/// 162.159.204.3   0/4
+/// 162.159.196.1   0/4
+/// 162.159.196.2   0/4
+/// 162.159.195.1   0/4
+/// 162.159.192.1   0/4
+/// 162.159.193.1   0/4
 /// ```
 ///
-/// Two corrections over the previous list, both from that run:
+/// Three findings, in order of how much they cost:
 ///
-///   * "completes the QUIC handshake" is **not** evidence of a gateway. The
-///     197.x and 204.x addresses serve the consumer-masque certificate and then
-///     never answer connect-ip, so an earlier pass that classified peers by
-///     handshake alone counted six gateways where there are two.
-///   * The 196/195/192/193 addresses are ordinary Cloudflare edge and cannot
-///     serve MASQUE at all, so they no longer sit in front of anything. They
-///     stay reachable through the CIDR sweep and the deep scan — nothing is
-///     eliminated, the order just stops spending the user's connect budget on
-///     them first.
+///   * **One probe is not a verdict.** Every gateway that works missed at least
+///     one of four attempts, and `162.159.198.1` missed two. An earlier pass
+///     here classified each address from a single sample and wrote off
+///     `162.159.199.1` and `.2` — the two best gateways on the fleet — as dead.
+///     Anything that ranks these addresses must sample repeatedly.
+///   * **162.159.199.0/24 was missing from the codebase entirely**, seeds and
+///     CIDR list alike, so its gateways could not be reached by any path.
+///   * **"Completes the QUIC handshake" is not evidence of a gateway.** The
+///     197.x and 204.x addresses finish QUIC and TLS, then never answer
+///     connect-ip. Ranking by handshake is what previously put four addresses
+///     that cannot serve MASQUE ahead of ones that can.
+///
+/// Nothing is deleted: the 0/4 addresses stay reachable through the CIDR sweep
+/// and the deep scan. The order just stops spending the user's connect budget
+/// on them first.
 pub const MASQUE_SEEDS: &[&str] = &[
+    "162.159.199.1",
+    "162.159.199.2",
     "162.159.198.2",
     "162.159.198.1",
     "162.159.197.1",
-    "162.159.197.2",
     "162.159.204.2",
-    "162.159.204.3",
-    "162.159.196.1",
-    "162.159.192.1",
 ];
 
-/// The addresses measured answering `:status 200` to connect-ip.
+/// The addresses measured answering `:status 200` to connect-ip, best first.
 ///
 /// Kept separate from [`MASQUE_SEEDS`] because the start path needs to know
 /// *which* peers are worth a second chance on another UDP port. Retrying an
 /// ordinary Cloudflare edge on UDP/500 is pointless — it has no connect-ip
 /// listener on any port — while retrying a real gateway there is the only
 /// escape from a carrier that degrades UDP/443 to this range specifically.
-pub const MASQUE_VERIFIED_GATEWAYS: &[&str] = &["162.159.198.2", "162.159.198.1"];
+pub const MASQUE_VERIFIED_GATEWAYS: &[&str] = &[
+    "162.159.199.1",
+    "162.159.199.2",
+    "162.159.198.2",
+    "162.159.198.1",
+];
 
 pub const MASQUE_PORTS: &[u16] = &[443, 500, 1701, 4500, 4443, 8443, 8095];
 
 /// Alternate UDP ports a verified gateway was measured serving connect-ip on.
 ///
-/// Measured on both verified gateways with an enrolled certificate: `:status
-/// 200` on 500, 1701, 4500 and 8095 at 86–129 ms — the same latency class as
-/// 443, because it is the same gateway and the same HTTP/3 data plane. 4443 and
-/// 8443 complete the TLS handshake but never answer connect-ip, and 2408
-/// answers nothing, so neither belongs in a start-path ladder that a user waits
-/// on.
+/// Ordered by field evidence first, then measured hit rate — see the note on
+/// 1701 below for why those two disagree.
+///
+/// Two attempts per (gateway, port) across all four verified gateways with an
+/// enrolled certificate, counting only connect-ip `:status 200`:
+///
+/// ```text
+///                :500  :1701  :4500  :8095  :4443  :8443
+/// 162.159.199.1   2/2   2/2    2/2    2/2    1/2    1/2
+/// 162.159.199.2   1/2   0/2    1/2    2/2    1/2    2/2
+/// 162.159.198.2   1/2   2/2    1/2    1/2    2/2    2/2
+/// 162.159.198.1   2/2   0/2    1/2    2/2    1/2    1/2
+///                ----  ----   ----   ----   ----   ----
+///                 6/8   4/8    5/8    7/8    5/8    6/8
+/// ```
+///
+/// Every one of the six ports answers on at least one gateway, which corrects an
+/// earlier claim here that 4443 and 8443 complete TLS but never answer
+/// connect-ip. That claim came from a single-sample run — the same mistake that
+/// mis-ranked the seed list. 4443 and 8443 are still left out of the start-path
+/// ladder to hold the connect budget at four rungs, and the sweep still reaches
+/// them through [`MASQUE_PORTS`].
+///
+/// This run measured hit rate only, not latency. The earlier single-sample pass
+/// timed 500/1701/4500/8095 at 86–129 ms, the same class as 443, which is what
+/// the design argument below rests on: it is the same gateway and the same
+/// HTTP/3 data plane, so the alternate port costs nothing but the dial.
+///
+/// 1701 leads despite ranking last on total hits, because the spread above is
+/// sampling noise on an uncensored path — no port here is actually unreachable
+/// from a VPS — and it says nothing about which port survives Iranian DPI. 1701
+/// is the only one with field evidence: it is where WireGuard-over-WARP
+/// connected from inside Iran while UDP/443 was being dropped. Field evidence
+/// outranks VPS hit rate for ordering.
+///
+/// Caveat worth knowing before trusting a rung: 1701 answered 2/2 on
+/// `162.159.199.1` and `162.159.198.2` but 0/2 on `162.159.199.2` and
+/// `162.159.198.1`, and the ladder pairs each port with the first two verified
+/// gateways. So the 1701 pair is one measured-good rung followed by one
+/// measured-dead rung. Left as is because per-port gateway tables in a const are
+/// worse than one wasted 5 s dial, but if the ladder ever needs shortening, that
+/// rung is the first to cut.
 ///
 /// This is why the escape from a blocked UDP/443 belongs here and not in the
 /// HTTP/2 pass: another UDP port on the same gateway keeps QUIC, keeps the
 /// throughput, and is known to work. HTTP/2 over TCP is not served connect-ip
 /// by any public Cloudflare edge at all.
-pub const MASQUE_ALT_PORTS: &[u16] = &[500, 1701, 4500, 8095];
+pub const MASQUE_ALT_PORTS: &[u16] = &[1701, 8095, 500, 4500];
 
 pub const MASQUE_CIDRS_V6: &[&str] = &[
     "2606:4700:d0::/48",
