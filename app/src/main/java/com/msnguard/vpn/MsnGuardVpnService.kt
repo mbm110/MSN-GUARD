@@ -4388,7 +4388,11 @@ object ConnectionLog {
     @Synchronized
     fun record(message: String) {
         if (NOISE.any(message::contains)) return
-        val line = "${stamp.format(java.util.Date())}  $message"
+        // Coded, not dropped. The log's whole purpose is that the user forwards it,
+        // and in plain form it was a full description of the transport — engine,
+        // port layout, pool size and the upstream publisher's channel handle. See
+        // LogRedactor for what stays readable and why.
+        val line = "${stamp.format(java.util.Date())}  ${LogRedactor.redact(message)}"
         if (entries.size == MAX_ENTRIES) entries.removeFirst()
         entries.addLast(line)
         runCatching { sink?.appendText(line + "\n") }

@@ -382,7 +382,7 @@ object ShardManager {
         if (awaitListener(port)) {
             running.set(true)
             activeNode = winner
-            ConnectionLog.record("$TAG up on $port via ${winner.label}")
+            ConnectionLog.record("$TAG up on $port via ${LogRedactor.nodeTag(winner.key)}")
             logLanSharing(context, listenHost, port)
             return true
         }
@@ -451,7 +451,7 @@ object ShardManager {
                 if (cached == null) SmartSplit.remember(context, profile)
                 running.set(true)
                 activeNode = winner
-                ConnectionLog.record("$TAG up on $port via ${winner.label} · Smart Split active")
+                ConnectionLog.record("$TAG up on $port via ${LogRedactor.nodeTag(winner.key)} · Smart Split active")
                 logLanSharing(context, listenHost, port)
                 return true
             }
@@ -548,7 +548,7 @@ object ShardManager {
         val previous = activeNode
         val port = listenPort
         previous?.let { ShardHealth.recordFailure(context, it) }
-        ConnectionLog.record("$TAG rotating away from ${previous?.label ?: "unknown"}")
+        ConnectionLog.record("$TAG rotating away from ${previous?.let { LogRedactor.nodeTag(it.key) } ?: "unknown"}")
         // start() re-ranks, and the failure just recorded pushes the dead node
         // down, so the same node is not chosen again immediately. The port is
         // carried over explicitly: it must not silently revert to the default
@@ -641,7 +641,7 @@ object ShardManager {
                 lastError = "no node answered"
                 ConnectionLog.record("$TAG race found nothing in ${RACE_BUDGET_MS}ms")
             } else {
-                ConnectionLog.record("$TAG winner ${chosen.label} in ${winnerLatency.get()}ms")
+                ConnectionLog.record("$TAG winner ${LogRedactor.nodeTag(chosen.key)} in ${winnerLatency.get()}ms")
             }
             return chosen
         } catch (e: Exception) {

@@ -77,10 +77,30 @@ class ShardRefreshJob : android.app.job.JobService() {
          * Register the periodic job. Idempotent: scheduling the same id replaces
          * the previous registration rather than stacking a second one.
          *
-         * Called from [MainActivity.onCreate] rather than a boot receiver, because
-         * `setPersisted(true)` already makes JobScheduler re-register it across
-         * reboots, and a BOOT_COMPLETED receiver would need a permission we do not
-         * otherwise ask for.
+         * Called from [MainActivity.onCreate], and that call site is what makes the
+         * job survive reboots here.
+         *
+         * **No `setPersisted(true)`.** It looks like the obvious way to survive a
+         * reboot, and it is what this code used to do, but JobScheduler rejects a
+         * persisted job unless the app holds `RECEIVE_BOOT_COMPLETED` — and the
+         * rejection is an exception from `schedule()`, not a downgrade. Field log,
+         * twice per launch on a real device:
+         *
+         * ```
+         * ShardRefreshJob could not be scheduled: Requested job cannot be persisted
+         *   without holding android.permission.RECEIVE_BOOT_COMPLETED permission
+         * ```
+         *
+         * So the flag meant to protect the job across reboots was in fact stopping
+         * it from ever being registered at all: no periodic refresh had ever run on
+         * any device, and the node list only advanced when the user opened the app.
+         *
+         * Dropping the flag rather than adding the permission, because the permission
+         * buys nothing here. A non-persisted job is lost on reboot and re-registered
+         * the next time [MainActivity] starts, and this app cannot refresh a node
+         * list usefully without the user opening it to connect anyway. The manifest's
+         * standing rule — request nothing Play Protect scores as boot-persistent
+         * behaviour — is the tiebreaker.
          */
         fun schedule(context: Context) {
             val scheduler = context.getSystemService(JobScheduler::class.java) ?: return
@@ -90,7 +110,6 @@ class ShardRefreshJob : android.app.job.JobService() {
                 // app's users — would otherwise never get an update at all.
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                 .setPeriodic(PERIOD_MS)
-                .setPersisted(true)
                 // Explicitly not requiring charging or idle. Both would mean a
                 // phone that is used all day and charged overnight in a country
                 // where the pool churns daily gets its update at the worst

@@ -751,6 +751,56 @@ object ShardConfigs {
     )
 
     /**
+     * The three Google hosts that must share Gemini's exit IP — and no others.
+     *
+     * An earlier attempt at this used `domain:google.com`, on the theory that the
+     * unit which has to be path-consistent is the whole cookie domain. That is
+     * true of the cookie, but it bought consistency at an unacceptable price:
+     * Gmail, Drive, Docs, Maps, Translate, Play and `dl.google.com` all moved onto
+     * one node hop. Rejected on cost.
+     *
+     * What replaced it is measured rather than reasoned. Two facts, both checked:
+     *
+     * 1. **The node IPs are not the problem.** 68 nodes from the live pool were
+     *    brought up one at a time on a VPS and asked for `gemini.google.com/app`:
+     *    18 had a working exit, and all 18 returned HTTP 200 with the full ~831 KB
+     *    page. Zero challenges. So Gemini does not refuse this pool, and no amount
+     *    of node re-selection was ever going to help.
+     *
+     * 2. **Gemini's boot only touches three cookie-bearing `google.com` hosts.**
+     *    Decoded from the served HTML: the declared `preconnect`/`dns-prefetch`
+     *    set is `gemini.gstatic.com`, `lh3.googleusercontent.com`,
+     *    `ogads-pa`/`waa-pa.clients6.google.com`, `www.google.com`,
+     *    `www.gstatic.com`, `www.googletagmanager.com`. Of those, only
+     *    `www.google.com` is under the session cookie's scope — `gstatic`,
+     *    `googleusercontent` and `googletagmanager` are separate registrable
+     *    domains and carry no Google session cookie, and both `clients6` names are
+     *    already claimed by [SANCTIONED_DOMAINS]. `accounts.google.com` is where
+     *    the session itself lives, and the `ogs.google.com/widget` endpoints are the
+     *    one-Google bar, which only fetches for a signed-in user.
+     *
+     *    Everything else the page mentions — `one`, `myaccount`, `support`, `docs`,
+     *    `drive`, `play`, `admin`, `workspace`, `notebooklm` — appears exclusively
+     *    as an href in the account menu. A link that is never clicked issues no
+     *    request, so it cannot contribute a second source address.
+     *
+     * `full:` rather than `domain:` on all three, so no subdomain is dragged in by
+     * accident: `domain:google.com` was the mistake this list exists to undo, and
+     * `domain:www.google.com` would still be wider than what was verified.
+     *
+     * Cost, stated plainly because the user has to be able to predict it: Google
+     * Search itself now takes the node hop, since Search *is* `www.google.com`.
+     * That is text, kilobytes a query. YouTube, Play, Gmail, Drive, Docs, Maps and
+     * Photos are untouched and stay direct — none of them is one of these three
+     * names, and the rule is scoped so that they cannot match.
+     */
+    private val GOOGLE_SESSION_HOSTS = listOf(
+        "full:accounts.google.com",
+        "full:www.google.com",
+        "full:ogs.google.com",
+    )
+
+    /**
      * Meta's address space, for the parts of WhatsApp that carry no hostname.
      *
      * `geosite:whatsapp` alone does not fix WhatsApp, for exactly the reason
@@ -913,6 +963,19 @@ object ShardConfigs {
             // 4-6. Sanctioned + Telegram + WhatsApp, by name and then by address.
             .put(rule {
                 put("domain", JSONArray().apply { SANCTIONED_DOMAINS.forEach { put(it) } })
+                put("outboundTag", "proxy")
+            })
+            // 4b. The signed-in Google session, and only the three hosts that were
+            //     measured to take part in it. TCP/443 only: Firebase Cloud
+            //     Messaging holds mtalk.google.com:5228-5230, every app's push
+            //     notifications ride it, and an unreachable node must never cost the
+            //     user their notifications. `full:` keeps this to exactly three
+            //     names — see GOOGLE_SESSION_HOSTS for why it is not the whole
+            //     cookie domain.
+            .put(rule {
+                put("domain", JSONArray().apply { GOOGLE_SESSION_HOSTS.forEach { put(it) } })
+                put("network", "tcp")
+                put("port", "443")
                 put("outboundTag", "proxy")
             })
             // 5 exists only to protect 6 from itself. `geoip:facebook` is Meta's

@@ -1949,7 +1949,13 @@ class MainActivity : Activity() {
 
     private fun connectionLogText(tab: LogTab = LogTab.ALL): String {
         val appEvents = ConnectionLog.snapshot()
-        val coreEvents = NativeCore.lastLog().lineSequence().filter(String::isNotBlank).toList()
+        // The core's lines never pass through ConnectionLog.record(), so they are
+        // coded here instead — otherwise the one thing the screen shows in plain
+        // text is the transport's own address and port layout.
+        val coreEvents = NativeCore.lastLog().lineSequence()
+            .filter(String::isNotBlank)
+            .map(LogRedactor::redact)
+            .toList()
         val events = when (tab) {
             LogTab.ALL -> appEvents + coreEvents
             LogTab.APP -> appEvents
@@ -2006,7 +2012,12 @@ class MainActivity : Activity() {
         val fromDisk = runCatching {
             File(filesDir, "connection.log").takeIf { it.isFile }?.readText()
         }.getOrNull()
-        val core = NativeCore.lastLog().lineSequence().filter(String::isNotBlank).toList()
+        // Same reason as connectionLogText(): the core writes its own buffer and
+        // never goes through ConnectionLog.record(), so it is coded on the way out.
+        val core = NativeCore.lastLog().lineSequence()
+            .filter(String::isNotBlank)
+            .map(LogRedactor::redact)
+            .toList()
         val app = fromDisk?.takeIf { it.isNotBlank() } ?: ConnectionLog.snapshot().joinToString("\n")
         return buildString {
             append("MSN-GUARD ")
