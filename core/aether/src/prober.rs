@@ -36,39 +36,73 @@ pub const MASQUE_CIDRS_V4: &[&str] = &[
 
 /// MASQUE gateway seeds, in dial order.
 ///
-/// Order is measured, not guessed. Probing every one of these from a clean host
-/// with a freshly enrolled device certificate and `:protocol = cf-connect-ip`
-/// over HTTP/3 gave:
+/// Order is measured, not guessed. Re-measured 2026-09-02 from an uncensored
+/// host against a **freshly enrolled** device certificate, judging each address
+/// by the only verdict that matters — did it answer the connect-ip CONNECT:
 ///
 /// ```text
 /// 162.159.198.2   -> :status 200   (also the endpoint the account API assigns)
 /// 162.159.198.1   -> :status 200
-/// 162.159.197.1   -> QUIC terminated, error 305
-/// 162.159.196.1   -> no QUIC listener at all
-/// 162.159.195.1   -> no QUIC listener at all
-/// 162.159.192.1   -> no QUIC listener at all
-/// 162.159.197.3   -> no QUIC listener at all
-/// 162.159.193.1   -> no QUIC listener at all
-/// 162.159.192.2   -> no QUIC listener at all
-/// 188.114.96.1    -> no QUIC listener at all
-/// 172.65.251.1    -> no QUIC listener at all
+/// 162.159.197.1   -> QUIC+TLS complete, connect-ip never answered
+/// 162.159.197.2   -> QUIC+TLS complete, connect-ip never answered
+/// 162.159.204.2   -> QUIC+TLS complete, connect-ip never answered
+/// 162.159.204.3   -> QUIC+TLS complete, connect-ip never answered
+/// 162.159.196.1   -> QUIC Initial answered, handshake never completes
+/// 162.159.195.1   -> QUIC Initial answered, handshake never completes
+/// 162.159.192.1   -> QUIC Initial answered, handshake never completes
+/// 162.159.193.1   -> QUIC Initial answered, handshake never completes
+/// 162.159.197.3   -> QUIC Initial answered, handshake never completes
+/// 188.114.96..99  -> QUIC Initial answered (this is the WireGuard edge)
+/// 172.65.251.1    -> nothing at all
 /// ```
 ///
-/// Only the 162.159.198.0/24 pair actually serves connect-ip. The old order put
-/// four dead addresses first, which is why the field log burned its whole HTTP/3
-/// budget on 196.1, 195.1, 192.1 and 197.3 and never reached a working gateway.
+/// Two corrections over the previous list, both from that run:
+///
+///   * "completes the QUIC handshake" is **not** evidence of a gateway. The
+///     197.x and 204.x addresses serve the consumer-masque certificate and then
+///     never answer connect-ip, so an earlier pass that classified peers by
+///     handshake alone counted six gateways where there are two.
+///   * The 196/195/192/193 addresses are ordinary Cloudflare edge and cannot
+///     serve MASQUE at all, so they no longer sit in front of anything. They
+///     stay reachable through the CIDR sweep and the deep scan — nothing is
+///     eliminated, the order just stops spending the user's connect budget on
+///     them first.
 pub const MASQUE_SEEDS: &[&str] = &[
     "162.159.198.2",
     "162.159.198.1",
     "162.159.197.1",
+    "162.159.197.2",
+    "162.159.204.2",
+    "162.159.204.3",
     "162.159.196.1",
-    "162.159.195.1",
     "162.159.192.1",
-    "162.159.197.3",
-    "162.159.193.1",
 ];
 
+/// The addresses measured answering `:status 200` to connect-ip.
+///
+/// Kept separate from [`MASQUE_SEEDS`] because the start path needs to know
+/// *which* peers are worth a second chance on another UDP port. Retrying an
+/// ordinary Cloudflare edge on UDP/500 is pointless — it has no connect-ip
+/// listener on any port — while retrying a real gateway there is the only
+/// escape from a carrier that degrades UDP/443 to this range specifically.
+pub const MASQUE_VERIFIED_GATEWAYS: &[&str] = &["162.159.198.2", "162.159.198.1"];
+
 pub const MASQUE_PORTS: &[u16] = &[443, 500, 1701, 4500, 4443, 8443, 8095];
+
+/// Alternate UDP ports a verified gateway was measured serving connect-ip on.
+///
+/// Measured on both verified gateways with an enrolled certificate: `:status
+/// 200` on 500, 1701, 4500 and 8095 at 86–129 ms — the same latency class as
+/// 443, because it is the same gateway and the same HTTP/3 data plane. 4443 and
+/// 8443 complete the TLS handshake but never answer connect-ip, and 2408
+/// answers nothing, so neither belongs in a start-path ladder that a user waits
+/// on.
+///
+/// This is why the escape from a blocked UDP/443 belongs here and not in the
+/// HTTP/2 pass: another UDP port on the same gateway keeps QUIC, keeps the
+/// throughput, and is known to work. HTTP/2 over TCP is not served connect-ip
+/// by any public Cloudflare edge at all.
+pub const MASQUE_ALT_PORTS: &[u16] = &[500, 1701, 4500, 8095];
 
 pub const MASQUE_CIDRS_V6: &[&str] = &[
     "2606:4700:d0::/48",

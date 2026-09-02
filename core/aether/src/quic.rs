@@ -87,6 +87,19 @@ fn data_check_enabled() -> bool {
 
 const DATA_PROBE_REQUIRED_SUCCESSES: u32 = 2;
 
+/// How many packets one `select!` wake-up may move in a single direction.
+///
+/// The loop used to move exactly one packet per wake-up, then run the whole
+/// tail — `poll_h3`, `drain_datagrams`, `flush` — for that one packet. At
+/// 100 Mbps a 1350-byte path carries roughly 9 000 packets/second, so the tail
+/// ran 9 000 times a second and `flush` allocated a fresh 1350-byte buffer each
+/// time. Draining what is already queued before running the tail amortises it.
+///
+/// Bounded, not unbounded: an unbounded drain would let a fast download hold the
+/// loop indefinitely and starve the timeout branch, which is how the connection
+/// loses its loss-detection timers.
+const PACKET_BATCH: usize = 32;
+
 pub struct Channels {
     pub outbound_tx: mpsc::Sender<Vec<u8>>,
     pub inbound_rx: mpsc::Receiver<Vec<u8>>,
@@ -248,7 +261,8 @@ pub async fn run(
         noize::pre_handshake(sock.as_ref(), peer, &cfg.noize).await;
     }
 
-    flush(&mut conn, &sockets).await?;
+    let mut send_buf = vec![0u8; MAX_DATAGRAM_SIZE];
+    flush(&mut conn, &sockets, &mut send_buf).await?;
 
     let mut out_buf = vec![0u8; 65535];
     let mut keepalive_interval = tokio::time::interval(Duration::from_secs(20));
@@ -277,9 +291,20 @@ pub async fn run(
 
         let timeout = conn.timeout();
 
+        // NOT `biased`. With biased polling tokio takes the first ready arm in
+        // declaration order, and `net_rx` is never empty during a download — so
+        // the arms below it (device traffic out, and `conn.on_timeout()`) were
+        // never polled at all. Two things broke as a result:
+        //
+        //   * the device's own TCP ACKs could not leave the phone, so every
+        //     download collapsed to a stall-and-recover crawl;
+        //   * QUIC loss detection never ran, so a lost packet was only noticed
+        //     when the peer happened to retransmit.
+        //
+        // Unbiased polling starts at a random arm each time, so every arm makes
+        // progress. `PACKET_BATCH` is what keeps that efficient: each arm drains
+        // a bounded burst per wake-up instead of one packet.
         tokio::select! {
-            biased;
-
             _ = keepalive_interval.tick() => {
                 if conn.is_established() {
                     if let Err(e) = conn.send_ack_eliciting() {
@@ -309,6 +334,22 @@ pub async fn run(
                 let info = quiche::RecvInfo { from, to: to_local };
                 if let Err(e) = conn.recv(&mut data, info) {
                     log::trace!("recv error: {e}");
+                }
+
+                // Drain whatever else the socket reader already has queued before
+                // falling through to poll_h3/drain_datagrams/flush. Under load the
+                // channel is never empty, so without this the expensive tail runs
+                // once per received packet.
+                for _ in 1..PACKET_BATCH {
+                    match net_rx.try_recv() {
+                        Ok((to_local, from, mut data)) => {
+                            let info = quiche::RecvInfo { from, to: to_local };
+                            if let Err(e) = conn.recv(&mut data, info) {
+                                log::trace!("recv error: {e}");
+                            }
+                        }
+                        Err(_) => break,
+                    }
                 }
             }
 
@@ -361,6 +402,26 @@ pub async fn run(
                                 Err(e) => log::trace!("encap: {e}"),
                             },
                             _ => predelivery_drops += 1,
+                        }
+
+                        // Same batching as the inbound arm: during an upload the
+                        // TUN reader keeps this channel full, and one packet per
+                        // wake-up is what made the upload direction slow.
+                        if let (Some(sid), true) = (req_stream, ready_fired) {
+                            for _ in 1..PACKET_BATCH {
+                                match internals.outbound_rx.try_recv() {
+                                    Ok(next) => match masque::encode_ip_datagram(sid, &next) {
+                                        Ok(framed) => {
+                                            if let Err(e) = conn.dgram_send(&framed) {
+                                                log::trace!("dgram_send: {e}");
+                                                break;
+                                            }
+                                        }
+                                        Err(e) => log::trace!("encap: {e}"),
+                                    },
+                                    Err(_) => break,
+                                }
+                            }
                         }
                     }
                     None => {
@@ -452,7 +513,7 @@ pub async fn run(
             }
         }
 
-        flush(&mut conn, &sockets).await?;
+        flush(&mut conn, &sockets, &mut send_buf).await?;
 
         if conn.is_closed() {
             if !established_ever && !ech_retried && current_ech.is_some() {
@@ -474,7 +535,7 @@ pub async fn run(
                     h3_conn = None;
                     req_stream = None;
                     capsules = CapsuleParser::new();
-                    flush(&mut conn, &sockets).await?;
+                    flush(&mut conn, &sockets, &mut send_buf).await?;
                     continue;
                 }
             }
@@ -661,14 +722,19 @@ fn drain_datagrams(
     delivered
 }
 
+/// Drain quiche's send queue onto the wire.
+///
+/// The scratch buffer is caller-owned on purpose. This runs once per loop
+/// iteration — thousands of times a second on a fast tunnel — and allocating a
+/// fresh 1350-byte `Vec` each call put a hot allocation directly in the data
+/// path.
 async fn flush(
     conn: &mut quiche::Connection,
     sockets: &HashMap<SocketAddr, Arc<UdpSocket>>,
+    out: &mut [u8],
 ) -> Result<()> {
-    let mut out = vec![0u8; MAX_DATAGRAM_SIZE];
-
     loop {
-        match conn.send(&mut out) {
+        match conn.send(out) {
             Ok((write, send_info)) => {
                 if let Some(sock) = sockets.get(&send_info.from) {
                     sock.send_to(&out[..write], send_info.to).await?;
@@ -976,6 +1042,17 @@ fn describe_connection_error(err: &quiche::ConnectionError) -> String {
     text
 }
 
+/// The `verify_stage` marker meaning "QUIC and TLS both completed and the
+/// connect-ip request was sent".
+///
+/// Public because `is_identity_rejection` in the dialler keys off it: on the QUIC
+/// path an authorization refusal arrives as a `CONNECTION_CLOSE` carrying TLS
+/// alert 49, with no `:status` to parse, and the *stage* is what separates that
+/// from a certificate rejected during the handshake. Sharing the constant keeps
+/// the two in step — a reworded message here would otherwise silently stop the
+/// classifier from recognising a refused identity.
+pub const CONNECT_STAGE_AFTER_REQUEST: &str = "after the connect-ip request, before any :status";
+
 /// How far the verify attempt got before it stopped.
 ///
 /// The stage is the diagnostically valuable half. "Never established" means the
@@ -988,7 +1065,7 @@ fn verify_stage(conn: &quiche::Connection, connect_sent: bool) -> &'static str {
     if !conn.is_established() {
         "during the QUIC handshake"
     } else if connect_sent {
-        "after the connect-ip request, before any :status"
+        CONNECT_STAGE_AFTER_REQUEST
     } else {
         "after the handshake, before the connect-ip request"
     }

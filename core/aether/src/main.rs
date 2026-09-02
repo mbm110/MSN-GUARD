@@ -838,7 +838,7 @@ async fn select_peer(
                     enable_restricted_h2();
                     let mut h2_probe = probe.clone();
                     h2_probe.ports = masque_h2_ports(&probe.ports);
-                    match prober::verify_cached_gateways(&h2_probe, masque_gateway_peers()).await {
+                    match prober::verify_cached_gateways(&h2_probe, masque_h2_gateway_peers()).await {
                         Some(best) => best,
                         None => {
                             // See `hunt_masque_peer`: a wide HTTP/2 sweep cannot
@@ -1011,11 +1011,15 @@ fn masque_h2_ports(base: &[u16]) -> Vec<u16> {
 /// How many distinct gateways may reject the device certificate before we stop
 /// dialling more of them.
 ///
-/// A `4xx` on the connect-ip CONNECT is the edge saying *this client certificate
-/// is not valid for MASQUE*. That is a property of the identity, not of the peer,
-/// so once several unrelated gateways agree there is nothing left to discover by
-/// working through the rest of the list.
-const IDENTITY_REJECTED_LIMIT: u32 = 3;
+/// Lowered from 3 to 2, because the peer list it counts against is now short and
+/// honest. Only two addresses in the fleet answer connect-ip; if both refuse the
+/// certificate, no third opinion exists to wait for, and the old threshold of 3
+/// could never be reached — which is half of why the field log looped forever
+/// instead of re-enrolling.
+///
+/// Still not 1: a single refusal can be a gateway-local hiccup, and re-registering
+/// a device on the strength of one answer would churn identities on a bad night.
+const IDENTITY_REJECTED_LIMIT: u32 = 2;
 
 /// The obfuscation profile GOOL's outer WARP tunnel is raised with.
 ///
@@ -1028,47 +1032,86 @@ const GOOL_OUTER_PROFILE: &str = "balanced";
 
 /// How many MASQUE gateways the HTTP/3 pass may try.
 ///
-/// HTTP/3 is the only transport that works: measured against every gateway in
-/// `prober::MASQUE_SEEDS`, `162.159.198.2` and `162.159.198.1` answer
-/// `:status 200` over HTTP/3, while HTTP/2 gets `RST_STREAM` from those same two
-/// and a content-free `400` from everything else. So the budget belongs here,
-/// not in the fallback. Dead addresses fail fast — no QUIC listener means no
-/// handshake, not a timeout — so a larger list is cheap.
+/// Twelve rungs, unchanged, so the connect budget is exactly what it was — but
+/// what sits in those rungs is now measured. `masque_gateway_peers()` fills the
+/// first ten with the two addresses that answer connect-ip, each on `443` and
+/// then on the four alternate UDP ports they were measured serving. The last two
+/// are the next seeds on `443`, in case Cloudflare moves the pool.
+///
+/// The old list spent eight of twelve rungs, roughly 40 seconds, on addresses
+/// that answer a QUIC Initial and nothing more. Those are still reachable
+/// through the CIDR sweep and the deep scan; they are just no longer in front of
+/// the gateways that work.
 const MASQUE_H3_PROBE_LIMIT: usize = 12;
 
 /// How many gateways the HTTP/2 fallback may try.
 ///
 /// Kept small on purpose. No Cloudflare edge was observed serving connect-ip
-/// over HTTP/2, so this pass exists only in case a network blocks UDP/443
-/// outright and Cloudflare later enables extended CONNECT on TCP. Every attempt
-/// costs a full 8-second verify timeout, and the ~2-minute stall in the field log
-/// was this pass grinding through 30 peers that could never work.
+/// over HTTP/2, so this pass exists only in case a network blocks UDP outright
+/// and Cloudflare later enables extended CONNECT on TCP. Every attempt costs a
+/// full 8-second verify timeout, and the ~2-minute stall in the field log was
+/// this pass grinding through 30 peers that could never work.
 const MASQUE_H2_PROBE_LIMIT: usize = 4;
 
-/// MASQUE gateway candidates, in dial order. Used by both transports.
+/// MASQUE gateway candidates, in dial order, for the HTTP/3 start path.
 ///
 /// This used to walk `consts::CDN_ANYCAST_POOL` — 104.16-104.28 and
 /// 172.64-172.67 — which is Cloudflare's *website* CDN. Those edges complete TCP
 /// and TLS happily and then either answer the connect-ip CONNECT with `400` or
-/// accept the stream and never reply. That is exactly the `status 400` /
-/// `h2 verify timeout` mixture the Iranian field logs showed across 30
-/// consecutive peers, not one of which can ever serve MASQUE.
+/// accept the stream and never reply.
 ///
-/// The gateways that do serve connect-ip live in `prober::MASQUE_CIDRS_V4`
-/// (162.159.192-198, 172.65.251, 188.114.96-99) and are seeded by
-/// `prober::MASQUE_SEEDS`. Dial the seeds first, then the head of each MASQUE
-/// /24 — `masque_cidrs_v4()` already moves the Zero Trust range to the front
-/// when `AETHER_TEAM` is set.
+/// The order below is built from a re-measurement on 2026-09-02 with a freshly
+/// enrolled device certificate, scoring every address by whether it answered the
+/// connect-ip CONNECT rather than by whether its TLS handshake completed:
+///
+///   1. `prober::MASQUE_VERIFIED_GATEWAYS` on `consts::QUIC_PORT` — the two
+///      addresses that answered `:status 200`.
+///   2. The same two gateways on `prober::MASQUE_ALT_PORTS`. This is the rung the
+///      field log needed and did not have. Its whole point is a carrier that
+///      degrades UDP/443 toward `162.159.19x.x` specifically: in that log every
+///      gateway timed out on `443` while WoW connected on `188.114.97.1:1701/UDP`
+///      in the same minute, so UDP itself was fine. Both verified gateways answer
+///      connect-ip on 500, 1701, 4500 and 8095 at 86-129 ms — the same latency
+///      class as 443, because it is the same gateway on the same HTTP/3 data
+///      plane. Nothing about the tunnel after connect changes, which is why the
+///      escape lives here and not in the HTTP/2 pass.
+///   3. The remaining `prober::MASQUE_SEEDS` on the documented port, so a moved
+///      pool is still found.
+///   4. Hosts `.1`/`.2` of every MASQUE /24 — `masque_cidrs_v4()` already moves
+///      the Zero Trust range to the front when `AETHER_TEAM` is set.
 fn masque_gateway_peers() -> Vec<SocketAddr> {
     let mut out: Vec<SocketAddr> = Vec::new();
     let mut seen: HashSet<SocketAddr> = HashSet::new();
 
+    let mut push = |out: &mut Vec<SocketAddr>, ip: Ipv4Addr, port: u16| {
+        let peer = SocketAddr::new(IpAddr::V4(ip), port);
+        if seen.insert(peer) {
+            out.push(peer);
+        }
+    };
+
+    let verified: Vec<Ipv4Addr> = prober::MASQUE_VERIFIED_GATEWAYS
+        .iter()
+        .filter_map(|entry| entry.parse().ok())
+        .collect();
+
+    for ip in &verified {
+        push(&mut out, *ip, consts::QUIC_PORT);
+    }
+
+    // Port-major, not gateway-major: one port across both gateways before moving
+    // on. Blocking is a property of the port on this path, not of the address, so
+    // trying both gateways on 500 discriminates a blocked port in two attempts
+    // instead of walking one gateway through every port first.
+    for &port in prober::MASQUE_ALT_PORTS {
+        for ip in &verified {
+            push(&mut out, *ip, port);
+        }
+    }
+
     for seed in prober::MASQUE_SEEDS {
         if let Ok(ip) = seed.parse::<Ipv4Addr>() {
-            let peer = SocketAddr::new(IpAddr::V4(ip), consts::QUIC_PORT);
-            if seen.insert(peer) {
-                out.push(peer);
-            }
+            push(&mut out, ip, consts::QUIC_PORT);
         }
     }
 
@@ -1079,15 +1122,25 @@ fn masque_gateway_peers() -> Vec<SocketAddr> {
         };
         let o = base.octets();
         for host in [1u8, 2] {
-            let ip = Ipv4Addr::new(o[0], o[1], o[2], host);
-            let peer = SocketAddr::new(IpAddr::V4(ip), consts::QUIC_PORT);
-            if seen.insert(peer) {
-                out.push(peer);
-            }
+            push(&mut out, Ipv4Addr::new(o[0], o[1], o[2], host), consts::QUIC_PORT);
         }
     }
 
     out
+}
+
+/// The same candidates, restricted to what the HTTP/2 pass can actually dial.
+///
+/// `MASQUE_ALT_PORTS` are UDP ports on which a *QUIC* gateway answers connect-ip.
+/// Handing them to an HTTP/2 dialler would open TCP connections to ports nothing
+/// listens on for TCP, spending an 8-second verify timeout each to learn nothing.
+/// The HTTP/2 pass therefore sees exactly the `:443` entries it saw before this
+/// ladder existed.
+fn masque_h2_gateway_peers() -> Vec<SocketAddr> {
+    masque_gateway_peers()
+        .into_iter()
+        .filter(|peer| peer.port() == consts::QUIC_PORT)
+        .collect()
 }
 
 async fn quick_verify_masque_peer(
@@ -1146,6 +1199,52 @@ enum PeerOutcome {
     IdentityRejected,
     /// Transport-level failure: timeout, reset, TLS error.
     Unreachable,
+}
+
+/// Ask the API for a fresh MASQUE certificate after gateways refused the current
+/// one, and persist it.
+///
+/// This is the missing half of the field failure. The gateway that answered
+/// `TLS alert 49 (access_denied)` had read the certificate and refused it, but
+/// nothing in the connect path could act on that: `ensure_masque_enrolled`
+/// returns the saved certificate untouched while it is not near expiry, so every
+/// reconnect replayed the same refused certificate against the same gateways —
+/// three identical attempts in the 2026-09-02 log with no enrolment in between.
+///
+/// Returns `None` when a fresh certificate could not be obtained, so the caller
+/// still reports the honest failure instead of retrying blindly.
+async fn refresh_refused_masque_identity(
+    identity: &account::Identity,
+    options: &StartOptions,
+) -> Option<account::Identity> {
+    crate::ffi::record_log("MASQUE identity refused; requesting a fresh certificate");
+
+    let enrollment = match account::renew_masque_certificate(identity).await {
+        Ok(enrollment) => enrollment,
+        Err(error) => {
+            log::warn!("[-] could not re-enrol a MASQUE key: {error}");
+            crate::ffi::record_log(format!("Could not refresh the MASQUE certificate: {error}"));
+            return None;
+        }
+    };
+
+    // `renew_masque_certificate` falls back to the certificate on disk when the
+    // API is merely unreachable. That is right for a normal connect and useless
+    // here: the certificate we already hold is the one being refused, so dialling
+    // again with it would just repeat the loop.
+    if !enrollment.renewed {
+        crate::ffi::record_log("The MASQUE certificate could not be renewed right now");
+        return None;
+    }
+
+    let refreshed = apply_masque_enrollment(identity.clone(), enrollment);
+    if let Err(error) = config::save(&masque_config_path(options), &refreshed) {
+        // Not fatal: the certificate is valid in memory and this connect can use
+        // it. Only the next cold start pays for the lost write.
+        log::warn!("[!] could not save the refreshed masque identity: {error}");
+    }
+    crate::ffi::record_log("New MASQUE certificate issued; retrying the gateways");
+    Some(refreshed)
 }
 
 /// Turn an identity-rejection count into the user-facing failure.
@@ -1248,30 +1347,48 @@ async fn try_masque_peer(
     }
 }
 
-/// True when the edge answered the CONNECT with an *authorization* verdict.
+/// True when the edge answered with an *authorization* verdict on our identity.
 ///
-/// Deliberately narrow: `401` and `403` only.
+/// Two shapes count, and both were seen in the field:
 ///
-/// `400` used to count, which produced a false diagnosis. Probing every gateway
-/// from a clean host with a freshly enrolled certificate showed that no
-/// Cloudflare edge serves connect-ip over HTTP/2 at all — the real gateways
-/// answer `RST_STREAM`, and every other address answers `400` no matter what is
-/// sent, including a request carrying no client certificate. So a `400` says
-/// nothing about our identity; treating it as one is what produced
-/// "re-register the WARP device" while the certificate was in fact fine.
+///   * `connect-ip status 401` / `403` — the gateway answered the CONNECT and
+///     refused it. `400` deliberately does **not** count: probing every gateway
+///     from a clean host with a freshly enrolled certificate showed no
+///     Cloudflare edge serves connect-ip over HTTP/2 at all — the real gateways
+///     answer `RST_STREAM` and every other address answers `400` no matter what
+///     is sent, including a request carrying no client certificate. So a `400`
+///     says nothing about our identity, and counting it is what produced
+///     "re-register the WARP device" while the certificate was in fact fine.
+///   * A `CONNECTION_CLOSE` carrying **TLS alert 49 (`access_denied`)** raised
+///     *after* the connect-ip request. RFC 9001 §4.8 maps a TLS alert onto QUIC
+///     transport code `0x100 + alert`, so on the QUIC path an authorization
+///     refusal arrives as a connection close rather than as an HTTP status —
+///     there is no `:status` line to parse. The 2026-09-02 field log shows
+///     exactly this on `162.159.197.2`, and it was classified `Unreachable`, so
+///     the re-enrolment path was never armed and all three connect attempts
+///     reused the same refused certificate.
 ///
-/// A `403` is different: over HTTP/3 the gateway returns it after accepting our
-/// certificate at the TLS layer, so it is a genuine verdict on the identity or
-/// on the requested protocol.
+/// The stage requirement is what keeps this narrow. `verify_stage()` only says
+/// "after the connect-ip request" once QUIC is established and the request has
+/// been sent, which means the gateway had already accepted our certificate at
+/// the TLS layer and read the CONNECT. An alert 49 during the handshake — or an
+/// alert 40 (`handshake_failure`), which is what the non-gateway addresses send
+/// — stays a transport failure and still moves on to the next peer.
 fn is_identity_rejection(error: &AetherError) -> bool {
     let text = error.to_string();
-    let Some(rest) = text.split("connect-ip status ").nth(1) else {
-        return false;
-    };
-    rest.split_whitespace()
-        .next()
-        .and_then(|code| code.parse::<u16>().ok())
-        .is_some_and(|code| matches!(code, 401 | 403))
+
+    if let Some(rest) = text.split("connect-ip status ").nth(1) {
+        if rest
+            .split_whitespace()
+            .next()
+            .and_then(|code| code.parse::<u16>().ok())
+            .is_some_and(|code| matches!(code, 401 | 403))
+        {
+            return true;
+        }
+    }
+
+    text.contains(quic::CONNECT_STAGE_AFTER_REQUEST) && text.contains("TLS alert 49")
 }
 
 async fn want_quick_reconnect(cached: &lastconn::LastConnection) -> bool {
@@ -1412,7 +1529,7 @@ async fn hunt_masque_peer(
 }
 
 async fn run_masque(
-    identity: account::Identity,
+    mut identity: account::Identity,
     ech: Option<Vec<u8>>,
     listen: SocketAddr,
     lastconn_path: String,
@@ -1496,7 +1613,21 @@ async fn run_masque(
         match dial_masque_pass(&identity, &h3_candidates, options).await {
             PassOutcome::Connected(peer) => quick_peer = Some(peer),
             PassOutcome::IdentityRejected(count) if count >= IDENTITY_REJECTED_LIMIT => {
-                return Err(identity_rejected_error(count));
+                // Refused certificate, not a dead peer list: re-enrol and dial
+                // again rather than surfacing a failure the user cannot act on.
+                match refresh_refused_masque_identity(&identity, options).await {
+                    Some(fresh) => {
+                        identity = fresh;
+                        match dial_masque_pass(&identity, &h3_candidates, options).await {
+                            PassOutcome::Connected(peer) => quick_peer = Some(peer),
+                            PassOutcome::IdentityRejected(count) => {
+                                return Err(identity_rejected_error(count));
+                            }
+                            PassOutcome::Exhausted => {}
+                        }
+                    }
+                    None => return Err(identity_rejected_error(count)),
+                }
             }
             PassOutcome::IdentityRejected(count) => identity_rejections = count,
             PassOutcome::Exhausted => {}
@@ -1508,7 +1639,7 @@ async fn run_masque(
                 "HTTP/3 did not accept a known gateway; switching to HTTP/2 with TLS fragmentation",
             );
             enable_restricted_h2();
-            for peer in masque_gateway_peers()
+            for peer in masque_h2_gateway_peers()
                 .into_iter()
                 .take(MASQUE_H2_PROBE_LIMIT)
             {
@@ -1522,7 +1653,19 @@ async fn run_masque(
             match dial_masque_pass_from(&identity, &known, options, identity_rejections).await {
                 PassOutcome::Connected(peer) => quick_peer = Some(peer),
                 PassOutcome::IdentityRejected(count) => {
-                    return Err(identity_rejected_error(count));
+                    match refresh_refused_masque_identity(&identity, options).await {
+                        Some(fresh) => {
+                            identity = fresh;
+                            match dial_masque_pass(&identity, &known, options).await {
+                                PassOutcome::Connected(peer) => quick_peer = Some(peer),
+                                PassOutcome::IdentityRejected(count) => {
+                                    return Err(identity_rejected_error(count));
+                                }
+                                PassOutcome::Exhausted => {}
+                            }
+                        }
+                        None => return Err(identity_rejected_error(count)),
+                    }
                 }
                 PassOutcome::Exhausted => {}
             }
@@ -3202,6 +3345,59 @@ mod tests {
         }
     }
 
+    /// The rung the field log needed: both verified gateways on each alternate
+    /// UDP port, before the unmeasured seeds.
+    #[test]
+    fn alt_port_ladder_follows_the_verified_gateways() {
+        let peers = masque_gateway_peers();
+
+        let index = |text: &str| {
+            let want: SocketAddr = text.parse().unwrap();
+            peers.iter().position(|p| *p == want)
+        };
+
+        // 443 on both verified gateways first, then port-major across the
+        // alternates, then the unmeasured seeds.
+        let last_443 = index("162.159.198.1:443").expect("verified gateway on 443");
+        let first_alt = index("162.159.198.2:500").expect("verified gateway on 500");
+        let first_seed = index("162.159.197.1:443").expect("seed on 443");
+        assert!(last_443 < first_alt);
+        assert!(first_alt < first_seed);
+
+        // Port-major: both gateways on 500 before either reaches 1701.
+        assert!(index("162.159.198.1:500").unwrap() < index("162.159.198.2:1701").unwrap());
+
+        for &port in prober::MASQUE_ALT_PORTS {
+            for gateway in prober::MASQUE_VERIFIED_GATEWAYS {
+                assert!(
+                    index(&format!("{gateway}:{port}")).is_some(),
+                    "{gateway}:{port} must be on the ladder"
+                );
+            }
+        }
+
+        // Ports never measured serving connect-ip must not cost a user-visible
+        // verify timeout on the start path.
+        for text in ["162.159.198.2:4443", "162.159.198.2:8443", "162.159.198.2:2408"] {
+            assert!(index(text).is_none(), "{text} must not be on the ladder");
+        }
+
+        // The whole ladder still fits the rungs the HTTP/3 pass will walk.
+        let ladder = prober::MASQUE_VERIFIED_GATEWAYS.len() * (1 + prober::MASQUE_ALT_PORTS.len());
+        assert!(ladder <= MASQUE_H3_PROBE_LIMIT);
+    }
+
+    /// The HTTP/2 pass must never dial a UDP-only port over TCP.
+    #[test]
+    fn http2_peers_stay_on_443() {
+        let peers = masque_h2_gateway_peers();
+        assert!(!peers.is_empty());
+        for peer in &peers {
+            assert_eq!(peer.port(), consts::QUIC_PORT, "{peer} is not a TCP port");
+        }
+        assert_eq!(peers.first(), Some(&"162.159.198.2:443".parse().unwrap()));
+    }
+
     /// The gateway the enrollment response names must win over the stale
     /// WireGuard endpoint from registration.
     #[test]
@@ -3349,6 +3545,29 @@ mod tests {
         assert!(is_identity_rejection(&AetherError::Other(
             "connect-ip status 403".to_string()
         )));
+
+        // The field signature: a CONNECTION_CLOSE carrying TLS alert 49 raised
+        // after the connect-ip request was sent. The gateway read the certificate
+        // and refused it, so this must reach the re-enrolment path — treating it
+        // as "next gateway" is what looped three identical attempts in the log.
+        assert!(is_identity_rejection(&AetherError::Masque(format!(
+            "verify {}: TLS alert 49 (access_denied)",
+            quic::CONNECT_STAGE_AFTER_REQUEST
+        ))));
+
+        // Alert 49 *before* the request is a TLS-layer refusal of the handshake
+        // itself, not a verdict on connect-ip: the peer may simply not be a
+        // gateway. It stays a transport failure so the dialler moves on.
+        assert!(!is_identity_rejection(&AetherError::Masque(
+            "verify never established: TLS alert 49 (access_denied)".to_string()
+        )));
+
+        // Other alerts at the same stage are not identity verdicts. 45 means the
+        // certificate expired, which the expiry check already handles.
+        assert!(!is_identity_rejection(&AetherError::Masque(format!(
+            "verify {}: TLS alert 45 (certificate_expired)",
+            quic::CONNECT_STAGE_AFTER_REQUEST
+        ))));
     }
 
     #[test]

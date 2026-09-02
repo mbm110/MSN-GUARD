@@ -940,6 +940,20 @@ pub async fn ensure_masque_enrolled(identity: &Identity) -> Result<MasqueEnrollm
         log::info!("[+] enrolling MASQUE key for device {}", identity.device_id);
     }
 
+    renew_masque_certificate(identity).await
+}
+
+/// Enrol a brand-new MASQUE key regardless of what is on disk.
+///
+/// Split out of [`ensure_masque_enrolled`], which returns the saved certificate
+/// untouched whenever it is present and not near expiry. That early return is
+/// right for a normal connect and wrong for the one case the field log exposed:
+/// a gateway that read the certificate and *refused* it (TLS alert 49
+/// `access_denied` after the connect-ip request). Such a certificate is fresh by
+/// the clock and useless on the wire, so the only thing that clears it is asking
+/// the API for another one. Without this entry point every reconnect replayed the
+/// same refused certificate against the same gateways forever.
+pub async fn renew_masque_certificate(identity: &Identity) -> Result<MasqueEnrollment> {
     let keypair = generate_masque_keypair()?;
     match enroll_key(
         &identity.device_id,
@@ -974,9 +988,7 @@ pub async fn ensure_masque_enrolled(identity: &Identity) -> Result<MasqueEnrollm
         // that no longer exists, and keeping it produces exactly the failure this
         // whole change is meant to surface: a tunnel that handshakes and carries
         // nothing. Propagate it so the caller can re-register.
-        Err(AetherError::IdentityRefused(reason)) => {
-            Err(AetherError::IdentityRefused(reason))
-        }
+        Err(AetherError::IdentityRefused(reason)) => Err(AetherError::IdentityRefused(reason)),
         Err(error) if cert_still_usable(identity) => {
             log::warn!(
                 "[!] key enrollment failed ({error}); keeping the certificate already on disk"
