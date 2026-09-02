@@ -55,40 +55,6 @@ object ShardHealth {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     /**
-     * How much a node that the destination refuses is pushed down the order.
-     *
-     * Deliberately modest, and it is a *penalty on the sort key*, never an
-     * exclusion: such a node still carries everything else perfectly, so a pool
-     * where every exit is refused must keep working. 2 s is enough to lose to any
-     * comparable node and not enough to lose to a broken one.
-     *
-     * Measured on the live pool it costs nothing anyway: the refused exits were
-     * the slow ones (1326 ms and worse) and the accepted ones the fast ones
-     * (867 ms), so preferring an accepted exit improves latency rather than
-     * trading it away.
-     */
-    private const val REFUSED_EXIT_PENALTY_MS = 2_000
-
-    /** Stored reach verdicts. 0 is also what every pre-existing entry reads as. */
-    const val REACH_UNKNOWN = 0
-    const val REACH_USABLE = 1
-    const val REACH_REFUSED = 2
-
-    /**
-     * How long a stored verdict is trusted, in hours.
-     *
-     * A verdict must expire, or a node whose operator moves it to a served exit
-     * would carry its penalty forever and could only be forgiven by the user
-     * resetting the transport. Six hours matches the subscription refresh, so a
-     * node is re-judged about as often as the pool itself changes.
-     *
-     * Expiry is why the stamp exists at all — and it also means an entry written
-     * by an older version, which has no stamp, reads as expired rather than as a
-     * verdict, so an upgrade starts from measurement instead of from a guess.
-     */
-    private const val REACH_TTL_HOURS = 6
-
-    /**
      * What we know about one node.
      *
      * @param latencyMs last successful probe, 0 if never measured.
@@ -96,40 +62,14 @@ object ShardHealth {
      * @param failures consecutive failures, reset to 0 by any success.
      * @param kbps last measured download rate, 0 if never measured. See
      *   [recordThroughput] for why latency alone is not enough.
-     * @param reach whether the destination that geolocates its callers will serve
-     *   this exit — see [ShardReach]. [REACH_UNKNOWN] until measured, which is
-     *   what every entry written by an older version reads as.
-     * @param reachAtMs when [reach] was measured. A verdict older than
-     *   [REACH_TTL_HOURS] is treated as unmeasured — see [reachEffective].
      */
     data class Score(
         val latencyMs: Int,
         val streak: Int,
         val failures: Int,
         val kbps: Int = 0,
-        val reach: Int = REACH_UNKNOWN,
-        val reachAtMs: Long = 0L,
     ) {
         val everWorked: Boolean get() = latencyMs > 0
-
-        /**
-         * The verdict, or [REACH_UNKNOWN] once it is too old to trust.
-         *
-         * Everything reads this rather than [reach] directly, so an expired
-         * verdict stops shaping the order and gets re-measured on the next race,
-         * while the stored value survives for the writers that only update one
-         * other field.
-         */
-        val reachEffective: Int
-            get() = if (reach == REACH_UNKNOWN || isReachExpired()) REACH_UNKNOWN else reach
-
-        private fun isReachExpired(): Boolean {
-            if (reachAtMs <= 0L) return true
-            val age = System.currentTimeMillis() - reachAtMs
-            // A clock moved backwards reads as expired rather than as fresh
-            // forever, which is the safe direction: it costs one measurement.
-            return age < 0L || age > REACH_TTL_HOURS * 60L * 60L * 1000L
-        }
 
         /**
          * Sort key: lower is tried earlier.
@@ -145,20 +85,8 @@ object ShardHealth {
             // Two consecutive successes are worth roughly a second of latency:
             // enough to prefer a steady 2 s node over a flaky 1.2 s one, not
             // enough to bury a genuinely fast newcomer.
-            else -> latencyMs - (streak.coerceAtMost(5) * 500) - throughputBonus() +
-                refusedExitPenalty()
+            else -> latencyMs - (streak.coerceAtMost(5) * 500) - throughputBonus()
         }
-
-        /**
-         * Penalty for an exit the destination refuses to serve. See
-         * [REFUSED_EXIT_PENALTY_MS] for why it is a penalty and not a filter.
-         *
-         * Applies only inside the "known-good" branch above, so it can reorder
-         * working nodes among themselves and can never promote a failing node or
-         * demote one below the known-bad tier.
-         */
-        private fun refusedExitPenalty(): Int =
-            if (reachEffective == REACH_REFUSED) REFUSED_EXIT_PENALTY_MS else 0
 
         /**
          * How much measured bandwidth is allowed to outweigh probe latency.
@@ -194,11 +122,6 @@ object ShardHealth {
             // Absent in entries written by older versions, which read back as 0
             // and simply score no bonus until the node is measured again.
             kbps = parts.getOrNull(3)?.toIntOrNull() ?: 0,
-            // Same: an older entry reads as REACH_UNKNOWN, i.e. no penalty, so an
-            // upgrade cannot reorder the pool until each node is measured.
-            reach = parts.getOrNull(4)?.toIntOrNull() ?: REACH_UNKNOWN,
-            // Absent in an older entry, which therefore reads as expired.
-            reachAtMs = parts.getOrNull(5)?.toLongOrNull() ?: 0L,
         )
     }
 
@@ -218,11 +141,7 @@ object ShardHealth {
             latencyMs
         }
         prefs(context).edit()
-            .putString(
-                node.key,
-                "$blended:${previous.streak + 1}:0:${previous.kbps}" +
-                    ":${previous.reach}:${previous.reachAtMs}"
-            )
+            .putString(node.key, "$blended:${previous.streak + 1}:0:${previous.kbps}")
             .apply()
     }
 
@@ -248,54 +167,17 @@ object ShardHealth {
         prefs(context).edit()
             .putString(
                 node.key,
-                "${previous.latencyMs}:${previous.streak}:${previous.failures}" +
-                    ":$blended:${previous.reach}:${previous.reachAtMs}"
+                "${previous.latencyMs}:${previous.streak}:${previous.failures}:$blended"
             )
             .apply()
     }
-
-    /**
-     * Record whether the destination that geolocates its callers will serve this
-     * exit — see [ShardReach] for how that is measured for under a kilobyte.
-     *
-     * [ShardReach.Verdict.UNKNOWN] is not written at all: a check that could not
-     * run is not evidence, and overwriting a real verdict with it would make the
-     * order flap on a bad network. Only a definite answer is stored.
-     */
-    fun recordReach(context: Context, node: ShardNode, verdict: ShardReach.Verdict) {
-        val value = when (verdict) {
-            ShardReach.Verdict.USABLE -> REACH_USABLE
-            ShardReach.Verdict.WALLED -> REACH_REFUSED
-            ShardReach.Verdict.UNKNOWN -> return
-        }
-        val previous = score(context, node)
-        // Written even when the verdict is unchanged, because the stamp is what
-        // keeps it from expiring — but only the stamp moves, so this is not a
-        // reordering.
-        prefs(context).edit()
-            .putString(
-                node.key,
-                "${previous.latencyMs}:${previous.streak}:${previous.failures}" +
-                    ":${previous.kbps}:$value:${System.currentTimeMillis()}"
-            )
-            .apply()
-    }
-
-    /** True when this node's exit was measured, recently, and refused. */
-    fun isRefusedExit(context: Context, node: ShardNode): Boolean =
-        score(context, node).reachEffective == REACH_REFUSED
-
-    /** True when this node's exit was measured, recently, and accepted. */
-    fun isUsableExit(context: Context, node: ShardNode): Boolean =
-        score(context, node).reachEffective == REACH_USABLE
 
     fun recordFailure(context: Context, node: ShardNode) {
         val previous = score(context, node)
         prefs(context).edit()
             .putString(
                 node.key,
-                "${previous.latencyMs}:0:${previous.failures + 1}:${previous.kbps}" +
-                    ":${previous.reach}:${previous.reachAtMs}"
+                "${previous.latencyMs}:0:${previous.failures + 1}:${previous.kbps}"
             )
             .apply()
     }

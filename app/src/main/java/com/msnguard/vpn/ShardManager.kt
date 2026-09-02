@@ -88,30 +88,6 @@ object ShardManager {
      */
     private const val PROBE_TIMEOUT_MS = 5_000
 
-    /**
-     * Budget for the exit check on one candidate — see [ShardReach].
-     *
-     * Shorter than [PROBE_TIMEOUT_MS] on purpose: this check runs *after* the
-     * liveness probe already succeeded on the same node, so the path is known to
-     * work and a slow answer here is not worth waiting for. Measured 150–2729 ms
-     * against the live pool.
-     */
-    private const val REACH_TIMEOUT_MS = 4_000
-
-    /**
-     * How long the race may wait, past its first answer, for a candidate whose
-     * exit the geolocating destination will actually serve.
-     *
-     * This is the entire cost of the feature, and it is bounded here rather than
-     * left to accumulate. It is paid only when the first node to answer is one of
-     * the refused exits, and not at all once a verdict has been remembered for
-     * that node. Measured: the check itself is 150–2729 ms and the candidates run
-     * in parallel, so 2.5 s covers the common case without letting a stalled exit
-     * hold up a connect the user is watching.
-     */
-    private const val REACH_GRACE_MS = 2_500L
-
-
     /** Overall budget for the race, after which we take whatever we have. */
     private const val RACE_BUDGET_MS = 12_000L
 
@@ -631,64 +607,41 @@ object ShardManager {
             val winner = java.util.concurrent.atomic.AtomicReference<ShardNode?>(null)
             val winnerLatency = java.util.concurrent.atomic.AtomicInteger(0)
             val latch = java.util.concurrent.CountDownLatch(1)
-            // A second latch for the preferred outcome: a node that is both alive
-            // and one the geolocating destination will serve. See the wait below.
-            val preferred = java.util.concurrent.atomic.AtomicReference<ShardNode?>(null)
-            val preferredLatency = java.util.concurrent.atomic.AtomicInteger(0)
-            val preferredLatch = java.util.concurrent.CountDownLatch(1)
-            // Counts candidates that have finished, however they finished. Used to
-            // release the wait below the moment there is nothing left to wait for,
-            // so the grace window is a ceiling and not a cost.
-            val finished = java.util.concurrent.atomic.AtomicInteger(0)
             val pool = java.util.concurrent.Executors.newFixedThreadPool(
                 candidates.size.coerceAtMost(RACE_WIDTH)
             )
 
             candidates.forEachIndexed { index, node ->
                 pool.execute {
-                    try {
-                        raceOne(context, node, index, winner, winnerLatency, latch,
-                            preferred, preferredLatency, preferredLatch)
-                    } finally {
-                        // Whatever happened, this candidate is done. When the last
-                        // one finishes, release the grace wait: there is no longer
-                        // anything that could clear the check.
-                        if (finished.incrementAndGet() == candidates.size) {
-                            preferredLatch.countDown()
+                    // Once someone has won, the remaining probes are pointless
+                    // work on a metered link — stop rather than finish politely.
+                    if (winner.get() != null) return@execute
+                    val started = System.currentTimeMillis()
+                    val ok = ShardProbe.check(PROBE_BASE_PORT + index, PROBE_TIMEOUT_MS)
+                    val elapsed = (System.currentTimeMillis() - started).toInt()
+                    if (ok) {
+                        ShardHealth.recordSuccess(context, node, elapsed)
+                        // compareAndSet, so the genuinely first success wins even
+                        // when two finish in the same millisecond.
+                        if (winner.compareAndSet(null, node)) {
+                            winnerLatency.set(elapsed)
+                            latch.countDown()
                         }
+                    } else {
+                        ShardHealth.recordFailure(context, node)
                     }
                 }
             }
 
-            // Two-stage wait, and this is the whole speed argument. Stage one is
-            // the race as it always was: the first node that answers, within the
-            // same budget. Stage two waits a short extra window — and only that —
-            // for one of the nodes racing *in parallel* to also clear the exit
-            // check. So the added wall-clock cost is bounded by
-            // REACH_GRACE_MS, is paid only when the first responder is a refused
-            // exit, and is zero once verdicts are remembered.
             latch.await(RACE_BUDGET_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
-            if (winner.get() != null) {
-                preferredLatch.await(REACH_GRACE_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
-            }
             pool.shutdownNow()
 
-            // Prefer a served exit; fall back to the plain race winner rather
-            // than failing, because a pool where every exit is refused must still
-            // connect — it just will not reach the geolocated destination.
-            val chosen = preferred.get() ?: winner.get()
-            val chosenLatency =
-                if (preferred.get() != null) preferredLatency.get() else winnerLatency.get()
+            val chosen = winner.get()
             if (chosen == null) {
                 lastError = "no node answered"
                 ConnectionLog.record("$TAG race found nothing in ${RACE_BUDGET_MS}ms")
             } else {
-                ConnectionLog.record("$TAG winner ${LogRedactor.nodeTag(chosen.key)} in ${chosenLatency}ms")
-                if (preferred.get() == null) {
-                    // Worth a line: this is the state where the tunnel is up and
-                    // healthy but the geolocated destination will still refuse.
-                    ConnectionLog.record("$TAG no node cleared the reach check")
-                }
+                ConnectionLog.record("$TAG winner ${LogRedactor.nodeTag(chosen.key)} in ${winnerLatency.get()}ms")
             }
             return chosen
         } catch (e: Exception) {
@@ -700,70 +653,6 @@ object ShardManager {
             // would otherwise fight over nothing, but it is 45 idle outbounds worth
             // of memory for no reason.
             stop()
-        }
-    }
-
-    /**
-     * One candidate's turn in the race: prove it is alive, then ask whether the
-     * geolocating destination will serve its exit.
-     *
-     * Split out of [race] because it carries the two-outcome logic — first-alive
-     * and first-served are different winners — which inline was buried in the
-     * middle of a long loop body.
-     */
-    private fun raceOne(
-        context: Context,
-        node: ShardNode,
-        index: Int,
-        winner: java.util.concurrent.atomic.AtomicReference<ShardNode?>,
-        winnerLatency: java.util.concurrent.atomic.AtomicInteger,
-        latch: java.util.concurrent.CountDownLatch,
-        preferred: java.util.concurrent.atomic.AtomicReference<ShardNode?>,
-        preferredLatency: java.util.concurrent.atomic.AtomicInteger,
-        preferredLatch: java.util.concurrent.CountDownLatch,
-    ) {
-        // Once a preferred node has won, the remaining probes are pointless work
-        // on a metered link — stop rather than finish politely.
-        if (preferred.get() != null) return
-        val started = System.currentTimeMillis()
-        val probePort = PROBE_BASE_PORT + index
-        val ok = ShardProbe.check(probePort, PROBE_TIMEOUT_MS)
-        val elapsed = (System.currentTimeMillis() - started).toInt()
-        if (!ok) {
-            ShardHealth.recordFailure(context, node)
-            return
-        }
-        ShardHealth.recordSuccess(context, node, elapsed)
-        // compareAndSet, so the genuinely first success wins even when two finish
-        // in the same millisecond.
-        if (winner.compareAndSet(null, node)) {
-            winnerLatency.set(elapsed)
-            latch.countDown()
-        }
-
-        // The exit check, on the same inbound this probe just proved is alive.
-        // Skipped once some other candidate has already cleared it.
-        if (preferred.get() != null) return
-        val known = ShardHealth.score(context, node).reachEffective
-        val verdict = if (known == ShardHealth.REACH_USABLE) {
-            // Trusted from an earlier connect, so the common case — reconnecting
-            // to a node that already worked — pays nothing at all. A served exit
-            // that stops being served is caught when its verdict expires.
-            ShardReach.Verdict.USABLE
-        } else {
-            // Measured when unknown, and re-measured when it was refused: exits
-            // move, and a verdict cached forever would keep punishing a node whose
-            // operator has since fixed it. Runs in parallel with the other
-            // candidates, so it costs one round trip and not N.
-            ShardReach.check(probePort, REACH_TIMEOUT_MS).also {
-                ShardHealth.recordReach(context, node, it)
-            }
-        }
-        // UNKNOWN counts as preferred: a check that could not run must never cost
-        // the user a working node.
-        if (verdict != ShardReach.Verdict.WALLED && preferred.compareAndSet(null, node)) {
-            preferredLatency.set(elapsed)
-            preferredLatch.countDown()
         }
     }
 }
