@@ -114,18 +114,6 @@ object ShardManager {
     var activeNode: ShardNode? = null
         private set
 
-    /**
-     * The second exit currently carrying the Google group, or null when there is
-     * none — which is the ordinary case.
-     *
-     * Exposed so the service can tell whether a re-evaluation actually changed
-     * anything before spending a relaunch on it, and so a session that already has
-     * the right second exit does not check again.
-     */
-    @Volatile
-    var activeGoogleExit: ShardNode? = null
-        private set
-
     /** Last error, so the service can report something specific. */
     @Volatile
     var lastError: String = ""
@@ -215,7 +203,6 @@ object ShardManager {
     fun stop() {
         running.set(false)
         activeNode = null
-        activeGoogleExit = null
         process?.let { proc ->
             try {
                 proc.destroy()
@@ -349,7 +336,6 @@ object ShardManager {
             return false
         }
         ShardHealth.prune(context, pool)
-        ShardExit.prune(context, pool)
 
         // Ranked, then sliced: the race is over the nodes most likely to work, in
         // the order most likely to be fast. Diversified so one endpoint's variants
@@ -370,16 +356,6 @@ object ShardManager {
         }
         val winner = raced ?: return false
 
-        // A second exit for the Google group, if one was already measured for this
-        // pool. Never probed here: this is the connect path, and the whole design of
-        // [ShardExit] is that measuring happens after CONNECTED. Null in the ordinary
-        // case, which builds exactly the config v1.7.13 shipped.
-        //
-        // Excluded when it is the winner itself — the same node cannot be both legs,
-        // and a config with two identical outbounds would just add a pointless hop.
-        val googleExit = ShardExit.chosenExit(context, pool)?.takeIf { it.key != winner.key }
-        activeGoogleExit = googleExit
-
         // Wildcard only when the user asked for LAN sharing. The port is fixed
         // either way: unlike the Rust core and Psiphon, SHARD's listener is also
         // what tun2socks dials, so it cannot move to a user-chosen port.
@@ -389,14 +365,13 @@ object ShardManager {
         // Smart Split, when the user has it on: bring the tunnel up with a fragment
         // profile and keep the first one that carries a blocked SNI. Returns true
         // when the tunnel is up and split; false means fall through to node-only.
-        if (startSmartSplit(context, winner, listenHost, port, logLevel, googleExit)) return true
+        if (startSmartSplit(context, winner, listenHost, port, logLevel)) return true
 
         val config = ShardConfigs.tunnelConfig(
             winner,
             listenHost,
             port,
             logLevel,
-            googleExit = googleExit,
         )
         val configFile = ShardConfigs.writeConfig(context, "tunnel.json", config)
         if (!launch(context, configFile, TAG)) return false
@@ -436,7 +411,6 @@ object ShardManager {
         listenHost: String,
         port: Int,
         logLevel: String,
-        googleExit: ShardNode? = null,
     ): Boolean {
         if (!SmartSplit.enabled(context)) return false
         if (SmartSplit.measuredUnavailable(context)) {
@@ -460,7 +434,7 @@ object ShardManager {
         for (profile in candidates) {
             ConnectionLog.record("$TAG Smart Split: tuning, ${profile.attempt}")
             val splitConfig = ShardConfigs.tunnelConfig(
-                winner, listenHost, port, logLevel, smartSplit = profile, googleExit = googleExit,
+                winner, listenHost, port, logLevel, smartSplit = profile,
             )
             val splitFile = ShardConfigs.writeConfig(context, "tunnel.json", splitConfig)
             if (!launch(context, splitFile, TAG)) continue
@@ -590,67 +564,6 @@ object ShardManager {
      * on the far side still works.
      */
     fun isHealthy(): Boolean = isRunning && ShardProbe.check(listenPort, PROBE_TIMEOUT_MS)
-
-    /**
-     * Rebuild the live config with a second exit for the Google group, keeping the
-     * node the user is already on.
-     *
-     * Deliberately not [rotate]: that re-races the pool and would move the user to
-     * a different node, which is the opposite of what this feature promises. Here
-     * the winner, the port, the fragment profile and every other route stay
-     * exactly as they are — one destination group gains an outbound.
-     *
-     * The relaunch itself is the same trick the watchdog already relies on: the
-     * TUN, tun2socks and [ShardSocksFront] all address a fixed port, so replacing
-     * the process behind it is invisible to them. Measured cost is one process
-     * start, so the user sees at most a stall of about a second.
-     *
-     * @return true when the tunnel is up again with the second exit applied. On
-     *   false the caller should treat the session as lost: the old process is gone
-     *   and nothing is listening.
-     */
-    @Synchronized
-    fun applyGoogleExit(context: Context, verboseLog: Boolean = false): Boolean {
-        val node = activeNode ?: return false
-        val pool = ShardEdges.expand(ShardSubscription.nodes(context))
-        val exit = ShardExit.chosenExit(context, pool)?.takeIf { it.key != node.key } ?: return false
-        val port = listenPort
-        val listenHost = if (CoreConfig.lanSharingEnabled(context)) "0.0.0.0" else "127.0.0.1"
-        val logLevel = if (verboseLog) "info" else "warning"
-        // The session's own profile, not a re-measurement: this network was already
-        // measured when it connected, and null simply means Smart Split is off or
-        // was found not to work here — in which case the config has no split, which
-        // is exactly what it had a second ago.
-        val profile = if (SmartSplit.enabled(context)) SmartSplit.cachedProfile(context) else null
-
-        val config = ShardConfigs.tunnelConfig(
-            node,
-            listenHost,
-            port,
-            logLevel,
-            smartSplit = profile,
-            googleExit = exit,
-        )
-        val configFile = ShardConfigs.writeConfig(context, "tunnel.json", config)
-
-        // Only now is the old process killed. Writing the config first keeps the
-        // window where nothing is listening as short as a process start.
-        stop()
-        if (!launch(context, configFile, TAG)) {
-            ConnectionLog.record("$TAG second exit: relaunch failed")
-            return false
-        }
-        if (!awaitListener(port)) {
-            ConnectionLog.record("$TAG second exit: listener never came up")
-            stop()
-            return false
-        }
-        running.set(true)
-        activeNode = node
-        activeGoogleExit = exit
-        ConnectionLog.record("$TAG second exit active: ${LogRedactor.nodeTag(exit.key)}")
-        return true
-    }
 
     /**
      * Race [candidates] and return the first node that carries a real request.

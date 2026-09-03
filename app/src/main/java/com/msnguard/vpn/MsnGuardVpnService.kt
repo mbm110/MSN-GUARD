@@ -274,16 +274,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var watchdogTask: java.util.concurrent.ScheduledFuture<*>? = null
 
     /**
-     * The one-shot post-connect exit check. See [scheduleExitCheck].
-     *
-     * Held so teardown can cancel it: a user who connects and disconnects inside
-     * 20 s would otherwise have a task fire against a session that no longer
-     * exists, and its relaunch branch would bring an xray process up behind a
-     * SOCKS port nothing is reading.
-     */
-    private var exitCheckTask: java.util.concurrent.ScheduledFuture<*>? = null
-
-    /**
      * True only when the *user* asked to disconnect (dial tap, notification
      * action, kill switch, revoke).
      *
@@ -698,22 +688,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
         /** How often the liveness watchdog checks an established tunnel. */
         private const val WATCHDOG_INTERVAL_S = 30L
-
-        /**
-         * How long after CONNECTED the exit check runs, in seconds.
-         *
-         * Twenty, and the number is a compromise between two costs the user pays.
-         * Earlier competes with the traffic the user opened the app for — the TUN
-         * has just come up and their apps are all reconnecting at once. Later
-         * means someone who opens Gemini immediately still sees the wall on this
-         * session, because the fix lands after they have already looked.
-         *
-         * It is a one-shot [schedule], not a repeating task: the answer is a
-         * property of the exit IP and the destination's opinion of it, neither of
-         * which changes during a session. Re-asking every 30 s would be pure
-         * battery and data for a fact that cannot move.
-         */
-        private const val SHARD_EXIT_DELAY_S = 20L
 
         /** Auto-reconnect backoff in seconds; the last entry repeats forever. */
         private val RECONNECT_BACKOFF_S = longArrayOf(5, 15, 30, 60, 120)
@@ -2280,7 +2254,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 repostNotification()
                 startShardTrafficPolling()
                 startWatchdog()
-                scheduleExitCheck()
             } catch (e: Exception) {
                 ConnectionLog.record("SHARD start failed: ${e.message}")
                 ShardSocksFront.stop()
@@ -2572,59 +2545,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private fun stopWatchdog() {
         watchdogTask?.cancel(false)
         watchdogTask = null
-        exitCheckTask?.cancel(false)
-        exitCheckTask = null
-    }
-
-    /**
-     * Schedule the one-shot destination check for a SHARD session.
-     *
-     * Everything expensive about this feature is behind two guards. It only runs
-     * for SHARD, and [ShardExit.evaluate] returns immediately when the live node
-     * already has a fresh verdict — so the second connect on a known-good node
-     * costs nothing at all.
-     *
-     * Runs on [ladderScheduler], which is otherwise idle between watchdog ticks.
-     * The relaunch it may trigger takes the same lock as the watchdog's rotation
-     * path, so the two cannot interleave on one session.
-     */
-    private fun scheduleExitCheck() {
-        exitCheckTask?.cancel(false)
-        exitCheckTask = ladderScheduler.schedule({
-            try {
-                if (stopRequested.get() || userInitiatedStop.get()) return@schedule
-                if (!connected.get()) return@schedule
-                if (!currentProtocol.contains("SHARD")) return@schedule
-                val node = ShardManager.activeNode ?: return@schedule
-                // Already split for this pool: the config built at connect time is
-                // correct, so re-measuring would be paying for a known answer.
-                if (ShardManager.activeGoogleExit != null) return@schedule
-
-                val pool = ShardEdges.expand(ShardSubscription.nodes(this))
-                if (!ShardExit.evaluate(this, node, ShardManager.SOCKS_PORT, pool)) return@schedule
-
-                // Re-checked after the probing, which takes seconds: the user may
-                // have disconnected in the meantime, and relaunching then would
-                // leave a stray process behind a port nobody reads.
-                if (stopRequested.get() || userInitiatedStop.get() || !connected.get()) {
-                    return@schedule
-                }
-                if (ShardManager.applyGoogleExit(this, verboseShardLog())) {
-                    // Silent by design: no status change, no notification, no user
-                    // action. The node, the country and the IP on screen are all
-                    // still accurate — only one destination group moved.
-                    ConnectionLog.record("SHARD: second exit applied for the AI group")
-                } else {
-                    // The relaunch failed, so nothing is listening on the SOCKS
-                    // port. The watchdog is still running and will see a dead
-                    // tunnel within one interval, but waiting up to 30 s with a
-                    // broken tunnel is worse than telling it now.
-                    ConnectionLog.record("SHARD: second exit could not be applied")
-                    onTunnelLost("second exit relaunch failed")
-                }
-            } catch (_: Exception) {
-            }
-        }, SHARD_EXIT_DELAY_S, TimeUnit.SECONDS)
     }
 
     /**
