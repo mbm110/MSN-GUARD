@@ -530,7 +530,14 @@ object ShardConfigs {
         listenPort: Int,
         logLevel: String,
         smartSplit: SmartSplit.FragmentProfile? = null,
+        googleExit: ShardNode? = null,
     ): String {
+        // Which outbound the Google group takes. `proxy2` exists only when a second
+        // exit was measured — see [ShardExit] — and then it carries nothing else:
+        // Telegram, the other sanctioned services and every direct path are
+        // untouched, so a second hop for one destination cannot slow anything down
+        // that was already working.
+        val googleTag = if (googleExit != null) "proxy2" else "proxy"
         val outbounds = JSONArray()
             .put(outbound(node, "proxy"))
             .put(
@@ -539,6 +546,7 @@ object ShardConfigs {
                     put("protocol", "blackhole")
                 }
             )
+        if (googleExit != null) outbounds.put(outbound(googleExit, "proxy2"))
         if (smartSplit != null) {
             outbounds.put(fragmentedDirect(smartSplit))
                 .put(JSONObject().apply {
@@ -600,7 +608,11 @@ object ShardConfigs {
                     // the name — an extra failure mode and a DNS leak surface. Both
                     // were tested against the real binary; both route correctly, and
                     // this is the safer one.
-                    if (smartSplit != null) {
+                    //
+                    // Also on for a second Google exit with Smart Split off: that
+                    // config's one rule is a domain rule, and without a sniffed name
+                    // it could never match.
+                    if (smartSplit != null || googleExit != null) {
                         put(
                             "sniffing",
                             JSONObject().apply {
@@ -633,10 +645,45 @@ object ShardConfigs {
             put("outbounds", outbounds)
             if (smartSplit != null) {
                 put("dns", smartSplitDns())
-                put("routing", JSONObject().put("rules", smartSplitRules()))
+                put("routing", JSONObject().put("rules", smartSplitRules(googleTag)))
+            } else if (googleExit != null) {
+                // Smart Split off, second exit on. One rule and nothing else: the
+                // Google group leaves through `proxy2`, and because `proxy` is still
+                // first in the outbound list it remains the default for every other
+                // packet. No DNS block, no fragmenter, no geoip — the historical
+                // node-only behaviour with one destination moved.
+                put("routing", JSONObject().put("rules", googleExitRules()))
             }
         }.toString()
     }
+
+    /**
+     * The minimal rule table for a second Google exit without Smart Split.
+     *
+     * Deliberately not a trimmed copy of [smartSplitRules]: that table's job is to
+     * decide direct-vs-node for the whole device, and importing any of it here
+     * would change what happens to traffic this feature is not about. Everything
+     * unmatched falls through to the default outbound, which is `proxy`.
+     */
+    private fun googleExitRules(): JSONArray = JSONArray()
+        .put(
+            JSONObject().apply {
+                put("type", "field")
+                put("domain", JSONArray().apply { GOOGLE_AI_DOMAINS.forEach { put(it) } })
+                put("outboundTag", "proxy2")
+            }
+        )
+        .put(
+            JSONObject().apply {
+                put("type", "field")
+                put("domain", JSONArray().apply { GOOGLE_SESSION_HOSTS.forEach { put(it) } })
+                // TCP/443 only, for the same reason as in [smartSplitRules]: FCM
+                // holds mtalk.google.com:5228-5230 and must not be moved.
+                put("network", "tcp")
+                put("port", "443")
+                put("outboundTag", "proxy2")
+            }
+        )
 
     /**
      * The fragmented direct outbound: Serverless-for-Iran's mechanism, our config.
@@ -711,24 +758,39 @@ object ShardConfigs {
     }
 
     /**
-     * Domains that must never take the direct path, because an Iranian exit IP is
-     * refused at the far end rather than blocked on the way out.
+     * Sanctioned services that are NOT part of the Google session.
      *
-     * This list is static and deliberately generous, and it cannot be replaced by a
-     * health check. A sanctioned service does not fail at the TCP or TLS layer — it
-     * completes the handshake and answers a valid HTTP 403, which is indistinguishable
-     * from a working response to any latency- or reachability-based prober. Measured:
-     * `chatgpt.com` through an Iranian-style exit connects, negotiates TLS, and
-     * returns 403; `api.openai.com` returns 401, which is exactly what it returns
-     * when it is working.
-     *
-     * A wrongly-classified host therefore does not get slower, it dies. Erring
-     * towards the node is the only safe direction.
+     * Split out from [SANCTIONED_DOMAINS] purely so the Google group can be given a
+     * different outbound without the rest following it. Nothing here moves when a
+     * second exit is in play: OpenAI, Anthropic, xAI, Telegram and WhatsApp are all
+     * working on the live node and a working path is never touched.
      */
-    private val SANCTIONED_DOMAINS = listOf(
+    private val OTHER_SANCTIONED_DOMAINS = listOf(
         "geosite:openai",
         "geosite:anthropic",
         "geosite:xai",
+        // Telegram and WhatsApp are here for a different reason: neither is
+        // sanctioned, both are blocked hard enough that only the node reaches them.
+        "geosite:telegram",
+        "geosite:whatsapp",
+    )
+
+    /**
+     * Google's AI surface, which is the one group that may be moved to a second exit.
+     *
+     * Separate from [OTHER_SANCTIONED_DOMAINS] because Google is the only provider
+     * in this app that refuses an otherwise-perfect exit *by IP reputation* rather
+     * than by country of the user. Measured across the live pool one node at a
+     * time: 22 exits are served the real Gemini page, 4 are refused — and the
+     * refusal is a 200 with a full-size body whose bootstrap state carries the
+     * verdict, so no transport-level check can see it. See [ShardExit].
+     *
+     * These three plus [GOOGLE_SESSION_HOSTS] move together or not at all. They
+     * share one cookie scope, so serving the page from one exit and its RPC backend
+     * from another produces a signed-in user whose session is refused mid-request —
+     * which is worse than the wall, because it is intermittent.
+     */
+    private val GOOGLE_AI_DOMAINS = listOf(
         "geosite:google-deepmind",
         // Gemini's own hostnames are inside `google-deepmind` and were already on
         // this list, yet the site still failed: the HTML arrived through the node
@@ -744,11 +806,28 @@ object ShardConfigs {
         // which is the failure this entry exists to prevent.
         "domain:clients6.google.com",
         "full:content.googleapis.com",
-        // Telegram and WhatsApp are here for a different reason: neither is
-        // sanctioned, both are blocked hard enough that only the node reaches them.
-        "geosite:telegram",
-        "geosite:whatsapp",
     )
+
+    /**
+     * Domains that must never take the direct path, because an Iranian exit IP is
+     * refused at the far end rather than blocked on the way out.
+     *
+     * This list is static and deliberately generous, and it cannot be replaced by a
+     * health check. A sanctioned service does not fail at the TCP or TLS layer — it
+     * completes the handshake and answers a valid HTTP 403, which is indistinguishable
+     * from a working response to any latency- or reachability-based prober. Measured:
+     * `chatgpt.com` through an Iranian-style exit connects, negotiates TLS, and
+     * returns 403; `api.openai.com` returns 401, which is exactly what it returns
+     * when it is working.
+     *
+     * A wrongly-classified host therefore does not get slower, it dies. Erring
+     * towards the node is the only safe direction.
+     *
+     * Composed of the two halves above rather than written out, so the DNS block and
+     * the rule table keep seeing one complete list while the Google half can also be
+     * addressed on its own.
+     */
+    private val SANCTIONED_DOMAINS = OTHER_SANCTIONED_DOMAINS + GOOGLE_AI_DOMAINS
 
     /**
      * The three Google hosts that must share Gemini's exit IP — and no others.
@@ -938,7 +1017,7 @@ object ShardConfigs {
      *   is not a browser: a default-deny would break every app whose protocol the
      *   sniffer does not recognise, and this config is carrying the whole device.
      */
-    private fun smartSplitRules(): JSONArray {
+    private fun smartSplitRules(googleTag: String = "proxy"): JSONArray {
         fun rule(build: JSONObject.() -> Unit) = JSONObject().apply {
             put("type", "field")
             build()
@@ -960,13 +1039,25 @@ object ShardConfigs {
                 put("port", 53)
                 put("outboundTag", "dns-out")
             })
-            // 4-6. Sanctioned + Telegram + WhatsApp, by name and then by address.
+            // 4a. The Google AI group. First, and separate from the rest of the
+            //     sanctioned set, because it is the only group that can be moved to
+            //     a second exit — [googleTag] is `proxy` in every ordinary session
+            //     and `proxy2` only when [ShardExit] measured the live node as
+            //     refused. Ahead of 4b so it wins for the names both could match.
             .put(rule {
-                put("domain", JSONArray().apply { SANCTIONED_DOMAINS.forEach { put(it) } })
+                put("domain", JSONArray().apply { GOOGLE_AI_DOMAINS.forEach { put(it) } })
+                put("outboundTag", googleTag)
+            })
+            // 4b-6. The rest of the sanctioned set, Telegram and WhatsApp: always the
+            //        live node, never the second exit.
+            .put(rule {
+                put("domain", JSONArray().apply { OTHER_SANCTIONED_DOMAINS.forEach { put(it) } })
                 put("outboundTag", "proxy")
             })
-            // 4b. The signed-in Google session, and only the three hosts that were
-            //     measured to take part in it. TCP/443 only: Firebase Cloud
+            // 4c. The signed-in Google session, and only the three hosts that were
+            //     measured to take part in it. Follows the AI group's outbound: they
+            //     share a cookie scope, so splitting them across two exits would
+            //     produce a session refused mid-request. TCP/443 only: Firebase Cloud
             //     Messaging holds mtalk.google.com:5228-5230, every app's push
             //     notifications ride it, and an unreachable node must never cost the
             //     user their notifications. `full:` keeps this to exactly three
@@ -976,7 +1067,7 @@ object ShardConfigs {
                 put("domain", JSONArray().apply { GOOGLE_SESSION_HOSTS.forEach { put(it) } })
                 put("network", "tcp")
                 put("port", "443")
-                put("outboundTag", "proxy")
+                put("outboundTag", googleTag)
             })
             // 5 exists only to protect 6 from itself. `geoip:facebook` is Meta's
             // whole address space, so Instagram and Facebook — which are supposed

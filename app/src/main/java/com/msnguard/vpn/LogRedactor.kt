@@ -219,7 +219,7 @@ object LogRedactor {
         "ShardRefreshJob" to "R5",
         "ShardHealth" to "H4",
         "ShardEdges" to "G8",
-        "ShardReach" to "X6",
+        "ShardExit" to "X6",
         "SmartSplit" to "Q9",
         "Smart Split" to "Q9",
         "SHARD" to "K0",
@@ -266,6 +266,22 @@ object LogRedactor {
         // The exit-country check. Coded, or a forwarded log would state both that
         // the app tests its exits and which destination it tests them against.
         "reach check" to "rc",
+        // Same subject, the v1.7.14 vocabulary. Without these a forwarded log spells
+        // out the entire method in plain words: that a destination refuses the exit,
+        // that a second exit exists, and that one is being shopped for.
+        "exit check inconclusive" to "rc?",
+        "exit check served" to "rc+",
+        "exit check refused" to "rc-",
+        "second exit selected" to "e2s",
+        "second exit known" to "e2k",
+        "no second exit answered" to "e2n",
+        "no candidate for a second exit" to "e2c",
+        "looking for a second exit" to "e2f",
+        "second exit" to "e2",
+        "exit probe could not start" to "e2x",
+        "exit probe failed" to "e2e",
+        "exit probe" to "e2p",
+        "second leg" to "e2",
         "HTTP/3" to "z3",
         "QUIC" to "z9",
         "account" to "ac",

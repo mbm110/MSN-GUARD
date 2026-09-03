@@ -3032,6 +3032,11 @@ class MainActivity : Activity() {
         // network, would otherwise be sticky until the app's data is cleared.
         val remeasureRow = navRow("Re-measure network", "") {
             SmartSplit.forgetMeasurements(this)
+            // The exit verdicts go with it. They are a different measurement, but
+            // from the user's side this row means "forget what you decided about
+            // this network", and a stale second exit is exactly the kind of sticky
+            // wrong answer this row exists to clear.
+            ShardExit.clear(this)
             smartSplitRow?.setSubtitle(SmartSplit.summary(this))
             renderChainCard()
             toastShort("Will re-measure on the next connect")
