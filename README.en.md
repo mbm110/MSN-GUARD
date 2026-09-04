@@ -7,7 +7,7 @@
 **Device-wide tunnelling for censored networks — five transports, Rust core, native Android client**
 
 [![Build](https://img.shields.io/github/actions/workflow/status/mbm110/MSN-GUARD/build.yml?branch=master&style=for-the-badge&label=build)](https://github.com/mbm110/MSN-GUARD/actions)
-[![Version](https://img.shields.io/badge/version-1.5.0-5CE68F?style=for-the-badge)](https://github.com/mbm110/MSN-GUARD/releases)
+[![Version](https://img.shields.io/badge/version-1.7.16-5CE68F?style=for-the-badge)](https://github.com/mbm110/MSN-GUARD/releases)
 [![Android](https://img.shields.io/badge/Android-8.0%2B-3A4FB0?style=for-the-badge&logo=android&logoColor=white)](https://github.com/mbm110/MSN-GUARD)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-6c5ce7?style=for-the-badge)](LICENSE)
 [![Transports](https://img.shields.io/badge/transports-MASQUE%20%C2%B7%20WireGuard%20%C2%B7%20WARP%C2%B7WARP%20%C2%B7%20Psiphon%20%C2%B7%20Tor-1f6f4a?style=for-the-badge)](#transports)
@@ -179,12 +179,12 @@ Worth saying plainly: Auto is almost always faster than pinning a country, becau
 
 ## Install
 
-Grab the latest APK from [Releases](https://github.com/mbm110/MSN-GUARD/releases) or from the [Actions](https://github.com/mbm110/MSN-GUARD/actions) artifacts. The current version is `1.5.0`, and the app checks that same Releases page for updates.
+Grab the latest APK from [Releases](https://github.com/mbm110/MSN-GUARD/releases) or from the [Actions](https://github.com/mbm110/MSN-GUARD/actions) artifacts. The current version is `1.7.16`, and the app checks that same Releases page for updates.
 
 | Device architecture | File |
 |---|---|
-| ARM 64-bit — most current handsets | `MSN-GUARD-v1.5.0-arm64-v8a.apk` |
-| ARM 32-bit — older devices | `MSN-GUARD-v1.5.0-armeabi-v7a.apk` |
+| ARM 64-bit — most current handsets | `MSN-GUARD-v1.7.16-arm64-v8a.apk` |
+| ARM 32-bit — older devices | `MSN-GUARD-v1.7.16-armeabi-v7a.apk` |
 
 Android 8.0 (API 26) or newer. Allow installation from unknown sources, and approve Android's VPN permission prompt on first connect.
 

@@ -2522,6 +2522,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         ShardManager.lastError.ifBlank { "No public node could be reached" }
                     )
                 }
+                // The pool is about to be raced again on the next connect, and the
+                // lists that decide it age faster than releases do. Asked for here
+                // rather than only in the Activity, because the tile and Always-on
+                // VPN both start a session without one ever being on screen — the
+                // exact installs a dead edge would strand. Fire-and-forget: it costs
+                // nothing when nothing changed and never blocks the connect.
+                RemotePolicy.refreshIfDue(this)
 
                 sendStatus(STATUS_CONNECTING, "Starting device routing…", 70)
                 if (!ShardSocksFront.start(ShardManager.SOCKS_PORT)) {
@@ -2854,12 +2861,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // process, which kills every open TCP flow: that is precisely the
             // "speed jumps, then drops, then a cut in the middle" the user
             // reported, and the node was never the problem.
+            //
+            // But only DOWNSTREAM bytes prove the far end is alive. A 1.7.15 field
+            // log showed the blind spot: the winner sat on an edge address the
+            // publisher had declared dead, the connect probe passed, and then every
+            // mux dial failed — `tls: handshake failure` and `500` — for the rest of
+            // the log with no rotation. Apps kept retrying, so `tx` kept moving and
+            // this branch kept voting "healthy" for a node that could not open a
+            // single connection.
+            //
+            // So: rx moving is still an unconditional pass, while tx moving alone
+            // only earns a probe. A real upload with a live node passes that probe;
+            // a node that cannot dial fails it twice and rotates.
             val tx = ShardSocksFront.sessionTx
             val rx = ShardSocksFront.sessionRx
-            val moved = tx != shardLastTx || rx != shardLastRx
+            val downstreamMoved = rx != shardLastRx
+            val upstreamMoved = tx != shardLastTx
             shardLastTx = tx
             shardLastRx = rx
-            if (moved) {
+            if (downstreamMoved) {
                 shardStrikes = 0
                 return null
             }
@@ -2873,7 +2893,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // send something the branch above sees the counters move. The liveness
             // flags checked above (process alive, front-end up, routing up) are
             // local and still evaluated every tick.
-            if (!isScreenInteractive()) {
+            //
+            // Skipped when only upstream moved: that is an app actively retrying,
+            // the case the rx/tx split above exists to catch, and deferring the
+            // probe for four ticks is exactly how the dead-edge session stayed
+            // unrotated. Battery cost is bounded — this needs traffic to trigger,
+            // and traffic means the radio is already awake.
+            if (!isScreenInteractive() && !upstreamMoved) {
                 shardIdleProbeTick++
                 if (shardIdleProbeTick < SHARD_SLEEP_PROBE_TICKS) return null
                 shardIdleProbeTick = 0
@@ -2892,12 +2918,20 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             shardStrikes++
             if (shardStrikes < SHARD_STRIKES_BEFORE_ROTATE) {
                 ConnectionLog.record(
-                    "SHARD: probe missed ($shardStrikes/$SHARD_STRIKES_BEFORE_ROTATE) — waiting, traffic is idle"
+                    if (upstreamMoved) {
+                        "SHARD: node not answering while apps retry ($shardStrikes/$SHARD_STRIKES_BEFORE_ROTATE)"
+                    } else {
+                        "SHARD: probe missed ($shardStrikes/$SHARD_STRIKES_BEFORE_ROTATE) — waiting, traffic is idle"
+                    }
                 )
                 return null
             }
             shardStrikes = 0
-            return "the node stopped answering"
+            return if (upstreamMoved) {
+                "the node accepted traffic but answered nothing"
+            } else {
+                "the node stopped answering"
+            }
         }
 
         if (currentProtocol.contains("TOR")) {

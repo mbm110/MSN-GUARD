@@ -41,6 +41,10 @@ import android.content.Context
 class ShardRefreshJob : android.app.job.JobService() {
 
     override fun onStartJob(params: JobParameters?): Boolean {
+        // Edges and geo-blocked hosts ride the same window. Fire-and-forget: it
+        // does not gate jobFinished, because the subscription fetch below is the
+        // one whose result the pool actually waits on.
+        RemotePolicy.refreshIfDue(applicationContext)
         ShardSubscription.refreshIfDue(applicationContext) {
             // Never reschedule on failure. The next periodic window is minutes to
             // hours away and the cache is still serviceable; retrying a blocked or

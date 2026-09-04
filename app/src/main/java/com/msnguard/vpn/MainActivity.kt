@@ -522,6 +522,10 @@ class MainActivity : Activity() {
         // wide; someone who installs the app and taps SHARD immediately should not
         // have to wait for it. Returns without I/O if the list is already fresh.
         ShardSubscription.refreshIfDue(this)
+        // Same trigger for the edge and geo-blocked lists. Separate file, separate
+        // ETag, same 6-hour floor — see [RemotePolicy]. Cheap enough to sit next to
+        // the subscription fetch: a 304 is a few hundred bytes.
+        RemotePolicy.refreshIfDue(this)
 
         // Orbit console. Every control below is built in onCreate so a single
         // pass wires the whole screen; no XML layouts exist in this app.
@@ -3111,6 +3115,10 @@ class MainActivity : Activity() {
             // force = true: the whole point of tapping this is to bypass the
             // six-hour interval the background job honours.
             shardPoolRow?.setValue("Updating…")
+            // The policy file rides the same tap. It is what decides how many paths
+            // each node has, so refreshing the node list without it would leave the
+            // count in the summary computed from stale edges.
+            RemotePolicy.refreshIfDue(this, force = true)
             ShardSubscription.refreshIfDue(this, force = true) { count ->
                 runOnUiThread {
                     shardPoolRow?.setValue(shardPoolSummary())

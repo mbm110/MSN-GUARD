@@ -539,6 +539,7 @@ object ShardConfigs {
      * the profile has to be measured rather than chosen.
      */
     fun tunnelConfig(
+        context: Context,
         node: ShardNode,
         listenHost: String,
         listenPort: Int,
@@ -685,8 +686,8 @@ object ShardConfigs {
             // present only so a future rule has something to point at.
             put("outbounds", outbounds)
             if (smartSplit != null) {
-                put("dns", smartSplitDns())
-                put("routing", JSONObject().put("rules", smartSplitRules()))
+                put("dns", smartSplitDns(context))
+                put("routing", JSONObject().put("rules", smartSplitRules(context)))
             }
         }.toString()
     }
@@ -895,8 +896,13 @@ object ShardConfigs {
     /**
      * Sites that block Iranian source IPs at the far end, not by DNS.
      *
-     * These three were audited host by host against the served HTML, and the rule
-     * is `full:` per host on purpose. `domain:` would be a much wider blast radius
+     * The names live in [RemotePolicy.BUILTIN_GEOBLOCKED] now, so a new site costs a
+     * JSON edit and not a release; the shipped constants are the fallback. This
+     * function only renders whatever is in force into rules, which is also where the
+     * `full:` wrapping happens.
+     *
+     * Each entry was audited host by host against the served HTML, and the rule is
+     * `full:` per host on purpose. `domain:` would be a much wider blast radius
      * than the fix needs:
      *  - `domain:nvidia.com` pulls in `us.download.nvidia.com`, whose driver payload
      *    measured `content-length: 890807536` — 890 MB down one node — plus the
@@ -921,15 +927,24 @@ object ShardConfigs {
      * answer, so the default resolver's records are already usable and paying for
      * a node-side lookup would be pure latency.
      */
-    private val GEOBLOCKED_SITE_HOSTS = listOf(
-        "full:www.nvidia.com",
-        "full:nvidia.com",
-        "full:images.nvidia.com",
-        "full:www.avast.com",
-        "full:avast.com",
-        "full:www.android.com",
-        "full:android.com",
-    )
+    private fun geoBlockedRuleHosts(context: Context): List<String> =
+        RemotePolicy.geoBlockedHosts(context).map { "full:$it" }
+
+    /**
+     * [SANCTIONED_DOMAINS] plus whatever the policy file adds.
+     *
+     * Additive on purpose: the compiled list is mostly `geosite:` tokens, which the
+     * policy file is not allowed to write, so it can only ever append. A `*.` prefix
+     * becomes `domain:` — the name and its subdomains — and a bare hostname becomes
+     * `full:`, one exact name. That mapping lives here rather than in
+     * [RemotePolicy] because rule syntax is this file's business, and the validator
+     * on the other side deliberately hands over nothing but a hostname and that one
+     * prefix.
+     */
+    private fun sanctionedRuleDomains(context: Context): List<String> =
+        SANCTIONED_DOMAINS + RemotePolicy.sanctionedHosts(context).map {
+            if (it.startsWith("*.")) "domain:${it.substring(2)}" else "full:$it"
+        }
 
     /**
      * Meta's address space, for the parts of WhatsApp that carry no hostname.
@@ -985,8 +1000,8 @@ object ShardConfigs {
      * falling through to the wrong resolver, which would put a sanctioned name's
      * lookup on the direct path.
      */
-    private fun smartSplitDns(): JSONObject {
-        val sanctioned = JSONArray().apply { SANCTIONED_DOMAINS.forEach { put(it) } }
+    private fun smartSplitDns(context: Context): JSONObject {
+        val sanctioned = JSONArray().apply { sanctionedRuleDomains(context).forEach { put(it) } }
         val iranian = JSONArray()
             .put("domain:ir")
             .put("geosite:category-ir")
@@ -1057,6 +1072,10 @@ object ShardConfigs {
      * - **DoH's own connection is fragmented** (rule 1). Otherwise the resolver's
      *   TLS session is one unfragmented handshake to a known IP and the censor
      *   closes it — the resolver would be the one thing the DPI could still see.
+     * - **The health probe's endpoints are forced through the node** (rule 3b).
+     *   They are plaintext port 80, which nothing else above the catch-all matches,
+     *   so without it the probe measured the carrier link instead of the node and a
+     *   dead node was never rotated away from.
      * - **`geoip:telegram` is separate from `geosite:telegram`** (rules 4 and 5).
      *   MTProto dials bare IPs with no SNI, so sniffing yields nothing and the
      *   domain rule never matches. Verified: `curl` at `149.154.167.51` logged
@@ -1077,7 +1096,7 @@ object ShardConfigs {
      *   is not a browser: a default-deny would break every app whose protocol the
      *   sniffer does not recognise, and this config is carrying the whole device.
      */
-    private fun smartSplitRules(): JSONArray {
+    private fun smartSplitRules(context: Context): JSONArray {
         fun rule(build: JSONObject.() -> Unit) = JSONObject().apply {
             put("type", "field")
             build()
@@ -1099,9 +1118,38 @@ object ShardConfigs {
                 put("port", 53)
                 put("outboundTag", "dns-out")
             })
+            // 3b. The health probe's own three endpoints, through the node.
+            //
+            // Without this rule the watchdog cannot see a dead node at all. The
+            // probe is a plaintext HTTP request on port 80 to one of
+            // [ShardProbe.TARGETS], sent through this very inbound — and nothing
+            // above the catch-all matches tcp/80: rule 11 wants `protocol: tls`
+            // and rule 12 wants port 443. So it fell to rule 13 and left over
+            // `direct-plain`, i.e. straight out of the carrier link, never touching
+            // the node it was supposed to be testing. Verified against the real
+            // binary: `tcp:cp.cloudflare.com:80` took `[direct-plain]` before this
+            // rule and `[proxy]` after it.
+            //
+            // That is exactly the 1.7.15 field log: the winner sat on an edge the
+            // publisher had declared dead, every mux dial failed for six minutes,
+            // and the watchdog kept passing — because its probe was answered by the
+            // internet, not by the node.
+            //
+            // `full:` on three names and the ports they are actually probed on, so
+            // this cannot claim anything else: those hosts on 443 keep their normal
+            // route, and no other host on port 80 is affected.
+            .put(rule {
+                put(
+                    "domain",
+                    JSONArray().apply { ShardProbe.RULE_HOSTS.forEach { put("full:$it") } }
+                )
+                put("network", "tcp")
+                put("port", ShardProbe.RULE_PORTS)
+                put("outboundTag", "proxy")
+            })
             // 4-6. Sanctioned + Telegram + WhatsApp, by name and then by address.
             .put(rule {
-                put("domain", JSONArray().apply { SANCTIONED_DOMAINS.forEach { put(it) } })
+                put("domain", JSONArray().apply { sanctionedRuleDomains(context).forEach { put(it) } })
                 put("outboundTag", "proxy")
             })
             // 4b. The signed-in Google session, and only the three hosts that were
@@ -1118,15 +1166,43 @@ object ShardConfigs {
                 put("outboundTag", "proxy")
             })
             // 4c. Sites that refuse Iranian source addresses. TCP/443 and `full:`
-            //     hosts only — see GEOBLOCKED_SITE_HOSTS for why this is not
+            //     hosts only — see geoBlockedRuleHosts for why this is not
             //     `domain:` and why it is not in SANCTIONED_DOMAINS. Position
             //     matters: after the DNS rules, before the Iranian rules, so an
             //     Iranian-CDN-fronted asset cannot swallow it.
             .put(rule {
-                put("domain", JSONArray().apply { GEOBLOCKED_SITE_HOSTS.forEach { put(it) } })
+                put("domain", JSONArray().apply { geoBlockedRuleHosts(context).forEach { put(it) } })
                 put("network", "tcp")
                 put("port", "443")
                 put("outboundTag", "proxy")
+            })
+            // 4d. Meta's QUIC, killed before rule 5 can claim it.
+            //
+            // This is the bug the field report caught: with Smart Split on,
+            // Instagram would not open, while the same node opened it fine with the
+            // publisher's own config. Rule 5 sends Instagram and Facebook to
+            // `direct-frag`, and `direct-frag`'s fragmenter is a **TCP** mask —
+            // there is nothing in a UDP datagram for it to split. So Instagram's
+            // QUIC left the phone unfragmented, straight at a DPI box that drops it,
+            // and because the app had a live UDP path it never fell back to TCP.
+            // Verified against the real binary: `udp:www.instagram.com:443` took
+            // `[direct-frag]` before this rule and `[blackhole]` after it.
+            //
+            // Blackholing is what makes the app retry over TCP/443, which rule 11
+            // does fragment — the same reason rule 10 exists for foreign QUIC in
+            // general. This rule is only its Meta-shaped special case, needed
+            // because rule 5 sits above rule 10 and would otherwise win.
+            //
+            // Scoped to UDP/443 and to these two geosites: TCP is untouched, so the
+            // path that actually works keeps working.
+            .put(rule {
+                put(
+                    "domain",
+                    JSONArray().put("geosite:instagram").put("geosite:facebook")
+                )
+                put("network", "udp")
+                put("port", "443")
+                put("outboundTag", "blackhole")
             })
             // 5 exists only to protect 6 from itself. `geoip:facebook` is Meta's
             // whole address space, so Instagram and Facebook — which are supposed

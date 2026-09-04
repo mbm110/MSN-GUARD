@@ -39,6 +39,27 @@ object ShardProbe {
     )
 
     /**
+     * The same three hostnames, for the routing rule that has to send them through
+     * the node.
+     *
+     * Derived from [TARGETS] rather than repeated, because the two drifting apart is
+     * a silent failure: a target this list does not name is a probe that leaves over
+     * the carrier link and reports a dead node as healthy. See the rule 3b comment
+     * in `ShardConfigs.smartSplitRules`.
+     */
+    val RULE_HOSTS: List<String> = TARGETS.map { it.first }
+
+    /**
+     * The ports those endpoints are probed on, as an xray port list.
+     *
+     * Derived for the same reason as [RULE_HOSTS]: the rule names its hosts from
+     * this file, so a future target on any other port would be named by the rule
+     * and still fall outside it — restoring the blind spot for that one target,
+     * silently. Comma lists are valid xray port syntax and were measured to match.
+     */
+    val RULE_PORTS: String = TARGETS.map { it.third }.distinct().sorted().joinToString(",")
+
+    /**
      * @param socksPort loopback SOCKS5 port to test through.
      * @param timeoutMs budget for the whole exchange, handshake included.
      * @return true if any target answered as expected.

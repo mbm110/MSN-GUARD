@@ -1,5 +1,7 @@
 package com.msnguard.vpn
 
+import android.content.Context
+
 /**
  * Fans every node out across several Cloudflare edge addresses.
  *
@@ -19,23 +21,25 @@ package com.msnguard.vpn
  *
  * ## Where the addresses come from
  *
- * [EDGES] is the publisher's own list of edges on which the fragment+fingerprint
+ * [edges] is the publisher's own list of edges on which the fragment+fingerprint
  * approach was reported still working, plus whatever address the subscription
  * itself carries — which is kept, never replaced, so a good path we already have
  * cannot be lost by this expansion.
+ *
+ * It is **fetched at runtime** ([RemotePolicy]), because this is the fact that
+ * ages fastest: the publisher declared three of the original four dead in one
+ * message, and replacing them used to mean a release.
  *
  * ## Why not every Cloudflare IP
  *
  * Cloudflare announces millions of addresses and most are useless here: an edge
  * has to actually be reachable and unthrottled on the user's carrier. Scanning
  * for them on the device would be a long, battery-expensive sweep for a marginal
- * gain over a handful of edges that are known to work. Measured on the shipped
- * seed, these four turn 28 nodes into 112 paths — already more than a connect
- * can race through, so more edges would buy nothing.
+ * gain over a handful of edges that are known to work.
  *
- * If the subscription later moves to an address that is not in [EDGES], that
- * address is kept as a fifth, so the pool follows the publisher instead of
- * being pinned to a list that ages.
+ * If the subscription later moves to an address that is not in the list, that
+ * address is kept as an extra, so the pool follows the publisher instead of being
+ * pinned to a list that ages.
  *
  * ## Guardrails
  *
@@ -61,13 +65,14 @@ object ShardEdges {
      * including on connections where uploads are throttled. Order is not
      * significant: [ShardHealth] learns which of them is fast on this particular
      * network and [ShardManager] spreads each race across them.
+     *
+     * **Fetched, not compiled in.** An edge dies when a carrier blackholes it, and
+     * that used to cost a release: three of the original four were reported dead at
+     * once, taking three quarters of the pool's paths with them. [RemotePolicy]
+     * holds the live list and falls back to the built-in one when it has nothing,
+     * so this is now an edit in a JSON file rather than a version bump.
      */
-    val EDGES = listOf(
-        "104.21.70.21",
-        "104.21.33.59",
-        "172.67.141.182",
-        "172.67.217.240",
-    )
+    fun edges(context: Context): List<String> = RemotePolicy.edges(context)
 
     /**
      * Ports Cloudflare terminates. A node on anything else is not fanned out,
@@ -109,10 +114,10 @@ object ShardEdges {
     ).mapNotNull { cidrToRange(it) }
 
     /**
-     * Expand [nodes] across [EDGES].
+     * Expand [nodes] across [edges].
      *
      * Deduped on [ShardNode.key], which includes the address — so the publisher's
-     * own address is not duplicated when it happens to be one of [EDGES], and two
+     * own address is not duplicated when it happens to be one of [edges], and two
      * nodes that differ only by edge remain separate entries with their own health
      * memory. That per-edge memory is the point: on a network where one edge is
      * throttled, the ranking learns it once and stops racing it.
@@ -131,8 +136,9 @@ object ShardEdges {
      * sorts on measured latency and streaks, and only falls back to this order for
      * nodes it knows nothing about.
      */
-    fun expand(nodes: List<ShardNode>): List<ShardNode> {
-        val out = ArrayList<ShardNode>(nodes.size * (EDGES.size + 1))
+    fun expand(context: Context, nodes: List<ShardNode>): List<ShardNode> {
+        val edges = edges(context)
+        val out = ArrayList<ShardNode>(nodes.size * (edges.size + 1))
         val seen = HashSet<String>()
         nodes.forEachIndexed { index, node ->
             if (!isExpandable(node)) {
@@ -140,10 +146,10 @@ object ShardEdges {
                 return@forEachIndexed
             }
             // The subscription's own address first in the rotation, so it is always
-            // present even when it is not one of [EDGES].
-            val addresses = ArrayList<String>(EDGES.size + 1)
+            // present even when it is not one of [edges].
+            val addresses = ArrayList<String>(edges.size + 1)
             addresses.add(node.address)
-            EDGES.forEach { if (it != node.address) addresses.add(it) }
+            edges.forEach { if (it != node.address) addresses.add(it) }
             val offset = index % addresses.size
             for (step in addresses.indices) {
                 val address = addresses[(offset + step) % addresses.size]
@@ -159,7 +165,18 @@ object ShardEdges {
         // No Host header means the address is the server itself.
         if (node.host.isBlank()) return false
         if (node.port !in CDN_PORTS) return false
-        val numeric = ipv4ToLong(node.address) ?: return false
+        return isCloudflareAddress(node.address)
+    }
+
+    /**
+     * Is [address] a dotted-quad literal inside Cloudflare's published ranges?
+     *
+     * Public because [RemotePolicy] validates fetched edges with it. That check is
+     * what stops a bad or hostile policy file from pointing every node's TLS — real
+     * SNI and all — at an address the operator picked.
+     */
+    fun isCloudflareAddress(address: String): Boolean {
+        val numeric = ipv4ToLong(address) ?: return false
         return CF_RANGES.any { numeric in it }
     }
 

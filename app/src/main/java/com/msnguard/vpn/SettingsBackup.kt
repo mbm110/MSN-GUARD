@@ -96,6 +96,11 @@ object SettingsBackup {
         "shard_last_check",
         "shard_last_count",
         "shard_last_paths",
+        // Same argument for the policy file's bookkeeping: an ETag restored onto a
+        // device with no matching cache file makes the server answer 304 for a body
+        // this install has never seen, and the app sits on the built-ins.
+        "policy_etag",
+        "policy_last_check",
         // Psiphon's advertised region list, refreshed from the network.
         "psiphon_available_regions",
         // Which rung/transport last worked, per mode. See MsnGuardVpnService's

@@ -329,7 +329,7 @@ object ShardManager {
         // Expanded across the known-good CDN edges before anything else looks at
         // it: see [ShardEdges]. The subscription's own address is kept, so this can
         // only add paths, never remove one that was working.
-        val pool = ShardEdges.expand(ShardSubscription.nodes(context))
+        val pool = ShardEdges.expand(context, ShardSubscription.nodes(context))
         if (pool.isEmpty()) {
             lastError = "no nodes available"
             ConnectionLog.record("$TAG pool empty — cache and seed both unusable")
@@ -368,6 +368,7 @@ object ShardManager {
         if (startSmartSplit(context, winner, listenHost, port, logLevel)) return true
 
         val config = ShardConfigs.tunnelConfig(
+            context,
             winner,
             listenHost,
             port,
@@ -434,7 +435,7 @@ object ShardManager {
         for (profile in candidates) {
             ConnectionLog.record("$TAG Smart Split: tuning, ${profile.attempt}")
             val splitConfig = ShardConfigs.tunnelConfig(
-                winner, listenHost, port, logLevel, smartSplit = profile,
+                context, winner, listenHost, port, logLevel, smartSplit = profile,
             )
             val splitFile = ShardConfigs.writeConfig(context, "tunnel.json", splitConfig)
             if (!launch(context, splitFile, TAG)) continue

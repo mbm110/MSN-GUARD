@@ -90,7 +90,7 @@ object ShardSubscription {
     fun cachedPathCount(context: Context): Int {
         val stored = prefs(context).getInt(LAST_PATHS_PREF, 0)
         if (stored > 0) return stored
-        return cachedCount(context) * ShardEdges.EDGES.size
+        return cachedCount(context) * ShardEdges.edges(context).size
     }
 
     /**
@@ -191,7 +191,7 @@ object ShardSubscription {
                 return cachedCount(context)
             }
 
-            val paths = ShardEdges.expand(parsed).size
+            val paths = ShardEdges.expand(context, parsed).size
             cacheFile(context).writeText(body)
             prefs(context).edit()
                 .putString(ETAG_PREF, connection.getHeaderField("ETag").orEmpty())
