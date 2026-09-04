@@ -434,7 +434,21 @@ class MainActivity : Activity() {
                     // with a generic "Not connected".
                     if (suppressNextDisconnectedPaint) {
                         suppressNextDisconnectedPaint = false
-                        setModeEnabled(true)
+                        // NOT while the Auto Scan is between rungs. Re-enabling here
+                        // un-dims the rail and the OVER WARP card for the 1.5s settle,
+                        // and the next rung's CONNECTING dims them again — on the
+                        // phone that is the lower half of the screen blinking once
+                        // per rung. The scan keeps the controls locked throughout.
+                        if (autoScanIndex < 0) setModeEnabled(true)
+                    } else if (autoScanIndex >= 0) {
+                        // A SECOND disconnected broadcast from the same teardown: the
+                        // native worker's exit branch and stopTunnel()'s tail can each
+                        // emit one depending on which finishes first, and only the
+                        // first is consumed by the flag above. Painting it would drop
+                        // "Not connected" over the scan's own progress line and reset
+                        // the metrics mid-search. The scan owns this screen until it
+                        // ends.
+                        ConnectionLog.record("Auto Scan: teardown broadcast ignored between rungs")
                     } else {
                         showDisconnected()
                     }
@@ -516,8 +530,35 @@ class MainActivity : Activity() {
         }
         connectionTitle = label(textSize = 21f, color = INK, style = TypefaceStyle.MEDIUM).apply {
             gravity = Gravity.CENTER
+            // One line, always. Every headline this view shows is short ("Connecting",
+            // "Auto Scan", "Connection degraded"), and a wrap would change the
+            // console's height — see connectionDetail below for why that is the
+            // expensive kind of change.
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
         }
-        connectionDetail = label(textSize = 13.5f, color = MUTED).apply { gravity = Gravity.CENTER }
+        connectionDetail = label(textSize = 13.5f, color = MUTED).apply {
+            gravity = Gravity.CENTER
+            // TWO LINES, ALWAYS — this is a layout fix, not a typographic choice.
+            //
+            // The status line changes text on every broadcast of a connect, and its
+            // messages straddle the wrap point: "Starting WireGuard tunnel" is one
+            // line, "Tunnel handshake succeeded but no traffic passes — try another
+            // protocol" is two. Each change of line COUNT changed the console's
+            // measured height, and [fitConsoleToViewport] answers a height change by
+            // rescaling the dial — which relayouts the whole column, which is the
+            // "screen goes and comes back" the user sees under the OVER WARP card.
+            // With the Auto Scan the messages change several times per connect, so
+            // what used to be one settle became a series of them: the flicker.
+            //
+            // Fixed at two lines the height is constant, the fit pass settles once,
+            // and nothing below the dial moves for the rest of the session. Ellipsis
+            // rather than three lines because two is enough for every message the app
+            // produces (the longest is 71 characters).
+            minLines = 2
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
         chipLatency = label("Latency —", 12f, MUTED, TypefaceStyle.MEDIUM).apply {
             gravity = Gravity.CENTER
             contentDescription = "Ping connection"
@@ -1224,6 +1265,20 @@ class MainActivity : Activity() {
             // The dial is the only element that scales, so the whole delta has to
             // come out of (or go into) its box.
             val delta = natural - viewport - dp(FIT_SLACK_DP)
+            // ASYMMETRIC, and this is the anti-flicker rule.
+            //
+            // Shrinking is obligatory — an overflowing column hides controls. Growing
+            // back is not: it is a cosmetic gain, and doing it for every few free
+            // pixels turns any height change in the column into a shrink-then-grow
+            // pair. That pair is a full relayout of everything under the dial, twice,
+            // which on the phone reads as the lower half of the screen blinking. The
+            // status line changing between one and two lines during a connect was
+            // producing exactly that, several times per attempt.
+            //
+            // So the dial only grows when there is a whole line of slack to reclaim,
+            // which no text change can produce on its own — only a real viewport
+            // change (rotation, multi-window, the inset listener landing) can.
+            if (delta < 0 && -delta < dp(GROW_SLACK_DP)) return@addOnLayoutChangeListener
             val current = orbitDial.sizeScale
             // Clamped to the SAME range the setter enforces. If the target were
             // left below the floor, current would sit clamped at the floor while
@@ -5074,8 +5129,22 @@ class MainActivity : Activity() {
 
         // Keep the rail in sync when the change came from somewhere else (the
         // mode screen, a restored preference) rather than from a rail tap.
-        transportRail.select(Protocol.entries.indexOf(protocol), animate = true)
+        // Animated for a user tap, instant for a scan-driven change. The 330ms
+        // overshoot slide plus the chip's fade-to-zero-and-back is the right
+        // feedback for somebody who just pressed a cell; run once per rung by the
+        // Auto Scan it is three more blinks in the area the user is already
+        // watching. The labels still change, so the search stays visible.
+        val animate = autoScanIndex < 0
+        transportRail.select(Protocol.entries.indexOf(protocol), animate = animate)
         chipProtocol.animate().cancel()
+        if (!animate) {
+            // Alpha reset explicitly: cancel() leaves whatever value the fade had
+            // reached, so a scan starting mid-animation could freeze the chip
+            // half-transparent.
+            chipProtocol.alpha = 1f
+            chipProtocol.text = protocol.label.uppercase()
+            return
+        }
         chipProtocol.animate().alpha(0f).setDuration(80)
             .setInterpolator(DecelerateInterpolator())
             .withEndAction {
@@ -5338,6 +5407,11 @@ class MainActivity : Activity() {
         if (restoreSelection && before != null && before != selectedProtocol) {
             updateConnectionMode(before)
         }
+        // The card slot was frozen for the whole search ([renderChainCard]), and the
+        // winner is only known now. Called unconditionally: updateConnectionMode()
+        // above is a no-op when the selection did not change, and the SHARD winner
+        // reaches this line with the chain card still occupying the slot.
+        renderChainCard()
     }
 
     /**
@@ -5635,6 +5709,18 @@ class MainActivity : Activity() {
     }
 
     private fun setModeEnabled(enabled: Boolean) {
+        // Idempotent, because this is the hot path. Every CONNECTING broadcast ends
+        // in showConnectionProgress(), which ends here, and a single connect emits a
+        // dozen of them — Tor alone reports 15 bootstrap percentages. The work below
+        // rebuilds both cards from scratch (four RippleDrawables for the chain card,
+        // three for Smart Split, plus their badge backgrounds), so repeating it for
+        // a flag that has not moved was pure repaint: the OVER WARP / Smart Split
+        // area ticked its way through every connect.
+        //
+        // The rail is asked as well as the flag: it is the one control whose enabled
+        // state can be out of step with [modeControlsEnabled] after a page rebuild,
+        // and a return that left it wrong would lock or unlock it for good.
+        if (modeControlsEnabled == enabled && transportRail.isEnabled == enabled) return
         transportRail.isEnabled = enabled
         // Arming or disarming mid-session would leave the running tunnel and the
         // card disagreeing, and the change only takes effect on the next connect
@@ -5750,8 +5836,16 @@ class MainActivity : Activity() {
         // not merely disabled: a permanently-N/A card in the SHARD case would be
         // dead furniture on the app's most-used screen.
         val shardSelected = selectedProtocol == Protocol.SHARD
-        chainCard.visibility = if (shardSelected) View.GONE else View.VISIBLE
-        smartSplitCard.visibility = if (shardSelected) View.VISIBLE else View.GONE
+        // Frozen while the Auto Scan is walking the ladder. The swap is one card
+        // disappearing and another taking its place, and the ladder changes the
+        // selection three times in a single connect — so the user watched the OVER
+        // WARP card vanish and come back mid-search, which is the flicker they
+        // reported. [endAutoScan] repaints once the search is over, so the slot
+        // always catches up to the transport that actually won.
+        if (autoScanIndex < 0) {
+            chainCard.visibility = if (shardSelected) View.GONE else View.VISIBLE
+            smartSplitCard.visibility = if (shardSelected) View.VISIBLE else View.GONE
+        }
         renderSmartSplitCard()
         // The settings page carries the same switch, so keep it in step whenever the
         // card is repainted — arming from the home screen must not leave a stale
@@ -6388,6 +6482,15 @@ class MainActivity : Activity() {
          * though it is fully on screen.
          */
         const val FIT_SLACK_DP = 6
+        /**
+         * Spare room required before the dial is allowed to grow back.
+         *
+         * Bigger than one line of the status text (13.5sp ≈ 18dp) on purpose: the
+         * gap between "must shrink" and "may grow" is what stops a text change from
+         * ping-ponging the dial and relayouting the whole column twice. See
+         * [fitConsoleToViewport].
+         */
+        const val GROW_SLACK_DP = 28
         /**
          * Consecutive failed health checks tolerated on an established session
          * before the tunnel is declared dead and torn down. Three misses at the
