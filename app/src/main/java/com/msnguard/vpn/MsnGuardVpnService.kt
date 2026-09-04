@@ -284,6 +284,52 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private val userInitiatedStop = AtomicBoolean(false)
 
+    /**
+     * A quick reconnect (the notification's Reconnect action) is in flight.
+     *
+     * Separate from [userInitiatedStop] and [stopRequested] because it answers a
+     * third question those two cannot: this teardown is one the user asked for AND
+     * must be followed by a start. The native core's `finally` block reads it to
+     * decide not to end the service under a restart that is already scheduled.
+     */
+    private val reconnectRequested = AtomicBoolean(false)
+
+    /**
+     * Bumped by every [startTunnel]; captured by each session's worker.
+     *
+     * The native core's `finally` block runs when the core exits, which on a
+     * reconnect is *after* the next session has already been started. Without a
+     * way to tell "my own session ended" from "a newer session owns the service
+     * now", that block ended the service (or armed the kill switch) underneath the
+     * session that replaced it — the Reconnect-reads-as-Disconnect defect, and the
+     * same race for auto-reconnect. A monotonic counter answers it exactly, with no
+     * dependency on how fast the old core unwinds.
+     */
+    @Volatile
+    private var sessionGeneration = 0
+
+    /**
+     * The session that started the Psiphon controller now running.
+     *
+     * PsiphonTunnel's callbacks carry no identity, so after a reconnect the OLD
+     * controller's `onExiting` arrives while the NEW session is already up and gets
+     * read as "the tunnel died" — which would tear down a working session and null
+     * out its tunnel handle. Comparing this against [sessionGeneration] tells the
+     * two apart.
+     */
+    @Volatile
+    private var psiphonGeneration = 0
+
+    /**
+     * The blocking TUN is up because a tunnel dropped, and must stay up.
+     *
+     * Latched rather than derived: between auto-reconnect attempts there is no
+     * tunnel and no core to ask, so the only record that traffic is supposed to
+     * stay sealed is this flag. Cleared on a verified connect and on a user
+     * disconnect — the two events that legitimately end the seal.
+     */
+    private val killSwitchSealed = AtomicBoolean(false)
+
     /** Consecutive auto-reconnect attempts since the last verified connect. */
     private var reconnectAttempts = 0
 
@@ -686,11 +732,41 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
          */
         const val AUTO_RECONNECT_DEFAULT = true
 
+        /**
+         * Preference key for local-network access.
+         *
+         * Read by [lanBypassEnabled], which also migrates the older `lan_sharing`
+         * value forward, and written by the Settings switch. Absent means off:
+         * everything, LAN destinations included, goes through the tunnel.
+         */
+        const val LAN_BYPASS_PREF = "lan_bypass"
+
         /** How often the liveness watchdog checks an established tunnel. */
         private const val WATCHDOG_INTERVAL_S = 30L
 
         /** Auto-reconnect backoff in seconds; the last entry repeats forever. */
         private val RECONNECT_BACKOFF_S = longArrayOf(5, 15, 30, 60, 120)
+
+        /**
+         * Quick-reconnect timings.
+         *
+         * [RECONNECT_SETTLE_MS] is the gap before the restart begins: long enough
+         * for stopTunnel's inline teardown to finish on the SOCKS-front paths,
+         * short enough that the user reads it as a reconnect and not a dropout.
+         * [RECONNECT_CORE_WAIT_MS] then bounds the wait for the Rust core to
+         * actually exit — it holds a socket the next start needs, and starting on
+         * top of a live core returns "already running" instead of a tunnel. The
+         * ceiling exists so a wedged core degrades to a failed reconnect the user
+         * can retry, rather than a silent hang. It matches [OUTER_STOP_GRACE_MS]
+         * on purpose: that constant documents the same wait (aether_stop only
+         * raises a flag, and RUNNING clears when the tunnel task unwinds), and a
+         * chained session is the slow case — undershooting it would fail the
+         * restart on "core still busy" instead of waiting one more second.
+         */
+        private const val RECONNECT_SETTLE_MS = 600L
+        private const val RECONNECT_CORE_WAIT_MS = 6_000
+        private const val RECONNECT_POLL_MS = 100L
+
         /** Exit address measured by the core from inside the tunnel. */
         const val EXTRA_EXIT_IP = "exit_ip"
         const val STATUS_CONNECTING = "connecting"
@@ -842,6 +918,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     override fun onListeningSocksProxyPort(port: Int) {
+        // An older controller still unwinding can publish its port after the new
+        // session has published its own. Taking it would point tun2socks at a
+        // listener that is about to close. See [psiphonGeneration].
+        if (psiphonGeneration != sessionGeneration) {
+            ConnectionLog.record("Ignoring a stale Psiphon SOCKS port from an older controller")
+            return
+        }
         activeSocksPort = port
         ConnectionLog.record("Psiphon SOCKS proxy listening on port $port")
         if (CoreConfig.lanSharingEnabled(this)) {
@@ -880,6 +963,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     override fun onConnected() {
         ConnectionLog.record("Psiphon connected — upstream tunnel ready")
+        // Same guard as the other callbacks: an older controller can report connected
+        // while unwinding, and this method goes on to start tun2socks. Doing that for
+        // a dying controller would replace a healthy data path with a dead one.
+        if (psiphonGeneration != sessionGeneration) {
+            ConnectionLog.record("An older Psiphon controller reported connected; ignored")
+            return
+        }
         // A tunnel exists: disarm the watchdog so it cannot tear down a working
         // connection.
         ladderActive.set(false)
@@ -975,6 +1065,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     override fun onExiting() {
         ConnectionLog.record("Psiphon exiting")
+        // A controller from a previous session, unwinding after a reconnect already
+        // brought a new one up. Its callbacks are indistinguishable from the live
+        // controller's, so without this the old one's exit would null the new
+        // tunnel handle and be reported as a drop.
+        if (psiphonGeneration != sessionGeneration) {
+            ConnectionLog.record("An older Psiphon controller exited; current session untouched")
+            return
+        }
         psiphonTunnel = null
         // Psiphon hit its own EstablishTunnelTimeout and shut the controller down.
         // That is the definitive "this rung is dead" signal, and it arrives before
@@ -1311,6 +1409,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // Always SOCKS mode — in VPN mode we bridge TUN→SOCKS ourselves.
             tunnel.setVpnMode(false)
             psiphonTunnel = tunnel
+            // Stamped so this controller's callbacks can be told from an older
+            // controller's. See [psiphonGeneration].
+            psiphonGeneration = sessionGeneration
             psiphonConfigJson = buildPsiphonConfig()
 
             // Load hex-encoded server entries from assets
@@ -1658,15 +1759,100 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * other end, i.e. no internet, and no visible sign the app has given up. That
      * is exactly what was reported from the field.
      *
-     * The kill switch is deliberately not consulted here. These are failures to
-     * ever establish, not a tunnel dropping under a user who asked to stay
-     * protected — blocking all traffic after a failed connect would leave the
-     * device offline with no explanation.
+     * The kill switch is deliberately not consulted here BY DEFAULT. These are
+     * failures to ever establish, not a tunnel dropping under a user who asked to
+     * stay protected — blocking all traffic after a failed connect would leave the
+     * device offline with no explanation. [sealOnDrop] is the one exception, passed
+     * only by the chain's committed-rung death: that is a genuine drop of a session
+     * that was carrying traffic, and it is the only such drop that never reaches
+     * [onTunnelLost].
      */
-    private fun failAndStop(detail: String) {
-        sendStatus(STATUS_FAILED, detail)
+    private fun failAndStop(detail: String, sealOnDrop: Boolean = false) {
+        // Decided BEFORE the teardown, on two signals that both stop being readable
+        // once stopTunnel() has run:
+        //
+        //  * killSwitchArmed() reads `proxyMode`, which stopTunnel() clears.
+        //  * Tun2SocksManager.isRunning is what separates a drop from a failed
+        //    connect here. NOT `connected`: startTunnel() sets that on the way IN
+        //    (its opening compareAndSet), so it is true throughout a failed connect
+        //    too and would seal the device after one — exactly what the paragraph
+        //    above forbids. tun2socks routing means the inner leg really was
+        //    carrying the device's traffic.
+        val armed = sealOnDrop && killSwitchArmed() && Tun2SocksManager.isRunning
+        // A seal that is ALREADY up has to outlive this failure as well, and that
+        // decision has to be made here for the same reason: it reads the preference
+        // and it decides whether stopTunnel may end the service. See the block below
+        // for why ending it would leak.
+        val keepSeal = killSwitchSealed.get() && !userInitiatedStop.get() && killSwitchArmed()
+        // FAILED is withheld when the switch is about to seal AND a retry is coming:
+        // the dial would flash red and then immediately go back to "Reconnecting…",
+        // and scheduleAutoReconnect's own CONNECTING is the honest report there. The
+        // sealed branches below send their own terminal status when no retry is due.
+        val sealing = armed || keepSeal
+        if (!(sealing && willAutoReconnect())) {
+            sendStatus(STATUS_FAILED, detail)
+        }
         connected.set(false)
-        stopTunnel(notify = false)
+        // Keeping the service alive is a precondition of the seal: stopSelf()
+        // releases the blocking TUN's fd and the OS restores carrier networking,
+        // which is the leak the switch exists to prevent.
+        stopTunnel(notify = false, teardownService = !sealing)
+        // A quick reconnect owns the service: Psiphon, Tor, SHARD and the chain all
+        // report a mid-teardown failure through here, and killing the service would
+        // strand the restart the user just asked for — the same defect the native
+        // core's finally block had. The restart will report its own outcome.
+        //
+        // The latch is CONSUMED, not just read: if the restart itself is what failed,
+        // a second failure must be free to end the service normally instead of
+        // leaving a dead session behind a live notification.
+        if (reconnectRequested.compareAndSet(true, false)) {
+            ConnectionLog.record("Failure during a quick reconnect; service kept alive")
+            return
+        }
+        // The seal goes up AFTER the teardown, never before, or stopTunnel's own
+        // `tun?.close()` would close the blocking TUN we just built. `armed` was
+        // decided above, while proxyMode and tun2socks still described the dead
+        // session.
+        if (sealWithKillSwitch(armed)) {
+            // Same as the already-sealed branch below: seal, then keep trying, so the
+            // outage ends on its own if the network comes back.
+            if (willAutoReconnect()) {
+                scheduleAutoReconnect(detail)
+            } else {
+                sendStatus(STATUS_FAILED, "Kill switch active — tunnel dropped")
+            }
+            return
+        }
+        // A seal that is ALREADY up owns the service, and this is the path that used
+        // to release it: the drop sealed the device, auto-reconnect re-dialled, the
+        // retry failed, and the failure ended the service — which closes the
+        // blocking TUN's fd and hands traffic straight back to the carrier. That is
+        // the leak [killSwitchSealed] was latched for, so it is finally read here.
+        // stopTunnel above closed the fd, hence the rebuild rather than a bare
+        // return.
+        //
+        // Two exits from the seal, and both are the user's own instruction:
+        // [userInitiatedStop] (Disconnect, or the system revoking consent) and the
+        // preference itself, re-read so turning the switch off mid-outage frees the
+        // device on the next attempt instead of at the next reboot. Only the
+        // preference half of [killSwitchArmed] still means anything at this point —
+        // stopTunnel above cleared `proxyMode` — and that is fine, because the latch
+        // could only have been set by a VPN-mode drop in the first place.
+        if (keepSeal) {
+            ConnectionLog.record("Reconnect attempt failed; the kill switch stays sealed")
+            rebuildKillSwitchVpn()
+            // Keep trying behind the seal. Without this the device stayed blocked
+            // with nothing left to un-block it: failAndStop schedules no retry of its
+            // own, so a sealed outage would last until the user opened the app. The
+            // backoff tops out at 120s and repeats, which is exactly the overnight
+            // case the switch and auto-reconnect are both on for.
+            if (willAutoReconnect()) {
+                scheduleAutoReconnect(detail)
+            } else {
+                sendStatus(STATUS_FAILED, "Kill switch active — $detail")
+            }
+            return
+        }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -1692,6 +1878,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // off" latch and the backoff counter, so a manual retry always
                 // starts from the first, shortest delay.
                 userInitiatedStop.set(false)
+                // The seal is over too: this connect either replaces the blocking TUN
+                // with a working tunnel or fails on its own terms. Left set, a failed
+                // manual retry would be treated as "still sealed from the old drop".
+                killSwitchSealed.set(false)
                 reconnectAttempts = 0
                 startTunnel(config)
             }
@@ -1699,6 +1889,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // The one place that means "the user wants this off". Auto-reconnect
                 // reads this latch and stays out of the way.
                 userInitiatedStop.set(true)
+                // Clears the reconnect latch too, or a Reconnect that never came back
+                // up would leave the service un-stoppable: every teardown path reads
+                // the latch and declines to end the service while it is set.
+                reconnectRequested.set(false)
+                // And the seal: Disconnect must take the blocking TUN down with the
+                // session. Left latched, failAndStop would rebuild it on the way out
+                // and the device would stay sealed after the user asked to stop.
+                killSwitchSealed.set(false)
                 cancelAutoReconnect()
                 stopTunnel()
             }
@@ -1706,11 +1904,84 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 val config = storedConfig
                 if (config != null && connected.get()) {
                     ConnectionLog.record("Quick reconnect requested")
+                    // Latched BEFORE the teardown, because the teardown is what races
+                    // us. On MASQUE/WireGuard/WoW the core runs inside worker.execute
+                    // and its `finally` ends the service; on every path a failure
+                    // lands in failAndStop, which does the same. Both now read this
+                    // flag and leave the service alive for the restart below.
+                    reconnectRequested.set(true)
+                    // NOT userInitiatedStop: that latch means "stay off", and it
+                    // would make the restart's own auto-reconnect refuse to fire.
                     stopTunnel(notify = false, teardownService = false)
-                    worker.execute {
-                        try { Thread.sleep(500) } catch (_: InterruptedException) {}
-                        startTunnel(config)
-                    }
+                    // Off the worker on purpose. `worker` is single-threaded and the
+                    // native core occupies it for the whole session, so a task queued
+                    // here would not run until the core had exited — which is the
+                    // very thing we are waiting for, and on the SOCKS-mode paths it
+                    // can be seconds. ladderScheduler is idle while connected.
+                    ladderScheduler.schedule({
+                        try {
+                            // Two things have to be true before the restart can run,
+                            // and they finish at different moments:
+                            //
+                            //  * the core has to be out of the way, or
+                            //    NativeCore.start() returns "already running";
+                            //  * `connected` has to be back to false, because
+                            //    startTunnel() opens with
+                            //    `connected.compareAndSet(false, true)` and RETURNS
+                            //    SILENTLY if it loses. On the native paths that flag
+                            //    is cleared in the core's `finally`, which runs a
+                            //    moment AFTER isRunning() goes false — waiting only on
+                            //    the core would race it, the restart would no-op, and
+                            //    the notification's Reconnect would read as Disconnect
+                            //    all over again. On the SOCKS-front paths stopTunnel
+                            //    already cleared it inline, so this costs nothing.
+                            var waited = 0
+                            while ((NativeCore.isRunning() || connected.get()) &&
+                                waited < RECONNECT_CORE_WAIT_MS
+                            ) {
+                                Thread.sleep(RECONNECT_POLL_MS)
+                                waited += RECONNECT_POLL_MS.toInt()
+                            }
+                            if (NativeCore.isRunning() || connected.get()) {
+                                // Restarting anyway is not a retry, it is a
+                                // wrong-reason failure: raiseOuterLeg refuses a rung
+                                // while the core is up, and startTunnel's CAS refuses
+                                // the whole start while the old session still holds
+                                // `connected` — either way the user would be left with
+                                // a live notification over a dead tunnel. Report it.
+                                ConnectionLog.record(
+                                    "Quick reconnect: the previous session was still shutting down " +
+                                        "after ${RECONNECT_CORE_WAIT_MS / 1000}s; not restarting"
+                                )
+                                reconnectRequested.set(false)
+                                sendStatus(STATUS_FAILED, "Reconnect timed out — tap the dial to connect")
+                                return@schedule
+                            }
+                            // The user can press Disconnect inside the settle window,
+                            // and that latch means "stay off" — startAsForeground would
+                            // otherwise land on a service that is ending.
+                            if (userInitiatedStop.get()) {
+                                ConnectionLog.record(
+                                    "Quick reconnect abandoned: the user disconnected while waiting"
+                                )
+                                reconnectRequested.set(false)
+                                return@schedule
+                            }
+                            reconnectAttempts = 0
+                            startTunnel(config)
+                        } catch (e: Exception) {
+                            ConnectionLog.record("Quick reconnect failed: ${e.message}")
+                            reconnectRequested.set(false)
+                        }
+                        // Deliberately no `finally` clear. isRunning() going false and
+                        // the core's Kotlin `finally` block running are not the same
+                        // instant, and that block is the one reader that must still see
+                        // the latch — clearing it from this thread could win the race
+                        // and hand the old session a stopSelf() under the restart.
+                        // Every reader consumes the latch itself instead, and
+                        // sendStatus clears it on CONNECTED, so it cannot outlive the
+                        // reconnect it belongs to.
+                    }, RECONNECT_SETTLE_MS, TimeUnit.MILLISECONDS)
                 }
             }
             ACTION_NOTIFICATION_HEALTH -> {
@@ -1749,6 +2020,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     override fun onRevoke() {
         ConnectionLog.record("VPN permission revoked by the system")
         userInitiatedStop.set(true)
+        // Same reason as ACTION_DISCONNECT: the consent this reconnect would restart
+        // into is exactly what was just taken away, so the latch must not survive.
+        reconnectRequested.set(false)
+        // Nor the seal — the permission it would be rebuilt on is gone, so a rebuild
+        // could only fail, and failing there stops the service anyway.
+        killSwitchSealed.set(false)
         cancelAutoReconnect()
         stopTunnel()
         super.onRevoke()
@@ -1954,6 +2231,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         // Same reason as the plain Psiphon path: the Split screen's
                         // choice has to apply to chained runs too, and our own package
                         // stays off the TUN in every mode.
+                        .applyLanAccess(tun = address)
                         .applySplitTunneling()
                         .establish() ?: error("Android could not establish the VPN interface")
                     vpnModeActive.set(true)
@@ -2065,6 +2343,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // resolves its own gateway names in the core, off the TUN, so
                     // it needs nothing added here either.
                     .addDnsServer(address.router)
+                    // LAN destinations leave the circuit when the user turns this on
+                    // — that is the point of the setting, and on this transport it is
+                    // also an anonymity decision, so it stays opt-in and off by
+                    // default. Printers and NAS boxes are not reachable through Tor
+                    // in any case, so without it those destinations simply fail.
+                    .applyLanAccess(tun = address)
                     .applySplitTunneling()
                     .establish() ?: error("Android could not establish the VPN interface")
                 vpnModeActive.set(true)
@@ -2225,6 +2509,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // is off the TUN), so nothing in the connect path needs the
                     // TUN's resolver before the tunnel exists.
                     .addDnsServer(address.router)
+                    .applyLanAccess(tun = address)
                     .applySplitTunneling()
                     .establish() ?: error("Android could not establish the VPN interface")
                 vpnModeActive.set(true)
@@ -2262,20 +2547,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             }
         }
     }
-
-    /**
-     * The active SHARD node's country, or empty when this is not a SHARD session.
-     *
-     * Empty is also the answer for nodes the publisher labelled with only a channel
-     * handle — roughly a quarter of the pool. The caller then falls back to the
-     * activity's geolocation lookup, which is slower but always produces something.
-     */
-    private fun shardCountry(): String =
-        if (currentProtocol.contains("SHARD")) {
-            ShardManager.activeNode?.countryCode.orEmpty()
-        } else {
-            ""
-        }
 
     /** Whether the user asked for a verbose log; xray's level follows it. */
     private fun verboseShardLog(): Boolean =
@@ -2670,11 +2941,32 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * gap so the reconnect does not have to re-prompt the user.
      */
     private fun onTunnelLost(reason: String) {
+        // A quick reconnect tears the old tunnel down on purpose, and on Psiphon the
+        // controller's own `onExiting` arrives a moment later — after the restart has
+        // cleared stopRequested, so the usual guard no longer covers it. Treating
+        // that as a drop would schedule a second, competing reconnect.
+        if (reconnectRequested.get()) {
+            ConnectionLog.record("Tunnel ended during a quick reconnect; the restart owns it")
+            return
+        }
+        // Read BEFORE any teardown: stopTunnel() clears proxyMode, and
+        // killSwitchArmed() reads it. Asking afterwards would call a proxy-only
+        // session "VPN mode" and seal a device that never had a TUN.
+        val armed = killSwitchArmed()
         if (!autoReconnectEnabled()) {
             ConnectionLog.record("Auto reconnect is off — leaving the tunnel down")
             sendStatus(STATUS_FAILED, reason)
             connected.set(false)
             stopTunnel(notify = false)
+            // Auto-reconnect being off must not seal the device when the user asked
+            // for the tunnel to stay up. The kill switch is exactly that request, so
+            // this path has to honour it the same way the native core's finally does
+            // — before, a watchdog-detected drop on SHARD, Psiphon or Tor left
+            // traffic on the carrier link with the switch on.
+            if (sealWithKillSwitch(armed)) {
+                sendStatus(STATUS_FAILED, "Kill switch active — tunnel dropped")
+                return
+            }
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
@@ -2682,8 +2974,30 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         stopWatchdog()
         connected.set(false)
         stopTunnel(notify = false, teardownService = false)
+        // The backoff window is the leak the switch exists for: between the drop and
+        // the next attempt there is no TUN at all, and on the 120s rung that is two
+        // minutes of carrier-visible traffic. Sealing first means the retry replaces
+        // a blocking TUN with a working one instead of opening a hole.
+        sealWithKillSwitch(armed)
         scheduleAutoReconnect(reason)
     }
+
+    /**
+     * Whether a dropped tunnel should be replaced by a route-less TUN.
+     *
+     * Two conditions, and both are the user's own instruction: the switch is on,
+     * and this is not proxy mode. Proxy mode is excluded for the reason stated at
+     * the native core's teardown — no TUN was ever established there, nothing is
+     * routed implicitly, so there is no leak to seal and building a TUN would put
+     * up a VPN the user never consented to in this session.
+     *
+     * A user-initiated disconnect is NOT excluded here: the caller decides that.
+     * [stopTunnel]'s own paths never consult this, so pressing disconnect still
+     * ends the session cleanly.
+     */
+    private fun killSwitchArmed(): Boolean =
+        !proxyMode &&
+            getSharedPreferences("settings", MODE_PRIVATE).getBoolean("kill_switch", false)
 
     /**
      * Re-dial after a backoff, until it works or the user intervenes.
@@ -2897,13 +3211,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                             // rejected and raiseOuterLeg moves on — reporting FAILED
                             // there would abort the ladder on its first miss.
                             if (chainOuterCommitted) {
-                                failAndStop("The $label tunnel carrying $inner dropped")
+                                // sealOnDrop: a committed rung dying is the one Psiphon
+                                // or Tor drop that never reaches onTunnelLost, so the
+                                // kill switch has to be offered it here. failAndStop
+                                // itself checks that tun2socks was routing, so a rung
+                                // that dies while the inner leg is still dialling is
+                                // still treated as a failed connect and does not seal.
+                                failAndStop(
+                                    "The $label tunnel carrying $inner dropped",
+                                    sealOnDrop = true,
+                                )
                             }
                         }
                     } catch (t: Throwable) {
                         ConnectionLog.record("Chain: $label leg threw: ${t.message}")
                         if (chainOuterCommitted && !stopRequested.get()) {
-                            failAndStop("The $label tunnel carrying $inner dropped")
+                            failAndStop(
+                                "The $label tunnel carrying $inner dropped",
+                                sealOnDrop = true,
+                            )
                         }
                     }
                 }, "chain-outer-$protocol").start()
@@ -3038,6 +3364,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private fun startTunnel(config: String) {
         if (!connected.compareAndSet(false, true)) return
+        // Claims the service for this session. Every worker below captures the value
+        // it saw here, so a teardown block that runs late can recognise that a newer
+        // session has taken over and keep its hands off the lifecycle.
+        val generation = ++sessionGeneration
         // A start supersedes any pending retry, whoever asked for it.
         reconnectTask?.cancel(false)
         reconnectTask = null
@@ -3237,6 +3567,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         // every app tunnelled. applySplitTunneling() honours the
                         // choice and still keeps our own process off the TUN in every
                         // mode — which the DNS bootstrap above depends on.
+                        .applyLanAccess(tun = address)
                         .applySplitTunneling()
                         .establish() ?: error("Android could not establish the VPN interface")
                     vpnModeActive.set(true)
@@ -3249,6 +3580,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     ConnectionLog.record("Psiphon start failed: ${e.message}")
                     sendStatus(STATUS_FAILED, e.message)
                     connected.set(false)
+                    // Same reason as failAndStop's guard, and the latch is consumed
+                    // the same way: a quick reconnect has a restart queued and owns
+                    // the lifecycle, so a failure here must not take the service (and
+                    // the VPN consent) down with it.
+                    if (reconnectRequested.compareAndSet(true, false)) {
+                        ConnectionLog.record("Psiphon failure during a quick reconnect; service kept alive")
+                        return@execute
+                    }
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 }
@@ -3315,7 +3654,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         ConnectionLog.record("SOCKS proxy tunnel exited: $detail")
                         if (!willAutoReconnect()) sendStatus(STATUS_FAILED, detail)
                     } else if (stopRequested.get()) {
-                        sendStatus(STATUS_DISCONNECTED)
+                        // Not under a quick reconnect: MainActivity's DISCONNECTED
+                        // branch would paint "Not connected" and the tile would flip
+                        // inactive for one blink before the restart's own CONNECTING
+                        // arrived. Reported the way scheduleAutoReconnect reports the
+                        // same situation — the app is working on it, so say that
+                        // instead of claiming the session ended.
+                        if (reconnectRequested.get()) {
+                            sendStatus(STATUS_CONNECTING, "Reconnecting…")
+                        } else {
+                            sendStatus(STATUS_DISCONNECTED)
+                        }
                     } else if (!willAutoReconnect()) {
                         sendStatus(STATUS_FAILED, "Tunnel stopped unexpectedly")
                     }
@@ -3358,7 +3707,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     ConnectionLog.record("Native tunnel exited: $detail")
                     if (!willAutoReconnect()) sendStatus(STATUS_FAILED, detail)
                 } else if (stopRequested.get()) {
-                    sendStatus(STATUS_DISCONNECTED)
+                    // Same as the SOCKS branch above: no DISCONNECTED under a pending
+                    // reconnect, or the UI blinks "Not connected" mid-restart.
+                    if (reconnectRequested.get()) {
+                        sendStatus(STATUS_CONNECTING, "Reconnecting…")
+                    } else {
+                        sendStatus(STATUS_DISCONNECTED)
+                    }
                 } else {
                     ConnectionLog.record("Native tunnel stopped unexpectedly")
                     if (!willAutoReconnect()) sendStatus(STATUS_FAILED, "Tunnel stopped unexpectedly")
@@ -3393,15 +3748,34 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // TUN was ever created and nothing is routed implicitly, so there is
                 // no leak to seal — and building one here would put up a VPN the user
                 // never consented to in this session.
-                val killSwitch = !proxyMode &&
-                    getSharedPreferences("settings", MODE_PRIVATE).getBoolean("kill_switch", false)
+                val killSwitch = killSwitchArmed()
                 tun?.close()
                 tun = null
                 connected.set(false)
-                if (killSwitch && !stopRequested.get()) {
-                    ConnectionLog.record("Kill switch active; blocking all traffic")
+                if (generation != sessionGeneration) {
+                    // A newer session already owns the service. This is the shape a
+                    // Reconnect takes on MASQUE/WireGuard/WoW: the core we were
+                    // waiting on exits AFTER the restart has begun, so anything this
+                    // block does to the lifecycle lands on somebody else's session.
+                    // Before, it called stopSelf() here and the notification's
+                    // Reconnect read as Disconnect.
+                    //
+                    // Checked before the kill switch on purpose: arming a route-less
+                    // blocking TUN would break the session that is currently coming
+                    // up, which is the worse of the two failures.
+                    ConnectionLog.record("Previous core exited under a newer session; lifecycle untouched")
+                } else if (reconnectRequested.compareAndSet(true, false)) {
+                    // A restart is scheduled but has not run yet (the settle delay, or
+                    // still waiting for isRunning() to go false). Same conclusion as
+                    // above: leave the foreground service and the VPN consent alive
+                    // for it. Consumed, so a restart that never arrives cannot leave
+                    // the latch stuck on.
+                    ConnectionLog.record("Core exited for a quick reconnect; service kept alive")
+                } else if (killSwitch && !stopRequested.get()) {
                     sendStatus(STATUS_FAILED, "Kill switch active — tunnel dropped")
-                    rebuildKillSwitchVpn()
+                    // `killSwitch` was read at the top of this block, before
+                    // proxyMode could be cleared — pass it rather than asking again.
+                    sealWithKillSwitch(killSwitch)
                 } else if (nativeExitWasUnexpected && willAutoReconnect()) {
                     // The core died on its own and the user still wants to be
                     // connected. Keep the foreground service alive so the retry
@@ -3560,6 +3934,19 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 .addRoute("0.0.0.0", 0)
                 .addRoute("::", 0)
                 .addDnsServer("1.1.1.1")
+                // Two things this buys, and both are needed:
+                //
+                //  * Our own package comes off the blackhole (every mode of
+                //    applySplitTunneling either excludes us explicitly or leaves us
+                //    out by default). Without it the switch also seals the reconnect
+                //    that is supposed to end the outage: xray, Tor and Psiphon dial
+                //    from our UID, and NativeCore.prepare() talks to the gateway
+                //    before any TUN exists.
+                //  * The blackhole inherits the user's Split choice. In INCLUDE mode
+                //    only the apps that were being tunnelled get blocked; apps the
+                //    user deliberately kept off the tunnel were never protected by it,
+                //    so cutting them off would be a failure the switch never promised.
+                .applySplitTunneling()
                 .establish()
             ConnectionLog.record("Kill switch VPN active; all traffic blocked")
         } catch (e: Exception) {
@@ -3567,6 +3954,34 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
+    }
+
+    /**
+     * Put the blocking TUN up because a tunnel that WAS carrying traffic went away.
+     *
+     * Only a drop arms this — never a first connect that failed. A user who taps
+     * Connect on a hostile network, gets a failure and then finds their internet
+     * dead would read that as the app breaking the device, and no traffic was ever
+     * protected in that case, so there is nothing to seal.
+     *
+     * [killSwitchSealed] latches so the seal survives the retries: a failed retry
+     * used to end the service, which took the blocking TUN down with it and let
+     * traffic back onto the carrier link — the leak this exists to prevent.
+     *
+     * [armed] exists because [killSwitchArmed] reads `proxyMode`, and [stopTunnel]
+     * CLEARS `proxyMode` on its way out (the Psiphon branch does, at the comment
+     * about a session leaving the flag matching reality). A caller that tears the
+     * dead session down first and asks afterwards would therefore be told "VPN
+     * mode" about a session that was proxy-only, and seal a device that never had
+     * a TUN. Every drop-path caller reads the flag BEFORE its teardown and passes
+     * it here — the same order the native core's `finally` already uses.
+     */
+    private fun sealWithKillSwitch(armed: Boolean = killSwitchArmed()): Boolean {
+        if (!armed) return false
+        killSwitchSealed.set(true)
+        ConnectionLog.record("Kill switch active; blocking all traffic")
+        rebuildKillSwitchVpn()
+        return true
     }
 
     /**
@@ -3590,7 +4005,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // several paths to CONNECTED (native tunnel ready, Psiphon proxy ready,
         // tun2socks up, reconnect) and every one funnels through sendStatus.
         when (status) {
-            STATUS_CONNECTED -> if (connectedSince == 0L) connectedSince = SystemClock.elapsedRealtime()
+            STATUS_CONNECTED -> {
+                if (connectedSince == 0L) connectedSince = SystemClock.elapsedRealtime()
+                // The quick reconnect is over the moment a session reports connected.
+                // This is the latch's normal end: the scheduled restart cannot clear
+                // it itself without racing the old session's teardown readers.
+                reconnectRequested.set(false)
+            }
             STATUS_DISCONNECTED, STATUS_FAILED -> connectedSince = 0L
         }
         // Keep the last known figure across the many CONNECTING broadcasts that
@@ -3985,11 +4406,21 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // [updateTrafficNotification] for why they were the cause of the
         // lock-screen wakeups, not just clutter.
         val method = prettyProtocol()
-        // SHARD's own label is the authority for its country: the publisher states
-        // it per node, and it is known the instant a node wins the race — before
-        // any geolocation lookup could have run, and it stays correct across a
-        // mid-session rotation because rotateShardNode() clears currentCountry.
-        val country = shardCountry().ifBlank { currentCountry }
+        // SHARD names no country at all, by request: its pool is public and a node's
+        // advertised country is the publisher's label, not a measurement, so the two
+        // letters were being read as a promise about where the exit is. The other
+        // five transports keep theirs — Psiphon reports its region from the tunnel
+        // itself and the WARP/Tor paths get theirs from the activity's geolocation
+        // lookup, both of which describe the exit that is actually carrying traffic.
+        //
+        // Suppressed here rather than at the source: the active node's country is
+        // still what the main screen shows, and it belongs there. This is a
+        // notification-only decision.
+        val country = if (currentProtocol.contains("SHARD")) {
+            ""
+        } else {
+            currentCountry
+        }
         val subtitle = if (country.isNotBlank()) "$method • $country" else method
 
         // Proxy mode must not claim "VPN connected": nothing is tunnelled device-wide,
@@ -4065,11 +4496,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             if (chainMode) "Tor$mode over WARP" else "Tor$mode"
         }
         currentProtocol.contains("PSIPHON") -> "Psiphon"
-        // Plain "SHARD", exactly like the other transports. The exit is named in
-        // the notification's country field instead — see [shardCountry]. The
-        // address used to be printed here, but it is the Cloudflare edge every
-        // node in the pool shares, so it told the user nothing while looking like
-        // it told them something.
+        // Plain "SHARD", with no country beside it: the two letters were the
+        // publisher's own label for the node rather than a measured exit, so the
+        // notification now names the method only — see [notification]. The address
+        // used to be printed here, but it is the Cloudflare edge every node in the
+        // pool shares, so it told the user nothing while looking like it told them
+        // something.
         currentProtocol.contains("SHARD") -> "SHARD"
         currentProtocol.contains("MASQUE") -> "MASQUE"
         currentProtocol.contains("WIREGUARD") -> "WireGuard"
@@ -4181,7 +4613,31 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         return this
     }
 
-    private fun Builder.applyLanAccess(addresses: NativeCore.TunnelAddresses): Builder {
+    /**
+     * Keep local-network destinations off the tunnel, when the user asked for it.
+     *
+     * [addresses] is only consulted to recognise a WARP/Zero-Trust CGNAT identity,
+     * so the transports that have no such object (SHARD, Psiphon, Tor, the chain's
+     * inner leg) pass null and get the ordinary range set.
+     *
+     * [tun] must be the address plan the caller just gave the Builder, and passing
+     * it is not optional on those paths. AOSP's `excludeRoute(p)` is
+     * `addRoute(p, RTN_THROW)`, and `addRoute` looks a prefix up by destination and
+     * REPLACES the existing entry — the public docs say so outright. Every
+     * tun2socks path routes its own subnet (`addRoute(address.subnet, …)`) and puts
+     * the resolver inside it (`addDnsServer(address.router)`), and
+     * [Tun2SocksManager.selectPrivateAddress] picks from 10/8, 172.16/12,
+     * 192.168/16 — the same ranges being excluded here. Excluding the one it chose
+     * would turn the TUN's own route into a throw route and take lwIP's resolver
+     * with it: DNS dead on a tunnel that still looks connected. Hence the skip.
+     *
+     * Nothing is lost by skipping it, because selectPrivateAddress only returns a
+     * range no live interface is using — never the user's actual LAN.
+     */
+    private fun Builder.applyLanAccess(
+        addresses: NativeCore.TunnelAddresses? = null,
+        tun: Tun2SocksManager.PrivateAddress? = null,
+    ): Builder {
         if (!lanBypassEnabled()) return this
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             ConnectionLog.record("LAN access uses system local routes on Android 12 and older")
@@ -4196,12 +4652,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // Upstream v0.8.0: WARP/Zero Trust device and gateway addresses live in
         // 172.16.0.0/12. Excluding that range would leak org DNS/gateway onto the
         // LAN, so it is only bypassed when we are not on a WARP CGNAT identity.
-        if (!isWarpCgnat(addresses)) {
+        // A null identity cannot be one, so the range is included there.
+        if (addresses == null || !isWarpCgnat(addresses)) {
             ranges.add(1, "172.16.0.0/12")
         }
+        val tunCidr = tun?.let { "${it.subnet}/${it.prefixLength}" }
+        var skipped = false
         ranges.forEach { cidr ->
+            if (cidr == tunCidr) {
+                skipped = true
+                return@forEach
+            }
             val (address, prefix) = cidr.split('/')
             excludeRoute(IpPrefix(InetAddress.getByName(address), prefix.toInt()))
+        }
+        if (skipped) {
+            ConnectionLog.record("LAN access: $tunCidr kept on the tunnel (it is the TUN's own subnet)")
         }
         ConnectionLog.record("LAN routes bypass the VPN")
         return this
@@ -4214,11 +4680,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private fun lanBypassEnabled(): Boolean {
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-        if (!prefs.contains("lan_bypass") && prefs.getBoolean("lan_sharing", false)) {
-            prefs.edit().putBoolean("lan_bypass", true).apply()
+        if (!prefs.contains(LAN_BYPASS_PREF) && prefs.getBoolean("lan_sharing", false)) {
+            prefs.edit().putBoolean(LAN_BYPASS_PREF, true).apply()
             return true
         }
-        return prefs.getBoolean("lan_bypass", false)
+        return prefs.getBoolean(LAN_BYPASS_PREF, false)
     }
 
     private fun Builder.applyTunnelAddresses(addresses: NativeCore.TunnelAddresses): Builder {

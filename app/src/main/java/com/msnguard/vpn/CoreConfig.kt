@@ -80,7 +80,12 @@ object CoreConfig {
 
         return JSONObject().apply {
             put("config_path", File(context.filesDir, "aether.toml").absolutePath)
-            put("protocol", protocol ?: text("default_protocol", "masque"))
+            // Fallback must match MainActivity's `savedProtocol()` and the tile's
+            // default. This is the value used before the user has ever picked
+            // anything, i.e. on a first connect — and WireGuard now leads the rail,
+            // so a disagreement here would build a MASQUE config under a UI showing
+            // WireGuard selected.
+            put("protocol", protocol ?: text("default_protocol", "wireguard"))
             // Where the core's own SOCKS listener goes.
             //
             // Three cases, and the first two are why this is not a constant any more:

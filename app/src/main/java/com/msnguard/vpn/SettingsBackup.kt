@@ -108,6 +108,11 @@ object SettingsBackup {
         "plain_working_transport",
         "tor_winning_mode",
         "tor_winning_mode_chained",
+        // "the one-time transport search already found a winner on this device".
+        // A measurement of one carrier's blocking, so a restore onto a phone on a
+        // different network must let the search run there instead of inheriting a
+        // verdict it never made. See MainActivity.AUTO_SCAN_DONE.
+        "auto_scan_done",
     )
 
     /**

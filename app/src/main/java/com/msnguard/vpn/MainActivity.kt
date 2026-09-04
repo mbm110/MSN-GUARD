@@ -90,7 +90,43 @@ class MainActivity : Activity() {
     private lateinit var pageHost: FrameLayout
     private lateinit var appUpdater: AppUpdater
     private var predictiveBackCallback: Any? = null
-    private var selectedProtocol = Protocol.MASQUE
+    private var selectedProtocol = Protocol.WIREGUARD
+    /**
+     * Where the one-time Auto Scan is in [AUTO_SCAN_LADDER], or -1 when it is not
+     * running.
+     *
+     * The scan exists for the user who does not know what MASQUE is: the first
+     * connect walks the four transports that need no account and no setup, keeps
+     * the one that actually carries traffic, and never asks again. It is UI-side on
+     * purpose — the service already knows how to raise one transport, and the
+     * decision of *which* to raise is exactly what this screen owns.
+     */
+    private var autoScanIndex = -1
+    /**
+     * The transport selected before the scan started, restored if the whole ladder
+     * fails.
+     *
+     * Without this a failed scan would leave the user pinned to the last rung it
+     * tried (SHARD), which is the one they understand least and the one least
+     * likely to be right on the next network.
+     */
+    private var autoScanBefore: Protocol? = null
+    /**
+     * Invalidates the per-attempt watchdog. Incremented on every attempt and on
+     * every abort, so a timeout posted for attempt N cannot advance attempt N+1.
+     */
+    private var autoScanToken = 0
+
+    /**
+     * True between abandoning one rung and dialling the next.
+     *
+     * Without it the ladder skips rungs. A rung can be abandoned by the watchdog
+     * while its own FAILED broadcast is still in flight — or its teardown produces
+     * one — and the second report would advance the ladder again, so a network where
+     * MASQUE works could jump from WireGuard to SHARD. Cleared when the next rung's
+     * connect actually fires.
+     */
+    private var autoScanSettling = false
     private var pendingConfig: String? = null
     /**
      * The backup JSON built before the file picker opened.
@@ -383,7 +419,15 @@ class MainActivity : Activity() {
                 // transport handshake finished; it is not proof that payload
                 // crosses. beginVerification() proves it before the UI claims it.
                 MsnGuardVpnService.STATUS_CONNECTED -> beginVerification()
-                MsnGuardVpnService.STATUS_FAILED -> showFailure(intent.getStringExtra(MsnGuardVpnService.EXTRA_DETAIL))
+                MsnGuardVpnService.STATUS_FAILED -> {
+                    // A rung of the Auto Scan died: move to the next transport instead
+                    // of painting a red dial the user cannot act on. advanceAutoScan()
+                    // returns false when the ladder is exhausted, and then the failure
+                    // is shown normally.
+                    if (!advanceAutoScan()) {
+                        showFailure(intent.getStringExtra(MsnGuardVpnService.EXTRA_DETAIL))
+                    }
+                }
                 MsnGuardVpnService.STATUS_DISCONNECTED -> {
                     // Our own verification teardown produces this broadcast. Keep
                     // the "no traffic passes" message instead of overwriting it
@@ -1081,6 +1125,11 @@ class MainActivity : Activity() {
         suppressNextDisconnectedPaint = true
         startService(Intent(this, MsnGuardVpnService::class.java)
             .setAction(MsnGuardVpnService.ACTION_DISCONNECT))
+        // A rung that handshook but carried nothing is exactly the Hamrah-e-Aval
+        // WireGuard case the Auto Scan exists for, and it is the reason the ladder
+        // is driven from this screen: the service thinks that session succeeded.
+        // stopCurrent = false because the teardown above IS the disconnect.
+        if (advanceAutoScan(stopCurrent = false)) return
         showFailure("Tunnel handshake succeeded but no traffic passes — try another protocol")
     }
 
@@ -2699,6 +2748,27 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(10) })
         splitTunnelSummaryButton = navRow("Split tunneling", splitTunnelSummary()) { openSplitTunnelScreen() }
         content.addView(splitTunnelSummaryButton, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+        // The switch this writes existed before, fed only the removed proxy mode's
+        // SOCKS bind, and was deleted because in VPN mode it changed nothing the
+        // user could see. It changes something now: the service applies the
+        // preference on every VPN path — SHARD, Psiphon, Tor and the chain included,
+        // not just the Rust core — so a printer, NAS or router page reached by its
+        // local address stays reachable while the tunnel is up.
+        //
+        // Off by default, and it must stay that way: sending LAN destinations around
+        // the tunnel is a routing decision the user should make, and on Tor it means
+        // those destinations leave the circuit.
+        val lanBypassRow = createToggleRow(
+            "Local network access",
+            "Reach printers, NAS and your router while connected",
+            lanBypassEnabled(),
+        ) {
+            preferences().edit().putBoolean(MsnGuardVpnService.LAN_BYPASS_PREF, it).apply()
+        }
+        content.addView(lanBypassRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
@@ -5027,11 +5097,21 @@ class MainActivity : Activity() {
         // the UI sat on "Connecting" until the tunnel came up on its own or the
         // user force-stopped the app.
         if (TunnelStatus.isActive() || visualState == OrbitDialView.State.CONNECTING) {
+            // A tap during the ladder is the user overruling it, so the scan stops
+            // here and the transport they started from comes back. Left running, the
+            // next rung would dial 1.5s after they asked everything to stop.
+            if (autoScanIndex >= 0) {
+                ConnectionLog.record("Auto Scan: cancelled by the user")
+                endAutoScan(restoreSelection = true)
+            }
             startService(Intent(this, MsnGuardVpnService::class.java).setAction(MsnGuardVpnService.ACTION_DISCONNECT))
             showDisconnected("Disconnecting")
             return
         }
 
+        // Decided BEFORE the consent dialog, because the answer depends on the
+        // selection and the user is about to be able to change nothing else.
+        if (shouldAutoScan()) beginAutoScan()
         val config = configJson()
         // Proxy mode needs no VPN consent at all — no TUN is created, so asking for
         // it would put a system dialog in front of a feature that does not use the
@@ -5065,9 +5145,199 @@ class MainActivity : Activity() {
         trafficSpeedTx = 0
         trafficSpeedRx = 0
         showConnecting()
+        // Every rung gets its own deadline, armed here so it covers the paths that
+        // never report anything back — see [armAutoScanWatchdog]. A no-op when no
+        // scan is running.
+        armAutoScanWatchdog()
         startForegroundService(Intent(this, MsnGuardVpnService::class.java)
             .setAction(MsnGuardVpnService.ACTION_CONNECT)
             .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config))
+    }
+
+    // ---------------------------------------------------------------- Auto Scan
+
+    /**
+     * Whether this connect should start the one-time transport search.
+     *
+     * Three conditions, and each one closes a way the scan could be the wrong
+     * behaviour rather than a helpful one:
+     *
+     *  - the latch is unset. That is what "only once, then remembered" means.
+     *  - the selection is ON the ladder. Somebody who deliberately picked Tor or
+     *    Psiphon has expressed a choice this must not overrule — and that same check
+     *    covers the chain, since Psiphon/Tor-over-WARP is only reachable from those
+     *    two selections and neither is on the ladder.
+     *  - VPN mode. Every rung after the first needs a TUN; in SOCKS mode SHARD has
+     *    no data path at all and switching transports under a user who is pointing
+     *    apps at a local port would break them silently.
+     */
+    private fun shouldAutoScan(): Boolean {
+        if (preferences().getBoolean(AUTO_SCAN_DONE, false)) return false
+        if (selectedProtocol !in AUTO_SCAN_LADDER) return false
+        if (CoreConfig.proxyOnly(this)) return false
+        return true
+    }
+
+    /**
+     * Arms the ladder at the selected transport.
+     *
+     * Starts from where the USER is, not from rung 0: the selection is WireGuard by
+     * default, so the common case starts at the top anyway, and a user who moved the
+     * rail before their first connect gets their pick tried first.
+     */
+    private fun beginAutoScan() {
+        autoScanBefore = selectedProtocol
+        autoScanIndex = AUTO_SCAN_LADDER.indexOf(selectedProtocol).coerceAtLeast(0)
+        autoScanToken++
+        ConnectionLog.record(
+            "Auto Scan: first connect — trying ${AUTO_SCAN_LADDER.drop(autoScanIndex).joinToString(", ") { it.label }}"
+        )
+    }
+
+    /**
+     * Advances the ladder after a rung failed, or ends the scan when none is left.
+     *
+     * Three callers, because a rung can die three ways and only one of them is a
+     * clean failure report:
+     *  - the service's FAILED broadcast;
+     *  - this screen's verification gate (handshake up, no traffic);
+     *  - [armAutoScanWatchdog], which is the one that matters most — with
+     *    auto-reconnect on (the default) the service does NOT broadcast FAILED for a
+     *    core that exited; it re-dials the same blocked transport on a backoff. A
+     *    ladder listening only for FAILED would sit on rung one forever.
+     *
+     * @param stopCurrent sends ACTION_DISCONNECT before moving on. Also what cancels
+     *   the service's own retry loop (it sets `userInitiatedStop`), so the abandoned
+     *   rung cannot come back under the next one. False only when the caller has
+     *   already sent it.
+     * @return true when it took over the paint and started another rung, so the
+     *   caller must not draw its own failure.
+     */
+    private fun advanceAutoScan(stopCurrent: Boolean = true): Boolean {
+        if (autoScanIndex < 0) return false
+        // A rung already being replaced must not be replaced twice — see
+        // [autoScanSettling]. Returns true so the caller still suppresses its own
+        // failure paint: a handover IS in progress, just not a new one.
+        if (autoScanSettling) return true
+        // Invalidate the watchdog for the rung that just died before starting the
+        // next one, or its timeout would fire into the new attempt.
+        autoScanToken++
+        val next = autoScanIndex + 1
+        if (next >= AUTO_SCAN_LADDER.size) {
+            ConnectionLog.record("Auto Scan: no transport carried traffic on this network")
+            endAutoScan(restoreSelection = true)
+            return false
+        }
+        autoScanIndex = next
+        autoScanSettling = true
+        val protocol = AUTO_SCAN_LADDER[next]
+        ConnectionLog.record("Auto Scan: ${protocol.label} next")
+        if (stopCurrent) {
+            // Keeps the abandoned rung's DISCONNECTED broadcast from painting "Not
+            // connected" over the scan's own progress line.
+            suppressNextDisconnectedPaint = true
+            startService(Intent(this, MsnGuardVpnService::class.java)
+                .setAction(MsnGuardVpnService.ACTION_DISCONNECT))
+        }
+        // Repaints the rail and the chip as well as writing the preference, so the
+        // user watches the search move — this is the whole point of doing it here
+        // rather than inside the service.
+        updateConnectionMode(protocol)
+        showConnectionProgress("Auto Scan", "Trying ${protocol.label}…")
+        // The previous rung's session may still be unwinding. Consent is already
+        // granted at this point (the first rung asked for it), so this goes straight
+        // to the service.
+        val token = autoScanToken
+        sessionHandler.postDelayed({
+            if (isFinishing || isDestroyed) return@postDelayed
+            // A user tap or a fresh connect between the schedule and here moved the
+            // token on; this attempt is stale.
+            if (token != autoScanToken || autoScanIndex != next) return@postDelayed
+            autoScanSettling = false
+            connect(configJson())
+        }, AUTO_SCAN_HANDOVER_MS)
+        return true
+    }
+
+    /**
+     * How long a rung gets to reach a VERIFIED connection before the ladder moves on.
+     *
+     * Per transport, because their failure modes differ in kind. WireGuard either
+     * handshakes in a few seconds or is being dropped, so waiting longer only wastes
+     * the user's time. MASQUE does not fail fast when blocked — it keeps trying
+     * gateways — so its number is a cap on that search. WoW raises two tunnels in
+     * sequence. SHARD races a slice of its node pool and then has to bring up xray
+     * plus tun2socks.
+     *
+     * Each budget already contains [VERIFY_TIMEOUT_MS] (18s), because the clock
+     * starts at the connect and the gate runs after the handshake.
+     */
+    private fun autoScanBudgetMs(protocol: Protocol): Long = when (protocol) {
+        Protocol.WIREGUARD -> 32_000L
+        Protocol.MASQUE -> 48_000L
+        Protocol.WARP_IN_WARP -> 55_000L
+        else -> 45_000L
+    }
+
+    /**
+     * Per-rung deadline. Armed by [connect] for every attempt while a scan is running.
+     *
+     * This is the ladder's real driver: it does not care WHY a rung did not arrive,
+     * only that it did not. It fires on a blocked handshake, on a core that keeps
+     * silently retrying itself, and on a Psiphon-style path that never reports
+     * anything at all.
+     */
+    private fun armAutoScanWatchdog() {
+        if (autoScanIndex < 0) return
+        val rung = autoScanIndex
+        val token = autoScanToken
+        sessionHandler.postDelayed({
+            if (isFinishing || isDestroyed) return@postDelayed
+            if (token != autoScanToken || autoScanIndex != rung) return@postDelayed
+            // Verified and live — nothing to do. completeAutoScan() has normally
+            // already moved the token by now; this is the belt to that braces.
+            if (visualState == OrbitDialView.State.CONNECTED ||
+                visualState == OrbitDialView.State.DEGRADED
+            ) return@postDelayed
+            val protocol = AUTO_SCAN_LADDER[rung]
+            ConnectionLog.record(
+                "Auto Scan: ${protocol.label} did not carry traffic in" +
+                    " ${autoScanBudgetMs(protocol) / 1000}s"
+            )
+            // Cancels the verification gate too: it may still be waiting on bytes
+            // from the tunnel this abandons, and its own failure path would then
+            // advance the ladder a second time.
+            cancelVerification()
+            if (!advanceAutoScan()) {
+                showFailure("No transport connected on this network — try again or pick one yourself")
+            }
+        }, autoScanBudgetMs(AUTO_SCAN_LADDER[rung]))
+    }
+
+    /**
+     * Records the winner and stops the search.
+     *
+     * The transport is already selected and persisted by [updateConnectionMode], so
+     * all that is left is the latch — which is written only from here, on a rung
+     * that verified, so a scan interrupted by a dead network can run again.
+     */
+    private fun completeAutoScan() {
+        if (autoScanIndex < 0) return
+        ConnectionLog.record("Auto Scan: ${selectedProtocol.label} works — remembered for next time")
+        preferences().edit().putBoolean(AUTO_SCAN_DONE, true).apply()
+        endAutoScan(restoreSelection = false)
+    }
+
+    /** Clears the scan's state. [restoreSelection] puts the user's own pick back. */
+    private fun endAutoScan(restoreSelection: Boolean) {
+        autoScanIndex = -1
+        autoScanToken++
+        autoScanSettling = false
+        val before = autoScanBefore
+        autoScanBefore = null
+        if (restoreSelection && before != null && before != selectedProtocol) {
+            updateConnectionMode(before)
+        }
     }
 
     /**
@@ -5169,13 +5439,28 @@ class MainActivity : Activity() {
         // The headline is text, so it takes the text-safe accent. On the dark
         // palette PRIMARY_TEXT == primary, so this is a no-op there.
         connectionTitle.setTextColor(PRIMARY_TEXT)
-        connectionTitle.text = title
-        connectionDetail.text = detail
+        // During the one-time Auto Scan every progress broadcast is relabelled here,
+        // in the single place they all pass through. Without it the service's own
+        // STARTING/SCANNING/CONNECTING lines ("Preparing MASQUE tunnel") overwrite
+        // the ladder's line a moment after it is drawn, and a user watching the
+        // screen cannot tell an automatic search from an ordinary connect.
+        if (autoScanIndex >= 0) {
+            connectionTitle.text = "Auto Scan"
+            connectionDetail.text = "Trying ${AUTO_SCAN_LADDER[autoScanIndex].label}" +
+                " (${autoScanIndex + 1} of ${AUTO_SCAN_LADDER.size})"
+        } else {
+            connectionTitle.text = title
+            connectionDetail.text = detail
+        }
         footerWave.setLit(false)
         setModeEnabled(false)
     }
 
     private fun showConnected(restored: Boolean = false) {
+        // The winner of a one-time Auto Scan is recorded here and nowhere else: this
+        // is the only point in the app that means "traffic really passes", which is
+        // the whole bar the ladder was searching for. A no-op when no scan is running.
+        completeAutoScan()
         visualState = OrbitDialView.State.CONNECTED
         orbitDial.state = visualState
         orbitDial.progressPercent = -1
@@ -5743,20 +6028,26 @@ class MainActivity : Activity() {
     )
 
     /**
-     * The LAN-bypass preference has no UI any more.
+     * The LAN-bypass preference has a switch again — Settings ▸ ROUTING & DATA.
      *
-     * The switch it fed configured the removed proxy mode's SOCKS bind; in VPN
-     * mode it changed nothing the user could see, which is why it never did
-     * anything useful. [MsnGuardVpnService.lanBypassEnabled] still READS the key
-     * and still migrates the older `lan_sharing` value forward, so a user who
-     * turned it on in an older build keeps the routing they had — the switch is
-     * gone, the honoured preference is not. Nothing in the UI writes it now, so
-     * new installs simply get the default: everything through the tunnel.
+     * The old switch fed the removed proxy mode's SOCKS bind and was deleted
+     * because in VPN mode it changed nothing the user could see. The service now
+     * applies it on every VPN path (native core, SHARD, Psiphon, Tor and the
+     * chains), so it does something: LAN destinations stay reachable while the
+     * tunnel is up. [MsnGuardVpnService.lanBypassEnabled] is still the only
+     * reader, and it still migrates the older `lan_sharing` value forward.
      */
+    private fun lanBypassEnabled(): Boolean = preferences().getBoolean(
+        MsnGuardVpnService.LAN_BYPASS_PREF,
+        // Same legacy fallback the service migrates on, so a user who set this in
+        // 1.4.x sees the switch already on instead of a switch that reads OFF over
+        // routing that is on.
+        preferences().getBoolean("lan_sharing", false),
+    )
 
     private fun savedProtocol(): Protocol {
-        val name = preferences().getString(DEFAULT_PROTOCOL, Protocol.MASQUE.coreName)
-        return Protocol.entries.firstOrNull { it.coreName == name && it.androidAvailable } ?: Protocol.MASQUE
+        val name = preferences().getString(DEFAULT_PROTOCOL, Protocol.WIREGUARD.coreName)
+        return Protocol.entries.firstOrNull { it.coreName == name && it.androidAvailable } ?: Protocol.WIREGUARD
     }
 
 
@@ -5899,8 +6190,17 @@ class MainActivity : Activity() {
         val description: String,
         val androidAvailable: Boolean = true,
     ) {
-        MASQUE("MASQUE", "masque", "HTTP/3 tunnel"),
+        // ORDER IS THE UI. Both the home-screen rail and the Connection mode page
+        // are built from `Protocol.entries`, so this list decides what a first-time
+        // user reaches for — and the first cell is what most of them will tap.
+        //
+        // WireGuard leads on purpose: it is the cheapest handshake of the six and it
+        // either works immediately or fails immediately, which is the right first
+        // move for a user who does not know what any of these words mean. MASQUE
+        // follows because it survives the carriers WireGuard is blocked on, and the
+        // one-time Auto Scan ([AUTO_SCAN_LADDER]) walks them in exactly this order.
         WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel"),
+        MASQUE("MASQUE", "masque", "HTTP/3 tunnel"),
         WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel"),
         PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel"),
         TOR("Tor", "tor", "Onion routing; slowest but hardest to block"),
@@ -6200,6 +6500,51 @@ class MainActivity : Activity() {
         const val CHAIN_ARMED_DEFAULT = true
 
         const val DEFAULT_PROTOCOL = "default_protocol"
+
+        /**
+         * Latch: the one-time Auto Scan has already found a transport that works.
+         *
+         * Set only when a rung actually carried verified traffic. A ladder that ran
+         * out of rungs deliberately leaves this unset — the usual cause of "nothing
+         * connected" is a phone with no data at all, and holding a permanent verdict
+         * from that moment would deny the scan to the network where it would have
+         * worked.
+         *
+         * Learned state, not a choice: listed in SettingsBackup's TRANSIENT_KEYS so a
+         * backup cannot carry one device's answer onto another carrier.
+         */
+        const val AUTO_SCAN_DONE = "auto_scan_done"
+
+        /**
+         * The transports the Auto Scan is allowed to try, in order.
+         *
+         * Psiphon and Tor are absent by instruction: both are deliberate choices with
+         * their own costs (an account-free anti-censorship stack and a three-hop
+         * onion circuit), and moving a user onto them behind their back is not the
+         * same favour as moving them between WARP transports. SHARD is last because
+         * it is the only rung whose exit is a public node.
+         *
+         * The ladder is only entered when the transport that FAILED is itself on it —
+         * a user who picked Tor and lost it gets their failure reported, not a silent
+         * switch to something else.
+         */
+        val AUTO_SCAN_LADDER = listOf(
+            Protocol.WIREGUARD,
+            Protocol.MASQUE,
+            Protocol.WARP_IN_WARP,
+            Protocol.SHARD,
+        )
+
+        /**
+         * Gap between abandoning one rung and dialling the next.
+         *
+         * The service clears its own re-entrancy guard (`connected`) BEFORE
+         * stopTunnel() has finished unwinding, so a connect issued the instant a
+         * failure arrives races that teardown: on the tun2socks rungs the old TUN is
+         * still open, and the new session either loses its establish() or is torn
+         * down by the tail of the old one.
+         */
+        const val AUTO_SCAN_HANDOVER_MS = 1_500L
         const val LOG_LEVEL = "log_level"
         const val PERF_PROFILE = "perf_profile"
         const val H2_FRAGMENTATION = "h2_fragmentation"

@@ -419,6 +419,20 @@ object ShardConfigs {
             // whole page. Above this xray opens a second connection anyway.
             put("concurrency", MUX_CONCURRENCY)
             put("xudpConcurrency", XUDP_CONCURRENCY)
+            // Not optional, and the default is actively harmful here. Read from
+            // the pinned fork: an empty value becomes "reject"
+            // (infra/conf/xray.go MuxConfig.Build), and then every UDP flow to
+            // port 443 that reaches a mux-enabled outbound is killed inside the
+            // mux layer — `XUDP rejected UDP/443 traffic`,
+            // app/proxyman/outbound/handler.go. On this transport that is not a
+            // niche case: without Smart Split every packet goes through the node,
+            // so all QUIC would be silently dropped and the apps using it would
+            // stall until they gave up and fell back to TCP.
+            //
+            // "skip" sends those flows down the plain (non-multiplexed) node path
+            // instead of dropping them. "allow" would push them through XUDP,
+            // which is the weaker path — see the xudpConcurrency note above.
+            put("xudpProxyUDP443", "skip")
         }
     }
 
@@ -552,10 +566,26 @@ object ShardConfigs {
                     // than forwarded: they would be answered by whichever resolver
                     // this outbound happens to reach, and an ECH-bearing HTTPS record
                     // arriving over the wrong path is worse than no record.
-                    put("settings", JSONObject().put("nonIPQuery", "drop"))
+                    // Level 1 belongs to this outbound alone: connIdle 12 s instead
+                    // of the fork's 300 s default, so a finished DNS exchange stops
+                    // holding state for five minutes. Matches upstream's value.
+                    //
+                    // It goes INSIDE `settings`, and that placement is not cosmetic:
+                    // `userLevel` is a field of the dns outbound's own settings
+                    // struct (infra/conf/dns_proxy.go), NOT of the outbound object.
+                    // Put one level up and xray parses the config, reports
+                    // `Configuration OK.` and ignores it — a silent no-op.
+                    put(
+                        "settings",
+                        JSONObject().apply {
+                            put("nonIPQuery", "drop")
+                            put("userLevel", 1)
+                        }
+                    )
                 })
         }
         return JSONObject().apply {
+            put("policy", policy())
             put(
                 "log",
                 JSONObject().apply {
@@ -582,10 +612,28 @@ object ShardConfigs {
                         JSONObject().apply {
                             put("auth", "noauth")
                             put("udp", true)
-                            // Where UDP replies are sent from. Loopback whatever
-                            // [listenHost] is: the datagram path is xray → this
-                            // process, and a LAN client's UDP still terminates here.
-                            put("ip", "127.0.0.1")
+                            // This is the address xray writes into BND.ADDR of the
+                            // SOCKS5 UDP-ASSOCIATE reply — where the client is told
+                            // to send its datagrams — not an internal detail.
+                            // Hardcoded loopback was wrong for a LAN client: it
+                            // would aim its UDP at its OWN loopback, so DNS, QUIC
+                            // and voice die while TCP keeps working. Silent and
+                            // partial, the worst failure shape there is.
+                            //
+                            // Both sides of following [listenHost] were measured
+                            // against the real binary:
+                            //  - sharing off → "127.0.0.1", byte-identical to before.
+                            //  - sharing on  → "0.0.0.0", which is the RFC-1928
+                            //    "same host as the control connection" convention:
+                            //    a LAN client sends to the address it dialled. A
+                            //    real datagram round-trip over a non-loopback
+                            //    address confirmed it resolves correctly. This is
+                            //    better than naming one interface IP, because the
+                            //    phone can be on Wi-Fi and hotspot at once.
+                            //  - [ShardSocksFront], our own client, ignores an
+                            //    all-zero BND.ADDR and keeps loopback, which is
+                            //    correct for it — it always dials via loopback.
+                            put("ip", listenHost)
                         }
                     )
                     // Sniffing is not an optimisation here, it is the mechanism.
@@ -605,8 +653,13 @@ object ShardConfigs {
                             "sniffing",
                             JSONObject().apply {
                                 put("enabled", true)
-                                put("destOverride", JSONArray().put("tls").put("http"))
+                                put("destOverride", JSONArray().put("tls").put("http").put("quic"))
                                 put("routeOnly", true)
+                                // `quic` next to tls/http: a QUIC initial carries the
+                                // SNI too, so with it the `domain:`/`geosite:` rules
+                                // below decide QUIC flows as well instead of falling
+                                // to the catch-all. Cheap — same sniff, one more
+                                // parser — and it only reads the first packet.
                             }
                         )
                     }
@@ -639,6 +692,36 @@ object ShardConfigs {
     }
 
     /**
+     * Connection lifetimes. Two levels, six lines, no throughput effect — this is
+     * about not holding sockets and radio state after a flow is over.
+     *
+     * `uplinkOnly`/`downlinkOnly` = 0 mean "tear down as soon as one direction
+     * closes" instead of the fork's 1 s linger, and 0 is documented as unlimited
+     * *wait*, not unlimited life. Level 1 is used by `dns-out` alone: 12 s idle
+     * instead of the 300 s default. Both values match what upstream ships.
+     *
+     * `bufferSize` is deliberately NOT set here. Raising it is the one plausible
+     * single-stream throughput knob left, but the fork's 4 KB is a low-end-device
+     * choice and the win is unmeasured on our path — that belongs in a measured
+     * A/B, not in this commit.
+     */
+    private fun policy(): JSONObject {
+        val level0 = JSONObject().apply {
+            put("uplinkOnly", 0)
+            put("downlinkOnly", 0)
+        }
+        val level1 = JSONObject().apply {
+            put("uplinkOnly", 0)
+            put("downlinkOnly", 0)
+            put("connIdle", 12)
+        }
+        return JSONObject().put(
+            "levels",
+            JSONObject().put("0", level0).put("1", level1)
+        )
+    }
+
+    /**
      * The fragmented direct outbound: Serverless-for-Iran's mechanism, our config.
      *
      * Two masks, and the numbers are not adjustable knobs. `lengths: ["5","94","1"]`
@@ -655,6 +738,16 @@ object ShardConfigs {
      * without maintaining an IP list. The fork's defaults are 4 and 1; 20 and 2 is
      * a deliberate widening, copied from upstream because the failure it prevents
      * is common on Iranian carriers.
+     *
+     * `settings` carries no `domainStrategy`, and that omission is the point.
+     * Reading the pinned fork: with a freedom-level domain strategy the handler
+     * resolves the name itself and replaces the destination with ONE randomly
+     * chosen address (`proxy/freedom/freedom.go`), and the race in
+     * `transport/internet/dialer.go` only runs while the destination is still a
+     * domain with two or more addresses. So setting it there silently disabled the
+     * happyEyeballs block above — the phone was picking one edge IP at random and
+     * living with it, which on a bad edge is exactly the stall the race exists to
+     * avoid. Upstream sets the strategy only under `sockopt`, and so do we now.
      */
     private fun fragmentedDirect(profile: SmartSplit.FragmentProfile): JSONObject {
         val delays = JSONArray().apply { profile.delays.forEach { put(it) } }
@@ -667,7 +760,6 @@ object ShardConfigs {
         return JSONObject().apply {
             put("tag", "direct-frag")
             put("protocol", "freedom")
-            put("settings", JSONObject().put("domainStrategy", "UseIP"))
             put(
                 "streamSettings",
                 JSONObject().apply {
@@ -801,6 +893,45 @@ object ShardConfigs {
     )
 
     /**
+     * Sites that block Iranian source IPs at the far end, not by DNS.
+     *
+     * These three were audited host by host against the served HTML, and the rule
+     * is `full:` per host on purpose. `domain:` would be a much wider blast radius
+     * than the fix needs:
+     *  - `domain:nvidia.com` pulls in `us.download.nvidia.com`, whose driver payload
+     *    measured `content-length: 890807536` — 890 MB down one node — plus the
+     *    whole developer/docs estate.
+     *  - `domain:avast.com` pulls support, forum, blog and the localised
+     *    `www.avast.ua/.ru/.co.jp`, and still would not cover the installer, which
+     *    lives on a different registrable domain.
+     *  - `domain:android.com` pulls `developer.android.com` (full SDK/docs) and
+     *    `source.android.com` (AOSP git and tarballs).
+     *
+     * Each entry is a host that actually issues requests when the page loads: the
+     * apex is listed next to `www.` because it answers the redirect from a
+     * different edge, and `images.nvidia.com` is nvidia's only load-bearing
+     * off-host asset (webfonts). Hosts that appear only as links the user may never
+     * click are deliberately absent — the same argument [GOOGLE_SESSION_HOSTS]
+     * makes. Third-party analytics/consent hosts are absent too: the pages paint
+     * without them, and one of them is a 1.8 MB download.
+     *
+     * These names go in the ROUTING rules only, never in [SANCTIONED_DOMAINS]:
+     * that list also feeds the `shard-dns` DoH server, whose lookups leave through
+     * the node at ~900 ms each. These sites fail on source IP, not on the DNS
+     * answer, so the default resolver's records are already usable and paying for
+     * a node-side lookup would be pure latency.
+     */
+    private val GEOBLOCKED_SITE_HOSTS = listOf(
+        "full:www.nvidia.com",
+        "full:nvidia.com",
+        "full:images.nvidia.com",
+        "full:www.avast.com",
+        "full:avast.com",
+        "full:www.android.com",
+        "full:android.com",
+    )
+
+    /**
      * Meta's address space, for the parts of WhatsApp that carry no hostname.
      *
      * `geosite:whatsapp` alone does not fix WhatsApp, for exactly the reason
@@ -861,7 +992,15 @@ object ShardConfigs {
             .put("geosite:category-ir")
             .put("full:challenges.cloudflare.com")
         return JSONObject().apply {
-            put("queryStrategy", "UseIP")
+            // Was "UseIP", which hands the phone AAAA records on carriers that have
+            // no routable IPv6 — each one a connect attempt that can only fail and
+            // time out. "UseSystem" gates the answer on what the device can
+            // actually route: the fork probes a UDP socket toward a root server
+            // once and caches the verdict for 100 ms (common/utils, used by
+            // app/dns), so the cost is one syscall, not a lookup per query.
+            put("queryStrategy", "UseSystem")
+            // Honour /etc/hosts-equivalent platform entries, same as upstream.
+            put("useSystemHosts", true)
             // A stale answer beats no answer on a carrier that drops DNS under load;
             // the alternative is a page that fails while a usable record is in hand.
             put("serveStale", true)
@@ -974,6 +1113,17 @@ object ShardConfigs {
             //     cookie domain.
             .put(rule {
                 put("domain", JSONArray().apply { GOOGLE_SESSION_HOSTS.forEach { put(it) } })
+                put("network", "tcp")
+                put("port", "443")
+                put("outboundTag", "proxy")
+            })
+            // 4c. Sites that refuse Iranian source addresses. TCP/443 and `full:`
+            //     hosts only — see GEOBLOCKED_SITE_HOSTS for why this is not
+            //     `domain:` and why it is not in SANCTIONED_DOMAINS. Position
+            //     matters: after the DNS rules, before the Iranian rules, so an
+            //     Iranian-CDN-fronted asset cannot swallow it.
+            .put(rule {
+                put("domain", JSONArray().apply { GEOBLOCKED_SITE_HOSTS.forEach { put(it) } })
                 put("network", "tcp")
                 put("port", "443")
                 put("outboundTag", "proxy")
