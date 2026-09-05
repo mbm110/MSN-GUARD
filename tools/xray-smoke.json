@@ -341,10 +341,15 @@
         "outboundTag": "out-0"
       },
       {
-        "_comment": "So direct-frag is not an unreferenced outbound.",
+        "_comment": [
+          "So direct-frag is not an unreferenced outbound. A plain domain rule on",
+          "purpose: this step runs with no geosite.dat on the runner, so",
+          "`geosite:...` here would fail to load the file and read as a rejected",
+          "config shape."
+        ],
         "type": "field",
         "domain": [
-          "geosite:category-ir"
+          "domain:aparat.com"
         ],
         "outboundTag": "direct-frag"
       }
