@@ -7,7 +7,7 @@
 **تونل کامل دستگاه برای شبکه‌های تحت سانسور — پنج مسیر ترابری، هستهٔ Rust، رابط بومی اندروید**
 
 [![Build](https://img.shields.io/github/actions/workflow/status/mbm110/MSN-GUARD/build.yml?branch=master&style=for-the-badge&label=build)](https://github.com/mbm110/MSN-GUARD/actions)
-[![Version](https://img.shields.io/badge/version-1.7.16-5CE68F?style=for-the-badge)](https://github.com/mbm110/MSN-GUARD/releases)
+[![Version](https://img.shields.io/badge/version-1.7.17-5CE68F?style=for-the-badge)](https://github.com/mbm110/MSN-GUARD/releases)
 [![Android](https://img.shields.io/badge/Android-8.0%2B-3A4FB0?style=for-the-badge&logo=android&logoColor=white)](https://github.com/mbm110/MSN-GUARD)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-6c5ce7?style=for-the-badge)](LICENSE)
 [![Transports](https://img.shields.io/badge/%D9%85%D8%B3%DB%8C%D8%B1%D9%87%D8%A7-MASQUE%20%C2%B7%20WireGuard%20%C2%B7%20WARP%C2%B7WARP%20%C2%B7%20Psiphon%20%C2%B7%20Tor-1f6f4a?style=for-the-badge)](#مسیرهای-ترابری)
@@ -179,12 +179,12 @@
 
 ## نصب
 
-آخرین APK را می‌توانید از [بخش Releases](https://github.com/mbm110/MSN-GUARD/releases) یا از artifact های [Actions](https://github.com/mbm110/MSN-GUARD/actions) بگیرید. نسخهٔ فعلی `1.7.16` است و خود برنامه هم آپدیت را از همان صفحهٔ Releases چک می‌کند.
+آخرین APK را می‌توانید از [بخش Releases](https://github.com/mbm110/MSN-GUARD/releases) یا از artifact های [Actions](https://github.com/mbm110/MSN-GUARD/actions) بگیرید. نسخهٔ فعلی `1.7.17` است و خود برنامه هم آپدیت را از همان صفحهٔ Releases چک می‌کند.
 
 | معماری دستگاه | فایل |
 |---|---|
-| معماری ARM ۶۴ بیتی، یعنی اکثر گوشی‌های امروزی | `MSN-GUARD-v1.7.16-arm64-v8a.apk` |
-| معماری ARM ۳۲ بیتی، دستگاه‌های قدیمی‌تر | `MSN-GUARD-v1.7.16-armeabi-v7a.apk` |
+| معماری ARM ۶۴ بیتی، یعنی اکثر گوشی‌های امروزی | `MSN-GUARD-v1.7.17-arm64-v8a.apk` |
+| معماری ARM ۳۲ بیتی، دستگاه‌های قدیمی‌تر | `MSN-GUARD-v1.7.17-armeabi-v7a.apk` |
 
 حداقل نسخهٔ اندروید ۸.۰ یا همان API 26 است. موقع نصب اجازهٔ نصب از منبع نامشخص را بدهید و در اولین اتصال، درخواست مجوز VPN اندروید را تأیید کنید.
 

@@ -222,6 +222,92 @@
           "host": "www.calmlunch.com"
         }
       }
+    },
+    {
+      "_comment": [
+        "Smart Split's direct-frag outbound, the shape fragmentedDirect() emits:",
+        "freedom + finalmask with NO tlsSettings (the app whose socket this is wrote",
+        "the ClientHello), plus sockopt.happyEyeballs. Numbers are upstream's",
+        "Serverless-for-Iran tcp-fragment-tls profile. Distinct from the node masks",
+        "above, so a fork that stops accepting either shape fails here.",
+        "delays ends in 1 on purpose: a trailing 400 applies to every remaining",
+        "split and kills the connection."
+      ],
+      "tag": "direct-frag",
+      "protocol": "freedom",
+      "streamSettings": {
+        "finalmask": {
+          "tcp": [
+            {
+              "type": "fragment",
+              "settings": {
+                "packets": "tlshello",
+                "lengths": [
+                  "5",
+                  "1"
+                ],
+                "delays": [
+                  "0"
+                ],
+                "maxSplit": "0"
+              }
+            },
+            {
+              "type": "fragment",
+              "settings": {
+                "packets": "1-1",
+                "lengths": [
+                  "43",
+                  "1"
+                ],
+                "delays": [
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "400",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "400",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "1",
+                  "400",
+                  "1"
+                ],
+                "maxSplit": "522"
+              }
+            }
+          ]
+        },
+        "sockopt": {
+          "domainStrategy": "ForceIP",
+          "happyEyeballs": {
+            "tryDelayMs": 300,
+            "prioritizeIPv6": true,
+            "interleave": 2,
+            "maxConcurrentTry": 20
+          }
+        }
+      }
     }
   ],
   "routing": {
@@ -253,6 +339,14 @@
           "in-live"
         ],
         "outboundTag": "out-0"
+      },
+      {
+        "_comment": "So direct-frag is not an unreferenced outbound.",
+        "type": "field",
+        "domain": [
+          "geosite:category-ir"
+        ],
+        "outboundTag": "direct-frag"
       }
     ]
   }

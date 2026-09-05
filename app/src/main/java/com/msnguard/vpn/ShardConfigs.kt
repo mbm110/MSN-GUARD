@@ -723,13 +723,52 @@ object ShardConfigs {
     }
 
     /**
-     * The fragmented direct outbound: Serverless-for-Iran's mechanism, our config.
+     * The fragmented direct outbound: Serverless-for-Iran's mechanism, its numbers.
      *
-     * Two masks, and the numbers are not adjustable knobs. `lengths: ["5","94","1"]`
-     * puts the first fragment boundary at byte 99 of the ClientHello payload, which
-     * is exactly the end of the cipher-suite list — see the [ShardNode] doc for the
-     * byte-by-byte derivation. The second mask's `109` is the two records the first
-     * mask produced, counted with their headers.
+     * ## Why these are not the node's numbers
+     *
+     * Until 1.7.16 this outbound carried `["5","94","1"]` / `["109","1"]`, copied
+     * from the `fm` the subscription ships for the NODE. On the node those numbers
+     * are derived and correct: that dial sets `fingerprint: "unsafe"` and a pinned
+     * 13-entry `cipherSuites`, so the ClientHello is byte-deterministic and the
+     * `5+94` boundary lands inside the cipher-suite list, safely before the
+     * extensions — see the [ShardNode] doc for the byte-by-byte derivation.
+     *
+     * This outbound is `freedom`, and the ClientHello crossing it was written by
+     * whatever app opened the socket. Its length is not ours to know, so the
+     * boundary is an assumption about someone else's TLS stack. Measured against
+     * the pinned fork with real handshakes, `["5","94","1"]` puts payload bytes
+     * `0..99` into a SINGLE 94-byte TLS record in the FIRST TCP segment, and
+     * whether the SNI is inside that record depends entirely on the client:
+     *
+     * ```
+     *   client hello shape          extensions start   SNI readable in segment 1?
+     *   TLS 1.3, 18 suites, sid 32        113          no
+     *   TLS 1.2,  7 suites, sid  0         59          YES
+     *   TLS 1.2,  3 suites, sid  0         51          YES
+     *   TLS 1.2,  2 suites, sid  0         49          YES
+     * ```
+     *
+     * A hello with a short suite list or an empty session id — which is ordinary
+     * for an app pinning a couple of suites — hands the DPI the SNI in one read.
+     * The numbers below have no such dependency: after the first 5 bytes every
+     * record holds one byte, whoever wrote the handshake, and the same measurement
+     * shows 10 payload bytes exposed in segment 1 for every client shape above.
+     *
+     * They are also, verbatim, the configuration the user verified opens Instagram
+     * from his own network with no tunnel at all. That is the only evidence that
+     * counts here: an Iranian DPI box cannot be reproduced from a VPS, so the
+     * choice is between a recipe measured in the field and one derived for a
+     * different handshake.
+     *
+     * The node path is untouched: [outbound] still applies `node.finalMask`
+     * verbatim, and there the derived offsets remain correct.
+     *
+     * `maxSplit` rises 355 -> 522 to match: one-byte records are 6 wire bytes
+     * each, so the smaller framing needs more splits to keep the same span of the
+     * handshake fragmented instead of spilling into one segment early. Cost, since
+     * every split carries a delay: ~520 stalls per handshake instead of ~355.
+     * Upstream ships exactly this number.
      *
      * `delays` is the one value that varies, and it is the profile: see [SmartSplit].
      *
@@ -769,8 +808,8 @@ object ShardConfigs {
                         JSONObject().put(
                             "tcp",
                             JSONArray()
-                                .put(fragmentMask("tlshello", listOf("5", "94", "1"), JSONArray().put("0"), "0"))
-                                .put(fragmentMask("1-1", listOf("109", "1"), delays, "355"))
+                                .put(fragmentMask("tlshello", listOf("5", "1"), JSONArray().put("0"), "0"))
+                                .put(fragmentMask("1-1", listOf("43", "1"), delays, "522"))
                         )
                     )
                     put(

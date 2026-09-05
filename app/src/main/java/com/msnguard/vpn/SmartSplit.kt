@@ -69,9 +69,11 @@ import javax.net.ssl.SSLSocketFactory
  * censor actually inspects, which is what makes a pass meaningful.
  *
  * A third, subtler one: **the timeout budget must differ per profile.** STUBBORN
- * legitimately needs 16-21 s for a full payload. One shared short budget rejects
- * it on every network and the feature looks permanently broken. Hence
- * [FragmentProfile.probeBudgetMs].
+ * legitimately needs longer than PATIENT, and one shared short budget rejects it
+ * on every network so the feature looks permanently broken. Hence
+ * [FragmentProfile.probeBudgetMs]. The measured cost of the stalls themselves is
+ * ~1.2 s (see [FragmentProfile.STUBBORN]); the rest of the budget is for the DPI
+ * dropping and the client retrying, which is the case the profile exists for.
  */
 object SmartSplit {
 
@@ -136,11 +138,35 @@ object SmartSplit {
         PATIENT("patient", listOf("1"), 6_000),
 
         /**
-         * 400 ms every tenth fragment, 31 entries, consumed cyclically by the
-         * fork's fragmenter. Copied from upstream's `high_delay` profile — the
-         * shape matters, not just the numbers: three stalls spread through the
-         * array is what defeats a long reassembly window without making every
-         * single fragment slow.
+         * Three 400 ms stalls, then 1 ms for the rest of the handshake.
+         *
+         * ## How the fork consumes this array
+         *
+         * One entry per split, walked ONCE, and the LAST entry then repeats for
+         * every remaining split — the same rule `lengths` visibly follows, where
+         * `["5","1"]` means one 5-byte record and then 1-byte records forever.
+         * It is NOT cyclic.
+         *
+         * Measured against the pinned fork (v26.8.28), handshake wall time to a
+         * real host with `["5","1"]` / `["43","1"]`, maxSplit 355:
+         *
+         * ```
+         *   31 x "1"                          0.46 s   (baseline)
+         *   this array (3 x "400", ends "1")  1.65 s   -> 3 stalls fired
+         *   one "400" mid-array, ends "1"     0.85 s   -> 1 stall fired
+         *   six "400", ends "1"               2.86 s   -> 6 stalls fired
+         *   thirty "1" then a TRAILING "400"  FAILED   -> connection died at 15.7 s
+         * ```
+         *
+         * So the stall count is exactly the number of `"400"` entries, and the
+         * trailing entry is the one that matters most: a `"400"` in last position
+         * applies to all ~350 remaining splits and the connection does not
+         * survive it. **Keep a `"1"` last.** A cyclic reading of this array would
+         * predict ~34 stalls and ~14 s here, which is not what the fork does.
+         *
+         * Three stalls spread through the array is what defeats a long reassembly
+         * window without making every fragment slow; the shape is upstream's
+         * `high_delay` profile.
          */
         STUBBORN(
             "stubborn",
