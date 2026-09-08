@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use base64::Engine;
-use rand::Rng;
+use rand::RngExt;
 
 use crate::error::{AetherError, Result};
 

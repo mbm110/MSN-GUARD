@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rand::Rng;
+use rand::{RngExt, Rng};
 use regex::Regex;
 use serde::Deserialize;
 use tokio::net::UdpSocket;
