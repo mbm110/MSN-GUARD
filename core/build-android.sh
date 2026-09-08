@@ -78,6 +78,13 @@ if [[ -z "$NDK" || ! -d "$NDK" || ! -d "$BIN" || -z "$CMAKE" || ! -x "$CMAKE" ]]
   exit 1
 fi
 
+# Force fresh dependency resolution for rand 0.10 (avoid stale Cargo.lock from cache)
+rm -f "$CRATE/Cargo.lock"
+(
+  cd "$CRATE"
+  cargo generate-lockfile
+)
+
 export ANDROID_NDK_HOME="$NDK"
 export ANDROID_NDK_ROOT="$NDK"
 export CMAKE="$CMAKE"
