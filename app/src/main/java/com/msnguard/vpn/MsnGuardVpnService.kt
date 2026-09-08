@@ -341,7 +341,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var reconnectTask: java.util.concurrent.ScheduledFuture<*>? = null
 
     /** NetworkCallback to detect connectivity restoration and trigger immediate retry. */
-    private var connectivityCallback: android.net.NetworkCallback? = null
+    private var connectivityCallback: ConnectivityManager.NetworkCallback? = null
 
     /** ConnectivityManager reference for unregistering the callback. */
     private var connectivityManager: ConnectivityManager? = null
@@ -3104,7 +3104,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private fun registerConnectivityCallback() {
         if (connectivityCallback != null) return // Already registered
         connectivityManager = getSystemService(ConnectivityManager::class.java)
-        connectivityCallback = object : android.net.NetworkCallback() {
+        connectivityCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 // Connectivity restored - reset backoff and try immediately if we're in auto-reconnect
                 if (willAutoReconnect() && !connected.get() && !userInitiatedStop.get()) {
@@ -3149,7 +3149,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         val cb = connectivityCallback
         if (mgr != null && cb != null) {
             try {
-                mgr.unregisterNetworkCallback(cb)
+                mgr.unregisterNetworkCallback(cb as ConnectivityManager.NetworkCallback)
                 ConnectionLog.record("NetworkCallback unregistered")
             } catch (_: Exception) {}
         }
