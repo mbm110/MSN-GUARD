@@ -24,6 +24,20 @@ const CHROME_GROUPS: &str = "P-256:X25519:P-384";
 static H2_FALLBACK: AtomicBool = AtomicBool::new(false);
 static H2_PREFERRED: AtomicBool = AtomicBool::new(false);
 
+/// The largest DATA frame we let the edge send us. The h2 default is the RFC
+/// minimum of 16 KiB, so a fast stream pays four times the frame headers and
+/// four times the wakeups it needs to.
+const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
+
+fn h2_builder() -> h2::client::Builder {
+    let mut builder = h2::client::Builder::new();
+    builder
+        .initial_window_size(crate::sysprofile::h2_stream_window_bytes())
+        .initial_connection_window_size(crate::sysprofile::h2_connection_window_bytes())
+        .max_frame_size(H2_MAX_FRAME_SIZE);
+    builder
+}
+
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
@@ -284,7 +298,8 @@ pub async fn verify_h2(cfg: &H2TunnelConfig, timeout: Duration) -> Result<Durati
         let tls = tokio_boring::connect(tls_config, &cfg.sni, fragment)
             .await
             .map_err(|e| AetherError::Tls(format!("h2 tls handshake: {e}")))?;
-        let (h2, connection) = h2::client::handshake(tls)
+        let (h2, connection) = h2_builder()
+            .handshake(tls)
             .await
             .map_err(|e| AetherError::Masque(format!("h2 handshake: {e}")))?;
         let driver = tokio::spawn(async move {
@@ -415,9 +430,20 @@ pub async fn run(
         ),
     );
 
-    let (h2, mut connection) = h2::client::handshake(tls)
+    let (h2, mut connection) = h2_builder()
+        .handshake(tls)
         .await
         .map_err(|e| AetherError::Masque(format!("h2 handshake: {e}")))?;
+
+    // Worth saying out loud: this is the ceiling on a download, at
+    // window / round-trip-time, and it is the first thing to look at when the
+    // HTTP/2 carrier is slower than the line underneath it.
+    log_or_debug(quiet, format!(
+        "[h2] flow control: stream window {}KB, connection window {}KB, max frame {}KB",
+        crate::sysprofile::h2_stream_window_bytes() / 1024,
+        crate::sysprofile::h2_connection_window_bytes() / 1024,
+        H2_MAX_FRAME_SIZE / 1024,
+    ));
 
     let mut ping_pong = connection
         .ping_pong()

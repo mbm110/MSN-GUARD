@@ -12,8 +12,12 @@ use tokio::sync::{mpsc, oneshot};
 use crate::error::{AetherError, Result};
 use crate::ffi;
 
-fn tcp_buf() -> usize {
-    crate::sysprofile::netstack_tcp_buf_bytes()
+fn tcp_rx_buf() -> usize {
+    crate::sysprofile::netstack_tcp_rx_buf_bytes()
+}
+
+fn tcp_tx_buf() -> usize {
+    crate::sysprofile::netstack_tcp_tx_buf_bytes()
 }
 
 fn udp_buf() -> usize {
@@ -544,8 +548,8 @@ async fn run(
                         if s.accept_tx.is_some() && is_tcp_syn(&pkt) {
                             if let Some((dst_ip, dst_port, src_ip, src_port)) = parse_tcp_syn(&pkt) {
                                 // Create a listening socket for this destination
-                                let rx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_buf()]);
-                                let tx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_buf()]);
+                                let rx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_rx_buf()]);
+                                let tx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_tx_buf()]);
                                 let mut socket = tcp::Socket::new(rx_buf, tx_buf);
                                 socket.set_nagle_enabled(false);
 
@@ -627,8 +631,8 @@ async fn sleep_opt(delay: Option<std::time::Duration>) {
 fn handle_cmd(s: &mut NetStack, cmd: Cmd) {
     match cmd {
         Cmd::OpenTcp { dst, resp } => {
-            let rx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_buf()]);
-            let tx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_buf()]);
+            let rx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_rx_buf()]);
+            let tx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_tx_buf()]);
             let mut socket = tcp::Socket::new(rx_buf, tx_buf);
             socket.set_nagle_enabled(false);
 
