@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::stream::StreamExt;
-use rand::RngExt;
+use rand::{Rng, RngExt};
 
 use crate::error::{AetherError, Result};
 use crate::noize::NoizeConfig;
