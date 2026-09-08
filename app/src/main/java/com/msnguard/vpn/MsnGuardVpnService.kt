@@ -29,6 +29,11 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import ca.psiphon.PsiphonTunnel
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCallback
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 
 /**
  * Protocol sets shared between a rung's config and its winner-detection.
@@ -335,6 +340,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     /** The pending auto-reconnect, so a user action can cancel it. */
     private var reconnectTask: java.util.concurrent.ScheduledFuture<*>? = null
+
+    /** NetworkCallback to detect connectivity restoration and trigger immediate retry. */
+    private var connectivityCallback: NetworkCallback? = null
+
+    /** ConnectivityManager reference for unregistering the callback. */
+    private var connectivityManager: ConnectivityManager? = null
 
     /**
      * Set by the Rust-core path when its tunnel ended without the user asking.
@@ -1853,6 +1864,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             }
             return
         }
+        // In auto-reconnect (not sealed, not quick-reconnect): keep the service
+        // alive and schedule another attempt. This is the fix for the bug where
+        // the first failed retry after a drop killed the service entirely.
+        if (willAutoReconnect()) {
+            ConnectionLog.record("Auto-reconnect attempt failed; scheduling next retry")
+            scheduleAutoReconnect(detail)
+            return
+        }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -3014,6 +3033,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // a blocking TUN with a working one instead of opening a hole.
         sealWithKillSwitch(armed)
         scheduleAutoReconnect(reason)
+        // Also register for connectivity changes so we can retry immediately
+        // when the network comes back, instead of waiting for the backoff timer.
+        registerConnectivityCallback()
     }
 
     /**
@@ -3076,6 +3098,64 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         reconnectTask = null
         stopWatchdog()
         reconnectAttempts = 0
+        unregisterConnectivityCallback()
+    }
+
+    /** Register a NetworkCallback to detect connectivity restoration and trigger immediate retry. */
+    private fun registerConnectivityCallback() {
+        if (connectivityCallback != null) return // Already registered
+        connectivityManager = getSystemService(ConnectivityManager::class.java)
+        connectivityCallback = object : NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                // Connectivity restored - reset backoff and try immediately if we're in auto-reconnect
+                if (willAutoReconnect() && !connected.get() && !userInitiatedStop.get()) {
+                    ConnectionLog.record("NetworkCallback: connectivity restored, resetting backoff and retrying")
+                    reconnectAttempts = 0
+                    reconnectTask?.cancel(false)
+                    reconnectTask = ladderScheduler.schedule({
+                        try {
+                            if (userInitiatedStop.get() || connected.get()) return@schedule
+                            val config = storedConfig
+                            if (config != null) startTunnel(config)
+                        } catch (e: Exception) {
+                            ConnectionLog.record("Auto reconnect after network restore failed: ${e.message}")
+                            scheduleAutoReconnect("network restore failure")
+                        }
+                    }, 0, TimeUnit.SECONDS)
+                }
+            }
+
+            override fun onLost(network: Network) {
+                // Network lost - do nothing, watchdog will handle it
+            }
+        }
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+            .build()
+        try {
+            connectivityManager?.registerNetworkCallback(request, connectivityCallback!!)
+            ConnectionLog.record("NetworkCallback registered for auto-reconnect")
+        } catch (e: Exception) {
+            ConnectionLog.record("NetworkCallback registration failed: ${e.message}")
+            connectivityCallback = null
+            connectivityManager = null
+        }
+    }
+
+    private fun unregisterConnectivityCallback() {
+        connectivityManager?.let { mgr ->
+            connectivityCallback?.let { cb ->
+                try {
+                    mgr.unregisterNetworkCallback(cb)
+                    ConnectionLog.record("NetworkCallback unregistered")
+                } catch (_: Exception) {}
+            }
+        }
+        connectivityCallback = null
+        connectivityManager = null
     }
 
     private fun autoReconnectEnabled(): Boolean =
