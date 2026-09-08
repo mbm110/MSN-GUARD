@@ -136,7 +136,6 @@ targetAbis.forEach { abi ->
         environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
         inputs.dir(rootProject.file("core/aether/src"))
         inputs.file(rootProject.file("core/aether/Cargo.toml"))
-        inputs.file(rootProject.file("core/aether/Cargo.lock"))
         inputs.dir(rootProject.file("core/quiche"))
         inputs.file(buildScript)
         val output = file("src/main/jniLibs/$abi/libaether.so")
