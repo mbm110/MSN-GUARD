@@ -30,6 +30,7 @@ jobs:
           rm -f ~/.cargo/.crates.toml
           rm -f ~/.cargo/.crates2.json
           rm -rf ~/work/MSN-GUARD/MSN-GUARD/core/aether/target-android
+          rm -f ~/work/MSN-GUARD/MSN-GUARD/core/aether/Cargo.lock
           echo "Cargo cache cleared"
 
       - name: Install cargo-ndk
