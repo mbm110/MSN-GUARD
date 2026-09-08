@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::stream::StreamExt;
-use rand::{Rng, RngExt};
+use rand::RngExt;
 
 use crate::error::{AetherError, Result};
 use crate::noize::NoizeConfig;
@@ -799,14 +799,14 @@ fn sample_cidr_v6(cidr: &str, n: usize, v4_cidrs: &[&str]) -> Vec<Ipv6Addr> {
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         let embedded = if v4.is_empty() {
-            rng.gen::<u32>() as u128
+            rng.random::<u32>() as u128
         } else {
-            let (b, p) = v4[rng.gen_range(0..v4.len())];
+            let (b, p) = v4[rng.random_range(0..v4.len())];
             let host_bits = 32u32.saturating_sub(p as u32);
             let host = if host_bits == 0 {
                 0
             } else {
-                rng.gen::<u32>() & ((1u32 << host_bits) - 1)
+                rng.random::<u32>() & ((1u32 << host_bits) - 1)
             };
             (b | host) as u128
         };
