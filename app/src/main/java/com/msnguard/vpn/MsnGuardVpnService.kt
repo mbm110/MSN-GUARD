@@ -31,7 +31,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import ca.psiphon.PsiphonTunnel
 import android.net.ConnectivityManager
 import android.net.Network
-import android.net.NetworkCallback
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 
@@ -342,7 +341,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var reconnectTask: java.util.concurrent.ScheduledFuture<*>? = null
 
     /** NetworkCallback to detect connectivity restoration and trigger immediate retry. */
-    private var connectivityCallback: NetworkCallback? = null
+    private var connectivityCallback: android.net.NetworkCallback? = null
 
     /** ConnectivityManager reference for unregistering the callback. */
     private var connectivityManager: ConnectivityManager? = null
@@ -3105,7 +3104,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private fun registerConnectivityCallback() {
         if (connectivityCallback != null) return // Already registered
         connectivityManager = getSystemService(ConnectivityManager::class.java)
-        connectivityCallback = object : NetworkCallback() {
+        connectivityCallback = object : android.net.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 // Connectivity restored - reset backoff and try immediately if we're in auto-reconnect
                 if (willAutoReconnect() && !connected.get() && !userInitiatedStop.get()) {
@@ -3146,13 +3145,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     private fun unregisterConnectivityCallback() {
-        connectivityManager?.let { mgr ->
-            connectivityCallback?.let { cb ->
-                try {
-                    mgr.unregisterNetworkCallback(cb)
-                    ConnectionLog.record("NetworkCallback unregistered")
-                } catch (_: Exception) {}
-            }
+        val mgr = connectivityManager
+        val cb = connectivityCallback
+        if (mgr != null && cb != null) {
+            try {
+                mgr.unregisterNetworkCallback(cb)
+                ConnectionLog.record("NetworkCallback unregistered")
+            } catch (_: Exception) {}
         }
         connectivityCallback = null
         connectivityManager = null
