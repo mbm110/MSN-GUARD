@@ -23,6 +23,14 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
 
+      - name: Clear cargo cache (force fresh dependency resolution)
+        run: |
+          rm -rf ~/.cargo/registry/cache
+          rm -rf ~/.cargo/registry/src
+          rm -f ~/.cargo/.crates.toml
+          rm -f ~/.cargo/.crates2.json
+          echo "Cargo cache cleared"
+
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
 
