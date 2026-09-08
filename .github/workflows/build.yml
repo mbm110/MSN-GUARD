@@ -29,6 +29,7 @@ jobs:
           rm -rf ~/.cargo/registry/src
           rm -f ~/.cargo/.crates.toml
           rm -f ~/.cargo/.crates2.json
+          rm -rf ~/core/aether/target-android
           echo "Cargo cache cleared"
 
       - name: Install cargo-ndk
