@@ -173,9 +173,9 @@ pub fn generate_fcm_token(install_id: &str) -> String {
 }
 
 fn random_alphanumeric(len: usize) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..len)
-        .map(|_| ALPHANUM[rng.gen_range(0..ALPHANUM.len())] as char)
+        .map(|_| ALPHANUM[rng.random_range(0..ALPHANUM.len())] as char)
         .collect()
 }
 

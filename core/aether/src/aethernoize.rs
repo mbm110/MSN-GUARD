@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rand::{Rng, RngCore};
+use rand::Rng;
 use regex::Regex;
 use serde::Deserialize;
 use tokio::net::UdpSocket;
@@ -171,7 +171,7 @@ fn parse_range(data: &str) -> usize {
         let min: usize = min_str.trim().parse().unwrap_or(0);
         let max: usize = max_str.trim().parse().unwrap_or(0);
         if max > min && min > 0 {
-            return rand::thread_rng().gen_range(min..=max).min(2048);
+            return rand::rng().random_range(min..=max).min(2048);
         }
     }
     data.trim().parse().unwrap_or(0).min(2048)
@@ -221,7 +221,7 @@ pub fn parse_cps(spec: &str) -> Vec<u8> {
                 let len = parse_range(tag_data);
                 if len > 0 {
                     let mut r = vec![0u8; len];
-                    rand::thread_rng().fill_bytes(&mut r);
+                    rand::rng().fill_bytes(&mut r);
                     out.extend_from_slice(&r);
                 }
             }
@@ -231,7 +231,7 @@ pub fn parse_cps(spec: &str) -> Vec<u8> {
                     let chars = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
                     let mut r = vec![0u8; len];
                     for b in r.iter_mut() {
-                        *b = chars[rand::thread_rng().gen_range(0..chars.len())];
+                        *b = chars[rand::rng().random_range(0..chars.len())];
                     }
                     out.extend_from_slice(&r);
                 }
@@ -242,7 +242,7 @@ pub fn parse_cps(spec: &str) -> Vec<u8> {
                     let chars = b"0123456789";
                     let mut r = vec![0u8; len];
                     for b in r.iter_mut() {
-                        *b = chars[rand::thread_rng().gen_range(0..chars.len())];
+                        *b = chars[rand::rng().random_range(0..chars.len())];
                     }
                     out.extend_from_slice(&r);
                 }
@@ -265,9 +265,9 @@ fn wrap_ikev2(payload: &[u8]) -> Vec<u8> {
     if payload.len() >= 8 {
         initiator_spi.copy_from_slice(&payload[..8]);
     } else {
-        rand::thread_rng().fill_bytes(&mut initiator_spi);
+        rand::rng().fill_bytes(&mut initiator_spi);
     }
-    rand::thread_rng().fill_bytes(&mut responder_spi);
+    rand::rng().fill_bytes(&mut responder_spi);
 
     let total_length = 28u32 + 24 + payload.len() as u32;
     let sa_payload_length = 24u16 + payload.len() as u16;
@@ -308,7 +308,7 @@ fn generate_junk(cfg: &AetherNoizeConfig) -> Vec<u8> {
     let size = if max_size == min_size {
         min_size
     } else {
-        rand::thread_rng().gen_range(min_size..=max_size)
+        rand::rng().random_range(min_size..=max_size)
     };
 
     if size == 0 {
@@ -320,7 +320,7 @@ fn generate_junk(cfg: &AetherNoizeConfig) -> Vec<u8> {
     }
 
     let mut junk = vec![0u8; size];
-    rand::thread_rng().fill_bytes(&mut junk);
+    rand::rng().fill_bytes(&mut junk);
     junk
 }
 
@@ -393,7 +393,7 @@ pub async fn send_keepalive_junk(sock: &UdpSocket, cfg: &AetherNoizeConfig) {
     }
 
     let base = cfg.jc_before_hs.max(1);
-    let extra = rand::thread_rng().gen_range(0..=base);
+    let extra = rand::rng().random_range(0..=base);
     let count = base + extra;
 
     for _ in 0..count {
@@ -405,7 +405,7 @@ pub async fn send_keepalive_junk(sock: &UdpSocket, cfg: &AetherNoizeConfig) {
         }
         send_connected(sock, &junk).await;
 
-        let jitter = rand::thread_rng().gen_range(0..=8);
+        let jitter = rand::rng().random_range(0..=8);
         let gap = cfg.junk_interval + Duration::from_millis(jitter);
         if !gap.is_zero() {
             tokio::time::sleep(gap).await;

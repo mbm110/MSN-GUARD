@@ -434,7 +434,7 @@ fn build_dataplane_probe(src: Ipv4Addr) -> Vec<u8> {
     pkt.extend_from_slice(&Ipv4Addr::new(8, 8, 8, 8).octets());
     let csum = ipv4_checksum(&pkt[0..20]);
     pkt[10..12].copy_from_slice(&csum.to_be_bytes());
-    let sport: u16 = rand::thread_rng().gen_range(20000..60000);
+    let sport: u16 = rand::rng().random_range(20000..60000);
     pkt.extend_from_slice(&sport.to_be_bytes());
     pkt.extend_from_slice(&53u16.to_be_bytes());
     pkt.extend_from_slice(&(udp_len as u16).to_be_bytes());

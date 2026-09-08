@@ -6,7 +6,7 @@ use boring::hash::MessageDigest;
 use boring::nid::Nid;
 use boring::pkey::PKey;
 use boring::x509::{X509Builder, X509NameBuilder};
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::apifront;
@@ -244,7 +244,7 @@ const API_RETRY_AFTER_CAP_SECS: u64 = 30;
 fn backoff_delay(attempt: u32) -> std::time::Duration {
     let exponential = API_BACKOFF_BASE_MS.saturating_mul(1u64 << attempt.min(5));
     let capped = exponential.min(API_BACKOFF_CAP_MS);
-    let jitter = rand::thread_rng().next_u32() as u64 % (capped / 3 + 1);
+    let jitter = rand::rng().next_u32() as u64 % (capped / 3 + 1);
     std::time::Duration::from_millis(capped / 2 + jitter)
 }
 
@@ -498,7 +498,7 @@ fn base_headers() -> reqwest::header::HeaderMap {
 
 fn generate_x25519_keypair() -> ([u8; 32], String) {
     let mut private = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut private);
+    rand::rng().fill_bytes(&mut private);
 
     private[0] &= 248;
     private[31] &= 127;
@@ -512,7 +512,7 @@ fn generate_x25519_keypair() -> ([u8; 32], String) {
 
 fn random_android_serial() -> String {
     let mut s = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut s);
+    rand::rng().fill_bytes(&mut s);
     hex::encode(s)
 }
 
