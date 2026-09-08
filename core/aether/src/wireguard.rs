@@ -118,15 +118,7 @@ impl WgTunnel {
         let peer_public = PublicKey::from(cfg.peer_public_key);
         let preshared = cfg.preshared_key;
 
-        let tunn = Tunn::new(
-            local_secret,
-            peer_public,
-            preshared,
-            cfg.persistent_keepalive,
-            0,
-            None,
-        )
-        .map_err(|e| AetherError::Other(format!("wireguard tunnel init: {e}")))?;
+        let tunn = Tunn::new(local_secret, peer_public, preshared, cfg.persistent_keepalive, 0, None);
 
         Ok(Self {
             tunn: Arc::new(Mutex::new(Box::new(tunn))),
@@ -818,8 +810,7 @@ pub async fn verify_endpoint_keep_session(
         Some(keepalive.unwrap_or(25)),
         0,
         None,
-    )
-    .map_err(|e| AetherError::Other(format!("tunn init: {e}")))?;
+    );
 
     let mut out_buf = vec![0u8; MAX_PACKET];
     let mut recv_buf = vec![0u8; MAX_PACKET];
