@@ -583,7 +583,7 @@ object ShardManager {
      */
     private fun race(context: Context, candidates: List<ShardNode>): ShardNode? {
         if (candidates.isEmpty()) return null
-        val config = ShardConfigs.probeConfig(candidates, PROBE_BASE_PORT)
+        val config = ShardConfigs.probeConfig(context, candidates, PROBE_BASE_PORT)
         val configFile = ShardConfigs.writeConfig(context, "probe.json", config)
         if (!launch(context, configFile, "$TAG/probe")) return null
 
