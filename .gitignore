@@ -25,7 +25,6 @@ build/
 app/build/
 app/.cxx/
 app/.externalNativeBuild/
-app/src/main/jniLibs/
 *.apk
 *.aab
 
