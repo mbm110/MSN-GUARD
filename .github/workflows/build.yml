@@ -26,6 +26,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source $HOME/.cargo/env
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+          cargo install cargo-ndk
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Grant execute permission for gradlew
