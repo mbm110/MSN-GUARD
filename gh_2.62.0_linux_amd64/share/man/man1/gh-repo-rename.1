@@ -1,0 +1,46 @@
+.nh
+.TH "GH-REPO-RENAME" "1" "Nov 2024" "GitHub CLI 2.62.0" "GitHub CLI manual"
+
+.SH NAME
+gh-repo-rename - Rename a repository
+
+
+.SH SYNOPSIS
+\fBgh repo rename [<new-name>] [flags]\fR
+
+
+.SH DESCRIPTION
+Rename a GitHub repository.
+
+.PP
+By default, this renames the current repository; otherwise renames the specified repository.
+
+
+.SH OPTIONS
+.TP
+\fB-R\fR, \fB--repo\fR \fB<[HOST/]OWNER/REPO>\fR
+Select another repository using the [HOST/]OWNER/REPO format
+
+.TP
+\fB-y\fR, \fB--yes\fR
+Skip the confirmation prompt
+
+
+.SH EXIT CODES
+0: Successful execution
+
+.PP
+1: Error
+
+.PP
+2: Command canceled
+
+.PP
+4: Authentication required
+
+.PP
+NOTE: Specific commands may have additional exit codes. Refer to the command's help for more information.
+
+
+.SH SEE ALSO
+\fBgh-repo(1)\fR

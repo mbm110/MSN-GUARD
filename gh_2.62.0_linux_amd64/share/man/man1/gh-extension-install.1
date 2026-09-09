@@ -1,0 +1,64 @@
+.nh
+.TH "GH-EXTENSION-INSTALL" "1" "Nov 2024" "GitHub CLI 2.62.0" "GitHub CLI manual"
+
+.SH NAME
+gh-extension-install - Install a gh extension from a repository
+
+
+.SH SYNOPSIS
+\fBgh extension install <repository> [flags]\fR
+
+
+.SH DESCRIPTION
+Install a GitHub repository locally as a GitHub CLI extension.
+
+.PP
+The repository argument can be specified in \fBOWNER/REPO\fR format as well as a full URL.
+The URL format is useful when the repository is not hosted on github.com.
+
+.PP
+To install an extension in development from the current directory, use \fB\&.\fR as the
+value of the repository argument.
+
+.PP
+For the list of available extensions, see 
+\[la]https://github.com/topics/gh\-extension\[ra]\&.
+
+
+.SH OPTIONS
+.TP
+\fB--force\fR
+force upgrade extension, or ignore if latest already installed
+
+.TP
+\fB--pin\fR \fB<string>\fR
+pin extension to a release tag or commit ref
+
+
+.SH EXIT CODES
+0: Successful execution
+
+.PP
+1: Error
+
+.PP
+2: Command canceled
+
+.PP
+4: Authentication required
+
+.PP
+NOTE: Specific commands may have additional exit codes. Refer to the command's help for more information.
+
+
+.SH EXAMPLE
+.EX
+$ gh extension install owner/gh-extension
+$ gh extension install https://git.example.com/owner/gh-extension
+$ gh extension install .
+
+.EE
+
+
+.SH SEE ALSO
+\fBgh-extension(1)\fR

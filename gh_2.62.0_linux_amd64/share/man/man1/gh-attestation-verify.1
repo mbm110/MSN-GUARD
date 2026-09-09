@@ -1,0 +1,197 @@
+.nh
+.TH "GH-ATTESTATION-VERIFY" "1" "Nov 2024" "GitHub CLI 2.62.0" "GitHub CLI manual"
+
+.SH NAME
+gh-attestation-verify - Verify an artifact's integrity using attestations
+
+
+.SH SYNOPSIS
+\fBgh attestation verify [<file-path> | oci://<image-uri>] [--owner | --repo] [flags]\fR
+
+
+.SH DESCRIPTION
+Verify the integrity and provenance of an artifact using its associated
+cryptographically signed attestations.
+
+.PP
+In order to verify an attestation, you must validate the identity of the Actions
+workflow that produced the attestation (a.k.a. the signer workflow). Given this
+identity, the verification process checks the signatures in the attestations,
+and confirms that the attestation refers to provided artifact.
+
+.PP
+To specify the artifact, the command requires:
+* a file path to an artifact, or
+* a container image URI (e.g. \fBoci://<image-uri>\fR)
+  * (note that if you provide an OCI URL, you must already be authenticated with
+its container registry)
+
+.PP
+To fetch the attestation, and validate the identity of the signer, the command
+requires either:
+* the \fB--repo\fR flag (e.g. --repo github/example).
+* the \fB--owner\fR flag (e.g. --owner github), or
+
+.PP
+The \fB--repo\fR flag value must match the name of the GitHub repository
+that the artifact is linked with.
+
+.PP
+The \fB--owner\fR flag value must match the name of the GitHub organization
+that the artifact's linked repository belongs to.
+
+.PP
+By default, the verify command will:
+- only verify provenance attestations
+- attempt to fetch relevant attestations via the GitHub API.
+
+.PP
+To verify other types of attestations, use the \fB--predicate-type\fR flag.
+
+.PP
+To use your artifact's OCI registry instead of GitHub's API, use the
+\fB--bundle-from-oci\fR flag. For offline verification, using attestations
+stored on desk (c.f. the download command), provide a path to the \fB--bundle\fR flag.
+
+.PP
+To see the full results that are generated upon successful verification, i.e.
+for use with a policy engine, provide the \fB--format=json\fR flag.
+
+.PP
+The signer workflow's identity is validated against the Subject Alternative Name (SAN)
+within the attestation certificate. Often, the signer workflow is the
+same workflow that started the run and generated the attestation, and will be
+located inside your repository. For this reason, by default this command uses
+either the \fB--repo\fR or the \fB--owner\fR flag value to validate the SAN.
+
+.PP
+However, sometimes the caller workflow is not the same workflow that
+performed the signing. If your attestation was generated via a reusable
+workflow, then that reusable workflow is the signer whose identity needs to be
+validated. In this situation, the signer workflow may or may not be located
+inside your \fB--repo\fR or \fB--owner\fR\&.
+
+.PP
+When using reusable workflows, use the \fB--signer-repo\fR, \fB--signer-workflow\fR,
+or \fB--cert-identity\fR flags to validate the signer workflow's identity.
+
+.PP
+For more policy verification options, see the other available flags.
+
+
+.SH OPTIONS
+.TP
+\fB-b\fR, \fB--bundle\fR \fB<string>\fR
+Path to bundle on disk, either a single bundle in a JSON file or a JSON lines file with multiple bundles
+
+.TP
+\fB--bundle-from-oci\fR
+When verifying an OCI image, fetch the attestation bundle from the OCI registry instead of from GitHub
+
+.TP
+\fB--cert-identity\fR \fB<string>\fR
+Enforce that the certificate's subject alternative name matches the provided value exactly
+
+.TP
+\fB-i\fR, \fB--cert-identity-regex\fR \fB<string>\fR
+Enforce that the certificate's subject alternative name matches the provided regex
+
+.TP
+\fB--cert-oidc-issuer\fR \fB<string> (default "https://token.actions.githubusercontent.com")\fR
+Issuer of the OIDC token
+
+.TP
+\fB--custom-trusted-root\fR \fB<string>\fR
+Path to a trusted_root.jsonl file; likely for offline verification
+
+.TP
+\fB--deny-self-hosted-runners\fR
+Fail verification for attestations generated on self-hosted runners
+
+.TP
+\fB-d\fR, \fB--digest-alg\fR \fB<string> (default "sha256")\fR
+The algorithm used to compute a digest of the artifact: {sha256|sha512}
+
+.TP
+\fB--format\fR \fB<string>\fR
+Output format: {json}
+
+.TP
+\fB--hostname\fR \fB<string>\fR
+Configure host to use
+
+.TP
+\fB-q\fR, \fB--jq\fR \fB<expression>\fR
+Filter JSON output using a jq expression
+
+.TP
+\fB-L\fR, \fB--limit\fR \fB<int> (default 30)\fR
+Maximum number of attestations to fetch
+
+.TP
+\fB--no-public-good\fR
+Do not verify attestations signed with Sigstore public good instance
+
+.TP
+\fB-o\fR, \fB--owner\fR \fB<string>\fR
+GitHub organization to scope attestation lookup by
+
+.TP
+\fB--predicate-type\fR \fB<string> (default "https://slsa.dev/provenance/v1")\fR
+Filter attestations by provided predicate type
+
+.TP
+\fB-R\fR, \fB--repo\fR \fB<string>\fR
+Repository name in the format /
+
+.TP
+\fB--signer-repo\fR \fB<string>\fR
+Repository of reusable workflow that signed attestation in the format /
+
+.TP
+\fB--signer-workflow\fR \fB<string>\fR
+Workflow that signed attestation in the format [host/]////
+
+.TP
+\fB-t\fR, \fB--template\fR \fB<string>\fR
+Format JSON output using a Go template; see "gh help formatting"
+
+
+.SH EXIT CODES
+0: Successful execution
+
+.PP
+1: Error
+
+.PP
+2: Command canceled
+
+.PP
+4: Authentication required
+
+.PP
+NOTE: Specific commands may have additional exit codes. Refer to the command's help for more information.
+
+
+.SH EXAMPLE
+.EX
+# Verify an artifact linked with a repository
+$ gh attestation verify example.bin --repo github/example
+
+# Verify an artifact linked with an organization
+$ gh attestation verify example.bin --owner github
+
+# Verify an artifact and output the full verification result
+$ gh attestation verify example.bin --owner github --format json
+
+# Verify an OCI image using attestations stored on disk
+$ gh attestation verify oci://<image-uri> --owner github --bundle sha256:foo.jsonl
+
+# Verify an artifact signed with a reusable workflow
+$ gh attestation verify example.bin --owner github --signer-repo actions/example
+
+.EE
+
+
+.SH SEE ALSO
+\fBgh-attestation(1)\fR

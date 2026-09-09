@@ -28,8 +28,8 @@ android {
         applicationId = "com.msnguard.vpn"
         minSdk = 26
         targetSdk = 36
-        versionCode = 91
-        versionName = "1.7.18"
+        versionCode = 92
+        versionName = "1.8.0"
 
     }
 
@@ -38,7 +38,7 @@ android {
             isEnable = true
             reset()
             include(*targetAbis.toTypedArray())
-            isUniversalApk = false
+            isUniversalApk = true
         }
     }
 

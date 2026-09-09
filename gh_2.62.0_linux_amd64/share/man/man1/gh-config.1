@@ -1,0 +1,61 @@
+.nh
+.TH "GH-CONFIG" "1" "Nov 2024" "GitHub CLI 2.62.0" "GitHub CLI manual"
+
+.SH NAME
+gh-config - Manage configuration for gh
+
+
+.SH SYNOPSIS
+\fBgh config <command> [flags]\fR
+
+
+.SH DESCRIPTION
+Display or change configuration settings for gh.
+
+.PP
+Current respected settings:
+- \fBgit_protocol\fR: the protocol to use for git clone and push operations {https|ssh} (default https)
+- \fBeditor\fR: the text editor program to use for authoring text
+- \fBprompt\fR: toggle interactive prompting in the terminal {enabled|disabled} (default enabled)
+- \fBprefer_editor_prompt\fR: toggle preference for editor-based interactive prompting in the terminal {enabled|disabled} (default disabled)
+- \fBpager\fR: the terminal pager program to send standard output to
+- \fBhttp_unix_socket\fR: the path to a Unix socket through which to make an HTTP connection
+- \fBbrowser\fR: the web browser to use for opening URLs
+
+
+.SH AVAILABLE COMMANDS
+.TP
+\fBgh-config-clear-cache(1)\fR
+Clear the cli cache
+
+.TP
+\fBgh-config-get(1)\fR
+Print the value of a given configuration key
+
+.TP
+\fBgh-config-list(1)\fR
+Print a list of configuration keys and values
+
+.TP
+\fBgh-config-set(1)\fR
+Update configuration with a value for the given key
+
+
+.SH EXIT CODES
+0: Successful execution
+
+.PP
+1: Error
+
+.PP
+2: Command canceled
+
+.PP
+4: Authentication required
+
+.PP
+NOTE: Specific commands may have additional exit codes. Refer to the command's help for more information.
+
+
+.SH SEE ALSO
+\fBgh(1)\fR
