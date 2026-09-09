@@ -103,6 +103,19 @@ object ShardManager {
 
     private val running = AtomicBoolean(false)
 
+    /**
+     * Signals [start] to abandon the connect at its next checkpoint, without
+     * needing the lock [start] holds.
+     *
+     * The user can hit Disconnect while the race is mid-slice, and the disconnect
+     * path runs on the MAIN thread — waiting for [start]'s synchronized block to
+     * finish is an ANR of up to MAX_RACE_SLICES × (RACE_BUDGET_MS + listener wait)
+     * ≈ 40+ s. stop() latches this flag and kills any live process lock-free;
+     * start() checks it between slices and before every launch, then exits early.
+     */
+    @Volatile
+    private var stopRequestedDuringStart = false
+
     @Volatile
     private var process: Process? = null
 
@@ -198,17 +211,13 @@ object ShardManager {
             line.contains("A unified platform for anti-censorship") ||
             line.contains("infra/conf/serial: Reading config")
 
-    /** Stop the process and forget the session. */
-    @Synchronized
-    fun stop() {
+    /** Kill the process without latching the cancel flag. For internal cleanup. */
+    private fun killProcess() {
         running.set(false)
         activeNode = null
         process?.let { proc ->
             try {
                 proc.destroy()
-                // Give it a moment to close its listeners before anything tries to
-                // bind them again; a leftover listener makes the next connect fail
-                // with "address already in use".
                 if (!proc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
                     proc.destroyForcibly()
                 }
@@ -217,6 +226,46 @@ object ShardManager {
         }
         process = null
         logThread = null
+    }
+
+    /** Stop the process and forget the session. */
+    fun stop() {
+        // Latch FIRST, lock-free: a start that is mid-race sees this at its next
+        // checkpoint and unwinds itself. Blocking on a lock here is what froze
+        // the UI for the whole race budget when a disconnect arrived during
+        // Connecting — the main thread must never wait on start()'s monitor.
+        stopRequestedDuringStart = true
+        // CAPTURED now, not read inside the thread: a quick Disconnect → Connect
+        // can start a NEW process before this thread runs, and reading the
+        // field there would tear down the fresh session's process.
+        val proc = process
+        // destroy() is idempotent and non-blocking; a start that already passed
+        // its checkpoints sees the process die in awaitListener() and unwinds.
+        try {
+            proc?.destroy()
+        } catch (_: Exception) {
+        }
+        // Off the main thread: the waitFor() grace exists so the next connect
+        // does not hit "address already in use", and that wait can take 3 s —
+        // the main thread has better things to do than sit through it.
+        Thread({
+            try {
+                if (proc != null && proc.isAlive &&
+                    !proc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)
+                ) {
+                    proc.destroyForcibly()
+                }
+            } catch (_: Exception) {
+            }
+            // Null the field ONLY if it is still the process we killed: the
+            // null must not race a fresh session that already launched.
+            if (process === proc) {
+                process = null
+                logThread = null
+            }
+            running.set(false)
+            activeNode = null
+        }, "shard-stop").start()
     }
 
     /** True when the local SOCKS port is accepting, i.e. the tunnel is usable. */
@@ -322,7 +371,13 @@ object ShardManager {
         verboseLog: Boolean = false,
         port: Int = SOCKS_PORT,
     ): Boolean {
-        stop()
+        // A stop may have latched while this start waited for the lock. That stop
+        // was aimed at the PREVIOUS session, not at this fresh connect — and
+        // startTunnel() has already verified the user asked to connect again.
+        // Clearing here (not returning false) is what makes Connect work right
+        // after a mid-Connecting Disconnect; returning false would poison every
+        // later connect with a stale latch.
+        stopRequestedDuringStart = false
         lastError = ""
         listenPort = port
 
@@ -349,12 +404,23 @@ object ShardManager {
         // everything — each slice costs up to RACE_BUDGET_MS.
         var raced: ShardNode? = null
         for (slice in 0 until MAX_RACE_SLICES) {
+            // Checkpoint between slices: a Disconnect that arrived mid-race must
+            // land here within one slice (~12 s worst case), not after all three.
+            if (stopRequestedDuringStart) {
+                lastError = "connect cancelled"
+                ConnectionLog.record("$TAG connect cancelled between race slices")
+                return false
+            }
             val candidates = ranked.drop(slice * RACE_WIDTH).take(RACE_WIDTH)
             if (candidates.isEmpty()) break
             raced = race(context, candidates)
             if (raced != null) break
         }
         val winner = raced ?: return false
+        if (stopRequestedDuringStart) {
+            lastError = "connect cancelled"
+            return false
+        }
 
         // Wildcard only when the user asked for LAN sharing. The port is fixed
         // either way: unlike the Rust core and Psiphon, SHARD's listener is also
@@ -375,6 +441,14 @@ object ShardManager {
             logLevel,
         )
         val configFile = ShardConfigs.writeConfig(context, "tunnel.json", config)
+        // Last checkpoint before committing the winner: stop() may have killed the
+        // probe process moments ago, and launching the live tunnel into a cancelled
+        // session would just leave another process for the next stop to clean up.
+        if (stopRequestedDuringStart) {
+            lastError = "connect cancelled"
+            ConnectionLog.record("$TAG connect cancelled before tunnel launch")
+            return false
+        }
         if (!launch(context, configFile, TAG)) return false
 
         // Wait for the listener rather than assume it. Reporting CONNECTED before
@@ -593,6 +667,7 @@ object ShardManager {
             var ready = false
             val deadline = System.currentTimeMillis() + 4000
             while (System.currentTimeMillis() < deadline) {
+                if (stopRequestedDuringStart) return null
                 if (portAccepts(PROBE_BASE_PORT, 300)) {
                     ready = true
                     break
@@ -617,6 +692,10 @@ object ShardManager {
                     // Once someone has won, the remaining probes are pointless
                     // work on a metered link — stop rather than finish politely.
                     if (winner.get() != null) return@execute
+                    // A stop during the race abandons every probe immediately;
+                    // ShardProbe.check blocks up to PROBE_TIMEOUT_MS and the
+                    // user is already waiting on this connect being over.
+                    if (stopRequestedDuringStart) return@execute
                     val started = System.currentTimeMillis()
                     val ok = ShardProbe.check(PROBE_BASE_PORT + index, PROBE_TIMEOUT_MS)
                     val elapsed = (System.currentTimeMillis() - started).toInt()
@@ -652,8 +731,11 @@ object ShardManager {
         } finally {
             // The probe process must die before the tunnel process starts: they
             // would otherwise fight over nothing, but it is 45 idle outbounds worth
-            // of memory for no reason.
-            stop()
+            // of memory for no reason. killProbe() and NOT stop(): stop() latches
+            // stopRequestedDuringStart, and this finally runs on every normal,
+            // successful slice too — latching here would cancel the connect that
+            // was about to launch its winner.
+            killProcess()
         }
     }
 }
