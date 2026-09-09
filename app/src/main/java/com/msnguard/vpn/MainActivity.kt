@@ -3229,7 +3229,7 @@ class MainActivity : Activity() {
                     }
                 }
                 prefs.apply()
-                toastShort(if (ip.isEmpty()) "Custom IP cleared" else "")
+                if (ip.isEmpty()) toastShort("Custom IP cleared")
             }
         }
         inputRow.addView(applyButton)
