@@ -372,7 +372,7 @@ class OrbitToggleRow(
     }
 
     private fun updateDescription(title: String) {
-        contentDescription = "$title, ${if (isOn) "on" else "off"}"
+        contentDescription = "$title، ${if (isOn) "روشن" else "خاموش"}"
         track.contentDescription = contentDescription
     }
 

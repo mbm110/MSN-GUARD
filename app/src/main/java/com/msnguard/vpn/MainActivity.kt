@@ -567,7 +567,7 @@ class MainActivity : Activity() {
         }
         chipLatency = label("Latency —", 12f, MUTED, TypefaceStyle.MEDIUM).apply {
             gravity = Gravity.CENTER
-            contentDescription = "Ping connection"
+            contentDescription = "سنجش پینگ اتصال"
             isClickable = true
             isFocusable = true
             setOnClickListener { pingConnection() }
@@ -1201,7 +1201,7 @@ class MainActivity : Activity() {
         addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
         addView(ImageView(this@MainActivity).apply {
             setImageResource(R.drawable.ic_settings)
-            contentDescription = "Settings"
+            contentDescription = "تنظیمات"
             isClickable = true
             isFocusable = true
             val p = dp(12)
@@ -2100,7 +2100,7 @@ class MainActivity : Activity() {
             background = roundedBackground(SURFACE_VARIANT, 12, DIVIDER)
             isClickable = true
             isFocusable = true
-            contentDescription = "$caption the full log"
+            contentDescription = "$caption، نمایش کامل گزارش"
             setOnClickListener {
                 performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 onClick()
@@ -2547,7 +2547,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(18), 0, dp(18), 0)
-            contentDescription = "Scan ${target.label} endpoints"
+            contentDescription = "اسکن پایانه‌های ${target.label}"
             isClickable = true
             isFocusable = true
             setOnClickListener { onSelect(target) }
@@ -2574,7 +2574,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(18), 0, dp(18), 0)
-            contentDescription = "Use ${discovery.label} MASQUE gateway discovery"
+            contentDescription = "استفاده از ${discovery.label} برای کشف دروازه MASQUE"
             isClickable = true
             isFocusable = true
             setOnClickListener { onSelect(discovery) }
@@ -2598,7 +2598,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(18), 0, dp(18), 0)
-            contentDescription = "Use ${mode.label} scan mode"
+            contentDescription = "استفاده از حالت اسکن ${mode.label}"
             isClickable = true
             isFocusable = true
             setOnClickListener { onSelect(mode) }
@@ -2625,7 +2625,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(18), 0, dp(18), 0)
-            contentDescription = "Use ${transport.label} for MASQUE scanning"
+            contentDescription = "استفاده از ${transport.label} برای اسکن MASQUE"
             isClickable = true
             isFocusable = true
             setOnClickListener { onSelect(transport) }
@@ -5080,7 +5080,7 @@ class MainActivity : Activity() {
         }
         val checkbox = CheckBox(this).apply {
             isChecked = packageName in selected
-            contentDescription = "Select ${packageManager.getApplicationLabel(app)}"
+            contentDescription = "انتخاب ${packageManager.getApplicationLabel(app)}"
             setOnCheckedChangeListener { _, checked ->
                 if (checked) {
                     selected += packageName
@@ -6088,7 +6088,7 @@ class MainActivity : Activity() {
 
     private fun createHeaderBackButton(onClick: () -> Unit): ImageView = ImageView(this).apply {
         setImageResource(R.drawable.ic_back)
-        contentDescription = "Back"
+        contentDescription = "بازگشت"
         isClickable = true
         isFocusable = true
         val p = dp(12)

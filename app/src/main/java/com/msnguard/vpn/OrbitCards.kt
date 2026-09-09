@@ -140,14 +140,14 @@ class ExitNodeCard(
                 // describe a tunnel that no longer exists.
                 locView.text = note ?: "reading from inside the tunnel"
                 flagView.text = "\uD83C\uDF10"
-                contentDescription = note ?: "Measuring the tunnel exit address"
+                contentDescription = note ?: "در حال اندازه‌گیری آدرس خروجی تونل"
                 return
             }
             ipView.text = UNAVAILABLE
             ipView.textSize = 15f
             locView.text = "tap to retry"
             flagView.text = "\uD83C\uDF10"
-            contentDescription = "IP unavailable, tap to retry"
+            contentDescription = "آی‌پی در دسترس نیست، برای تلاش مجدد بزنید"
             return
         }
         val fit = IpFormatter.fit(address)
@@ -168,7 +168,7 @@ class ExitNodeCard(
             else -> "not tunnelled"
         }
         // Accessibility reads the full address; the visual is the shortened one.
-        contentDescription = "${keyView.text}: ${fit.full}${if (country.isNotEmpty()) ", $country" else ""}"
+        contentDescription = "${keyView.text}: ${fit.full}${if (country.isNotEmpty()) "، $country" else ""}"
     }
 
     fun pushSample(value: Float) = spark.push(value)
@@ -483,10 +483,10 @@ class ChainModeCard(
         val label = innerLabel()
         contentDescription = when {
             // Mirrors the badge exactly: N/A only when the chain does not apply.
-            !applicable -> "$label over WARP unavailable: $unavailableReason"
-            value && !available -> "$label over WARP is armed, $unavailableReason"
-            value -> "$label over WARP is armed"
-            else -> "$label over WARP is off"
+            !applicable -> "$label روی WARP در دسترس نیست: $unavailableReason"
+            value && !available -> "$label روی WARP فعال شد، $unavailableReason"
+            value -> "$label روی WARP فعال است"
+            else -> "$label روی WARP خاموش است"
         }
     }
 

@@ -60,9 +60,9 @@ class OrbitDialView(
             val previous = field
             field = value
             contentDescription = when (value) {
-                State.DISCONNECTED, State.FAILED -> "Connect"
-                State.CONNECTING -> "Connecting"
-                State.CONNECTED, State.DEGRADED -> "Disconnect"
+                State.DISCONNECTED, State.FAILED -> "اتصال"
+                State.CONNECTING -> "در حال اتصال"
+                State.CONNECTED, State.DEGRADED -> "قطع اتصال"
             }
             if (value == State.CONNECTED || value == State.DEGRADED) {
                 if (previous != State.CONNECTED && previous != State.DEGRADED) tickReveal = 0f
@@ -123,7 +123,7 @@ class OrbitDialView(
         isClickable = true
         isFocusable = true
         isFocusableInTouchMode = false
-        contentDescription = "Connect"
+        contentDescription = "اتصال"
         // Shadow layers and sweep gradients need software rendering to be exact
         // on older GPUs; the view is small and repaints at most 20fps.
         setLayerType(LAYER_TYPE_SOFTWARE, null)
