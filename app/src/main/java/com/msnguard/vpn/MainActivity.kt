@@ -44,6 +44,8 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import android.graphics.Typeface
+import android.widget.LinearLayout.LayoutParams
 import androidx.core.content.FileProvider
 import java.io.File
 import java.net.HttpURLConnection
@@ -3138,7 +3140,7 @@ class MainActivity : Activity() {
         // to all SHARD configs. When set, this IP replaces the node address in the
         // outbound config, so SHARD connects through the user's chosen edge.
         val customIpRow = LinearLayout(this).apply {
-            orientation = VERTICAL
+            orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(12), dp(16), dp(12))
             background = Sculpt.sculptedBackground(
                 resources.displayMetrics.density,
@@ -3164,7 +3166,7 @@ class MainActivity : Activity() {
         customIpRow.addView(customIpSubtitle)
 
         val inputRow = LinearLayout(this).apply {
-            orientation = HORIZONTAL
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
         val customIpInput = EditText(this).apply {
@@ -3195,13 +3197,13 @@ class MainActivity : Activity() {
             textSize = 12f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             gravity = Gravity.CENTER
-            setTextColor(MINT)
+            setTextColor(palette.mint)
             setPadding(dp(16), dp(10), dp(16), dp(10))
             setBackground(Sculpt.sculptedBackground(
                 resources.displayMetrics.density,
-                Sculpt.withAlpha(MINT, 0.12f),
+                Sculpt.withAlpha(palette.mint, 0.12f),
                 8,
-                Sculpt.withAlpha(MINT, 0.3f),
+                Sculpt.withAlpha(palette.mint, 0.3f),
             ))
             isClickable = true
             isFocusable = true
