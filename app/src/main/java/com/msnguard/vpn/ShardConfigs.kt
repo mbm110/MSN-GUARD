@@ -476,7 +476,7 @@ object ShardConfigs {
      * carrier link and being counted as a success. Free-Configs' own health check
      * does the same thing, and for the same reason.
      */
-    fun probeConfig(nodes: List<ShardNode>, basePort: Int): String {
+    fun probeConfig(context: Context, nodes: List<ShardNode>, basePort: Int): String {
         val inbounds = JSONArray()
         val outbounds = JSONArray().put(
             JSONObject().apply {
