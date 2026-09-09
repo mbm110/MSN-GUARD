@@ -29,11 +29,29 @@ jobs:
           cargo install cargo-ndk
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
+      - name: Setup signing keystore
+        env:
+          AETHERY_KEYSTORE_BASE64: ${{ secrets.AETHERY_KEYSTORE_BASE64 }}
+          AETHERY_KEYSTORE_PASSWORD: ${{ secrets.AETHERY_KEYSTORE_PASSWORD }}
+          AETHERY_KEY_ALIAS: ${{ secrets.AETHERY_KEY_ALIAS }}
+          AETHERY_KEY_PASSWORD: ${{ secrets.AETHERY_KEY_PASSWORD }}
+        run: |
+          echo "$AETHERY_KEYSTORE_BASE64" | base64 -d > release.keystore
+          cat > keystore.env <<EOF
+          storePassword=$AETHERY_KEYSTORE_PASSWORD
+          keyAlias=$AETHERY_KEY_ALIAS
+          keyPassword=$AETHERY_KEY_PASSWORD
+          EOF
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
       - name: Build Release APKs
-        run: ./gradlew assembleRelease
+        env:
+          AETHERY_KEYSTORE_PASSWORD: ${{ secrets.AETHERY_KEYSTORE_PASSWORD }}
+          AETHERY_KEY_ALIAS: ${{ secrets.AETHERY_KEY_ALIAS }}
+          AETHERY_KEY_PASSWORD: ${{ secrets.AETHERY_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease -PaetheryKeystore=release.keystore
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
