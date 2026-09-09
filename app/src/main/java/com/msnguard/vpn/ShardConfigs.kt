@@ -295,7 +295,7 @@ object ShardConfigs {
      * @param node the SHARD node
      * @param tag the outbound tag routing rules will point at.
      */
-    private fun outbound(context: Context, node: ShardNode, tag: String, mux: Boolean = true): JSONObject {
+    fun outbound(context: Context, node: ShardNode, tag: String, mux: Boolean = true): JSONObject {
         val customIp = getCustomCfIp(context)
         val effectiveAddress = if (customIp.isNotEmpty()) customIp else node.address
 
