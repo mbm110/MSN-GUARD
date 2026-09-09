@@ -152,8 +152,29 @@ object ShardConfigs {
 
     private const val TAG = "ShardConfigs"
 
+    /** SharedPreferences key for user's custom Cloudflare IP. */
+    private const val CUSTOM_CF_IP_PREF = "shard_custom_cf_ip"
+
     /** Schemes we can actually run. Anything else in the file is skipped. */
     private val SUPPORTED = setOf("vless", "trojan")
+
+    /**
+     * Get the user's custom Cloudflare IP, if set.
+     * Returns empty string if not set.
+     */
+    private fun getCustomCfIp(context: Context): String =
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getString(CUSTOM_CF_IP_PREF, "")?.trim().orEmpty()
+
+    /**
+     * Clear the user's custom Cloudflare IP.
+     */
+    fun clearCustomCfIp(context: Context) {
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .edit()
+            .remove(CUSTOM_CF_IP_PREF)
+            .apply()
+    }
 
     /**
      * Streams per multiplexed connection, and per XUDP connection.
@@ -270,16 +291,21 @@ object ShardConfigs {
     /**
      * Build the outbound object for one node.
      *
+     * @param context for reading user's custom Cloudflare IP
+     * @param node the SHARD node
      * @param tag the outbound tag routing rules will point at.
      */
-    private fun outbound(node: ShardNode, tag: String, mux: Boolean = true): JSONObject {
+    private fun outbound(context: Context, node: ShardNode, tag: String, mux: Boolean = true): JSONObject {
+        val customIp = getCustomCfIp(context)
+        val effectiveAddress = if (customIp.isNotEmpty()) customIp else node.address
+
         val settings = JSONObject()
         when (node.protocol) {
             "vless" -> settings.put(
                 "vnext",
                 JSONArray().put(
                     JSONObject().apply {
-                        put("address", node.address)
+                        put("address", effectiveAddress)
                         put("port", node.port)
                         put(
                             "users",
@@ -299,7 +325,7 @@ object ShardConfigs {
                 "servers",
                 JSONArray().put(
                     JSONObject().apply {
-                        put("address", node.address)
+                        put("address", effectiveAddress)
                         put("port", node.port)
                         put("password", node.credential)
                     }
@@ -481,7 +507,7 @@ object ShardConfigs {
             // No mux during the race: the probe is a single short flow, so a
             // multiplexed connection would add its own setup for no benefit, and
             // the number being measured must be the node's own latency.
-            outbounds.put(outbound(node, tag, mux = false))
+            outbounds.put(outbound(context, node, tag, mux = false))
             rules.put(
                 JSONObject().apply {
                     put("type", "field")
@@ -547,7 +573,7 @@ object ShardConfigs {
         smartSplit: SmartSplit.FragmentProfile? = null,
     ): String {
         val outbounds = JSONArray()
-            .put(outbound(node, "proxy"))
+            .put(outbound(context, node, "proxy"))
             .put(
                 JSONObject().apply {
                     put("tag", "blackhole")

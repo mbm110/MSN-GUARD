@@ -3134,6 +3134,109 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
 
+        // Custom Cloudflare IP row: user can enter their own Cloudflare IP and apply it
+        // to all SHARD configs. When set, this IP replaces the node address in the
+        // outbound config, so SHARD connects through the user's chosen edge.
+        val customIpRow = LinearLayout(this).apply {
+            orientation = VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            background = Sculpt.sculptedBackground(
+                resources.displayMetrics.density,
+                Sculpt.recess(SURFACE, 0.16f),
+                14,
+                Sculpt.withAlpha(DIVIDER, 0.15f),
+            )
+        }
+        val customIpTitle = TextView(this).apply {
+            text = "Enter Your Cloudflare IP"
+            textSize = 13.5f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(INK)
+        }
+        customIpRow.addView(customIpTitle)
+
+        val customIpSubtitle = TextView(this).apply {
+            text = "This IP will replace all node addresses in SHARD configs"
+            textSize = 10.5f
+            setTextColor(MUTED)
+            setPadding(0, dp(2), 0, dp(8))
+        }
+        customIpRow.addView(customIpSubtitle)
+
+        val inputRow = LinearLayout(this).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val customIpInput = EditText(this).apply {
+            hint = "e.g. 104.16.0.1"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                rightMargin = dp(8)
+            }
+            // Load current value if set
+            val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
+            val current = prefs.getString("shard_custom_cf_ip", "")?.trim().orEmpty()
+            if (current.isNotEmpty()) setText(current)
+            setBackground(Sculpt.sculptedBackground(
+                resources.displayMetrics.density,
+                Sculpt.recess(SURFACE, 0.16f),
+                8,
+                Sculpt.withAlpha(DIVIDER, 0.15f),
+            ))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setTextColor(INK)
+            setHintTextColor(MUTED)
+            setSingleLine(true)
+        }
+        inputRow.addView(customIpInput)
+
+        val applyButton = TextView(this).apply {
+            text = "Apply"
+            textSize = 12f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            gravity = Gravity.CENTER
+            setTextColor(MINT)
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            setBackground(Sculpt.sculptedBackground(
+                resources.displayMetrics.density,
+                Sculpt.withAlpha(MINT, 0.12f),
+                8,
+                Sculpt.withAlpha(MINT, 0.3f),
+            ))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                val ip = customIpInput.text.toString().trim()
+                val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE).edit()
+                if (ip.isEmpty()) {
+                    prefs.remove("shard_custom_cf_ip")
+                } else {
+                    // Basic validation: must be an IP address format
+                    if (ip.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))) {
+                        val octets = ip.split(".").map { it.toIntOrNull() ?: -1 }
+                        if (octets.all { it in 0..255 }) {
+                            prefs.putString("shard_custom_cf_ip", ip)
+                            toastShort("Custom Cloudflare IP applied: $ip")
+                        } else {
+                            toastShort("Invalid IP address")
+                            return@setOnClickListener
+                        }
+                    } else {
+                        toastShort("Invalid IP format (use IPv4)")
+                        return@setOnClickListener
+                    }
+                }
+                prefs.apply()
+                toastShort(if (ip.isEmpty()) "Custom IP cleared" else "")
+            }
+        }
+        inputRow.addView(applyButton)
+        customIpRow.addView(inputRow)
+        content.addView(customIpRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
+
         // The home-screen card's mirror, for the same reason the Psiphon chain has
         // one: someone looking for a feature they saw on the main screen looks in
         // settings, and a control that exists in only one of the two places reads as
