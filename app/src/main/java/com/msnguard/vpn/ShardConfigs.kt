@@ -167,6 +167,17 @@ object ShardConfigs {
             .getString(CUSTOM_CF_IP_PREF, "")?.trim().orEmpty()
 
     /**
+     * Whether the user has pinned every outbound to one custom Cloudflare IP.
+     *
+     * Public because [ShardEdges.expand] needs it: with a custom IP the edge
+     * fan-out is meaningless — every variant's address is overwritten with the
+     * same IP at outbound-build time ([outbound]), so `expand` would emit N
+     * near-identical candidates that all race the one address. Collapsing the
+     * fan-out keeps the pool honest (one entry per node) and the race cheap.
+     */
+    fun hasCustomIp(context: Context): Boolean = getCustomCfIp(context).isNotEmpty()
+
+    /**
      * Clear the user's custom Cloudflare IP.
      */
     fun clearCustomCfIp(context: Context) {

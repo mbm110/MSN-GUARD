@@ -51,7 +51,6 @@ object ShardSubscription {
     private const val ETAG_PREF = "shard_etag"
     private const val LAST_CHECK_PREF = "shard_last_check"
     private const val LAST_COUNT_PREF = "shard_last_count"
-    private const val LAST_PATHS_PREF = "shard_last_paths"
 
     /**
      * Floor between two network checks.
@@ -86,11 +85,22 @@ object ShardSubscription {
      * would otherwise re-read and re-parse the 41 KB cache on the main thread just
      * to render a subtitle. Falls back to a multiply when the value predates this
      * field, which is only ever the first run after an update.
+     *
+     * When the edge list changed since the subscription was last refreshed — a
+     * `RemotePolicy` update adds IPs without touching the node file, so the
+     * subscription answers 304 and never rewrites the stored count — the stored
+     * value is stale and wrong (it still multiplies by the old edge count).
+     * Recompute from the current edge list whenever the cached value disagrees
+     * with `nodes × edges`: cheap (the edge list is a handful of strings) and
+     * it is the number the pool will actually race, not the number it raced
+     * last time.
      */
     fun cachedPathCount(context: Context): Int {
-        val stored = prefs(context).getInt(LAST_PATHS_PREF, 0)
-        if (stored > 0) return stored
-        return cachedCount(context) * ShardEdges.edges(context).size
+        val nodes = cachedCount(context)
+        if (nodes <= 0) return 0
+        val perNode = ShardEdges.pathsPerNode(context)
+        if (perNode <= 0) return nodes
+        return nodes * perNode
     }
 
     /**
@@ -191,15 +201,16 @@ object ShardSubscription {
                 return cachedCount(context)
             }
 
-            val paths = ShardEdges.expand(context, parsed).size
             cacheFile(context).writeText(body)
             prefs(context).edit()
                 .putString(ETAG_PREF, connection.getHeaderField("ETag").orEmpty())
                 .putLong(LAST_CHECK_PREF, System.currentTimeMillis())
                 .putInt(LAST_COUNT_PREF, parsed.size)
-                .putInt(LAST_PATHS_PREF, paths)
                 .apply()
-            ConnectionLog.record("$TAG updated — ${parsed.size} nodes, $paths paths")
+            ConnectionLog.record(
+                "$TAG updated — ${parsed.size} nodes, " +
+                    "${parsed.size * ShardEdges.pathsPerNode(context)} paths",
+            )
             return parsed.size
         } finally {
             connection.disconnect()

@@ -101,6 +101,9 @@ object SettingsBackup {
         // this install has never seen, and the app sits on the built-ins.
         "policy_etag",
         "policy_last_check",
+        // And the same for the Smart Split profile mirror's bookkeeping.
+        "smart_split_etag",
+        "smart_split_last_check",
         // Psiphon's advertised region list, refreshed from the network.
         "psiphon_available_regions",
         // Which rung/transport last worked, per mode. See MsnGuardVpnService's

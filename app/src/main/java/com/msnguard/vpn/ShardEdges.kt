@@ -75,6 +75,23 @@ object ShardEdges {
     fun edges(context: Context): List<String> = RemotePolicy.edges(context)
 
     /**
+     * How many distinct addresses one expandable node fans out to: the edge list
+     * plus the subscription's own address (which is always kept — see [expand]).
+     *
+     * The settings subtitle computes `nodes × pathsPerNode` with this, and it must
+     * agree with what [expand] actually emits, so the counting lives next to the
+     * expansion rather than in the UI. A node whose own address is itself in the
+     * edge list does not get a duplicate ([expand] dedupes on `node.key`), so the
+     * subscription's address is only counted when it is not one of the edges.
+     */
+    fun pathsPerNode(context: Context): Int {
+        // With a custom IP the pool is one address per node — see [expand].
+        if (ShardConfigs.hasCustomIp(context)) return 1
+        val edgeList = edges(context)
+        return edgeList.size + 1
+    }
+
+    /**
      * Ports Cloudflare terminates. A node on anything else is not fanned out,
      * because the edge would simply not answer.
      *
@@ -137,6 +154,13 @@ object ShardEdges {
      * nodes it knows nothing about.
      */
     fun expand(context: Context, nodes: List<ShardNode>): List<ShardNode> {
+        // A custom IP pins every outbound to one address, so the edge fan-out
+        // would only multiply near-identical candidates racing that one address.
+        // Collapse it: one entry per node, the address the user chose.
+        if (ShardConfigs.hasCustomIp(context)) {
+            val seen = HashSet<String>()
+            return nodes.filter { seen.add(it.key) }
+        }
         val edges = edges(context)
         val out = ArrayList<ShardNode>(nodes.size * (edges.size + 1))
         val seen = HashSet<String>()
