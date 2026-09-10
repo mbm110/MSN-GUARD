@@ -45,6 +45,10 @@ class ShardRefreshJob : android.app.job.JobService() {
         // does not gate jobFinished, because the subscription fetch below is the
         // one whose result the pool actually waits on.
         RemotePolicy.refreshIfDue(applicationContext)
+        // The Smart Split profiles ride the same window too — the user asked
+        // for exactly this: the Node List refresh, manual or periodic, brings
+        // the Serverless profiles along.
+        SmartSplitSub.refreshIfDue(applicationContext)
         ShardSubscription.refreshIfDue(applicationContext) {
             // Never reschedule on failure. The next periodic window is minutes to
             // hours away and the cache is still serviceable; retrying a blocked or

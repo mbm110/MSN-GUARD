@@ -470,15 +470,17 @@ object ShardManager {
     /**
      * Try to bring the tunnel up with Smart Split. True when it is up and split.
      *
-     * Ordered cheapest-first by [SmartSplit.FragmentProfile.entries]: the patient
-     * profile is tried before the stubborn one, so a network where both work gets
-     * the fast one. A cached measurement skips the loop and is trusted without
-     * re-probing — that is the point of caching it.
+     * The candidate ladder is the mirror's order — the publisher's own fallback
+     * order (fragA before fragB, and however many more the mirror carries).
+     * Each candidate gets its own probe budget ([SmartSplit.FragmentProfile.probeBudgetMs],
+     * derived from its masks), the same launch/listener/probe sequence, and the
+     * same failure contract: one candidate that cannot carry a blocked SNI hands
+     * the baton to the next, and only when every profile failed does the session
+     * fall back to the node-only config — which is what the user had before
+     * this feature existed.
      *
-     * False is not an error. It means either the user has the feature off, or this
-     * network was already measured as one fragmentation does not beat, or every
-     * candidate failed. All three cases end with [start] launching the node-only
-     * config, which is what the user had before this feature existed.
+     * A cached measurement skips the loop and is trusted without re-probing —
+     * that is the point of caching it.
      */
     private fun startSmartSplit(
         context: Context,
@@ -504,9 +506,19 @@ object ShardManager {
         val candidates = if (cached != null) {
             listOf(cached)
         } else {
-            SmartSplit.FragmentProfile.entries.toList()
+            SmartSplitSub.profiles(context)
+        }
+        if (candidates.isEmpty()) {
+            // No profiles at all — not even the seed. Smart Split cannot run;
+            // the node-only config is the honest fallback, not a silent skip.
+            ConnectionLog.record("$TAG Smart Split: no fragment profiles available; node-only")
+            return false
         }
         for (profile in candidates) {
+            if (stopRequestedDuringStart) {
+                ConnectionLog.record("$TAG connect cancelled during Smart Split")
+                return false
+            }
             ConnectionLog.record("$TAG Smart Split: tuning, ${profile.attempt}")
             val splitConfig = ShardConfigs.tunnelConfig(
                 context, winner, listenHost, port, logLevel, smartSplit = profile,
@@ -533,8 +545,8 @@ object ShardManager {
             ConnectionLog.record("$TAG Smart Split: ${profile.attempt} did not carry a blocked site")
             stop()
         }
-        // Neither profile worked: remembered, so the next connect on this network
-        // does not pay the probe budget again.
+        // No profile worked: remembered, so the next connect on this network
+        // does not pay every probe budget again.
         SmartSplit.recordNoProfile(context)
         ConnectionLog.record("$TAG Smart Split unavailable here; using node for everything")
         return false

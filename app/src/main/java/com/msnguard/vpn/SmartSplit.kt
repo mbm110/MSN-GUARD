@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.telephony.TelephonyManager
+import org.json.JSONArray
 import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -26,34 +27,26 @@ import javax.net.ssl.SSLSocketFactory
  * filtered sites, the node for Telegram and sanctioned ones. See
  * [ShardConfigs.tunnelConfig] for the rule table that expresses it.
  *
+ * ## Where the fragment profiles come from
+ *
+ * The profiles are no longer compiled in. They are fetched, exactly like the
+ * SHARD node list and the edge list, from a raw.githubusercontent URL — a mirror
+ * of patterniha's Serverless-for-Iran subscription, kept current by a scheduled
+ * workflow in our own repo (see [SmartSplitSub.refreshIfDue] and
+ * `remote/smart-split.json`). This is the user's requirement: a profile change
+ * must reach the fleet with no build and no version bump, exactly as an edge IP
+ * change does.
+ *
+ * Each profile is the publisher's `tcp-fragment-tls` mask pair — the same
+ * `finalmask` shape the fork's own direct outbound uses — plus a probe budget.
+ * The mask numbers themselves are the publisher's tuning, validated in the field
+ * by them, and the mirror carries them verbatim.
+ *
  * ## Why the fragment profile has to be measured, not chosen
  *
- * The fragmenter has one tuning knob that decides whether it works at all on a
- * given carrier: how long to stall between fragments. Upstream ships two profiles
- * that differ in *nothing else*:
- *
- * ```
- *   PATIENT  delays = ["1"]                             ~0.4 s of stalling
- *   STUBBORN delays = ["1"×9,"400", "1"×9,"400", …]      16-21 s of stalling
- * ```
- *
- * On MCI (همراه اول) PATIENT works and STUBBORN opens nothing. On another
- * carrier whose DPI holds a longer reassembly window it is the other way round.
- * There is no way to know from outside which one a user needs, and the choice is
- * not a preference — it is a measurable fact about their ISP. So the app measures
- * it once per network and never shows the words to the user.
- *
- * Measured cost of getting it wrong, from a server with no DPI in the path at all
- * (i.e. pure overhead, five runs each):
- *
- * ```
- *                probe      page load     3 MB download
- *   PATIENT      0.73 s       0.84 s        3.1 MB/s
- *   STUBBORN     1.96 s       2.05 s        1.5 MB/s
- * ```
- *
- * STUBBORN is not stronger, it is more patient. Where PATIENT already works,
- * picking STUBBORN halves the user's throughput for nothing.
+ * The fragmenter's tuning decides whether it works at all on a given carrier,
+ * and there is no way to know from outside which profile a user's ISP needs. So
+ * the app measures it once per network and never shows the words to the user.
  *
  * ## The two traps in the probe, both of which produce a confident wrong answer
  *
@@ -68,12 +61,12 @@ import javax.net.ssl.SSLSocketFactory
  * fragmenter works, so they measure latency only. [PROBE_HOSTS] are hosts the
  * censor actually inspects, which is what makes a pass meaningful.
  *
- * A third, subtler one: **the timeout budget must differ per profile.** STUBBORN
- * legitimately needs longer than PATIENT, and one shared short budget rejects it
- * on every network so the feature looks permanently broken. Hence
- * [FragmentProfile.probeBudgetMs]. The measured cost of the stalls themselves is
- * ~1.2 s (see [FragmentProfile.STUBBORN]); the rest of the budget is for the DPI
- * dropping and the client retrying, which is the case the profile exists for.
+ * A third, subtler one: **the timeout budget must differ per profile.** A
+ * stalling profile legitimately needs longer than a plain one, and one shared
+ * short budget rejects it on every network so the feature looks permanently
+ * broken. Hence [FragmentProfile.probeBudgetMs] — scaled from the publisher's
+ * own max stall (`max(400×stallCount, 12) s`) so the budget tracks the mask, not
+ * a hardcoded guess.
  */
 object SmartSplit {
 
@@ -82,19 +75,13 @@ object SmartSplit {
     private const val PREFS = "settings"
 
     /**
-     * Master switch. ON by default.
+     * Master switch. OFF by default.
      *
-     * Default-on is a deliberate choice with a real trade-off. The gain only exists
-     * on a censored carrier: a filtered site reached by fragmented TLS straight from
-     * the phone avoids the node hop entirely. On a clean link the same path measures
-     * *slower* than the node (5.2 vs 8.2 MB/s), so for a user nobody is blocking
-     * this is a small loss.
-     *
-     * What makes default-on safe is that it is gated on a measurement rather than on
-     * hope: if neither fragment profile can carry a blocked SNI, the profile is
-     * recorded as unavailable for that network and the session falls back to the
-     * historical all-through-the-node config. So the worst case is the old
-     * behaviour, arrived at automatically.
+     * The user asked for it to be a real opt-in: this is an experimental direct-
+     * fragmentation path, and the default must be the historical all-through-the-
+     * node behaviour. [enabled] now defaults to false; an existing install that
+     * turned it on keeps its stored choice, and a fresh install starts with it
+     * off until the user flips the switch.
      */
     const val ENABLED_PREF = "smart_split_enabled"
 
@@ -113,88 +100,77 @@ object SmartSplit {
     /**
      * How hard to fragment. The user never sees these names.
      *
-     * `delays` is the only difference, and it is expressed here rather than in the
-     * config builder because the probe has to be able to hand a specific profile
-     * to a specific candidate config.
+     * A profile is the publisher's `tcp-fragment-tls` mask pair, verbatim from
+     * the mirror ([SmartSplitSub] fetches and caches it). Not an enum anymore:
+     * the set of profiles is remote data now, and baking a fixed two-profile
+     * list back in would undo the whole point.
      *
      * [key] is a storage key, not a label: it goes into preferences and must stay
      * stable across versions, and it must never reach a user-visible surface. The
      * in-app log prints [attempt] instead — see [SmartSplit]'s note on why the
-     * mechanism is deliberately invisible.
+     * mechanism is deliberately invisible. The key is the profile's index in the
+     * mirror list, so a publisher appending a third profile does not shift what
+     * a stored measurement points at.
+     *
+     * @param masks the `finalmask.tcp` array of the publisher's
+     * `tcp-fragment-tls` outbound. Copied verbatim; the app does not understand
+     * or re-tune these numbers.
+     * @param probeBudgetMs how long [probeThroughSocks] may take for THIS mask.
+     * Derived from the mask's own `delays` (see [budgetFor]) rather than chosen
+     * by hand, so a stall-heavy profile the publisher ships next month is not
+     * failed everywhere by a budget pinned to today's masks.
      */
-    enum class FragmentProfile(
+    class FragmentProfile(
         /** Stored in preferences; must stay stable across versions. Never displayed. */
         val key: String,
-        /** The `delays` array for both fragment masks. */
-        val delays: List<String>,
-        /**
-         * Probe budget for THIS profile.
-         *
-         * Not one shared constant: STUBBORN's own stalling accounts for most of
-         * its budget, and judging it by PATIENT's clock would fail it everywhere.
-         */
+        /** The `finalmask.tcp` array, verbatim from the mirror. */
+        val masks: JSONArray,
+        /** Probe budget for THIS profile. */
         val probeBudgetMs: Int,
     ) {
-        PATIENT("patient", listOf("1"), 6_000),
-
-        /**
-         * Three 400 ms stalls, then 1 ms for the rest of the handshake.
-         *
-         * ## How the fork consumes this array
-         *
-         * One entry per split, walked ONCE, and the LAST entry then repeats for
-         * every remaining split — the same rule `lengths` visibly follows, where
-         * `["5","1"]` means one 5-byte record and then 1-byte records forever.
-         * It is NOT cyclic.
-         *
-         * Measured against the pinned fork (v26.8.28), handshake wall time to a
-         * real host with `["5","1"]` / `["43","1"]`, maxSplit 355:
-         *
-         * ```
-         *   31 x "1"                          0.46 s   (baseline)
-         *   this array (3 x "400", ends "1")  1.65 s   -> 3 stalls fired
-         *   one "400" mid-array, ends "1"     0.85 s   -> 1 stall fired
-         *   six "400", ends "1"               2.86 s   -> 6 stalls fired
-         *   thirty "1" then a TRAILING "400"  FAILED   -> connection died at 15.7 s
-         * ```
-         *
-         * So the stall count is exactly the number of `"400"` entries, and the
-         * trailing entry is the one that matters most: a `"400"` in last position
-         * applies to all ~350 remaining splits and the connection does not
-         * survive it. **Keep a `"1"` last.** A cyclic reading of this array would
-         * predict ~34 stalls and ~14 s here, which is not what the fork does.
-         *
-         * Three stalls spread through the array is what defeats a long reassembly
-         * window without making every fragment slow; the shape is upstream's
-         * `high_delay` profile.
-         */
-        STUBBORN(
-            "stubborn",
-            buildList {
-                repeat(3) {
-                    repeat(9) { add("1") }
-                    add("400")
-                }
-                add("1")
-            },
-            25_000,
-        ),
-        ;
-
         /**
          * What the in-app log calls this attempt: "attempt 1 of 2", never the key.
          *
          * The log is a user-visible surface — it is on the troubleshooting page and
-         * the user reads it and forwards it. Printing `patient`/`stubborn` there
-         * would hand the user two words to have an opinion about, which is the one
-         * thing this feature is designed to avoid. The ordinal still identifies the
-         * attempt uniquely for support purposes.
+         * the user reads it and forwards it. Printing the publisher's profile names
+         * there would hand the user two words to have an opinion about, which is the
+         * one thing this feature is designed to avoid. The ordinal still identifies
+         * the attempt uniquely for support purposes.
          */
-        val attempt: String get() = "attempt ${ordinal + 1} of ${entries.size}"
+        val attempt: String get() = "attempt ${ordinal + 1} of ${total}"
+
+        var ordinal: Int = 0
+            internal set
+        var total: Int = 0
+            internal set
 
         companion object {
-            fun byKey(key: String?): FragmentProfile? = entries.firstOrNull { it.key == key }
+            fun byKey(key: String?): FragmentProfile? =
+                SmartSplitSub.cachedProfiles().firstOrNull { it.key == key }
         }
+    }
+
+    /**
+     * Probe budget derived from the mask's own `delays` array.
+     *
+     * The publisher's masks carry their own stall profile in `delays`: entries
+     * larger than a second are stalls. The budget must cover the stalls plus the
+     * handshake itself plus a DPI-drop-and-retry, and a stalling mask judged by a
+     * plain mask's clock fails everywhere. `max(stallMs + 8 s, 12 s)` is the
+     * minimum honest budget; the floor exists so a mask with no stalls is not
+     * given a 3-second budget to carry a TLS handshake across a censored carrier.
+     */
+    private fun budgetFor(masks: JSONArray): Int {
+        var stallMs = 0L
+        for (i in 0 until masks.length()) {
+            val settings = masks.optJSONObject(i)?.optJSONObject("settings") ?: continue
+            val delays = settings.optJSONArray("delays") ?: continue
+            for (j in 0 until delays.length()) {
+                val d = delays.opt(j)?.toString()?.toLongOrNull() ?: continue
+                if (d > 1) stallMs += d
+            }
+        }
+        return maxOf(stallMs + 8_000, 12_000L).toInt().coerceAtMost(45_000)
     }
 
     /**
@@ -207,10 +183,17 @@ object SmartSplit {
      */
     private val PROBE_HOSTS = listOf("www.instagram.com", "www.youtube.com", "twitter.com")
 
-    /** Is Smart Split on? Default ON — see [ENABLED_PREF] for the trade-off. */
+    /**
+     * Is Smart Split on? Default OFF — see [ENABLED_PREF].
+     *
+     * Default-off, not default-absent: the same preference that stored the user's
+     * old default-on choice keeps meaning "on". Only an absent key now reads as
+     * off, which is what a fresh install and a `Settings reset to defaults` both
+     * produce.
+     */
     fun enabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(ENABLED_PREF, true)
+            .getBoolean(ENABLED_PREF, false)
 
     fun setEnabled(context: Context, value: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -296,9 +279,12 @@ object SmartSplit {
     /**
      * What the settings row shows: the measurement, in the user's terms.
      *
-     * Deliberately does not print PATIENT/STUBBORN. The user asked never to see
-     * them, and they describe an implementation detail of the fragmenter, not a
-     * choice anyone can act on.
+     * Deliberately does not print the profile name. The user asked never to see
+     * the fragment implementation, and the remote profiles carry the publisher's
+     * own names (e.g. `Serverless-v50-fragA`), which would hand the user two words
+     * to have an opinion about, which is the one thing this feature is designed to
+     avoid. The attempt ordinal still identifies the attempt uniquely for support
+     * purposes.
      */
     fun summary(context: Context): String = when {
         !enabled(context) -> "Off"

@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "updated": "2026-09-10T05:05Z",
+  "source": "patterniha/Serverless-for-Iran",
+  "profiles": [
+    {
+      "name": "Serverless-v50-fragA",
+      "masks": [
+        {
+          "type": "fragment",
+          "settings": {
+            "packets": "tlshello",
+            "lengths": [
+              "6",
+              "98",
+              "1"
+            ],
+            "delays": [
+              "0"
+            ],
+            "maxSplit": "0"
+          }
+        },
+        {
+          "type": "fragment",
+          "settings": {
+            "packets": "1-1",
+            "lengths": [
+              "114",
+              "1"
+            ],
+            "delays": [
+              "1"
+            ],
+            "maxSplit": "11"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Serverless-v50-fragB",
+      "masks": [
+        {
+          "type": "fragment",
+          "settings": {
+            "packets": "tlshello",
+            "lengths": [
+              "0",
+              "104",
+              "1"
+            ],
+            "delays": [
+              "0"
+            ],
+            "maxSplit": "0"
+          }
+        },
+        {
+          "type": "fragment",
+          "settings": {
+            "packets": "1-1",
+            "lengths": [
+              "114",
+              "1"
+            ],
+            "delays": [
+              "1"
+            ],
+            "maxSplit": "11"
+          }
+        }
+      ]
+    }
+  ]
+}

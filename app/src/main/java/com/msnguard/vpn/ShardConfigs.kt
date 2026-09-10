@@ -815,8 +815,22 @@ object ShardConfigs {
      * living with it, which on a bad edge is exactly the stall the race exists to
      * avoid. Upstream sets the strategy only under `sockopt`, and so do we now.
      */
+    /**
+     * The fragmented direct outbound, carrying the publisher's own masks
+     * verbatim from the mirror.
+     *
+     * The mask array is [SmartSplit.FragmentProfile.masks] — the publisher's
+     * `tcp-fragment-tls` `finalmask.tcp`, copied as-is. The app does not
+     * understand or re-tune those numbers; they are the publisher's field
+     * tuning, and re-deriving them here would fork the tuning into two places
+     * that drift.
+     *
+     * Everything else is ours and measured: `domainStrategy: ForceIP` +
+     * happyEyeballs under `sockopt` — the placement upstream uses and the only
+     * one that leaves the race alive (see the socket options note above this
+     * function's history).
+     */
     private fun fragmentedDirect(profile: SmartSplit.FragmentProfile): JSONObject {
-        val delays = JSONArray().apply { profile.delays.forEach { put(it) } }
         val happyEyeballs = JSONObject().apply {
             put("tryDelayMs", 300)
             put("prioritizeIPv6", true)
@@ -829,15 +843,7 @@ object ShardConfigs {
             put(
                 "streamSettings",
                 JSONObject().apply {
-                    put(
-                        "finalmask",
-                        JSONObject().put(
-                            "tcp",
-                            JSONArray()
-                                .put(fragmentMask("tlshello", listOf("5", "1"), JSONArray().put("0"), "0"))
-                                .put(fragmentMask("1-1", listOf("43", "1"), delays, "522"))
-                        )
-                    )
+                    put("finalmask", JSONObject().put("tcp", profile.masks))
                     put(
                         "sockopt",
                         JSONObject().apply {
@@ -848,24 +854,6 @@ object ShardConfigs {
                 }
             )
         }
-    }
-
-    private fun fragmentMask(
-        packets: String,
-        lengths: List<String>,
-        delays: JSONArray,
-        maxSplit: String,
-    ): JSONObject = JSONObject().apply {
-        put("type", "fragment")
-        put(
-            "settings",
-            JSONObject().apply {
-                put("packets", packets)
-                put("lengths", JSONArray().apply { lengths.forEach { put(it) } })
-                put("delays", delays)
-                put("maxSplit", maxSplit)
-            }
-        )
     }
 
     /**

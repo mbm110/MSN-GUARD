@@ -2547,6 +2547,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // exact installs a dead edge would strand. Fire-and-forget: it costs
                 // nothing when nothing changed and never blocks the connect.
                 RemotePolicy.refreshIfDue(this)
+                // The fragment profiles age on the same clock — a Smart Split
+                // connect from the tile deserves a current ladder, too.
+                SmartSplitSub.refreshIfDue(this)
 
                 sendStatus(STATUS_CONNECTING, "Starting device routing…", 70)
                 if (!ShardSocksFront.start(ShardManager.SOCKS_PORT)) {

@@ -528,6 +528,9 @@ class MainActivity : Activity() {
         // ETag, same 6-hour floor — see [RemotePolicy]. Cheap enough to sit next to
         // the subscription fetch: a 304 is a few hundred bytes.
         RemotePolicy.refreshIfDue(this)
+        // And the Smart Split fragment profiles, on the same triggers and the
+        // same floor — see [SmartSplitSub]. Same shape: a 304 costs nothing.
+        SmartSplitSub.refreshIfDue(this)
 
         // Orbit console. Every control below is built in onCreate so a single
         // pass wires the whole screen; no XML layouts exist in this app.
@@ -3121,6 +3124,11 @@ class MainActivity : Activity() {
             // each node has, so refreshing the node list without it would leave the
             // count in the summary computed from stale edges.
             RemotePolicy.refreshIfDue(this, force = true)
+            // The Smart Split profiles ride the same tap: the mirror is part of
+            // what makes SHARD connect, and refreshing the node list without it
+            // would leave a stale fragment ladder for the next Smart Split
+            // connect.
+            SmartSplitSub.refreshIfDue(this, force = true)
             ShardSubscription.refreshIfDue(this, force = true) { count ->
                 runOnUiThread {
                     shardPoolRow?.setValue(shardPoolSummary())

@@ -1,0 +1,55 @@
+name: Smart Split mirror sync
+
+# Keeps remote/smart-split.json — the mirror of patterniha's
+# Serverless-for-Iran subscription that Smart Split's fragment profiles are
+# fetched from — current without a build or a version bump.
+#
+# The publisher's subscription is a ~36 KB list of full client configs; the app
+# needs only the tcp-fragment-tls mask pair from each. This workflow extracts
+# those masks into the 1.4 KB mirror the phone actually fetches, so a publisher
+# change reaches the fleet within six hours with no release.
+#
+# Why a mirror at all: fetching the publisher's file directly on the phone would
+# couple our ETag cadence to every unrelated edit (DNS tweaks, policy levels)
+# and would put a third-party URL in the app's dial list. The mirror is ours:
+# our format, our cadence, and the extraction is reviewable here.
+
+on:
+  schedule:
+    # Every 6 hours, matching SmartSplitSub.MIN_INTERVAL_MS — the phone's
+    # cache floor and the mirror's rebuild rate must not fight each other.
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: smart-split-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract fragment profiles from the publisher's subscription
+        run: |
+          set -euo pipefail
+          python3 tools/smart-split-extract.py remote/smart-split.json
+
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- remote/smart-split.json; then
+            echo "mirror unchanged"
+            exit 0
+          fi
+          git config user.name "smart-split-sync[bot]"
+          git config user.email "actions@users.noreply.github.com"
+          git add remote/smart-split.json
+          git commit -m "remote: sync Smart Split fragment profiles from Serverless-for-Iran"
+          git push
