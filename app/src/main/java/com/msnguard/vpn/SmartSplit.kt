@@ -160,7 +160,8 @@ object SmartSplit {
      * minimum honest budget; the floor exists so a mask with no stalls is not
      * given a 3-second budget to carry a TLS handshake across a censored carrier.
      */
-    private fun budgetFor(masks: JSONArray): Int {
+    /** Probe budget derived from the mask's own `delays` array. */
+    fun budgetFor(masks: JSONArray): Int {
         var stallMs = 0L
         for (i in 0 until masks.length()) {
             val settings = masks.optJSONObject(i)?.optJSONObject("settings") ?: continue

@@ -76,7 +76,7 @@ object SmartSplitSub {
      * pool would silently disarm Smart Split on a network where it works.
      */
     fun profiles(context: Context): List<SmartSplit.FragmentProfile> =
-        parse(readCache(context) ?: readSeed(context))
+        parse(readCache(context) ?: readSeed(context)).orEmpty()
 
     /** Parse the mirror format into profiles. Null when unparseable/empty. */
     fun parse(body: String?): List<SmartSplit.FragmentProfile>? {
