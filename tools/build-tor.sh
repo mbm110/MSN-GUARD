@@ -158,6 +158,14 @@ build_abi() {
             OPENSSL_TARGET="android-arm"
             ARCH_FLAGS="-march=armv7-a -mfloat-abi=softfp -mfpu=neon -mthumb"
             ;;
+        x86_64)
+            # Emulator ABI. Same NDK clang triple as the other two; OpenSSL has
+            # a first-class android-x86_64 target. No ARCH_FLAGS needed — the
+            # emulator's x86_64 CPU is baseline for the target.
+            TARGET_HOST="x86_64-linux-android"
+            OPENSSL_TARGET="android-x86_64"
+            ARCH_FLAGS=""
+            ;;
         *)
             echo "ERROR: unsupported ABI $ABI"; return 1 ;;
     esac
