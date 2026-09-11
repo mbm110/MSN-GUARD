@@ -6483,8 +6483,6 @@ class MainActivity : Activity() {
         val androidAvailable: Boolean = true,
     ) {
         /** Localized at call time so a language switch refreshes every rail/page. */
-        val label: String get() = Strings.t(enLabel)
-        val description: String get() = Strings.t(enDescription)
         // ORDER IS THE UI. Both the home-screen rail and the Connection mode page
         // are built from `Protocol.entries`, so this list decides what a first-time
         // user reaches for — and the first cell is what most of them will tap.
@@ -6507,7 +6505,10 @@ class MainActivity : Activity() {
          * started for SHARD. The service branches on it before touching
          * NativeCore, the same way the Psiphon and Tor names do.
          */
-        SHARD(Strings.t("SHARD"), "shard", "Public nodes, auto-selected; no setup"),
+        SHARD("SHARD", "shard", "Public nodes, auto-selected; no setup");
+
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
     }
 
     private enum class ScanTarget(
@@ -6515,11 +6516,12 @@ class MainActivity : Activity() {
         val coreName: String,
         val enDescription: String,
     ) {
-        val label: String get() = Strings.t(enLabel)
-        val description: String get() = Strings.t(enDescription)
         IPV4("IPv4", "v4", "Scan IPv4 endpoints only"),
         IPV6("IPv6", "v6", "Scan IPv6 endpoints only"),
-        BOTH("Both", "both", "Scan IPv4 and IPv6 endpoints"),
+        BOTH("Both", "both", "Scan IPv4 and IPv6 endpoints");
+
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
     }
 
     private enum class ScanMode(
@@ -6527,13 +6529,14 @@ class MainActivity : Activity() {
         val coreName: String,
         val enDescription: String,
     ) {
-        val label: String get() = Strings.t(enLabel)
-        val description: String get() = Strings.t(enDescription)
         TURBO("Turbo", "turbo", "Fastest scan; first verified route wins"),
         BALANCED("Balanced", "balanced", "Default mix of speed and coverage"),
         THOROUGH("Thorough", "thorough", "Deep scan; selects best latency"),
         STEALTH("Stealth", "stealth", "Quiet, patient probing"),
-        IRONCLAD("Ironclad", "ironclad", "Strict CONNECT-IP verification before selection"),
+        IRONCLAD("Ironclad", "ironclad", "Strict CONNECT-IP verification before selection");
+
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
     }
 
     private enum class MasqueTransport(
@@ -6541,10 +6544,11 @@ class MainActivity : Activity() {
         val coreName: String,
         val enDescription: String,
     ) {
+        H3("HTTP/3", "h3", "QUIC first; falls back to HTTP/2 if UDP is blocked"),
+        H2("HTTP/2", "h2", "TCP with TLS fragmentation; use on restricted networks");
+
         val label: String get() = Strings.t(enLabel)
         val description: String get() = Strings.t(enDescription)
-        H3("HTTP/3", "h3", "QUIC first; falls back to HTTP/2 if UDP is blocked"),
-        H2("HTTP/2", "h2", "TCP with TLS fragmentation; use on restricted networks"),
     }
 
     private enum class EndpointDiscovery(
@@ -6552,59 +6556,66 @@ class MainActivity : Activity() {
         val coreName: String,
         val enDescription: String,
     ) {
+        CACHE("Cache & refresh", "cache", "Use verified gateways first, then discover more"),
+        FRESH("Fresh scan", "fresh", "Start a new scan every connection");
+
         val label: String get() = Strings.t(enLabel)
         val description: String get() = Strings.t(enDescription)
-        CACHE("Cache & refresh", "cache", "Use verified gateways first, then discover more"),
-        FRESH("Fresh scan", "fresh", "Start a new scan every connection"),
     }
 
     private enum class ObfuscationProfile(val enLabel: String, val coreName: String, val enDescription: String) {
-        val label: String get() = Strings.t(enLabel)
-        val description: String get() = Strings.t(enDescription)
         OFF("Off", "off", "No traffic-shape padding"),
         LIGHT("Light", "light", "Lower overhead on mild filtering"),
         BALANCED("Balanced", "balanced", "Recommended filtering resistance"),
-        AGGRESSIVE("Aggressive", "aggressive", "Highest resistance; slower setup"),
+        AGGRESSIVE("Aggressive", "aggressive", "Highest resistance; slower setup");
+
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
     }
 
     private enum class TlsCurvePreset(val enLabel: String, val coreName: String, val enDescription: String) {
+        CHROME("Chrome", "chrome", "Chrome TLS curve ordering"),
+        COMPATIBILITY("Compatibility", "compatibility", "P-256 and X25519 only");
+
         val label: String get() = Strings.t(enLabel)
         val description: String get() = Strings.t(enDescription)
-        CHROME("Chrome", "chrome", "Chrome TLS curve ordering"),
-        COMPATIBILITY("Compatibility", "compatibility", "P-256 and X25519 only"),
     }
 
     private enum class LogLevel(val enLabel: String, val coreName: String, val enDescription: String) {
-        val label: String get() = Strings.t(enLabel)
-        val description: String get() = Strings.t(enDescription)
         ERROR("Error", "error", "Only errors"),
         WARN("Warn", "warn", "Warnings and errors"),
         INFO("Info", "info", "Default verbosity"),
         DEBUG("Debug", "debug", "Tunnel internals"),
-        TRACE("Trace", "trace", "Full per-packet detail"),
+        TRACE("Trace", "trace", "Full per-packet detail");
+
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
     }
 
     private enum class PerfProfile(val enLabel: String, val coreName: String, val enDescription: String) {
-        val label: String get() = Strings.t(enLabel)
-        val description: String get() = Strings.t(enDescription)
         AUTO("Auto", "auto", "Detect hardware and scale accordingly"),
         LOW("Low", "low", "Routers and constrained devices"),
         MEDIUM("Medium", "medium", "Moderate hardware"),
-        HIGH("High", "high", "Desktop and powerful devices"),
+        HIGH("High", "high", "Desktop and powerful devices");
+
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
     }
 
     private enum class H2Fragmentation(val enLabel: String, val coreName: String, val enDescription: String) {
+        ON("On", "on", "Fragment TLS handshake to evade DPI"),
+        OFF("Off", "off", "Standard TLS handshake");
+
         val label: String get() = Strings.t(enLabel)
         val description: String get() = Strings.t(enDescription)
-        ON("On", "on", "Fragment TLS handshake to evade DPI"),
-        OFF("Off", "off", "Standard TLS handshake"),
     }
 
     private enum class LogTab(val enLabel: String) {
-        val label: String get() = Strings.t(enLabel)
         ALL("All"),
         APP("App"),
-        CORE("Core"),
+        CORE("Core");
+
+        val label: String get() = Strings.t(enLabel)
     }
 
     /**
@@ -6622,8 +6633,6 @@ class MainActivity : Activity() {
         val enLabel: String,
         val enDescription: String,
     ) {
-        val label: String get() = Strings.t(enLabel)
-        val description: String get() = Strings.t(enDescription)
         AUTO(
             CoreConfig.CHAIN_OUTER_AUTO,
             "Auto",
@@ -6631,7 +6640,10 @@ class MainActivity : Activity() {
         ),
         MASQUE("masque", "MASQUE", "HTTP/3, falling back to HTTP/2 with TLS fragmentation"),
         WIREGUARD("wireguard", "WireGuard", "Single WARP tunnel; blocked on some carriers"),
-        WOW("gool", "WoW", "WARP on WARP — slowest, for the most filtered networks"),
+        WOW("gool", "WoW", "WARP on WARP — slowest, for the most filtered networks");
+
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
     }
 
     private data class SelectionOption(

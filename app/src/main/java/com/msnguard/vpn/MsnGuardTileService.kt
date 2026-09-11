@@ -274,71 +274,94 @@ class MsnGuardTileService : TileService() {
 
 
         enum class Protocol(
-            val label: String,
+            val enLabel: String,
             val coreName: String,
-            val description: String,
+            val enDescription: String,
         ) {
             // Order mirrors MainActivity.Protocol — WireGuard first. Nothing here is
             // laid out from the order, but the two enums are read as one list by
             // anyone maintaining them, and the tile's default is the first entry's
             // sibling on the main screen.
-            WIREGUARD(Strings.t("WireGuard"), "wireguard", "WireGuard tunnel"),
-            MASQUE(Strings.t("MASQUE"), "masque", "HTTP/3 tunnel"),
-            WARP_IN_WARP(Strings.t("WARP-on-WARP"), "gool", "Double-layer tunnel"),
-            PSIPHON(Strings.t("Psiphon"), "psiphon", "SOCKS5 proxy tunnel"),
-            TOR(Strings.t("Tor"), "tor", "Onion routing"),
+            WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel"),
+            MASQUE("MASQUE", "masque", "HTTP/3 tunnel"),
+            WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel"),
+            PSIPHON("Psiphon", "psiphon", "SOCKS5 proxy tunnel"),
+            TOR("Tor", "tor", "Onion routing");
+
+            val label: String get() = Strings.t(enLabel)
+            val description: String get() = Strings.t(enDescription)
+
+            val label: String get() = Strings.t(enLabel)
         }
 
         enum class ScanTarget(
-            val label: String,
+            val enLabel: String,
             val coreName: String,
-            val description: String,
+            val enDescription: String,
         ) {
-            IPV4(Strings.t("IPv4"), "v4", "Scan IPv4 endpoints only"),
-            IPV6(Strings.t("IPv6"), "v6", "Scan IPv6 endpoints only"),
-            BOTH(Strings.t("Both"), "both", "Scan IPv4 and IPv6 endpoints"),
+            IPV4("IPv4", "v4", "Scan IPv4 endpoints only"),
+            IPV6("IPv6", "v6", "Scan IPv6 endpoints only"),
+            BOTH("Both", "both", "Scan IPv4 and IPv6 endpoints");
+
+            val label: String get() = Strings.t(enLabel)
+            val description: String get() = Strings.t(enDescription)
         }
 
         enum class ScanMode(
-            val label: String,
+            val enLabel: String,
             val coreName: String,
-            val description: String,
+            val enDescription: String,
         ) {
-            TURBO(Strings.t("Turbo"), "turbo", "Fastest scan; first verified route wins"),
-            BALANCED(Strings.t("Balanced"), "balanced", "Default mix of speed and coverage"),
-            THOROUGH(Strings.t("Thorough"), "thorough", "Deep scan; selects best latency"),
-            STEALTH(Strings.t("Stealth"), "stealth", "Quiet, patient probing"),
-            IRONCLAD(Strings.t("Ironclad"), "ironclad", "Strict CONNECT-IP verification before selection"),
+            TURBO("Turbo", "turbo", "Fastest scan; first verified route wins"),
+            BALANCED("Balanced", "balanced", "Default mix of speed and coverage"),
+            THOROUGH("Thorough", "thorough", "Deep scan; selects best latency"),
+            STEALTH("Stealth", "stealth", "Quiet, patient probing"),
+            IRONCLAD("Ironclad", "ironclad", "Strict CONNECT-IP verification before selection");
+
+            val label: String get() = Strings.t(enLabel)
+            val description: String get() = Strings.t(enDescription)
         }
 
         enum class EndpointDiscovery(
-            val label: String,
+            val enLabel: String,
             val coreName: String,
-            val description: String,
+            val enDescription: String,
         ) {
-            CACHE(Strings.t("Cache & refresh"), "cache", "Use verified gateways first, then discover more"),
-            FRESH(Strings.t("Fresh scan"), "fresh", "Start a new scan every connection"),
+            CACHE("Cache & refresh", "cache", "Use verified gateways first, then discover more"),
+            FRESH("Fresh scan", "fresh", "Start a new scan every connection");
+
+            val label: String get() = Strings.t(enLabel)
+            val description: String get() = Strings.t(enDescription)
         }
 
         enum class MasqueTransport(
-            val label: String,
+            val enLabel: String,
             val coreName: String,
-            val description: String,
+            val enDescription: String,
         ) {
-            H3(Strings.t("HTTP/3"), "h3", "QUIC; best on healthy UDP networks"),
-            H2(Strings.t("HTTP/2"), "h2", "TCP; use when UDP or QUIC is blocked"),
+            H3("HTTP/3", "h3", "QUIC; best on healthy UDP networks"),
+            H2("HTTP/2", "h2", "TCP; use when UDP or QUIC is blocked");
+
+            val label: String get() = Strings.t(enLabel)
+            val description: String get() = Strings.t(enDescription)
         }
 
-        enum class ObfuscationProfile(val label: String, val coreName: String, val description: String) {
-            OFF(Strings.t("Off"), "off", "No traffic-shape padding"),
-            LIGHT(Strings.t("Light"), "light", "Lower overhead on mild filtering"),
-            BALANCED(Strings.t("Balanced"), "balanced", "Recommended filtering resistance"),
-            AGGRESSIVE(Strings.t("Aggressive"), "aggressive", "Highest resistance; slower setup"),
+        enum class ObfuscationProfile(val enLabel: String, val coreName: String, val enDescription: String) {
+            OFF("Off", "off", "No traffic-shape padding"),
+            LIGHT("Light", "light", "Lower overhead on mild filtering"),
+            BALANCED("Balanced", "balanced", "Recommended filtering resistance"),
+            AGGRESSIVE("Aggressive", "aggressive", "Highest resistance; slower setup");
+
+            val label: String get() = Strings.t(enLabel)
+            val description: String get() = Strings.t(enDescription)
         }
 
-        enum class TlsCurvePreset(val label: String, val coreName: String, val description: String) {
-            CHROME(Strings.t("Chrome"), "chrome", "Chrome TLS curve ordering"),
-            COMPATIBILITY(Strings.t("Compatibility"), "compatibility", "P-256 and X25519 only"),
+        enum class TlsCurvePreset(val enLabel: String, val coreName: String, val enDescription: String) {
+            CHROME("Chrome", "chrome", "Chrome TLS curve ordering"),
+            COMPATIBILITY("Compatibility", "compatibility", "P-256 and X25519 only");
+
+            val label: String get() = Strings.t(enLabel)
+            val description: String get() = Strings.t(enDescription)
         }
     }
 }
