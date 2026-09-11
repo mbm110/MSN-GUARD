@@ -253,6 +253,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     /** Byte counters at the previous watchdog tick, to detect movement. */
     private var shardLastTx = -1L
     private var shardLastRx = -1L
+
+    /**
+     * Byte counters at the previous watchdog tick for a native core tunnel
+     * (MASQUE/WireGuard/WoW in VPN mode). The core emits its totals on the
+     * "traffic" event every second; onEvent writes them to [currentTx] and
+     * [currentRx] — this is the same movement test the SHARD branch runs,
+     * applied to the one counter the core cannot fake from the carrier side
+     * of the TUN. A native tunnel that never moves a byte between watchdog
+     * ticks is exactly the "connected but nothing passes" field report.
+     */
+    private var nativeLastTx = -1L
+    private var nativeLastRx = -1L
+
+    /**
+     * Consecutive watchdog ticks a native tunnel moved nothing, while the
+     * screen was on. Reset by any byte movement, at session start, and while
+     * the screen is dark (an idle phone is not a dead tunnel).
+     */
+    private var nativeIdleTicks = 0
     private var currentVpnIp = ""
     private var currentPing = ""
 
@@ -750,6 +769,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
          * everything, LAN destinations included, goes through the tunnel.
          */
         const val LAN_BYPASS_PREF = "lan_bypass"
+
+        /**
+         * Watchdog ticks a native core tunnel (MASQUE/WireGuard/WoW) may stay
+         * byte-silent while the screen is ON before the watchdog tears it
+         * down and reconnects. 2 strikes × 30 s = the tunnel gets one full
+         * minute of screen-on silence before any action — a healthy session
+         * that is merely between requests survives easily, while a
+         * handshake-only tunnel is replaced instead of sitting green.
+         */
+        private const val NATIVE_STRIKES_BEFORE_RECONNECT = 2
 
         /** How often the liveness watchdog checks an established tunnel. */
         private const val WATCHDOG_INTERVAL_S = 30L
@@ -2955,6 +2984,83 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             }
         }
 
+        // NATIVE CORE TUNNEL (MASQUE/WireGuard/WoW in VPN mode). This path
+        // previously fell straight through to `return null` at the bottom:
+        // NativeCore.isRunning() was never consulted and no byte movement was
+        // ever measured, so a handshake-only tunnel sat green for hours —
+        // the exact "it says connected but nothing works; toggle it and it
+        // fixes itself" field report.
+        //
+        // Same philosophy as SHARD: traffic beats probes. currentTx/currentRx
+        // are the core's own per-second "traffic" events, written by onEvent,
+        // so movement between two watchdog ticks proves the data plane with
+        // zero extra network probes — no new radio traffic, no new wakeups,
+        // no battery cost beyond the counters the session already emits.
+        //
+        // Screen-off idles are exempt (the SHARD branch's battery rule): a
+        // dark phone moving no bytes is the honest idle case, not a dead
+        // tunnel, and judging it would kill working tunnels on wake. Only a
+        // screen-on session that goes fully still is a candidate for a strike.
+        //
+        // "GOOL" is the core's protocol name for WARP-on-WARP (WoW); see
+        // protocolDisplayName's GOOL branch.
+        if (!proxyMode &&
+            (currentProtocol.contains("MASQUE") ||
+                currentProtocol.contains("WIREGUARD") ||
+                currentProtocol.contains("GOOL"))
+        ) {
+            if (!NativeCore.isRunning()) return "the tunnel process stopped"
+            val tx = currentTx
+            val rx = currentRx
+            if (nativeLastTx < 0 || nativeLastRx < 0) {
+                // First tick of the session: baseline only, no verdict.
+                nativeLastTx = tx
+                nativeLastRx = rx
+                nativeIdleTicks = 0
+                return null
+            }
+            // Only DOWNSTREAM bytes prove the far end is alive — the exact
+            // lesson of the SHARD branch above. Apps keep retrying into a
+            // dead tunnel, so tx moves on its own while rx stays flat; gating
+            // on "tx or rx" would let a dead session vote healthy forever.
+            // The UI's own verification gates on rx alone for the same
+            // reason (awaitTunnelBytes / watchForTunnelBytes).
+            val downstreamMoved = rx != nativeLastRx
+            val upstreamMoved = tx != nativeLastTx
+            nativeLastTx = tx
+            nativeLastRx = rx
+            if (downstreamMoved) {
+                nativeIdleTicks = 0
+                return null
+            }
+            if (!isScreenInteractive()) {
+                // Dark screen: honest idle, not a strike. Judging it would
+                // tear down every overnight tunnel for the crime of not being
+                // used, and the radio wakeups would cost battery for nothing.
+                nativeIdleTicks = 0
+                return null
+            }
+            nativeIdleTicks++
+            if (nativeIdleTicks < NATIVE_STRIKES_BEFORE_RECONNECT) {
+                ConnectionLog.record(
+                    if (upstreamMoved) {
+                        "Watchdog: apps sending but nothing coming back " +
+                            "(strike $nativeIdleTicks/$NATIVE_STRIKES_BEFORE_RECONNECT)"
+                    } else {
+                        "Watchdog: native tunnel idle, no bytes " +
+                            "(strike $nativeIdleTicks/$NATIVE_STRIKES_BEFORE_RECONNECT)"
+                    }
+                )
+                return null
+            }
+            nativeIdleTicks = 0
+            return if (upstreamMoved) {
+                "the tunnel accepted traffic but answered nothing"
+            } else {
+                "the tunnel stopped passing traffic"
+            }
+        }
+
         if (currentProtocol.contains("TOR")) {
             if (!TorManager.isRunning) return "the Tor process exited"
             if (!TorSocksFront.isRunning) return "the Tor front-end stopped"
@@ -3008,6 +3114,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // killSwitchArmed() reads it. Asking afterwards would call a proxy-only
         // session "VPN mode" and seal a device that never had a TUN.
         val armed = killSwitchArmed()
+        // NATIVE CORE SESSIONS ONLY (MASQUE/WireGuard/WoW in VPN mode): the
+        // core process below is still blocking the worker inside
+        // NativeCore.start(), and a watchdog kill is the one path where it is
+        // stopped from OUTSIDE the worker. When it exits, the worker's
+        // `finally` runs the lifecycle ladder: none of its branches know this
+        // was a "replace it" stop rather than a "give up" one — stopRequested
+        // is true, nativeExitWasUnexpected reads false, so the ladder would
+        // land on stopSelf() and kill the service before the 5 s reconnect
+        // lands. Latching reconnectRequested is the exact mechanism
+        // ACTION_RECONNECT uses for the same problem: the finally consumes
+        // the latch with compareAndSet and keeps the service alive for the
+        // restart that scheduleAutoReconnect is about to arm below. It is not
+        // set for the other transports: their processes die synchronously in
+        // their own managers, no worker `finally` is waiting, and a stale
+        // latch there would make a later genuine failure keep the service.
+        val nativeCoreSession = !proxyMode && !psiphonVpnMode && !chainMode &&
+            (currentProtocol.contains("MASQUE") ||
+                currentProtocol.contains("WIREGUARD") ||
+                currentProtocol.contains("GOOL"))
         if (!autoReconnectEnabled()) {
             ConnectionLog.record("Auto reconnect is off — leaving the tunnel down")
             sendStatus(STATUS_FAILED, reason)
@@ -3025,6 +3150,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
+        }
+        // Latched only now that a retry is certain (see above): with
+        // auto-reconnect off the latch would have nothing to keep the
+        // service alive FOR, and the finally would strand a dead session
+        // behind a live notification.
+        if (nativeCoreSession) {
+            reconnectRequested.set(true)
         }
         stopWatchdog()
         connected.set(false)
@@ -3514,6 +3646,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         shardStrikes = 0
         shardLastTx = -1L
         shardLastRx = -1L
+        // Native byte-watch uses the same per-session discipline: the new core
+        // starts counting from zero, so a stale baseline from the previous
+        // session would read as "counter went backwards" and reset forever.
+        nativeLastTx = -1L
+        nativeLastRx = -1L
+        nativeIdleTicks = 0
         stopRequested.set(false)
         // Latched for the whole session — see [proxyMode]. Read once, here, so a
         // mid-session change of the setting cannot make teardown take the wrong
@@ -3812,6 +3950,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // means no local SOCKS listener will exist for this session.
                 // The UI health check must go direct, not via 127.0.0.1.
                 TunnelStatus.isNativeTunMode = true
+                // Arm the watchdog BEFORE the blocking call, exactly like the
+                // proxy branch above: this is the one liveness supervisor for a
+                // native session (MASQUE/WireGuard/WoW), and previously it was
+                // never armed here at all — a handshake-only tunnel with a live
+                // core process could sit green for hours with nothing
+                // supervising the data plane. The first tick only baselines the
+                // byte counters, so arming this early cannot strike a
+                // settling tunnel; strikes need NATIVE_STRIKES_BEFORE_RECONNECT
+                // ticks of screen-on zero-rx after the baseline.
+                startWatchdog()
                 val result = NativeCore.start(config, tun!!.fd)
 
                 // Did the tunnel end on its own, i.e. without the user asking?
