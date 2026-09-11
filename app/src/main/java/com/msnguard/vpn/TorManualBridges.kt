@@ -133,9 +133,9 @@ internal object TorManualBridges {
     /** What the settings row shows: "Not set", or a count and the transports. */
     fun summary(context: Context): String {
         val parsed = bridges(context)
-        if (parsed.isEmpty()) return "Not set"
+        if (parsed.isEmpty()) return Strings.t("Not set")
         val kinds = parsed.map { it.transport ?: "plain" }.distinct().joinToString(", ")
-        val count = if (parsed.size == 1) "1 bridge" else "${parsed.size} bridges"
+        val count = if (parsed.size == 1) Strings.t("1 bridge") else Strings.tf("%s bridges", parsed.size)
         return "$count · $kinds"
     }
 

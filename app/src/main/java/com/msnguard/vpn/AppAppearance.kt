@@ -41,10 +41,13 @@ import android.graphics.Color
 object AppAppearance {
 
     /** Which palette the user picked. Persisted in the shared "settings" store. */
-    enum class Mode(val key: String, val label: String, val description: String) {
-        DARK(Strings.t("dark"), "Dark", "The original console — black glass and neon"),
-        LIGHT(Strings.t("light"), "Light", "Porcelain — grey page, white cards"),
+    enum class Mode(val key: String, val enLabel: String, val description: String) {
+        DARK("dark", "Dark", "The original console — black glass and neon"),
+        LIGHT("light", "Light — theme", "Porcelain — grey page, white cards"),
         ;
+
+        /** Localized at call time so a language switch refreshes the label. */
+        val label: String get() = Strings.t(enLabel)
 
         companion object {
             fun from(key: String?): Mode = entries.firstOrNull { it.key == key } ?: DARK

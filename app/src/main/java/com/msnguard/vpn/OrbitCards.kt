@@ -88,12 +88,12 @@ class ExitNodeCard(
         addView(flagView, LayoutParams(px(42), px(42)))
 
         val column = LinearLayout(context).apply { orientation = VERTICAL }
-        keyView = text("EXIT NODE", 8.5f, Sculpt.withAlpha(palette.faint, 0.95f), medium = true, spacing = 0.14f)
-        ipView = text("not tunnelled", 15f, palette.ink, medium = true, mono = true).apply {
+        keyView = text(Strings.t("EXIT NODE"), 8.5f, Sculpt.withAlpha(palette.faint, 0.95f), medium = true, spacing = 0.14f)
+        ipView = text(Strings.t("not tunnelled"), 15f, palette.ink, medium = true, mono = true).apply {
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
         }
-        locView = text("tap to refresh", 10.5f, Sculpt.withAlpha(palette.faint, 0.9f))
+        locView = text(Strings.t("tap to refresh"), 10.5f, Sculpt.withAlpha(palette.faint, 0.9f))
         column.addView(keyView)
         column.addView(ipView, LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -123,7 +123,7 @@ class ExitNodeCard(
         measuring: Boolean = false,
         note: String? = null,
     ) {
-        keyView.text = if (tunnelled) "EXIT NODE" else "YOUR IP"
+        keyView.text = if (tunnelled) Strings.t("EXIT NODE") else Strings.t("YOUR IP")
         if (address.isBlank() || address == UNAVAILABLE) {
             // On the native path the exit address comes from the core, measured
             // inside the tunnel, and arrives a second or two after connect. Saying
@@ -131,21 +131,21 @@ class ExitNodeCard(
             // something that is simply not finished — and tapping cannot speed it
             // up, because this process has no route into the tunnel.
             if (measuring) {
-                ipView.text = MEASURING
+                ipView.text = Strings.t(MEASURING)
                 ipView.textSize = 13f
                 // The caption is the caller's, because the same "measuring" visual
                 // covers two different truths: reading the exit from inside a live
                 // tunnel, and waiting for the carrier link to come back after a
                 // teardown. Saying "inside the tunnel" during the second one would
                 // describe a tunnel that no longer exists.
-                locView.text = note ?: "reading from inside the tunnel"
+                locView.text = note ?: Strings.t("reading from inside the tunnel")
                 flagView.text = "\uD83C\uDF10"
                 contentDescription = note ?: "در حال اندازه‌گیری آدرس خروجی تونل"
                 return
             }
-            ipView.text = UNAVAILABLE
+            ipView.text = Strings.t(UNAVAILABLE)
             ipView.textSize = 15f
-            locView.text = "tap to retry"
+            locView.text = Strings.t("tap to retry")
             flagView.text = "\uD83C\uDF10"
             contentDescription = "آی‌پی در دسترس نیست، برای تلاش مجدد بزنید"
             return
@@ -162,10 +162,10 @@ class ExitNodeCard(
         // Country only — city was explicitly not wanted, and the trace endpoint
         // does not return one anyway.
         locView.text = when {
-            country.isNotEmpty() && tunnelled -> "$country · tunnelled"
+            country.isNotEmpty() && tunnelled -> Strings.tf("%s · tunnelled", country)
             country.isNotEmpty() -> country
-            tunnelled -> "tunnelled"
-            else -> "not tunnelled"
+            tunnelled -> Strings.t("tunnelled")
+            else -> Strings.t("not tunnelled")
         }
         // Accessibility reads the full address; the visual is the shortened one.
         contentDescription = "${keyView.text}: ${fit.full}${if (country.isNotEmpty()) "، $country" else ""}"
@@ -241,7 +241,7 @@ class OrbitActionBar(
                 text = entry.caption
                 textSize = 8.5f
                 setTextColor(Sculpt.withAlpha(palette.muted, 0.95f))
-                letterSpacing = 0.11f
+                letterSpacing = spacing(0.11f)
                 typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
                 setSingleLine(true)
                 ellipsize = TextUtils.TruncateAt.END
@@ -340,9 +340,9 @@ class ChainModeCard(
 
         val column = LinearLayout(context).apply { orientation = VERTICAL }
         titleView = TextView(context).apply {
-            text = "PSIPHON OVER WARP"
+            text = Strings.t("PSIPHON OVER WARP")
             textSize = 11f
-            letterSpacing = 0.1f
+            letterSpacing = spacing(0.1f)
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             setSingleLine(true)
         }
@@ -362,7 +362,7 @@ class ChainModeCard(
 
         badgeView = TextView(context).apply {
             textSize = 8.5f
-            letterSpacing = 0.12f
+            letterSpacing = spacing(0.12f)
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             gravity = Gravity.CENTER
             setPadding(px(9), px(4), px(9), px(4))
@@ -400,7 +400,7 @@ class ChainModeCard(
      */
     fun setInner(name: String) {
         innerName = name.uppercase()
-        titleView.text = "$innerName OVER WARP"
+        titleView.text = Strings.tf("%s OVER WARP", innerName)
         setArmed(armed)
     }
 
@@ -414,7 +414,8 @@ class ChainModeCard(
         innerName.take(1) + innerName.drop(1).lowercase()
 
     /** Description of what the chain does, shown when armed. */
-    private fun armedSubtitle(): String = "armed · ${innerLabel()} inside WARP, $outerSummary"
+    private fun armedSubtitle(): String =
+        Strings.tf("armed %s inside WARP, %s", innerLabel(), outerSummary)
 
     /**
      * Says how the outer transport is chosen, e.g. "auto transport" or "via WoW".
@@ -459,16 +460,16 @@ class ChainModeCard(
         subtitleView.text = unavailableReason ?: if (value) {
             armedSubtitle()
         } else {
-            "for when neither exit IP is accepted"
+            Strings.t("for when neither exit IP is accepted")
         }
         subtitleView.setTextColor(Sculpt.withAlpha(palette.faint, 0.95f))
         badgeView.text = when {
             // N/A means "does not apply to this transport", so it must not appear
             // merely because the card is locked. While connected on Psiphon the
             // chain is live, and the badge has to keep saying so.
-            !applicable -> "N/A"
-            value -> "CHAINED"
-            else -> "OFF"
+            !applicable -> Strings.t("N/A")
+            value -> Strings.t("CHAINED")
+            else -> Strings.t("OFF")
         }
         // 10sp bold on a 16%-violet pill: the strictest badge in the app, so the
         // text ramp rather than the vivid violet.
@@ -580,3 +581,6 @@ private class GlyphView(
         }
     }
 }
+
+/** Neon letter-spacing scatters Persian's joined letters — clamp for Persian. */
+private fun spacing(v: Float): Float = if (AppLanguage.current() == "fa") 0f else v

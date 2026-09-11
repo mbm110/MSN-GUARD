@@ -53,7 +53,7 @@ object AppLanguage {
 
     /** Picker label for a code, e.g. "فارسی" for fa. */
     fun label(code: String): String = when (code) {
-        "system" -> "Follow system"
+        "system" -> Strings.t("Follow system")
         "fa" -> "فارسی"
         "zh" -> "中文"
         else -> "English"

@@ -582,7 +582,7 @@ class MainActivity : Activity() {
         }
         chipProtocol = label(selectedProtocol.label.uppercase(), 12f, MUTED, TypefaceStyle.MEDIUM).apply {
             gravity = Gravity.CENTER
-            letterSpacing = 0.08f
+            letterSpacing = spacing(0.08f)
         }
         selectedProtocol = savedProtocol()
         chipProtocol.text = selectedProtocol.label.uppercase()
@@ -590,15 +590,15 @@ class MainActivity : Activity() {
         // violet, speed amber. They were all `primary` before, which is why every
         // sparkline looked identical.
         tileDown = MetricTile(
-            this, palette, "↓ DOWN",
+            this, palette, Strings.t("↓ DOWN"),
             palette.mint, Sculpt.lighten(palette.mint, 0.30f), palette.mintText,
         ) { openTrafficMonitorScreen() }
         tileUp = MetricTile(
-            this, palette, "↑ UP",
+            this, palette, Strings.t("↑ UP"),
             palette.violet, Sculpt.lighten(palette.violet, 0.30f), palette.violetText,
         ) { openTrafficMonitorScreen() }
         tileSpeed = MetricTile(
-            this, palette, "SPEED",
+            this, palette, Strings.t("SPEED"),
             palette.amber, Sculpt.lighten(palette.amber, 0.30f), palette.amberText,
         ) { openTrafficMonitorScreen() }
         exitNodeCard = ExitNodeCard(this, palette) { refreshPublicIp() }
@@ -616,7 +616,7 @@ class MainActivity : Activity() {
         // now a thin signal trace that idles flat and grey, and ripples in the
         // connected accent once traffic is flowing. One 48-point path repainted at
         // 20fps only while connected — no bitmaps, no extra APK weight.
-        footerWave = OrbitFooterWave(this, palette, "SECURED BY MSN-GUARD")
+        footerWave = OrbitFooterWave(this, palette, Strings.t("SECURED BY MSN-GUARD"))
         statusLed = View(this).apply {
             background = Sculpt.sculptedBackground(
                 resources.displayMetrics.density,
@@ -794,7 +794,7 @@ class MainActivity : Activity() {
         if (requestCode == VPN_REQUEST && resultCode == RESULT_OK) {
             pendingConfig?.let(::connect)
         } else if (requestCode == VPN_REQUEST) {
-            showDisconnected("VPN permission required")
+            showDisconnected(Strings.t("VPN permission required"))
         }
         pendingConfig = null
     }
@@ -857,7 +857,7 @@ class MainActivity : Activity() {
         if (!isTunnelActive() || pingInFlight) return
         pingInFlight = true
         val request = ++latencyRequest
-        chipLatency.text = "Latency …"
+        chipLatency.text = Strings.t("Latency …")
         Thread {
             // Try each endpoint until one answers. A single unreachable probe URL
             // must not be reported as a degraded tunnel.
@@ -866,7 +866,7 @@ class MainActivity : Activity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 pingInFlight = false
                 if (request == latencyRequest && isTunnelActive()) {
-                    chipLatency.text = result.second?.let { "Latency ${it.toInt()} ms" } ?: "Latency n/a"
+                    chipLatency.text = result.second?.let { Strings.tf("Latency %s ms", it.toInt()) } ?: Strings.t("Latency n/a")
                     val reachable = result.second
                     // Bytes moved since the previous judgement, taken before the
                     // branches below because both of them need it.
@@ -1076,7 +1076,7 @@ class MainActivity : Activity() {
                             runOnUiThread {
                                 if (isFinishing || isDestroyed) return@runOnUiThread
                                 if (request != verifyRequest) return@runOnUiThread
-                                probe?.let { chipLatency.text = "Latency ${it.second.toInt()} ms" }
+                                probe?.let { chipLatency.text = Strings.tf("Latency %s ms", it.second.toInt()) }
                             }
                         }.start()
                     } else {
@@ -1106,7 +1106,7 @@ class MainActivity : Activity() {
                 if (verified != null) {
                     ConnectionLog.record("Reachability probe passed in $attempts attempt(s) — ${verified.first}")
                     showConnected()
-                    chipLatency.text = "Latency ${verified.second.toInt()} ms"
+                    chipLatency.text = Strings.tf("Latency %s ms", verified.second.toInt())
                     // Second opinion, from inside the tunnel. A probe that rode
                     // the carrier link proves nothing about the TUN, so if the
                     // core has still not moved a single byte after the settle
@@ -1159,7 +1159,7 @@ class MainActivity : Activity() {
             visualState = OrbitDialView.State.DEGRADED
             orbitDial.state = OrbitDialView.State.DEGRADED
             connectionTitle.setTextColor(AMBER_TEXT)
-            connectionDetail.text = "Tunnel is up but no traffic is passing"
+            connectionDetail.text = Strings.t("Tunnel is up but no traffic is passing")
             renderStatusLed()
         }, BYTE_WATCH_MS)
     }
@@ -1204,7 +1204,7 @@ class MainActivity : Activity() {
         }
         addView(statusLed, statusLed.layoutParams)
         addView(label(Strings.t("MSN-GUARD"), 13f, MUTED, TypefaceStyle.MEDIUM).apply {
-            letterSpacing = 0.14f
+            letterSpacing = spacing(0.14f)
         })
         addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
         addView(ImageView(this@MainActivity).apply {
@@ -1737,8 +1737,8 @@ class MainActivity : Activity() {
             // NativeCore.lastLog(), and both drop their oldest lines — which is
             // exactly why the beginning of a long log was unreachable. The file
             // that ConnectionLog mirrors to keeps everything up to its 256KB cap.
-            addView(createLogActionButton("COPY") { copyFullLog() })
-            addView(createLogActionButton("SHARE") { shareFullLog() })
+            addView(createLogActionButton(Strings.t("COPY")) { copyFullLog() })
+            addView(createLogActionButton(Strings.t("SHARE")) { shareFullLog() })
         }
         content.addView(header)
         content.addView(label(Strings.t("Tunnel and VPN events"), 14f, MUTED), LinearLayout.LayoutParams(
@@ -1856,23 +1856,23 @@ class MainActivity : Activity() {
         // PAUSE freezes the view so a line can actually be read. Without it the
         // 750ms refresh yanks the scroll position away mid-read whenever the core
         // is chatty, which during a connect is always.
-        val pauseChip = toolChip("Pause") {
+        val pauseChip = toolChip(Strings.t("Pause")) {
             paused = !paused
-            it.text = if (paused) "Resume" else "Pause"
+            it.text = if (paused) Strings.t("Resume") else Strings.t("Pause")
             paintChip(it, paused)
         }
         // WRAP off makes the text view scroll horizontally instead, so long
         // Psiphon JSON notices stop wrapping into six-line paragraphs.
-        val wrapChip = toolChip("Wrap") {
+        val wrapChip = toolChip(Strings.t("Wrap")) {
             wrapLines = !wrapLines
             paintChip(it, wrapLines)
             events.setHorizontallyScrolling(!wrapLines)
             events.requestLayout()
         }
-        val clearChip = toolChip("Clear") {
+        val clearChip = toolChip(Strings.t("Clear")) {
             ConnectionLog.clear()
             renderedLogs = null
-            Toast.makeText(this, "App log cleared", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, Strings.t("App log cleared"), Toast.LENGTH_SHORT).show()
         }
         paintChip(wrapChip, true)
         toolRow.addView(pauseChip, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
@@ -2090,7 +2090,7 @@ class MainActivity : Activity() {
             LogTab.APP -> appEvents
             LogTab.CORE -> coreEvents
         }
-        return events.joinToString("\n").ifBlank { "No connection events yet" }
+        return events.joinToString("\n").ifBlank { Strings.t("No connection events yet") }
     }
 
     /**
@@ -2102,7 +2102,7 @@ class MainActivity : Activity() {
      */
     private fun createLogActionButton(caption: String, onClick: () -> Unit): TextView =
         label(caption, 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply {
-            letterSpacing = 0.1f
+            letterSpacing = spacing(0.1f)
             gravity = Gravity.CENTER
             setPadding(dp(12), dp(7), dp(12), dp(7))
             background = roundedBackground(SURFACE_VARIANT, 12, DIVIDER)
@@ -2173,11 +2173,11 @@ class MainActivity : Activity() {
      */
     private fun copyFullLog() {
         Thread({
-            val text = runCatching { fullLogText() }.getOrElse { "Could not read the log: ${it.message}" }
+            val text = runCatching { fullLogText() }.getOrElse { Strings.tf("Could not read the log: %s", it.message.toString()) }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 val clipboard = getSystemService(ClipboardManager::class.java)
-                clipboard?.setPrimaryClip(ClipData.newPlainText("MSN-GUARD log", text))
+                clipboard?.setPrimaryClip(ClipData.newPlainText(Strings.t("MSN-GUARD log"), text))
                 // Always confirm, on every Android version. Android 13+ shows its
                 // own clipboard chip, so this is briefly a duplicate there — but a
                 // silent COPY on a long log is indistinguishable from a broken
@@ -2219,7 +2219,7 @@ class MainActivity : Activity() {
                                 .putExtra(Intent.EXTRA_SUBJECT, "MSN-GUARD log")
                                 .putExtra(Intent.EXTRA_STREAM, uri)
                                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-                            "Share log",
+                            Strings.t("Share log"),
                         )
                     )
                 }
@@ -2236,7 +2236,7 @@ class MainActivity : Activity() {
      */
     private fun backupSummary(): String {
         val count = SettingsBackup.valueCount(this)
-        return if (count == 0) "Nothing saved yet" else "$count settings"
+        return if (count == 0) Strings.t("Nothing saved yet") else Strings.tf("%s settings", count)
     }
 
     /**
@@ -2251,7 +2251,7 @@ class MainActivity : Activity() {
     private fun exportSettings() {
         pendingBackupJson = runCatching { SettingsBackup.export(this, appVersion()) }
             .getOrElse {
-                toastShort("Could not read the settings: ${it.message}")
+                toastShort(Strings.tf("Could not read the settings: %s", it.message.toString()))
                 return
             }
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
@@ -2304,7 +2304,7 @@ class MainActivity : Activity() {
             toastShort(Strings.t("Settings saved — this file holds no passwords"))
             settingsBackupRow?.setValue(backupSummary())
         }.onFailure {
-            toastShort("Could not write the backup: ${it.message}")
+            toastShort(Strings.tf("Could not write the backup: %s", it.message.toString()))
         }
     }
 
@@ -2322,11 +2322,11 @@ class MainActivity : Activity() {
                 stream.bufferedReader().readText()
             } ?: error("the file could not be opened")
         }.getOrElse {
-            toastShort("Could not read the file: ${it.message}")
+            toastShort(Strings.tf("Could not read the file: %s", it.message.toString()))
             return
         }
         val outcome = runCatching { SettingsBackup.restore(this, text) }.getOrElse {
-            toastShort(it.message ?: "This file is not a settings backup")
+            toastShort(it.message ?: Strings.t("This file is not a settings backup"))
             return
         }
         ConnectionLog.record(
@@ -2334,7 +2334,7 @@ class MainActivity : Activity() {
                 "${outcome.restored} value(s)" +
                 if (outcome.skipped > 0) ", ${outcome.skipped} skipped" else ""
         )
-        toastShort("Restored ${outcome.restored} settings from v${outcome.version}")
+        toastShort(Strings.tf("Restored %s settings from v%s", outcome.restored, outcome.version))
         recreate()
     }
 
@@ -2371,9 +2371,9 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
         val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        buttons.addView(createSettingsButton("Cancel") { dialog.dismiss() }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        buttons.addView(createSettingsButton(Strings.t("Cancel")) { dialog.dismiss() }, LinearLayout.LayoutParams(0, dp(52), 1f))
         buttons.addView(createSettingsButton(
-            "Reset",
+            Strings.t("Reset"),
             backgroundOverride = primary,
             textColorOverride = primaryContainer,
         ) {
@@ -2440,7 +2440,7 @@ class MainActivity : Activity() {
         val modeOptions = mutableMapOf<ScanMode, SelectionOption>()
         val targetOptions = mutableMapOf<ScanTarget, SelectionOption>()
 
-        options.addView(label(if (selectedProtocol == Protocol.MASQUE) "MASQUE GATEWAY DISCOVERY" else "WIREGUARD ENDPOINT DISCOVERY", 12f, MUTED).apply { letterSpacing = 0.1f })
+        options.addView(label(if (selectedProtocol == Protocol.MASQUE) "MASQUE GATEWAY DISCOVERY" else "WIREGUARD ENDPOINT DISCOVERY", 12f, MUTED).apply { letterSpacing = spacing(0.1f) })
         EndpointDiscovery.entries.forEachIndexed { index, discovery ->
             val option = createEndpointDiscoveryOption(discovery) { chosen ->
                 getSharedPreferences(SETTINGS, MODE_PRIVATE).edit()
@@ -2456,7 +2456,7 @@ class MainActivity : Activity() {
         }
 
         if (selectedProtocol == Protocol.MASQUE) {
-            options.addView(label(Strings.t("MASQUE TRANSPORT"), 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+            options.addView(label(Strings.t("MASQUE TRANSPORT"), 12f, MUTED).apply { letterSpacing = spacing(0.1f) }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(20) })
@@ -2473,7 +2473,7 @@ class MainActivity : Activity() {
             }
         }
 
-        options.addView(label(Strings.t("SCAN MODE"), 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+        options.addView(label(Strings.t("SCAN MODE"), 12f, MUTED).apply { letterSpacing = spacing(0.1f) }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(20) })
@@ -2489,7 +2489,7 @@ class MainActivity : Activity() {
             ).apply { topMargin = if (index == 0) dp(10) else dp(8) })
         }
 
-        options.addView(label(Strings.t("IP VERSION"), 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+        options.addView(label(Strings.t("IP VERSION"), 12f, MUTED).apply { letterSpacing = spacing(0.1f) }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(20) })
@@ -2550,7 +2550,7 @@ class MainActivity : Activity() {
     private fun createScannerOption(target: ScanTarget, onSelect: (ScanTarget) -> Unit): SelectionOption {
         val selected = target == defaultScan()
         val title = label(target.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.08f) }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -2577,7 +2577,7 @@ class MainActivity : Activity() {
     ): SelectionOption {
         val selected = discovery == defaultEndpointDiscovery()
         val title = label(discovery.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.08f) }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -2601,7 +2601,7 @@ class MainActivity : Activity() {
     private fun createScanModeOption(mode: ScanMode, onSelect: (ScanMode) -> Unit): SelectionOption {
         val selected = mode == defaultScanMode()
         val title = label(mode.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.08f) }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -2628,7 +2628,7 @@ class MainActivity : Activity() {
     ): SelectionOption {
         val selected = transport == defaultMasqueTransport()
         val title = label(transport.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.08f) }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -2744,9 +2744,9 @@ class MainActivity : Activity() {
 
             addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             if (selected) addView(label(Strings.t("CURRENT"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply {
-                letterSpacing = 0.08f
+                letterSpacing = spacing(0.08f)
             }) else if (!protocol.androidAvailable) addView(label(Strings.t("DESKTOP ONLY"), 11f, MUTED, TypefaceStyle.MEDIUM).apply {
-                letterSpacing = 0.05f
+                letterSpacing = spacing(0.05f)
             })
         }
     }
@@ -2782,7 +2782,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ))
         lateinit var killSwitchRow: LinearLayout
-        killSwitchRow = createToggleRow("Kill switch", "Block all traffic if the tunnel drops", killSwitchEnabled()) {
+        killSwitchRow = createToggleRow(Strings.t("Kill switch"), Strings.t("Block all traffic if the tunnel drops"), killSwitchEnabled()) {
             preferences().edit().putBoolean(KILL_SWITCH, it).apply()
         }
         content.addView(killSwitchRow, LinearLayout.LayoutParams(
@@ -2796,8 +2796,8 @@ class MainActivity : Activity() {
         // switch: blocking traffic and retrying are independent choices, and
         // pairing them would mean you cannot retry without blocking.
         val autoReconnectRow = createToggleRow(
-            "Auto reconnect",
-            "Reconnect automatically if the tunnel drops",
+            Strings.t("Auto reconnect"),
+            Strings.t("Reconnect automatically if the tunnel drops"),
             autoReconnectEnabled(),
         ) {
             preferences().edit().putBoolean(MsnGuardVpnService.AUTO_RECONNECT_PREF, it).apply()
@@ -2831,8 +2831,8 @@ class MainActivity : Activity() {
         // the tunnel is a routing decision the user should make, and on Tor it means
         // those destinations leave the circuit.
         val lanBypassRow = createToggleRow(
-            "Local network access",
-            "Reach printers, NAS and your router while connected",
+            Strings.t("Local network access"),
+            Strings.t("Reach printers, NAS and your router while connected"),
             lanBypassEnabled(),
         ) {
             preferences().edit().putBoolean(MsnGuardVpnService.LAN_BYPASS_PREF, it).apply()
@@ -2896,9 +2896,9 @@ class MainActivity : Activity() {
             preferences().edit().putBoolean(CoreConfig.LAN_SHARING_PREF, on).apply()
             ConnectionLog.record(
                 if (on) {
-                    "LAN sharing enabled — applies on the next connect"
+                    Strings.t("LAN sharing enabled — applies on the next connect")
                 } else {
-                    "LAN sharing disabled — applies on the next connect"
+                    Strings.t("LAN sharing disabled — applies on the next connect")
                 }
             )
             // Log the interface survey whenever sharing is switched on. Two builds
@@ -2926,7 +2926,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
-        content.addView(navRow(Strings.t("Tunnel controls"), "Shaping · Anti-DPI") { openTunnelControlsScreen() }, LinearLayout.LayoutParams(
+        content.addView(navRow(Strings.t("Tunnel controls"), Strings.t("Shaping · Anti-DPI")) { openTunnelControlsScreen() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
@@ -2943,7 +2943,7 @@ class MainActivity : Activity() {
         // Both rows came off the home screen's action bar, which was removed to make
         // room for a six-transport rail. They sit under Log verbosity because that is
         // the row that decides what the log will contain.
-        content.addView(navRow(Strings.t("Log"), "What the tunnel did") { openLogsScreen() }, LinearLayout.LayoutParams(
+        content.addView(navRow(Strings.t("Log"), Strings.t("What the tunnel did")) { openLogsScreen() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
@@ -3124,7 +3124,7 @@ class MainActivity : Activity() {
         val shardRow = navRow(Strings.t("Node list"), shardPoolSummary()) {
             // force = true: the whole point of tapping this is to bypass the
             // six-hour interval the background job honours.
-            shardPoolRow?.setValue("Updating…")
+            shardPoolRow?.setValue(Strings.t("Updating…"))
             // The policy file rides the same tap. It is what decides how many paths
             // each node has, so refreshing the node list without it would leave the
             // count in the summary computed from stale edges.
@@ -3138,7 +3138,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     shardPoolRow?.setValue(shardPoolSummary())
                     toastShort(
-                        if (count > 0) "$count nodes available" else "Could not update the list"
+                        if (count > 0) Strings.tf("%s nodes available", count) else Strings.t("Could not update the list")
                     )
                 }
             }
@@ -3163,7 +3163,7 @@ class MainActivity : Activity() {
             )
         }
         val customIpTitle = TextView(this).apply {
-            text = "Enter Your Cloudflare IP"
+            text = Strings.t("Enter Your Cloudflare IP")
             textSize = 13.5f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             setTextColor(INK)
@@ -3171,7 +3171,7 @@ class MainActivity : Activity() {
         customIpRow.addView(customIpTitle)
 
         val customIpSubtitle = TextView(this).apply {
-            text = "This IP will replace all node addresses in SHARD configs"
+            text = Strings.t("This IP will replace all node addresses in SHARD configs")
             textSize = 10.5f
             setTextColor(MUTED)
             setPadding(0, dp(2), 0, dp(8))
@@ -3206,7 +3206,7 @@ class MainActivity : Activity() {
         inputRow.addView(customIpInput)
 
         val applyButton = TextView(this).apply {
-            text = "Apply"
+            text = Strings.t("Apply")
             textSize = 12f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             gravity = Gravity.CENTER
@@ -3231,7 +3231,7 @@ class MainActivity : Activity() {
                         val octets = ip.split(".").map { it.toIntOrNull() ?: -1 }
                         if (octets.all { it in 0..255 }) {
                             prefs.putString("shard_custom_cf_ip", ip)
-                            toastShort(Strings.t("Custom Cloudflare IP applied: $ip"))
+                            toastShort(Strings.tf("Custom Cloudflare IP applied: %s", ip))
                         } else {
                             toastShort(Strings.t("Invalid IP address"))
                             return@setOnClickListener
@@ -3326,11 +3326,11 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
-        content.addView(navRow(Strings.t("Restore settings"), "From a backup file") { importSettings() }, LinearLayout.LayoutParams(
+        content.addView(navRow(Strings.t("Restore settings"), Strings.t("From a backup file")) { importSettings() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
-        content.addView(navRow(Strings.t("Reset to defaults"), "Forget every setting") { confirmResetSettings() }, LinearLayout.LayoutParams(
+        content.addView(navRow(Strings.t("Reset to defaults"), Strings.t("Forget every setting")) { confirmResetSettings() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
@@ -3353,7 +3353,7 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(8) })
         content.addView(label("MSN-GUARD ${appVersion()}", 11.5f, Sculpt.withAlpha(MUTED, 0.7f)).apply {
             gravity = Gravity.CENTER_HORIZONTAL
-            letterSpacing = 0.06f
+            letterSpacing = spacing(0.06f)
             setPadding(0, dp(22), 0, 0)
         })
 
@@ -3430,31 +3430,31 @@ class MainActivity : Activity() {
             }
         content.addView(sectionLabel(Strings.t("CONNECTION SHAPING")))
         lateinit var obfRow: OrbitSettingsRow
-        obfRow = addControl("Obfuscation", obfuscationProfile().label) {
+        obfRow = addControl(Strings.t("Obfuscation"), obfuscationProfile().label) {
             chooseObfuscation { obfRow.setValue(obfuscationProfile().label) }
         }
-        addControl("Advanced obfuscation", advancedObfuscationSummary()) { editAdvancedObfuscation() }
+        addControl(Strings.t("Advanced obfuscation"), advancedObfuscationSummary()) { editAdvancedObfuscation() }
         lateinit var retryRow: OrbitSettingsRow
-        retryRow = addControl("WireGuard retries", if (retryObfuscationProfiles()) "On" else "Off") {
+        retryRow = addControl(Strings.t("WireGuard retries"), if (retryObfuscationProfiles()) Strings.t("On") else Strings.t("Off")) {
             preferences().edit().putBoolean(RETRY_OBFUSCATION, !retryObfuscationProfiles()).apply()
-            retryRow.setValue(if (retryObfuscationProfiles()) "On" else "Off")
+            retryRow.setValue(if (retryObfuscationProfiles()) Strings.t("On") else Strings.t("Off"))
         }
         content.addView(sectionLabel(Strings.t("ROUTING")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        addControl("Manual endpoint", manualEndpoint() ?: Strings.t("Automatic")) { editManualEndpoint() }
-        addControl("Gateway cache", defaultEndpointDiscovery().label) { manageGatewayCache() }
+        addControl(Strings.t("Manual endpoint"), manualEndpoint() ?: Strings.t("Automatic")) { editManualEndpoint() }
+        addControl(Strings.t("Gateway cache"), defaultEndpointDiscovery().label) { manageGatewayCache() }
         content.addView(sectionLabel(Strings.t("TROUBLESHOOTING")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
         lateinit var tlsRow: OrbitSettingsRow
-        tlsRow = addControl("TLS fingerprint", tlsCurvePreset().label) {
+        tlsRow = addControl(Strings.t("TLS fingerprint"), tlsCurvePreset().label) {
             chooseTlsCurvePreset { tlsRow.setValue(tlsCurvePreset().label) }
         }
         lateinit var verificationRow: OrbitSettingsRow
-        verificationRow = addControl("WireGuard verification", if (wireGuardDataCheck()) "Strict" else "Fast") {
+        verificationRow = addControl(Strings.t("WireGuard verification"), if (wireGuardDataCheck()) Strings.t("Strict") else Strings.t("Fast")) {
             preferences().edit().putBoolean(WIREGUARD_DATA_CHECK, !wireGuardDataCheck()).apply()
-            verificationRow.setValue(if (wireGuardDataCheck()) "Strict" else "Fast")
+            verificationRow.setValue(if (wireGuardDataCheck()) Strings.t("Strict") else Strings.t("Fast"))
         }
         // The "VPN CORE" section is gone. It held DNS resolvers, Destination
         // routing, and Zero Trust — all three are proxy-mode features:
@@ -3473,9 +3473,9 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
         lateinit var fragRow: OrbitSettingsRow
-        fragRow = addControl("TLS fragmentation", if (h2Fragmentation() == H2Fragmentation.ON) "On" else "Off") {
+        fragRow = addControl(Strings.t("TLS fragmentation"), if (h2Fragmentation() == H2Fragmentation.ON) Strings.t("On") else Strings.t("Off")) {
             chooseH2Fragmentation {
-                fragRow.setValue(if (h2Fragmentation() == H2Fragmentation.ON) "On" else "Off")
+                fragRow.setValue(if (h2Fragmentation() == H2Fragmentation.ON) Strings.t("On") else Strings.t("Off"))
             }
         }
         scroll.addView(content)
@@ -3532,7 +3532,7 @@ class MainActivity : Activity() {
         val options = mutableMapOf<ObfuscationProfile, SelectionOption>()
         ObfuscationProfile.entries.forEachIndexed { index, profile ->
             val title = label(profile.label, 16f, INK, TypefaceStyle.MEDIUM)
-            val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+            val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.08f) }
             val row = LinearLayout(this).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 orientation = LinearLayout.HORIZONTAL
@@ -3573,8 +3573,8 @@ class MainActivity : Activity() {
     }
 
     private fun chooseTlsCurvePreset(after: (() -> Unit)? = null) = showChoiceSheet(
-        title = "TLS fingerprint",
-        subtitle = "Choose TLS curve ordering for QUIC connections",
+        title = Strings.t("TLS fingerprint"),
+        subtitle = Strings.t("Choose TLS curve ordering for QUIC connections"),
         options = TlsCurvePreset.entries.toList(),
         selected = tlsCurvePreset(),
         label = { it.label },
@@ -3585,8 +3585,8 @@ class MainActivity : Activity() {
     }
 
     private fun choosePerfProfile(after: (() -> Unit)? = null) = showChoiceSheet(
-        title = "Performance",
-        subtitle = "Scale scan concurrency and buffers to match your hardware",
+        title = Strings.t("Performance"),
+        subtitle = Strings.t("Scale scan concurrency and buffers to match your hardware"),
         options = PerfProfile.entries.toList(),
         selected = perfProfile(),
         label = { it.label },
@@ -3629,18 +3629,18 @@ class MainActivity : Activity() {
             // cannot share at all is a WARP transport in VPN mode — where the core
             // binds no listener because it is driving the TUN directly.
             return if (selectedProtocol == Protocol.TOR && CoreConfig.proxyOnly(this)) {
-                "Tor cannot run as a SOCKS proxy — set Tunnel type to VPN"
+                Strings.t("Tor cannot run as a SOCKS proxy — set Tunnel type to VPN")
             } else if (selectedProtocol == Protocol.SHARD) {
-                "SHARD shares from VPN mode — set Tunnel type to VPN"
+                Strings.t("SHARD shares from VPN mode — set Tunnel type to VPN")
             } else {
-                "Set Tunnel type to SOCKS proxy to share ${selectedProtocol.label}"
+                Strings.tf("Set Tunnel type to SOCKS proxy to share %s", selectedProtocol.label)
             }
         }
         if (!lanSharingEnabled()) {
-            return "Let other devices use this tunnel"
+            return Strings.t("Let other devices use this tunnel")
         }
         val host = CoreConfig.localNetworkAddress(this)
-            ?: return "No local network — turn on the hotspot or join Wi-Fi"
+            ?: return Strings.t("No local network — turn on the hotspot or join Wi-Fi")
         // SHARD's listener is xray's own, on its own port. CoreConfig.sharedSocksPort
         // answers for the Rust core and Psiphon and would print 1819 here — a port
         // nothing is listening on during a SHARD session, so anyone who typed it
@@ -3650,8 +3650,8 @@ class MainActivity : Activity() {
         } else {
             CoreConfig.sharedSocksPort(this)
         }
-        return "SOCKS5 $host:$socksPort · " +
-            "HTTP $host:${CoreConfig.HTTP_PROXY_PORT} · no password"
+        return Strings.tf("SOCKS5 %s · HTTP %s · no password",
+            "$host:$socksPort", "$host:${CoreConfig.HTTP_PROXY_PORT}")
     }
 
     /**
@@ -3698,8 +3698,8 @@ class MainActivity : Activity() {
      * split exists to avoid.
      */
     private fun chooseTorChainOuterMode(after: (() -> Unit)? = null) = showChoiceSheet(
-        title = "Outer transport",
-        subtitle = "Which WARP tunnel carries Tor in Tor over WARP",
+        title = Strings.t("Outer transport"),
+        subtitle = Strings.t("Which WARP tunnel carries Tor in Tor over WARP"),
         options = ChainOuterMode.entries.toList(),
         selected = torChainOuterMode(),
         label = { it.label },
@@ -3720,8 +3720,8 @@ class MainActivity : Activity() {
     }
 
     private fun chooseChainOuterMode(after: (() -> Unit)? = null) = showChoiceSheet(
-        title = "Outer transport",
-        subtitle = "Which WARP tunnel carries Psiphon in Psiphon over WARP",
+        title = Strings.t("Outer transport"),
+        subtitle = Strings.t("Which WARP tunnel carries Psiphon in Psiphon over WARP"),
         options = ChainOuterMode.entries.toList(),
         selected = chainOuterMode(),
         label = { it.label },
@@ -3757,8 +3757,8 @@ class MainActivity : Activity() {
     private fun chooseTorMode(after: (() -> Unit)? = null) {
         val modes = TorManager.TorMode.entries.toList()
         showChoiceSheet(
-            title = "Connection mode",
-            subtitle = "How Tor reaches the network. Auto tries each method until one works.",
+            title = Strings.t("Connection mode"),
+            subtitle = Strings.t("How Tor reaches the network. Auto tries each method until one works."),
             options = modes,
             selected = torMode(),
             label = { it.label },
@@ -3767,7 +3767,7 @@ class MainActivity : Activity() {
                 // with an empty box is the one choice in this sheet that cannot
                 // work — and the sheet is where the user decides.
                 if (mode == TorManager.TorMode.MANUAL && !TorManualBridges.isConfigured(this)) {
-                    "Enter a bridge first, in the row below this one"
+                    Strings.t("Enter a bridge first, in the row below this one")
                 } else if (mode == TorManager.TorMode.MANUAL) {
                     TorManualBridges.summary(this)
                 } else {
@@ -3783,7 +3783,7 @@ class MainActivity : Activity() {
             refuse = { chosen ->
                 if (chosen == TorManager.TorMode.MANUAL && !TorManualBridges.isConfigured(this)) {
                     editTorBridges()
-                    "Enter a bridge in Manual bridge first"
+                    Strings.t("Enter a bridge in Manual bridge first")
                 } else {
                     null
                 }
@@ -3792,7 +3792,7 @@ class MainActivity : Activity() {
             preferences().edit().putString(TorManager.MODE_PREF, chosen.key).apply()
             ConnectionLog.record(
                 if (chosen == TorManager.TorMode.AUTO) {
-                    "Tor connection mode set to Auto"
+                    Strings.t("Tor connection mode set to Auto")
                 } else {
                     "Tor connection mode pinned to ${chosen.label}"
                 }
@@ -3843,8 +3843,7 @@ class MainActivity : Activity() {
             addView(label(Strings.t("Manual bridge"), 22f, INK, TypefaceStyle.MEDIUM))
         })
         sheet.addView(label(
-            "One bridge per line, exactly as you received it. obfs4, meek_lite, " +
-                "webtunnel and snowflake are supported, as is a plain IP:port.",
+            Strings.t("One bridge per line, exactly as you received it. obfs4, meek_lite, webtunnel and snowflake are supported, as is a plain IP:port."),
             14f, MUTED,
         ), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -3853,7 +3852,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, dp(132),
         ))
         val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        buttons.addView(createSettingsButton("Clear") {
+        buttons.addView(createSettingsButton(Strings.t("Clear")) {
             TorManualBridges.save(this, "")
             field.setText("")
             // A cleared box cannot back a pinned Manual mode, so the pin goes with
@@ -3869,7 +3868,7 @@ class MainActivity : Activity() {
             renderChainCard()
         }, LinearLayout.LayoutParams(0, dp(52), 1f))
         buttons.addView(createSettingsButton(
-            "Save",
+            Strings.t("Save"),
             backgroundOverride = primary,
             textColorOverride = primaryContainer,
         ) {
@@ -3941,8 +3940,8 @@ class MainActivity : Activity() {
     private fun chooseTorRegion(after: (() -> Unit)? = null) {
         val options = listOf(TorRegions.AUTO) + TorRegions.options()
         showChoiceSheet(
-            title = "Preferred country",
-            subtitle = "Tor tries to exit here. If it cannot, another country is used.",
+            title = Strings.t("Preferred country"),
+            subtitle = Strings.t("Tor tries to exit here. If it cannot, another country is used."),
             options = options,
             selected = torRegion(),
             label = { code ->
@@ -3950,7 +3949,7 @@ class MainActivity : Activity() {
             },
             description = { code ->
                 if (code == TorRegions.AUTO) {
-                    "Fastest — Tor picks from every exit relay"
+                    Strings.t("Fastest — Tor picks from every exit relay")
                 } else {
                     TorRegions.detail(code)
                 }
@@ -3960,7 +3959,7 @@ class MainActivity : Activity() {
             preferences().edit().putString(TorRegions.REGION_PREF, chosen).apply()
             ConnectionLog.record(
                 if (chosen == TorRegions.AUTO) {
-                    "Tor exit country cleared — Tor chooses"
+                    Strings.t("Tor exit country cleared — Tor chooses")
                 } else {
                     "Tor exit country set to ${TorRegions.name(chosen)} ($chosen)"
                 }
@@ -3970,8 +3969,8 @@ class MainActivity : Activity() {
     }
 
     private fun chooseH2Fragmentation(after: (() -> Unit)? = null) = showChoiceSheet(
-        title = "TLS fragmentation",
-        subtitle = "Fragment the TLS ClientHello to look like ordinary HTTPS traffic",
+        title = Strings.t("TLS fragmentation"),
+        subtitle = Strings.t("Fragment the TLS ClientHello to look like ordinary HTTPS traffic"),
         options = H2Fragmentation.entries.toList(),
         selected = h2Fragmentation(),
         label = { it.label },
@@ -4026,8 +4025,8 @@ class MainActivity : Activity() {
      */
     private fun chooseTheme(after: (() -> Unit)? = null) {
         showChoiceSheet(
-            title = "Theme",
-            subtitle = "Applies straight away. A running tunnel is not interrupted.",
+            title = Strings.t("Theme"),
+            subtitle = Strings.t("Applies straight away. A running tunnel is not interrupted."),
             options = AppAppearance.Mode.entries.toList(),
             selected = AppAppearance.mode(this),
             label = { mode -> mode.label },
@@ -4058,7 +4057,7 @@ class MainActivity : Activity() {
         val options = listOf("system") + AppLanguage.SUPPORTED
         showChoiceSheet(
             title = Strings.t("Language"),
-            subtitle = "Applies straight away. A running tunnel is not interrupted.",
+            subtitle = Strings.t("Applies straight away. A running tunnel is not interrupted."),
             options = options,
             selected = currentLanguagePref(),
             label = { code -> AppLanguage.label(code) },
@@ -4085,8 +4084,8 @@ class MainActivity : Activity() {
     private fun chooseEgressRegion(after: (() -> Unit)? = null) {
         val options = listOf(CoreConfig.EGRESS_REGION_AUTO) + PsiphonRegions.options(this)
         showChoiceSheet(
-            title = "Preferred country",
-            subtitle = "Psiphon tries this country first. If it will not connect, all countries are tried.",
+            title = Strings.t("Preferred country"),
+            subtitle = Strings.t("Psiphon tries this country first. If it will not connect, all countries are tried."),
             options = options,
             selected = egressRegion(),
             label = { code ->
@@ -4094,7 +4093,7 @@ class MainActivity : Activity() {
             },
             description = { code ->
                 if (code == CoreConfig.EGRESS_REGION_AUTO) {
-                    "Fastest — Psiphon picks whichever server answers first"
+                    Strings.t("Fastest — Psiphon picks whichever server answers first")
                 } else {
                     PsiphonRegions.detail(code)
                 }
@@ -4104,7 +4103,7 @@ class MainActivity : Activity() {
             preferences().edit().putString(CoreConfig.EGRESS_REGION_PREF, chosen).apply()
             ConnectionLog.record(
                 if (chosen == CoreConfig.EGRESS_REGION_AUTO) {
-                    "Preferred exit country cleared — Psiphon chooses"
+                    Strings.t("Preferred exit country cleared — Psiphon chooses")
                 } else {
                     "Preferred exit country set to ${PsiphonRegions.name(chosen)} ($chosen)"
                 }
@@ -4115,10 +4114,10 @@ class MainActivity : Activity() {
 
 
     private fun chooseLogLevel() = showChoiceSheet(
-        title = "Log verbosity",
+        title = Strings.t("Log verbosity"),
         // Says when it takes effect, because it does not take effect now: the
         // value is read while the core config is assembled, i.e. at connect.
-        subtitle = "How much the core logs · applies next connection",
+        subtitle = Strings.t("How much the core logs · applies next connection"),
         options = LogLevel.entries.toList(),
         selected = logLevel(),
         label = { it.label },
@@ -4130,7 +4129,7 @@ class MainActivity : Activity() {
 
     /** Label for the Tunnel type row: what the whole-phone/one-port choice is set to. */
     private fun tunnelTypeLabel(): String =
-        if (CoreConfig.proxyOnly(this)) "SOCKS proxy" else "VPN (whole device)"
+        if (CoreConfig.proxyOnly(this)) Strings.t("SOCKS proxy") else Strings.t("VPN (whole device)")
 
     /** Value shown on the port row — the port, or why it is inert. */
     private fun proxyPortValue(): String {
@@ -4152,19 +4151,19 @@ class MainActivity : Activity() {
             return
         }
         showChoiceSheet(
-            title = "Tunnel type",
-            subtitle = "How MSN-GUARD carries your traffic",
+            title = Strings.t("Tunnel type"),
+            subtitle = Strings.t("How MSN-GUARD carries your traffic"),
             options = listOf(CoreConfig.TUNNEL_MODE_VPN, CoreConfig.TUNNEL_MODE_PROXY),
             selected = CoreConfig.tunnelMode(this),
-            label = { if (it == CoreConfig.TUNNEL_MODE_VPN) "VPN (whole device)" else "SOCKS proxy" },
+            label = { if (it == CoreConfig.TUNNEL_MODE_VPN) Strings.t("VPN (whole device)") else Strings.t("SOCKS proxy") },
             description = {
                 if (it == CoreConfig.TUNNEL_MODE_VPN) {
-                    "Every app goes through the tunnel"
+                    Strings.t("Every app goes through the tunnel")
                 } else {
                     // Names the transports that cannot do it, since that is the only
                     // way the choice can fail and the user should learn it here
                     // rather than from a failed connect.
-                    "Only apps you point at the port · not Tor or SHARD"
+                    Strings.t("Only apps you point at the port · not Tor or SHARD")
                 }
             },
         ) { chosen ->
@@ -4248,10 +4247,10 @@ class MainActivity : Activity() {
         ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
         val entry = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         entry.addView(field, LinearLayout.LayoutParams(0, dp(56), 1f))
-        entry.addView(createSettingsButton("Apply") {
+        entry.addView(createSettingsButton(Strings.t("Apply")) {
             val typed = field.text.toString().trim().toIntOrNull()
             if (typed == null) {
-                field.error = "Numbers only"
+                field.error = Strings.t("Numbers only")
                 return@createSettingsButton
             }
             val rejection = CoreConfig.portRejection(typed)
@@ -4261,8 +4260,8 @@ class MainActivity : Activity() {
             }
             preferences().edit().putInt(CoreConfig.PROXY_PORT_PREF, typed).apply()
             proxyPortRow?.setValue(proxyPortValue())
-            ConnectionLog.record("SOCKS port set to $typed — applies on the next connect")
-            toastShort(Strings.t("SOCKS port set to $typed"))
+            ConnectionLog.record(Strings.tf("SOCKS port set to %s — applies on the next connect", typed))
+            toastShort(Strings.tf("SOCKS port set to %s", typed))
             dialog.dismiss()
         }, LinearLayout.LayoutParams(dp(112), dp(56)).apply { leftMargin = dp(10) })
         sheet.addView(entry, LinearLayout.LayoutParams(
@@ -4310,7 +4309,7 @@ class MainActivity : Activity() {
         // settings, so the row cannot do anything. Greyed for the same reason the
         // port row is greyed in VPN mode: a control that does nothing is a bug.
         splitTunnelSummaryButton?.apply {
-            setValue(if (proxy) "Not used in SOCKS mode" else splitTunnelSummary())
+            setValue(if (proxy) Strings.t("Not used in SOCKS mode") else splitTunnelSummary())
             setAvailable(!proxy)
         }
         // Repainted here rather than only at build time: the transport can change
@@ -4331,16 +4330,16 @@ class MainActivity : Activity() {
     }
 
     private fun manageGatewayCache() = showChoiceSheet(
-        title = "Gateway cache",
-        subtitle = "Control saved MASQUE gateway discovery data",
+        title = Strings.t("Gateway cache"),
+        subtitle = Strings.t("Control saved MASQUE gateway discovery data"),
         options = listOf("Cache & refresh", "Fresh scan next time", "Clear saved gateways"),
         selected = if (defaultEndpointDiscovery() == EndpointDiscovery.CACHE) "Cache & refresh" else "Fresh scan next time",
         label = { it },
         description = {
             when (it) {
-                "Cache & refresh" -> "Try saved gateways first"
-                "Fresh scan next time" -> "Ignore saved gateways once"
-                else -> "Remove saved gateway latency data"
+                "Cache & refresh" -> Strings.t("Try saved gateways first")
+                "Fresh scan next time" -> Strings.t("Ignore saved gateways once")
+                else -> Strings.t("Remove saved gateway latency data")
             }
         },
         onSelected = { chosen ->
@@ -4356,7 +4355,7 @@ class MainActivity : Activity() {
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
         val field = EditText(this).apply {
             setText(manualEndpoint().orEmpty())
-            hint = "IP:port, blank for automatic"
+            hint = Strings.t("IP:port, blank for automatic")
             setTextColor(INK)
             setHintTextColor(MUTED)
             setSingleLine(true)
@@ -4379,16 +4378,16 @@ class MainActivity : Activity() {
         ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
         sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
         val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        buttons.addView(createSettingsButton("Clear") {
+        buttons.addView(createSettingsButton(Strings.t("Clear")) {
             preferences().edit().remove(MANUAL_ENDPOINT).apply()
             field.setText("")
         }, LinearLayout.LayoutParams(0, dp(52), 1f))
-        buttons.addView(createSettingsButton("Save") {
+        buttons.addView(createSettingsButton(Strings.t("Save")) {
             val endpoint = field.text.toString().trim()
             val validEndpoint = endpoint.isBlank() || Regex("^(?:\\d{1,3}(?:\\.\\d{1,3}){3}|\\[[0-9a-fA-F:]+]):([1-9]\\d{0,4})$")
                 .matchEntire(endpoint)?.groupValues?.get(1)?.toIntOrNull()?.let { it in 1..65535 } == true
             if (!validEndpoint) {
-                field.error = "Use numeric IP:port"
+                field.error = Strings.t("Use numeric IP:port")
                 return@createSettingsButton
             }
             preferences().edit().apply {
@@ -4454,7 +4453,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(16) })
         fields.forEach { (name, field) ->
-            sheet.addView(label(name, 11f, MUTED).apply { letterSpacing = 0.08f }, LinearLayout.LayoutParams(
+            sheet.addView(label(name, 11f, MUTED).apply { letterSpacing = spacing(0.08f) }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(10); bottomMargin = dp(6) })
             sheet.addView(field, LinearLayout.LayoutParams(
@@ -4499,18 +4498,24 @@ class MainActivity : Activity() {
         val i1 = settingsField(preferences().getString(OBFUSCATION_I1, "").orEmpty(), "<r 64>")
         val i2 = settingsField(preferences().getString(OBFUSCATION_I2, "").orEmpty(), "<r 32>")
         showTextSettingsSheet(
-            "Advanced obfuscation",
-            "WireGuard only. Jc/Jmin/Jmax tune junk packets; I1/I2 use Aether CPS packet patterns.",
-            listOf("JUNK COUNT (JC)" to jc, "JUNK MIN (JMIN)" to jmin, "JUNK MAX (JMAX)" to jmax, "INIT PACKET I1" to i1, "INIT PACKET I2" to i2),
+            Strings.t("Advanced obfuscation"),
+            Strings.t("WireGuard only. Jc/Jmin/Jmax tune junk packets; I1/I2 use Aether CPS packet patterns."),
+            listOf(
+                Strings.t("JUNK COUNT (JC)") to jc,
+                Strings.t("JUNK MIN (JMIN)") to jmin,
+                Strings.t("JUNK MAX (JMAX)") to jmax,
+                Strings.t("INIT PACKET I1") to i1,
+                Strings.t("INIT PACKET I2") to i2,
+            ),
             validator = { values ->
                 val numbers = values.take(3).map { it.toIntOrNull() }
                 when {
-                    values.take(3).withIndex().any { (index, value) -> value.isNotBlank() && numbers[index] == null } -> 0 to "Use whole numbers"
-                    numbers[0]?.let { it !in 0..10 } == true -> 0 to "Jc must be 0–10"
-                    numbers[1]?.let { it !in 0..1024 } == true -> 1 to "Jmin must be 0–1024"
-                    numbers[2]?.let { it !in 0..1024 } == true -> 2 to "Jmax must be 0–1024"
-                    numbers[1] != null && numbers[2] != null && numbers[2]!! < numbers[1]!! -> 2 to "Jmax must be at least Jmin"
-                    values.drop(3).any { it.length > 2048 } -> 3 to "Packet pattern is too long"
+                    values.take(3).withIndex().any { (index, value) -> value.isNotBlank() && numbers[index] == null } -> 0 to Strings.t("Use whole numbers")
+                    numbers[0]?.let { it !in 0..10 } == true -> 0 to Strings.t("Jc must be 0–10")
+                    numbers[1]?.let { it !in 0..1024 } == true -> 1 to Strings.t("Jmin must be 0–1024")
+                    numbers[2]?.let { it !in 0..1024 } == true -> 2 to Strings.t("Jmax must be 0–1024")
+                    numbers[1] != null && numbers[2] != null && numbers[2]!! < numbers[1]!! -> 2 to Strings.t("Jmax must be at least Jmin")
+                    values.drop(3).any { it.length > 2048 } -> 3 to Strings.t("Packet pattern is too long")
                     else -> null
                 }
             },
@@ -4577,7 +4582,7 @@ class MainActivity : Activity() {
         val rows = mutableMapOf<T, SelectionOption>()
         options.forEachIndexed { index, item ->
             val optionTitle = label(label(item), 16f, INK, TypefaceStyle.MEDIUM)
-            val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+            val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.08f) }
             val row = LinearLayout(this).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 orientation = LinearLayout.HORIZONTAL
@@ -4813,9 +4818,9 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
-        trafficSpeedValue = addTrafficMetric(content, "LIVE SPEED")
-        trafficSessionValue = addTrafficMetric(content, "THIS SESSION")
-        trafficMonthValue = addTrafficMetric(content, "THIS MONTH")
+        trafficSpeedValue = addTrafficMetric(content, Strings.t("LIVE SPEED"))
+        trafficSessionValue = addTrafficMetric(content, Strings.t("THIS SESSION"))
+        trafficMonthValue = addTrafficMetric(content, Strings.t("THIS MONTH"))
         scroll.addView(content)
         page.addView(scroll, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -4870,7 +4875,7 @@ class MainActivity : Activity() {
 
     /** One-line month total, shown as the Traffic monitor row's value. */
     private fun trafficHeadline(): String =
-        if (trafficMonthRx + trafficMonthTx == 0L) "No data yet"
+        if (trafficMonthRx + trafficMonthTx == 0L) Strings.t("No data yet")
         else formatTraffic(trafficMonthRx + trafficMonthTx) + " this month"
 
     private fun formatTraffic(bytes: Long): String = when {
@@ -4895,7 +4900,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { closeSplitTunnelScreen() }, LinearLayout.LayoutParams(dp(48), dp(56)))
             addView(label(Strings.t("Split tunneling"), 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(createSettingsButton("Done", backgroundOverride = primary, textColorOverride = primaryContainer) {
+            addView(createSettingsButton(Strings.t("Done"), backgroundOverride = primary, textColorOverride = primaryContainer) {
                 settings.save(settings.mode(), selected)
                 closeSplitTunnelScreen()
             }, LinearLayout.LayoutParams(dp(88), dp(40)).apply { marginEnd = dp(4) })
@@ -4905,7 +4910,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(20) })
-        content.addView(label(Strings.t("MODE"), 12f, MUTED).apply { letterSpacing = 0.1f })
+        content.addView(label(Strings.t("MODE"), 12f, MUTED).apply { letterSpacing = spacing(0.1f) })
         val modeOptions = mutableMapOf<SplitTunnelSettings.Mode, SelectionOption>()
         SplitTunnelSettings.Mode.entries.forEachIndexed { index, mode ->
             val option = createSplitModeOption(mode, settings.mode()) { chosen ->
@@ -4966,19 +4971,19 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { closeSplitTunnelAppsScreen() }, LinearLayout.LayoutParams(dp(48), dp(56)))
             addView(label(Strings.t("Apps"), 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(createSettingsButton("Done", backgroundOverride = primary, textColorOverride = primaryContainer) {
+            addView(createSettingsButton(Strings.t("Done"), backgroundOverride = primary, textColorOverride = primaryContainer) {
                 settings.save(mode, selected.toHashSet())
                 closeSplitTunnelAppsScreen()
                 closeSplitTunnelScreen()
             }, LinearLayout.LayoutParams(dp(88), dp(40)).apply { marginEnd = dp(4) })
         })
-        content.addView(label("Select apps to ${if (mode == SplitTunnelSettings.Mode.INCLUDE) "include" else "exclude"}", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label(Strings.t(if (mode == SplitTunnelSettings.Mode.INCLUDE) "Select apps to include" else "Select apps to exclude"), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(16) })
 
         val searchField = EditText(this).apply {
-            hint = "Search apps…"
+            hint = Strings.t("Search apps…")
             setHintTextColor(MUTED)
             setTextColor(INK)
             textSize = 15f
@@ -5199,7 +5204,7 @@ class MainActivity : Activity() {
         onSelect: (SplitTunnelSettings.Mode) -> Unit,
     ): SelectionOption {
         val title = label(mode.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.08f) }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(18), 0, dp(18), 0)
@@ -5357,7 +5362,7 @@ class MainActivity : Activity() {
                 endAutoScan(restoreSelection = true)
             }
             startService(Intent(this, MsnGuardVpnService::class.java).setAction(MsnGuardVpnService.ACTION_DISCONNECT))
-            showDisconnected("Disconnecting")
+            showDisconnected(Strings.t("Disconnecting"))
             return
         }
 
@@ -5620,7 +5625,7 @@ class MainActivity : Activity() {
     }
     private fun renderStatus() {
         if (!TunnelStatus.isActive() && isTunnelActive()) {
-            NativeCore.lastError().takeIf(String::isNotBlank)?.let(::showFailure) ?: showDisconnected("Tunnel stopped unexpectedly")
+            NativeCore.lastError().takeIf(String::isNotBlank)?.let(::showFailure) ?: showDisconnected(Strings.t("Tunnel stopped unexpectedly"))
         }
     }
 
@@ -5672,7 +5677,7 @@ class MainActivity : Activity() {
         // text, so it is applied before the shared progress renderer rather than
         // through it.
         orbitDial.progressPercent = progress
-        showConnectionProgress("Connecting", detail ?: "Starting ${selectedProtocol.label} tunnel")
+        showConnectionProgress(Strings.t("Connecting"), detail ?: Strings.tf("Starting %s tunnel", selectedProtocol.label))
     }
 
     private fun showStarting() {
@@ -5703,8 +5708,8 @@ class MainActivity : Activity() {
         // screen cannot tell an automatic search from an ordinary connect.
         if (autoScanIndex >= 0) {
             connectionTitle.text = Strings.t("Auto Scan")
-            connectionDetail.text = "Trying ${AUTO_SCAN_LADDER[autoScanIndex].label}" +
-                " (${autoScanIndex + 1} of ${AUTO_SCAN_LADDER.size})"
+            connectionDetail.text = Strings.tf("Trying %s", AUTO_SCAN_LADDER[autoScanIndex].label) +
+                Strings.tf(" (%s of %s)", autoScanIndex + 1, AUTO_SCAN_LADDER.size)
         } else {
             connectionTitle.text = title
             connectionDetail.text = detail
@@ -5724,7 +5729,7 @@ class MainActivity : Activity() {
         renderStatusLed()
         pingFailureStreak = 0
         connectionTitle.setTextColor(palette.connectedText)
-        connectionTitle.text = "Connected"
+        connectionTitle.text = Strings.t("Connected")
         connectionDetail.text = when {
             // Proxy mode first: it is the one case where "tunnel is active" would be
             // read as "my phone is protected", which is exactly what it is not. The
@@ -5736,19 +5741,19 @@ class MainActivity : Activity() {
             // "SOCKS proxy" — while one of them is riding a WARP leg that is the
             // reason it works at all on a blocking carrier.
             CoreConfig.proxyOnly(this) && chainRunning() ->
-                "SOCKS proxy on ${proxyReachLine()} · over WARP"
+                Strings.tf("SOCKS proxy on %s · over WARP", proxyReachLine())
             CoreConfig.proxyOnly(this) ->
-                "SOCKS proxy on ${proxyReachLine()}"
+                Strings.tf("SOCKS proxy on %s", proxyReachLine())
             // Say what is actually carrying traffic. With the chain armed the rail
             // reads PSIPHON or TOR, so "<transport> tunnel is active" hides the WARP
             // leg that is doing the circumvention.
-            chainRunning() && restored -> "${selectedProtocol.label} over WARP recovered"
-            chainRunning() -> "${selectedProtocol.label} over WARP is active"
-            restored -> "${selectedProtocol.label} tunnel recovered"
-            else -> "${selectedProtocol.label} tunnel is active"
+            chainRunning() && restored -> Strings.tf("%s over WARP recovered", selectedProtocol.label)
+            chainRunning() -> Strings.tf("%s over WARP is active", selectedProtocol.label)
+            restored -> Strings.tf("%s tunnel recovered", selectedProtocol.label)
+            else -> Strings.tf("%s tunnel is active", selectedProtocol.label)
         }
         footerWave.setLit(true)
-        chipLatency.text = "Latency …"
+        chipLatency.text = Strings.t("Latency …")
         startSessionTimer(restored)
         setModeEnabled(false)
         if (!restored) {
@@ -5766,10 +5771,10 @@ class MainActivity : Activity() {
         // Amber, but the readable amber: this is text on the card, and on the
         // light palette the vivid amber sits at 4.4:1 while the text amber is 7.3:1.
         connectionTitle.setTextColor(AMBER_TEXT)
-        connectionTitle.text = "Connection degraded"
-        connectionDetail.text = "Tunnel is active; HTTP health check failed"
+        connectionTitle.text = Strings.t("Connection degraded")
+        connectionDetail.text = Strings.t("Tunnel is active; HTTP health check failed")
         footerWave.setLit(false)
-        chipLatency.text = "Latency n/a"
+        chipLatency.text = Strings.t("Latency n/a")
     }
 
     private fun showFailure(detail: String? = null) {
@@ -5784,25 +5789,25 @@ class MainActivity : Activity() {
         renderStatusLed()
         stopSessionTimer()
         connectionTitle.setTextColor(ERROR_TEXT)
-        connectionTitle.text = "Connection failed"
+        connectionTitle.text = Strings.t("Connection failed")
         footerWave.setLit(false)
-        connectionDetail.text = detail ?: "Check the server and try again"
+        connectionDetail.text = detail ?: Strings.t("Check the server and try again")
         setModeEnabled(true)
     }
 
-    private fun showDisconnected(detail: String = "Tap the dial to connect") {
+    private fun showDisconnected(detail: String = Strings.t("Tap the dial to connect")) {
         latencyRequest++
         cancelVerification()
         clearCoreExitIp()
         stopAutoPing()
-        chipLatency.text = "Latency —"
+        chipLatency.text = Strings.t("Latency —")
         visualState = OrbitDialView.State.DISCONNECTED
         orbitDial.state = visualState
         renderStatusLed()
         stopSessionTimer()
         resetMetrics()
         connectionTitle.setTextColor(INK)
-        connectionTitle.text = "Not connected"
+        connectionTitle.text = Strings.t("Not connected")
         footerWave.setLit(false)
         connectionDetail.text = detail
         setModeEnabled(true)
@@ -5978,12 +5983,12 @@ class MainActivity : Activity() {
                 // "not available with Manual bridge" would send the user looking
                 // for a setting to change instead.
                 if (torMode() == TorManager.TorMode.MANUAL) {
-                    TorManager.manualChainBlocker(this) ?: "not available with your bridges"
+                    TorManager.manualChainBlocker(this) ?: Strings.t("not available with your bridges")
                 } else {
-                    "not available with ${torMode().label}"
+                    Strings.tf("not available with %s", torMode().label)
                 }
-            !applies -> "only for the PSIPHON and TOR transports"
-            !modeControlsEnabled -> "disconnect to change"
+            !applies -> Strings.t("only for the PSIPHON and TOR transports")
+            !modeControlsEnabled -> Strings.t("disconnect to change")
             else -> null
         }
         // Which transport is being wrapped, so the card cannot read
@@ -6008,9 +6013,9 @@ class MainActivity : Activity() {
         }
         chainCard.setOuterSummary(
             if (activeOuter == ChainOuterMode.AUTO) {
-                "auto transport"
+                Strings.t("auto transport")
             } else {
-                "via ${activeOuter.label}"
+                Strings.tf("via %s", activeOuter.label)
             }
         )
         chainCard.setArmed(chainArmed())
@@ -6084,15 +6089,15 @@ class MainActivity : Activity() {
     private fun renderSmartSplitCard() {
         val applies = selectedProtocol == Protocol.SHARD
         val reason = when {
-            !applies -> "only for the SHARD transport"
-            !modeControlsEnabled -> "disconnect to change"
+            !applies -> Strings.t("only for the SHARD transport")
+            !modeControlsEnabled -> Strings.t("disconnect to change")
             else -> null
         }
         smartSplitCard.setUnavailable(reason, applicable = applies)
         // Whether this network has been measured, in the user's terms — never which
         // fragment profile won. See [SmartSplit] for why the profile is not shown.
         smartSplitCard.setTuningSummary(
-            if (SmartSplit.cachedProfile(this) != null) "tuned for this network" else ""
+            if (SmartSplit.cachedProfile(this) != null) Strings.t("tuned for this network") else ""
         )
         smartSplitCard.setSplitEnabled(SmartSplit.enabled(this))
     }
@@ -6180,6 +6185,12 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST)
         }
     }
+
+    /**
+     * Neon letter-spacing scatters Persian's joined letters, so it is
+     * clamped to zero whenever the UI language is Persian.
+     */
+    private fun spacing(v: Float): Float = if (AppLanguage.current() == "fa") 0f else v
 
     private fun label(
         text: String = "",
@@ -6284,7 +6295,7 @@ class MainActivity : Activity() {
     private fun advancedObfuscationSummary(): String =
         listOf(OBFUSCATION_JC, OBFUSCATION_JMIN, OBFUSCATION_JMAX, OBFUSCATION_I1, OBFUSCATION_I2)
             .any { preferences().getString(it, "").orEmpty().isNotBlank() }
-            .let { if (it) "Custom" else "Preset" }
+            .let { if (it) Strings.t("Custom") else Strings.t("Preset") }
 
     private fun tlsCurvePreset(): TlsCurvePreset = preferences()
         .getString(TLS_CURVE_PRESET, TlsCurvePreset.CHROME.coreName)
@@ -6422,7 +6433,7 @@ class MainActivity : Activity() {
     private fun shardPoolSummary(): String {
         val count = ShardSubscription.cachedCount(this)
         val last = ShardSubscription.lastCheckMillis(this)
-        if (count <= 0) return "Tap to download"
+        if (count <= 0) return Strings.t("Tap to download")
         // Paths, not nodes: each node is tried through several CDN edges, and the
         // number of distinct routes is what actually decides whether a connect
         // finds something. Taken from the refresh rather than multiplied here,
@@ -6448,25 +6459,32 @@ class MainActivity : Activity() {
     private fun scanModeSummary(): String = when (selectedProtocol) {
         Protocol.MASQUE, Protocol.WIREGUARD, Protocol.WARP_IN_WARP ->
             "${defaultScanMode().label} · ${defaultScan().label}"
-        else -> "Only for MASQUE and WireGuard"
+        else -> Strings.t("Only for MASQUE and WireGuard")
     }
 
     private fun splitTunnelSummary(): String {
         val settings = SplitTunnelSettings(this)
         val count = settings.packages().size
         return when (settings.mode()) {
-            SplitTunnelSettings.Mode.ALL -> "All apps use MSN-GUARD"
-            SplitTunnelSettings.Mode.INCLUDE -> "Only $count selected app${if (count == 1) "" else "s"}"
-            SplitTunnelSettings.Mode.EXCLUDE -> "Exclude $count selected app${if (count == 1) "" else "s"}"
+            SplitTunnelSettings.Mode.ALL -> Strings.t("All apps use MSN-GUARD")
+            SplitTunnelSettings.Mode.INCLUDE ->
+                if (count == 1) Strings.t("Only 1 selected app")
+                else Strings.tf("Only %s selected apps", count)
+            SplitTunnelSettings.Mode.EXCLUDE ->
+                if (count == 1) Strings.t("Exclude 1 selected app")
+                else Strings.tf("Exclude %s selected apps", count)
         }
     }
 
     private enum class Protocol(
-        val label: String,
+        val enLabel: String,
         val coreName: String,
-        val description: String,
+        val enDescription: String,
         val androidAvailable: Boolean = true,
     ) {
+        /** Localized at call time so a language switch refreshes every rail/page. */
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
         // ORDER IS THE UI. Both the home-screen rail and the Connection mode page
         // are built from `Protocol.entries`, so this list decides what a first-time
         // user reaches for — and the first cell is what most of them will tap.
@@ -6493,20 +6511,24 @@ class MainActivity : Activity() {
     }
 
     private enum class ScanTarget(
-        val label: String,
+        val enLabel: String,
         val coreName: String,
-        val description: String,
+        val enDescription: String,
     ) {
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
         IPV4("IPv4", "v4", "Scan IPv4 endpoints only"),
         IPV6("IPv6", "v6", "Scan IPv6 endpoints only"),
         BOTH("Both", "both", "Scan IPv4 and IPv6 endpoints"),
     }
 
     private enum class ScanMode(
-        val label: String,
+        val enLabel: String,
         val coreName: String,
-        val description: String,
+        val enDescription: String,
     ) {
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
         TURBO("Turbo", "turbo", "Fastest scan; first verified route wins"),
         BALANCED("Balanced", "balanced", "Default mix of speed and coverage"),
         THOROUGH("Thorough", "thorough", "Deep scan; selects best latency"),
@@ -6515,36 +6537,46 @@ class MainActivity : Activity() {
     }
 
     private enum class MasqueTransport(
-        val label: String,
+        val enLabel: String,
         val coreName: String,
-        val description: String,
+        val enDescription: String,
     ) {
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
         H3("HTTP/3", "h3", "QUIC first; falls back to HTTP/2 if UDP is blocked"),
         H2("HTTP/2", "h2", "TCP with TLS fragmentation; use on restricted networks"),
     }
 
     private enum class EndpointDiscovery(
-        val label: String,
+        val enLabel: String,
         val coreName: String,
-        val description: String,
+        val enDescription: String,
     ) {
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
         CACHE("Cache & refresh", "cache", "Use verified gateways first, then discover more"),
         FRESH("Fresh scan", "fresh", "Start a new scan every connection"),
     }
 
-    private enum class ObfuscationProfile(val label: String, val coreName: String, val description: String) {
+    private enum class ObfuscationProfile(val enLabel: String, val coreName: String, val enDescription: String) {
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
         OFF("Off", "off", "No traffic-shape padding"),
         LIGHT("Light", "light", "Lower overhead on mild filtering"),
         BALANCED("Balanced", "balanced", "Recommended filtering resistance"),
         AGGRESSIVE("Aggressive", "aggressive", "Highest resistance; slower setup"),
     }
 
-    private enum class TlsCurvePreset(val label: String, val coreName: String, val description: String) {
+    private enum class TlsCurvePreset(val enLabel: String, val coreName: String, val enDescription: String) {
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
         CHROME("Chrome", "chrome", "Chrome TLS curve ordering"),
         COMPATIBILITY("Compatibility", "compatibility", "P-256 and X25519 only"),
     }
 
-    private enum class LogLevel(val label: String, val coreName: String, val description: String) {
+    private enum class LogLevel(val enLabel: String, val coreName: String, val enDescription: String) {
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
         ERROR("Error", "error", "Only errors"),
         WARN("Warn", "warn", "Warnings and errors"),
         INFO("Info", "info", "Default verbosity"),
@@ -6552,19 +6584,24 @@ class MainActivity : Activity() {
         TRACE("Trace", "trace", "Full per-packet detail"),
     }
 
-    private enum class PerfProfile(val label: String, val coreName: String, val description: String) {
+    private enum class PerfProfile(val enLabel: String, val coreName: String, val enDescription: String) {
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
         AUTO("Auto", "auto", "Detect hardware and scale accordingly"),
         LOW("Low", "low", "Routers and constrained devices"),
         MEDIUM("Medium", "medium", "Moderate hardware"),
         HIGH("High", "high", "Desktop and powerful devices"),
     }
 
-    private enum class H2Fragmentation(val label: String, val coreName: String, val description: String) {
+    private enum class H2Fragmentation(val enLabel: String, val coreName: String, val enDescription: String) {
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
         ON("On", "on", "Fragment TLS handshake to evade DPI"),
         OFF("Off", "off", "Standard TLS handshake"),
     }
 
-    private enum class LogTab(val label: String) {
+    private enum class LogTab(val enLabel: String) {
+        val label: String get() = Strings.t(enLabel)
         ALL("All"),
         APP("App"),
         CORE("Core"),
@@ -6582,9 +6619,11 @@ class MainActivity : Activity() {
      */
     private enum class ChainOuterMode(
         val coreName: String,
-        val label: String,
-        val description: String,
+        val enLabel: String,
+        val enDescription: String,
     ) {
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
         AUTO(
             CoreConfig.CHAIN_OUTER_AUTO,
             "Auto",

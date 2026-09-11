@@ -117,8 +117,8 @@ object TorRegions {
      */
     fun detail(code: String): String {
         val n = EXIT_COUNT[code.trim().uppercase()] ?: return "Exit capacity unknown"
-        val noun = if (n == 1) "exit relay" else "exit relays"
-        return if (n < 15) "$n $noun — may fall back to another country" else "$n $noun"
+        val noun = if (n == 1) Strings.t("exit relay") else Strings.t("exit relays")
+        return if (n < 15) Strings.tf("%s %s — may fall back to another country", n, noun) else Strings.tf("%s %s", n, noun)
     }
 
     /** Selectable countries, ordered by name. */

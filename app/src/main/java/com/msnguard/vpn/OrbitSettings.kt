@@ -48,7 +48,7 @@ class OrbitSectionHeader(
             this.text = text
             textSize = 11.5f
             setTextColor(palette.muted)
-            letterSpacing = 0.14f
+            letterSpacing = if (AppLanguage.current() == "fa") 0f else 0.14f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         })
     }

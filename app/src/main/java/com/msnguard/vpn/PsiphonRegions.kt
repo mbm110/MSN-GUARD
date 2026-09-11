@@ -86,7 +86,7 @@ object PsiphonRegions {
      */
     fun detail(code: String): String {
         val n = BUNDLED_COUNT[code.trim().uppercase()] ?: return "Reported available by Psiphon"
-        return if (n == 1) "1 server in the bundled list" else "$n servers in the bundled list"
+        return if (n == 1) Strings.t("1 server in the bundled list") else Strings.tf("%s servers in the bundled list", n)
     }
 
 

@@ -156,15 +156,18 @@ object TorManager {
      */
     enum class TorMode(
         val key: String,
-        val label: String,
+        val enLabel: String,
         val description: String,
     ) {
-        AUTO(Strings.t("auto"), "Auto", "Tries each method until one connects"),
-        DIRECT(Strings.t("direct"), "Direct", "No bridge; fastest where Tor is not blocked"),
-        OBFS4(Strings.t("obfs4"), "obfs4", "Bridge that hides Tor's traffic shape"),
-        MEEK(Strings.t("meek"), "Meek", "Rides a CDN; slow but hard to block"),
-        SNOWFLAKE(Strings.t("snowflake"), "Snowflake", "Volunteer WebRTC proxies"),
+        AUTO("auto", "Auto", "Tries each method until one connects"),
+        DIRECT("direct", "Direct", "No bridge; fastest where Tor is not blocked"),
+        OBFS4("obfs4", "obfs4", "Bridge that hides Tor's traffic shape"),
+        MEEK("meek", "Meek", "Rides a CDN; slow but hard to block"),
+        SNOWFLAKE("snowflake", "Snowflake", "Volunteer WebRTC proxies"),
         MANUAL("manual", "Manual bridge", "Bridge lines you entered yourself");
+
+        /** Localized at call time, not class-load, so a language switch refreshes it. */
+        val label: String get() = Strings.t(enLabel)
 
         companion object {
             fun from(key: String?): TorMode =

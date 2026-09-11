@@ -288,7 +288,7 @@ object SmartSplit {
      * purposes.
      */
     fun summary(context: Context): String = when {
-        !enabled(context) -> "Off"
+        !enabled(context) -> Strings.t("Off")
         measuredUnavailable(context) -> "On · not effective on this network"
         cachedProfile(context) == null -> "On · will measure this network"
         else -> Strings.t("On · tuned for this network")

@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">MSN-GUARD</string>
+    <string name="vpn_channel_name">MSN-GUARD</string>
+    <string name="vpn_notification">MSN-GUARD در حال اجراست</string>
+
+    <!-- Quick Tile strings -->
+    <string name="vpn_tile_label">MSN-GUARD</string>
+    <string name="vpn_connected">متصل شد</string>
+    <string name="vpn_disconnected">متصل نیست</string>
+    <string name="vpn_connecting">در حال اتصال…</string>
+    <string name="vpn_disconnect">قطع اتصال</string>
+
+    <!-- Upload/Download notification labels -->
+    <string name="vpn_upload">آپلود</string>
+    <string name="vpn_download">دانلود</string>
+</resources>

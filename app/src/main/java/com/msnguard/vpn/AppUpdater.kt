@@ -53,18 +53,18 @@ class AppUpdater(private val activity: Activity) {
     fun checkForUpdate() {
         if (busy) return
         busy = true
-        showProgress("Checking for updates")
+        showProgress(Strings.t("Checking for updates"))
         worker.execute {
             val result = runCatching(::latestRelease)
             activity.runOnUiThread {
                 dismissProgress()
                 busy = false
-                result.onFailure { showMessage("Update check failed", it.message ?: "Try again later") }
+                result.onFailure { showMessage(Strings.t("Update check failed"), it.message ?: Strings.t("Try again later")) }
                     .onSuccess { release ->
                         when {
-                            release == null -> showMessage("No update available", "No compatible release was found")
+                            release == null -> showMessage(Strings.t("No update available"), Strings.t("No compatible release was found"))
                             !isNewer(release.version, appVersion()) ->
-                                showMessage("You're up to date", "MSN-GUARD ${appVersion()} is installed")
+                                showMessage(Strings.t("You're up to date"), Strings.tf("MSN-GUARD %s is installed", appVersion()))
                             else -> announceUpdate(release)
                         }
                     }
@@ -81,15 +81,13 @@ class AppUpdater(private val activity: Activity) {
      */
     private fun announceUpdate(release: Release) {
         dialogBuilder()
-            .setTitle("Update available")
+            .setTitle(Strings.t("Update available"))
             .setMessage(
-                "MSN-GUARD ${release.version} has been released. " +
-                    "You are on ${appVersion()}.\n\n" +
-                    "Tapping Update opens the download in your browser. " +
-                    "Open the downloaded file to install it."
+                Strings.tf("MSN-GUARD %s has been released. You are on %s.", release.version, appVersion()) + "\n\n" +
+                    Strings.t("Tapping Update opens the download in your browser. Open the downloaded file to install it.")
             )
-            .setNegativeButton("Later", null)
-            .setPositiveButton("Update") { _, _ -> openDownload(release) }
+            .setNegativeButton(Strings.t("Later"), null)
+            .setPositiveButton(Strings.t("Update")) { _, _ -> openDownload(release) }
             .show()
     }
 
@@ -100,7 +98,7 @@ class AppUpdater(private val activity: Activity) {
             // by the same host, so if this fails too there is no usable browser at
             // all — worth saying rather than failing silently.
             if (!openLink(RELEASES_PAGE_URL)) {
-                showMessage("No browser found", "Install a browser, then download the update from GitHub.")
+                showMessage(Strings.t("No browser found"), Strings.t("Install a browser, then download the update from GitHub."))
             }
         }
     }
@@ -184,7 +182,7 @@ class AppUpdater(private val activity: Activity) {
     }
 
     private fun showMessage(title: String, message: String) {
-        dialogBuilder().setTitle(title).setMessage(message).setPositiveButton("OK", null).show()
+        dialogBuilder().setTitle(title).setMessage(message).setPositiveButton(Strings.t("OK"), null).show()
     }
 
     // The overlay is picked per palette. Passing a fixed one here overrides the

@@ -2458,18 +2458,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                             // send the user looking for a network fault. Disarming
                             // the chain is the actionable next step, since obfs4
                             // and Snowflake are available unchained.
-                            outer != null -> "Tor could not connect through $outer; " +
-                                "turn Tor over WARP off to try obfs4 and Snowflake"
+                            outer != null -> Strings.tf("Tor could not connect through %s; turn Tor over WARP off to try obfs4 and Snowflake", outer)
                             TorManager.selectedMode(this) == TorManager.TorMode.AUTO ->
-                                "Tor could not connect with any method on this network"
+                                Strings.t("Tor could not connect with any method on this network")
                             // A manual bridge that fails is the user's own line, so
                             // the fix is that line — not our mode picker.
                             TorManager.selectedMode(this) == TorManager.TorMode.MANUAL ->
-                                "Your bridge did not connect — check the line, or try Auto"
+                                Strings.t("Your bridge did not connect — check the line, or try Auto")
                             // Name the pinned mode: the fix is to change it or
                             // switch to Auto, not to retry the same thing.
-                            else -> "Tor could not connect over " +
-                                "${TorManager.selectedMode(this).label}; try Auto"
+                            else -> Strings.tf("Tor could not connect over %s; try Auto", TorManager.selectedMode(this).label)
                         }
                     )
                 }
@@ -4723,8 +4721,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // content — the exact case the user is complaining about.
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOnlyAlertOnce(true)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Disconnect", disconnectPendingIntent)
-            .addAction(android.R.drawable.ic_menu_revert, "Reconnect", reconnectPendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, Strings.t("Disconnect"), disconnectPendingIntent)
+            .addAction(android.R.drawable.ic_menu_revert, Strings.t("Reconnect"), reconnectPendingIntent)
 
         // The session timer, ticked by the system rather than by us.
         //
@@ -4764,23 +4762,23 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * it here.
      */
     private fun prettyProtocol(): String = when {
-        currentProtocol.contains(CHAIN_PROTOCOL_MARKER) -> "Psiphon over WARP"
+        currentProtocol.contains(CHAIN_PROTOCOL_MARKER) -> Strings.t("Psiphon over WARP")
         currentProtocol.contains("TOR") -> {
             val mode = TorManager.activeMode?.let { " (${it.label})" } ?: ""
-            if (chainMode) "Tor$mode over WARP" else "Tor$mode"
+            if (chainMode) Strings.tf("Tor%s over WARP", mode) else Strings.tf("Tor%s", mode)
         }
-        currentProtocol.contains("PSIPHON") -> "Psiphon"
+        currentProtocol.contains("PSIPHON") -> Strings.t("Psiphon")
         // Plain "SHARD", with no country beside it: the two letters were the
         // publisher's own label for the node rather than a measured exit, so the
         // notification now names the method only — see [notification]. The address
         // used to be printed here, but it is the Cloudflare edge every node in the
         // pool shares, so it told the user nothing while looking like it told them
         // something.
-        currentProtocol.contains("SHARD") -> "SHARD"
-        currentProtocol.contains("MASQUE") -> "MASQUE"
-        currentProtocol.contains("WIREGUARD") -> "WireGuard"
-        currentProtocol.contains("GOOL") -> "WARP-on-WARP"
-        currentProtocol.isBlank() -> "Tunnel"
+        currentProtocol.contains("SHARD") -> Strings.t("SHARD")
+        currentProtocol.contains("MASQUE") -> Strings.t("MASQUE")
+        currentProtocol.contains("WIREGUARD") -> Strings.t("WireGuard")
+        currentProtocol.contains("GOOL") -> Strings.t("WARP-on-WARP")
+        currentProtocol.isBlank() -> Strings.t("Tunnel")
         else -> currentProtocol.lowercase().replaceFirstChar { it.uppercase() }
     }
 

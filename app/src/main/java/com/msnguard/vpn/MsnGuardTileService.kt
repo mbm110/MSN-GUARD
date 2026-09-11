@@ -35,6 +35,7 @@ class MsnGuardTileService : TileService() {
     }
 
     private fun updateTile() {
+        if (AppLanguage.appContext == null) AppLanguage.appContext = applicationContext
         val tile = qsTile ?: return
         val isConnected = TunnelStatus.isActive()
         val state = if (isConnected) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
@@ -44,9 +45,9 @@ class MsnGuardTileService : TileService() {
             this,
             R.drawable.ic_notification
         )
-        tile.label = getString(R.string.vpn_tile_label)
+        tile.label = Strings.t("MSN-GUARD")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            tile.subtitle = if (isConnected) getString(R.string.vpn_connected) else getString(R.string.vpn_disconnected)
+            tile.subtitle = if (isConnected) Strings.t("Connected") else Strings.t("Disconnected")
         }
         tile.updateTile()
     }
@@ -66,7 +67,7 @@ class MsnGuardTileService : TileService() {
             startService(Intent(this, MsnGuardVpnService::class.java).setAction(MsnGuardVpnService.ACTION_DISCONNECT))
             tile.state = Tile.STATE_INACTIVE
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                tile.subtitle = getString(R.string.vpn_disconnected)
+                tile.subtitle = Strings.t("Disconnected")
             }
             tile.updateTile()
             return false
@@ -87,7 +88,7 @@ class MsnGuardTileService : TileService() {
             )
             tile.state = Tile.STATE_ACTIVE
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                tile.subtitle = getString(R.string.vpn_connecting)
+                tile.subtitle = Strings.t("Connecting…")
             }
             tile.updateTile()
             return false

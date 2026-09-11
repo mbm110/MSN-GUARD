@@ -80,9 +80,9 @@ class SmartSplitCard(
 
         val column = LinearLayout(context).apply { orientation = VERTICAL }
         titleView = TextView(context).apply {
-            text = "SMART SPLIT"
+            text = Strings.t("SMART SPLIT")
             textSize = 11f
-            letterSpacing = 0.1f
+            letterSpacing = spacing(0.1f)
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             setSingleLine(true)
         }
@@ -108,7 +108,7 @@ class SmartSplitCard(
 
         badgeView = TextView(context).apply {
             textSize = 8.5f
-            letterSpacing = 0.12f
+            letterSpacing = spacing(0.12f)
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             gravity = Gravity.CENTER
             setPadding(px(9), px(4), px(9), px(4))
@@ -169,9 +169,9 @@ class SmartSplitCard(
         // sites through the node" is the whole feature in one line, and it stays
         // true whichever fragment profile the probe settles on.
         subtitleView.text = unavailableReason ?: when {
-            !value -> "everything through the node"
-            tuningSummary.isNotEmpty() -> "local sites direct · $tuningSummary"
-            else -> "local sites direct, blocked sites via node"
+            !value -> Strings.t("everything through the node")
+            tuningSummary.isNotEmpty() -> Strings.tf("local sites direct · %s", tuningSummary)
+            else -> Strings.t("local sites direct, blocked sites via node")
         }
         // `muted`, not `faint`. Measured on both palettes rather than eyeballed:
         // faint@0.95 on the lit mint fill is 2.68:1 on Midnight and 4.49:1 on
@@ -179,9 +179,9 @@ class SmartSplitCard(
         // 5.46:1 lit, 8.10:1 and 6.29:1 unlit, so all four states clear 4.5:1.
         subtitleView.setTextColor(palette.muted)
         badgeView.text = when {
-            !applicable -> "N/A"
-            value -> "ON"
-            else -> "OFF"
+            !applicable -> Strings.t("N/A")
+            value -> Strings.t("ON")
+            else -> Strings.t("OFF")
         }
         badgeView.setTextColor(if (lit) palette.mintText else palette.faint)
         badgeView.background = Sculpt.sculptedBackground(
@@ -257,3 +257,6 @@ private class SplitGlyphView(
         }
     }
 }
+
+/** Neon letter-spacing scatters Persian's joined letters — clamp for Persian. */
+private fun spacing(v: Float): Float = if (AppLanguage.current() == "fa") 0f else v

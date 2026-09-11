@@ -544,10 +544,10 @@ class OrbitDialView(
 
             textPaint.typeface = labelTypeface
             textPaint.textSize = 9f * density * geo
-            textPaint.letterSpacing = 0.19f
+            textPaint.letterSpacing = if (AppLanguage.current() == "fa") 0f else 0.19f
             textPaint.color = Sculpt.withAlpha(palette.faint, 0.95f)
-            canvas.drawText("SESSION", cx, cy + 27f * density * geo, textPaint)
-            textPaint.letterSpacing = 0f
+            canvas.drawText(Strings.t("SESSION"), cx, cy + 27f * density * geo, textPaint)
+            textPaint.letterSpacing = spacing(0f)
             return
         }
 
@@ -571,16 +571,16 @@ class OrbitDialView(
             textPaint.typeface = labelTypeface
             textPaint.textAlign = Paint.Align.CENTER
             textPaint.textSize = 10.5f * density * geo
-            textPaint.letterSpacing = 0.19f
+            textPaint.letterSpacing = if (AppLanguage.current() == "fa") 0f else 0.19f
             textPaint.color = palette.amberText
             // The percentage stays, appended to the caption instead of occupying
             // the middle of the dial: it is real information when the transport
             // reports it, and joining it to the word keeps a number from ever
             // sitting alone where the tick used to be. Transports that cannot
             // measure progress print no figure (see progressPercent).
-            val caption = if (progressPercent >= 0) "CONNECTING $progressPercent%" else "CONNECTING"
+            val caption = if (progressPercent >= 0) Strings.tf("CONNECTING %s%%", progressPercent) else Strings.t("CONNECTING")
             canvas.drawText(caption, cx, cy + dp(26) * geo, textPaint)
-            textPaint.letterSpacing = 0f
+            textPaint.letterSpacing = spacing(0f)
             return
         }
 
@@ -625,7 +625,7 @@ class OrbitDialView(
         textPaint.typeface = labelTypeface
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.textSize = 10.5f * density * geo
-        textPaint.letterSpacing = 0.19f
+        textPaint.letterSpacing = if (AppLanguage.current() == "fa") 0f else 0.19f
         // CONNECTING never reaches here — it returned above with its own glyph —
         // so only the resting and failed captions are left.
         textPaint.color = when (state) {
@@ -633,11 +633,11 @@ class OrbitDialView(
             else -> Sculpt.withAlpha(palette.faint, 0.95f)
         }
         val cta = when (state) {
-            State.FAILED -> "RETRY"
-            else -> "TAP TO CONNECT"
+            State.FAILED -> Strings.t("RETRY")
+            else -> Strings.t("TAP TO CONNECT")
         }
         canvas.drawText(cta, cx, cy + dp(26) * geo, textPaint)
-        textPaint.letterSpacing = 0f
+        textPaint.letterSpacing = spacing(0f)
     }
 
     /**
@@ -861,3 +861,6 @@ class OrbitDialView(
         private const val WAVE_SHARPNESS = 2.4
     }
 }
+
+/** Neon letter-spacing scatters Persian's joined letters — clamp for Persian. */
+private fun spacing(v: Float): Float = if (AppLanguage.current() == "fa") 0f else v
