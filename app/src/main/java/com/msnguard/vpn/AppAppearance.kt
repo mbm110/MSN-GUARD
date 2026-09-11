@@ -42,8 +42,8 @@ object AppAppearance {
 
     /** Which palette the user picked. Persisted in the shared "settings" store. */
     enum class Mode(val key: String, val label: String, val description: String) {
-        DARK("dark", "Dark", "The original console — black glass and neon"),
-        LIGHT("light", "Light", "Porcelain — grey page, white cards"),
+        DARK(Strings.t("dark"), "Dark", "The original console — black glass and neon"),
+        LIGHT(Strings.t("light"), "Light", "Porcelain — grey page, white cards"),
         ;
 
         companion object {

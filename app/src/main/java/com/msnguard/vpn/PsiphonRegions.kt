@@ -125,7 +125,7 @@ object PsiphonRegions {
     /** Human name for a two-letter code, or the code itself when unknown. */
     fun name(code: String): String {
         val key = code.trim().uppercase()
-        return BUNDLED[key] ?: EXTRA_NAMES[key] ?: key
+        return Strings.t(BUNDLED[key] ?: EXTRA_NAMES[key] ?: key)
     }
 
     /** Flag + name, e.g. "🇩🇪 Germany". */

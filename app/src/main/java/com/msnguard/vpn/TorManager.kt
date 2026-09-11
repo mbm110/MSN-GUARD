@@ -159,11 +159,11 @@ object TorManager {
         val label: String,
         val description: String,
     ) {
-        AUTO("auto", "Auto", "Tries each method until one connects"),
-        DIRECT("direct", "Direct", "No bridge; fastest where Tor is not blocked"),
-        OBFS4("obfs4", "obfs4", "Bridge that hides Tor's traffic shape"),
-        MEEK("meek", "Meek", "Rides a CDN; slow but hard to block"),
-        SNOWFLAKE("snowflake", "Snowflake", "Volunteer WebRTC proxies"),
+        AUTO(Strings.t("auto"), "Auto", "Tries each method until one connects"),
+        DIRECT(Strings.t("direct"), "Direct", "No bridge; fastest where Tor is not blocked"),
+        OBFS4(Strings.t("obfs4"), "obfs4", "Bridge that hides Tor's traffic shape"),
+        MEEK(Strings.t("meek"), "Meek", "Rides a CDN; slow but hard to block"),
+        SNOWFLAKE(Strings.t("snowflake"), "Snowflake", "Volunteer WebRTC proxies"),
         MANUAL("manual", "Manual bridge", "Bridge lines you entered yourself");
 
         companion object {

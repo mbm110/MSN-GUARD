@@ -102,7 +102,7 @@ object TorRegions {
     /** Human name for a code, or the code itself when unknown. */
     fun name(code: String): String {
         val key = code.trim().uppercase()
-        return NAMES[key] ?: key
+        return Strings.t(NAMES[key] ?: key)
     }
 
     /** Flag + name, e.g. "🇩🇪 Germany". */

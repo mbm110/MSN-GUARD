@@ -1034,7 +1034,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
         val port = activeSocksPort
         if (port <= 0) {
-            failAndStop("Psiphon SOCKS port unavailable")
+            failAndStop(Strings.t("Psiphon SOCKS port unavailable"))
             return
         }
         val socksProxy = "127.0.0.1:$port"
@@ -1082,12 +1082,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
         val tunFd = tun
         if (tunFd == null) {
-            failAndStop("VPN interface missing")
+            failAndStop(Strings.t("VPN interface missing"))
             return
         }
 
         if (!Tun2SocksManager.start(tunFd, port)) {
-            failAndStop("Could not start whole-device routing")
+            failAndStop(Strings.t("Could not start whole-device routing"))
             return
         }
         psiphonVpnActivated = true
@@ -1513,15 +1513,21 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      *
      * Called once per connect, before the first [startPsiphonTunnel].
      *
-     * Chained runs only. A plain Psiphon connect always lets Psiphon pick whichever
-     * server answers first, which is both the fastest path and the behaviour that
-     * predates this feature — so the country preference must not leak into it. The
-     * flag is written unconditionally (not just when chained) precisely so that a
-     * plain connect following a chained one cannot inherit a stale `true` and start
-     * against a filtered candidate pool.
+     * Runs on plain Psiphon too, not just chained: the user picks the country
+     * from the settings page the moment Psiphon is selected, chain off or on,
+     * so the service must honour it on both paths. The attempt is still one
+     * short try in front of the ladder — [buildPsiphonConfig] pins
+     * `EgressRegion` for it and [escalateLadder] drops the filter and retries
+     * with all countries if it fails, so a wrong choice costs one
+     * [REGION_PHASE_TIMEOUT_SECONDS] window, never the session.
+     *
+     * The flag is written unconditionally (not just when a region is set)
+     * precisely so that a plain connect following a preferred-country one
+     * cannot inherit a stale `true` and start against a filtered candidate
+     * pool.
      */
     private fun armRegionPhase() {
-        val region = if (chainMode) CoreConfig.egressRegion(this) else null
+        val region = CoreConfig.egressRegion(this)
         regionPhase = region != null
         regionPhaseTried = region.orEmpty()
         if (region != null) {
@@ -1685,7 +1691,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 "Preferred country ${PsiphonRegions.name(region)} did not connect — " +
                     "continuing with all countries from strategy ${ladder.getOrNull(ladderIndex)?.name ?: "?"}"
             )
-            sendStatus(STATUS_CONNECTING, "Trying all countries…")
+            sendStatus(STATUS_CONNECTING, Strings.t("Trying all countries…"))
             worker.execute {
                 if (stopRequested.get()) return@execute
                 try { psiphonTunnel?.stop() } catch (_: Exception) {}
@@ -1715,7 +1721,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // Deliberately the same generic failure whether chained or not: the
             // user asked for one message, and a chained-specific string would only
             // suggest the chain itself was at fault when the carrier is.
-            failAndStop("Could not connect on this carrier. Try Wi-Fi or another SIM.")
+            failAndStop(Strings.t("Could not connect on this carrier. Try Wi-Fi or another SIM."))
             return
         }
 
@@ -1858,7 +1864,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             if (willAutoReconnect()) {
                 scheduleAutoReconnect(detail)
             } else {
-                sendStatus(STATUS_FAILED, "Kill switch active — tunnel dropped")
+                sendStatus(STATUS_FAILED, Strings.t("Kill switch active — tunnel dropped"))
             }
             return
         }
@@ -1919,6 +1925,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // The service can start before the activity ever runs (quick tile,
+        // auto-reconnect after process death), so it seeds the language
+        // resolver itself. Cheap: one field write per start.
+        AppLanguage.appContext = applicationContext
         when (intent?.action) {
             ACTION_CONNECT -> intent.getStringExtra(EXTRA_CONFIG)?.let { config ->
                 // A fresh user-initiated connect clears both the "user switched it
@@ -2001,7 +2011,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                                         "after ${RECONNECT_CORE_WAIT_MS / 1000}s; not restarting"
                                 )
                                 reconnectRequested.set(false)
-                                sendStatus(STATUS_FAILED, "Reconnect timed out — tap the dial to connect")
+                                sendStatus(STATUS_FAILED, Strings.t("Reconnect timed out — tap the dial to connect"))
                                 return@schedule
                             }
                             // The user can press Disconnect inside the settle window,
@@ -2116,7 +2126,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                             // over WARP, where "waiting for Psiphon" would be wrong.
                             val inner = if (currentProtocol.contains("TOR")) "Tor" else "Psiphon"
                             ConnectionLog.record("Chain: outer leg is up; waiting for $inner")
-                            sendStatus(STATUS_CONNECTING, "Connecting $inner through WARP…")
+                            sendStatus(STATUS_CONNECTING, Strings.tf("Connecting %s through WARP…", Strings.t(inner)))
                         }
                         return
                     }
@@ -2314,7 +2324,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // produced "No reachability after 15 probes" over a live tunnel.
                 activeSocksPort = plannedSocksPort()
                 startPsiphonTunnel()
-                sendStatus(STATUS_CONNECTING, "Connecting Psiphon through $outer…")
+                sendStatus(STATUS_CONNECTING, Strings.tf("Connecting Psiphon through %s…", Strings.t(outer)))
             } catch (e: Exception) {
                 ConnectionLog.record("Chain start failed: ${e.message}")
                 chainMode = false
@@ -2480,7 +2490,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
                 currentVpnIp = ""
                 val via = if (outer != null) "$mode over $outer" else mode
-                sendStatus(STATUS_CONNECTED, "Tor connected via $via")
+                sendStatus(STATUS_CONNECTED, Strings.tf("Tor connected via %s", via))
                 ConnectionLog.record("Tor: connected via $via")
                 // The mode is only known now, and it is part of the notification's
                 // subtitle ("Tor (Meek)").
@@ -2561,7 +2571,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     .establish() ?: error("Android could not establish the VPN interface")
                 vpnModeActive.set(true)
 
-                sendStatus(STATUS_CONNECTING, "Finding a fast node…", 15)
+                sendStatus(STATUS_CONNECTING, Strings.t("Finding a fast node…"), 15)
                 ConnectionLog.record("SHARD: TUN ready — racing the pool")
 
                 if (!ShardManager.start(this, verboseShardLog())) {
@@ -2580,7 +2590,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // connect from the tile deserves a current ladder, too.
                 SmartSplitSub.refreshIfDue(this)
 
-                sendStatus(STATUS_CONNECTING, "Starting device routing…", 70)
+                sendStatus(STATUS_CONNECTING, Strings.t("Starting device routing…"), 70)
                 if (!ShardSocksFront.start(ShardManager.SOCKS_PORT)) {
                     error("Could not start the UDP front-end")
                 }
@@ -2591,7 +2601,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
                 currentVpnIp = ""
                 val node = ShardManager.activeNode?.displayName ?: "a public node"
-                sendStatus(STATUS_CONNECTED, "SHARD connected via $node")
+                sendStatus(STATUS_CONNECTED, Strings.tf("SHARD connected via %s", node))
                 ConnectionLog.record("SHARD: connected via $node")
                 repostNotification()
                 startShardTrafficPolling()
@@ -2846,7 +2856,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         }
         shardRotations++
         ConnectionLog.record("SHARD: $reason — rotating node ($shardRotations)")
-        sendStatus(STATUS_CONNECTING, "Switching to another node…", 60)
+        sendStatus(STATUS_CONNECTING, Strings.t("Switching to another node…"), 60)
         val ok = try {
             ShardManager.rotate(this, verboseShardLog())
         } catch (e: Exception) {
@@ -2864,7 +2874,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         currentVpnIp = ""
         lastExitIp = ""
         currentCountry = ""
-        sendStatus(STATUS_CONNECTED, "SHARD connected via $node")
+        sendStatus(STATUS_CONNECTED, Strings.tf("SHARD connected via %s", node))
         ConnectionLog.record("SHARD: now on $node")
         repostNotification()
         return true
@@ -3144,7 +3154,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // — before, a watchdog-detected drop on SHARD, Psiphon or Tor left
             // traffic on the carrier link with the switch on.
             if (sealWithKillSwitch(armed)) {
-                sendStatus(STATUS_FAILED, "Kill switch active — tunnel dropped")
+                sendStatus(STATUS_FAILED, Strings.t("Kill switch active — tunnel dropped"))
                 return
             }
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -3213,7 +3223,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // The UI is told CONNECTING, not FAILED: from the user's point of view the
         // app is working on it, and painting the dial red for a recovery that is
         // about to happen on its own is the wrong report.
-        sendStatus(STATUS_CONNECTING, "Reconnecting after $reason…")
+        sendStatus(STATUS_CONNECTING, Strings.tf("Reconnecting after %s…", reason))
         ConnectionLog.record("Auto reconnect #$reconnectAttempts in ${delay}s")
         reconnectTask?.cancel(false)
         reconnectTask = ladderScheduler.schedule({
@@ -3435,7 +3445,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 "Chain leg 1/2 attempt ${offset + 1}/${ladder.size}: " +
                     "$label → SOCKS ${CoreConfig.CHAIN_SOCKS_PORT} (${budget / 1000}s budget)"
             )
-            sendStatus(STATUS_CONNECTING, "Connecting $label…")
+            sendStatus(STATUS_CONNECTING, Strings.tf("Connecting %s…", Strings.t(label)))
 
             val config = CoreConfig.chainOuterJson(this, protocol)
             val started = runCatching {
@@ -3466,7 +3476,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                                 // that dies while the inner leg is still dialling is
                                 // still treated as a failed connect and does not seal.
                                 failAndStop(
-                                    "The $label tunnel carrying $inner dropped",
+                                    Strings.tf("The %s tunnel carrying %s dropped", Strings.t(label), Strings.t(inner)),
                                     sealOnDrop = true,
                                 )
                             }
@@ -3475,7 +3485,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         ConnectionLog.record("Chain: $label leg threw: ${t.message}")
                         if (chainOuterCommitted && !stopRequested.get()) {
                             failAndStop(
-                                "The $label tunnel carrying $inner dropped",
+                                Strings.tf("The %s tunnel carrying %s dropped", Strings.t(label), Strings.t(inner)),
                                 sealOnDrop = true,
                             )
                         }
@@ -3696,7 +3706,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         if (proxyMode && currentProtocol.contains("TOR")) {
             connected.set(false)
             failAndStop(
-                "SOCKS proxy mode cannot use Tor — switch to another transport, " +
+                Strings.t("SOCKS proxy mode cannot use Tor — switch to another transport, ") +
                     "or set Tunnel type back to VPN"
             )
             return
@@ -3718,7 +3728,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         if (proxyMode && currentProtocol.contains("SHARD")) {
             connected.set(false)
             failAndStop(
-                "SHARD runs as a VPN, not a SOCKS proxy — set Tunnel type back to " +
+                Strings.t("SHARD runs as a VPN, not a SOCKS proxy — set Tunnel type back to ") +
                     "VPN; Share over LAN works there"
             )
             return
@@ -3776,7 +3786,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                             "SOCKS proxy mode — no VPN interface; Psiphon will listen on 127.0.0.1:$proxyPort"
                         )
                         startPsiphonTunnel()
-                        sendStatus(STATUS_CONNECTING, "Psiphon starting...")
+                        sendStatus(STATUS_CONNECTING, Strings.t("Psiphon starting..."))
                         return@execute
                     }
                     // Create the TUN first, then start Psiphon: this stops Psiphon's
@@ -3829,7 +3839,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // Pre-save the SOCKS port so onConnected() can start tun2socks immediately.
                     activeSocksPort = socksPort
                     startPsiphonTunnel()
-                    sendStatus(STATUS_CONNECTING, "Psiphon starting...")
+                    sendStatus(STATUS_CONNECTING, Strings.t("Psiphon starting..."))
                 } catch (e: Exception) {
                     ConnectionLog.record("Psiphon start failed: ${e.message}")
                     sendStatus(STATUS_FAILED, e.message)
@@ -3915,12 +3925,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         // same situation — the app is working on it, so say that
                         // instead of claiming the session ended.
                         if (reconnectRequested.get()) {
-                            sendStatus(STATUS_CONNECTING, "Reconnecting…")
+                            sendStatus(STATUS_CONNECTING, Strings.t("Reconnecting…"))
                         } else {
                             sendStatus(STATUS_DISCONNECTED)
                         }
                     } else if (!willAutoReconnect()) {
-                        sendStatus(STATUS_FAILED, "Tunnel stopped unexpectedly")
+                        sendStatus(STATUS_FAILED, Strings.t("Tunnel stopped unexpectedly"))
                     }
                     return@execute
                 }
@@ -3974,7 +3984,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // Same as the SOCKS branch above: no DISCONNECTED under a pending
                     // reconnect, or the UI blinks "Not connected" mid-restart.
                     if (reconnectRequested.get()) {
-                        sendStatus(STATUS_CONNECTING, "Reconnecting…")
+                        sendStatus(STATUS_CONNECTING, Strings.t("Reconnecting…"))
                     } else {
                         sendStatus(STATUS_DISCONNECTED)
                     }
@@ -4036,7 +4046,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // the latch stuck on.
                     ConnectionLog.record("Core exited for a quick reconnect; service kept alive")
                 } else if (killSwitch && !stopRequested.get()) {
-                    sendStatus(STATUS_FAILED, "Kill switch active — tunnel dropped")
+                    sendStatus(STATUS_FAILED, Strings.t("Kill switch active — tunnel dropped"))
                     // `killSwitch` was read at the top of this block, before
                     // proxyMode could be cleared — pass it rather than asking again.
                     sealWithKillSwitch(killSwitch)
@@ -4578,7 +4588,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         val manager = getSystemService(NotificationManager::class.java)
         ensureNotificationChannel(manager)
         val notification = Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("Connecting…")
+            .setContentTitle(Strings.t("Connecting…"))
             .setContentText(prettyProtocol())
             .setSmallIcon(R.drawable.ic_notification)
             .setLargeIcon(appBadge())
@@ -4623,7 +4633,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         try { manager.deleteNotificationChannel(CHANNEL_ID_LEGACY) } catch (_: Exception) {}
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "VPN Service",
+            Strings.t("VPN Service"),
             NotificationManager.IMPORTANCE_DEFAULT
         ).apply {
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
@@ -4692,9 +4702,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // right to call it a lie. The port is in the title because it is the one
         // thing they need and the only place they can see it while the app is closed.
         val title = if (proxyMode) {
-            "SOCKS proxy on ${CoreConfig.proxyListenPort(this)}"
+            Strings.tf("SOCKS proxy on %s", CoreConfig.proxyListenPort(this))
         } else {
-            "VPN connected"
+            Strings.t("VPN connected")
         }
 
         val builder = Notification.Builder(this, CHANNEL_ID)

@@ -473,6 +473,11 @@ class MainActivity : Activity() {
         // apply to dialogs but the window itself would stay dark.
         if (!AppAppearance.isNight(this)) setTheme(R.style.Theme_MsnGuard_Light)
         super.onCreate(savedInstanceState)
+        // First thing after super: the service reads the language preference on
+        // its own status sends, and t() needs a context to resolve "system".
+        // The application context outlives this activity, so a mid-session
+        // recreate() never orphans it.
+        AppLanguage.appContext = applicationContext
         palette = AppAppearance.load(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             // A registered OnBackInvokedCallback ALWAYS consumes the gesture — its
@@ -568,7 +573,7 @@ class MainActivity : Activity() {
             maxLines = 2
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
-        chipLatency = label("Latency —", 12f, MUTED, TypefaceStyle.MEDIUM).apply {
+        chipLatency = label(Strings.t("Latency —"), 12f, MUTED, TypefaceStyle.MEDIUM).apply {
             gravity = Gravity.CENTER
             contentDescription = "سنجش پینگ اتصال"
             isClickable = true
@@ -1180,12 +1185,12 @@ class MainActivity : Activity() {
         // is driven from this screen: the service thinks that session succeeded.
         // stopCurrent = false because the teardown above IS the disconnect.
         if (advanceAutoScan(stopCurrent = false)) return
-        showFailure("Tunnel handshake succeeded but no traffic passes — try another protocol")
+        showFailure(Strings.t("Tunnel handshake succeeded but no traffic passes — try another protocol"))
     }
 
     /** The state between handshake and proof. Keeps the dial in its CONNECTING look. */
     private fun showVerifying() {
-        showConnectionProgress("Verifying", "Checking that traffic really passes")
+        showConnectionProgress(Strings.t("Verifying"), Strings.t("Checking that traffic really passes"))
     }
 
     private fun createHeader(): LinearLayout = LinearLayout(this).apply {
@@ -1198,7 +1203,7 @@ class MainActivity : Activity() {
             rightMargin = dp(8)
         }
         addView(statusLed, statusLed.layoutParams)
-        addView(label("MSN-GUARD", 13f, MUTED, TypefaceStyle.MEDIUM).apply {
+        addView(label(Strings.t("MSN-GUARD"), 13f, MUTED, TypefaceStyle.MEDIUM).apply {
             letterSpacing = 0.14f
         })
         addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
@@ -1722,7 +1727,7 @@ class MainActivity : Activity() {
         val header = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { closeLogsScreen() }, LinearLayout.LayoutParams(dp(48), dp(56)))
-            addView(label("Logs", 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(
+            addView(label(Strings.t("Logs"), 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 1f,
@@ -1736,7 +1741,7 @@ class MainActivity : Activity() {
             addView(createLogActionButton("SHARE") { shareFullLog() })
         }
         content.addView(header)
-        content.addView(label("Tunnel and VPN events", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label(Strings.t("Tunnel and VPN events"), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(16) })
@@ -2256,7 +2261,7 @@ class MainActivity : Activity() {
         runCatching { startActivityForResult(intent, BACKUP_EXPORT_REQUEST) }
             .onFailure {
                 pendingBackupJson = null
-                toastShort("This device has no file picker")
+                toastShort(Strings.t("This device has no file picker"))
             }
     }
 
@@ -2271,14 +2276,14 @@ class MainActivity : Activity() {
      */
     private fun importSettings() {
         if (TunnelStatus.isActive() || visualState == OrbitDialView.State.CONNECTING) {
-            toastShort("Disconnect first — a restore changes what the tunnel uses")
+            toastShort(Strings.t("Disconnect first — a restore changes what the tunnel uses"))
             return
         }
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
             .addCategory(Intent.CATEGORY_OPENABLE)
             .setType("*/*")
         runCatching { startActivityForResult(intent, BACKUP_IMPORT_REQUEST) }
-            .onFailure { toastShort("This device has no file picker") }
+            .onFailure { toastShort(Strings.t("This device has no file picker")) }
     }
 
     /** Writes [pendingBackupJson] into the document the picker returned. */
@@ -2286,7 +2291,7 @@ class MainActivity : Activity() {
         val payload = pendingBackupJson
         pendingBackupJson = null
         if (payload == null) {
-            toastShort("The backup was not ready — try again")
+            toastShort(Strings.t("The backup was not ready — try again"))
             return
         }
         val result = runCatching {
@@ -2296,7 +2301,7 @@ class MainActivity : Activity() {
         }
         result.onSuccess {
             ConnectionLog.record("Settings backed up (${SettingsBackup.valueCount(this)} values)")
-            toastShort("Settings saved — this file holds no passwords")
+            toastShort(Strings.t("Settings saved — this file holds no passwords"))
             settingsBackupRow?.setValue(backupSummary())
         }.onFailure {
             toastShort("Could not write the backup: ${it.message}")
@@ -2342,7 +2347,7 @@ class MainActivity : Activity() {
      */
     private fun confirmResetSettings() {
         if (TunnelStatus.isActive() || visualState == OrbitDialView.State.CONNECTING) {
-            toastShort("Disconnect first — a reset changes what the tunnel uses")
+            toastShort(Strings.t("Disconnect first — a reset changes what the tunnel uses"))
             return
         }
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
@@ -2354,7 +2359,7 @@ class MainActivity : Activity() {
         sheet.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            addView(label("Reset to defaults", 22f, INK, TypefaceStyle.MEDIUM))
+            addView(label(Strings.t("Reset to defaults"), 22f, INK, TypefaceStyle.MEDIUM))
         })
         sheet.addView(label(
             "Every setting goes back to how the app arrived: connection mode, " +
@@ -2375,7 +2380,7 @@ class MainActivity : Activity() {
             SettingsBackup.resetToDefaults(this)
             ConnectionLog.record("Settings reset to defaults")
             dialog.dismiss()
-            toastShort("Settings reset to defaults")
+            toastShort(Strings.t("Settings reset to defaults"))
             recreate()
         }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
         sheet.addView(buttons, LinearLayout.LayoutParams(
@@ -2420,11 +2425,11 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(CANVAS)
             addView(createHeaderBackButton { closeScannerScreen() }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            addView(label("Scanner options", 22f, INK, TypefaceStyle.MEDIUM).apply {
+            addView(label(Strings.t("Scanner options"), 22f, INK, TypefaceStyle.MEDIUM).apply {
                 setPadding(dp(4), 0, 0, 0)
             })
         }
-        content.addView(label("Choose Aether's endpoint-discovery budget and address families", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label(Strings.t("Choose Aether's endpoint-discovery budget and address families"), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
@@ -2451,7 +2456,7 @@ class MainActivity : Activity() {
         }
 
         if (selectedProtocol == Protocol.MASQUE) {
-            options.addView(label("MASQUE TRANSPORT", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+            options.addView(label(Strings.t("MASQUE TRANSPORT"), 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(20) })
@@ -2468,7 +2473,7 @@ class MainActivity : Activity() {
             }
         }
 
-        options.addView(label("SCAN MODE", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+        options.addView(label(Strings.t("SCAN MODE"), 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(20) })
@@ -2484,7 +2489,7 @@ class MainActivity : Activity() {
             ).apply { topMargin = if (index == 0) dp(10) else dp(8) })
         }
 
-        options.addView(label("IP VERSION", 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
+        options.addView(label(Strings.t("IP VERSION"), 12f, MUTED).apply { letterSpacing = 0.1f }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(20) })
@@ -2545,7 +2550,7 @@ class MainActivity : Activity() {
     private fun createScannerOption(target: ScanTarget, onSelect: (ScanTarget) -> Unit): SelectionOption {
         val selected = target == defaultScan()
         val title = label(target.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label("SELECTED", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -2572,7 +2577,7 @@ class MainActivity : Activity() {
     ): SelectionOption {
         val selected = discovery == defaultEndpointDiscovery()
         val title = label(discovery.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label("SELECTED", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -2596,7 +2601,7 @@ class MainActivity : Activity() {
     private fun createScanModeOption(mode: ScanMode, onSelect: (ScanMode) -> Unit): SelectionOption {
         val selected = mode == defaultScanMode()
         val title = label(mode.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label("SELECTED", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -2623,7 +2628,7 @@ class MainActivity : Activity() {
     ): SelectionOption {
         val selected = transport == defaultMasqueTransport()
         val title = label(transport.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label("SELECTED", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -2665,7 +2670,7 @@ class MainActivity : Activity() {
         val header = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { closeModeScreen() }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            addView(label("Connection mode", 22f, INK, TypefaceStyle.MEDIUM).apply {
+            addView(label(Strings.t("Connection mode"), 22f, INK, TypefaceStyle.MEDIUM).apply {
                 setPadding(dp(4), 0, 0, 0)
             })
         }
@@ -2674,7 +2679,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { bottomMargin = dp(8) })
 
-        content.addView(label("Choose how MSN-GUARD connects", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label(Strings.t("Choose how MSN-GUARD connects"), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
@@ -2738,9 +2743,9 @@ class MainActivity : Activity() {
             ).apply { topMargin = dp(2) })
 
             addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            if (selected) addView(label("CURRENT", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply {
+            if (selected) addView(label(Strings.t("CURRENT"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply {
                 letterSpacing = 0.08f
-            }) else if (!protocol.androidAvailable) addView(label("DESKTOP ONLY", 11f, MUTED, TypefaceStyle.MEDIUM).apply {
+            }) else if (!protocol.androidAvailable) addView(label(Strings.t("DESKTOP ONLY"), 11f, MUTED, TypefaceStyle.MEDIUM).apply {
                 letterSpacing = 0.05f
             })
         }
@@ -2768,11 +2773,11 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(CANVAS)
             addView(createHeaderBackButton { closeSettingsScreen() }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            addView(label("Settings", 22f, INK, TypefaceStyle.MEDIUM).apply {
+            addView(label(Strings.t("Settings"), 22f, INK, TypefaceStyle.MEDIUM).apply {
                 setPadding(dp(4), 0, 0, 0)
             })
         }
-        content.addView(sectionLabel("PROTECTION"), LinearLayout.LayoutParams(
+        content.addView(sectionLabel(Strings.t("PROTECTION")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ))
@@ -2802,15 +2807,15 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
 
-        content.addView(sectionLabel("ROUTING & DATA"), LinearLayout.LayoutParams(
+        content.addView(sectionLabel(Strings.t("ROUTING & DATA")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        content.addView(navRow("Traffic monitor", trafficHeadline()) { openTrafficMonitorScreen() }, LinearLayout.LayoutParams(
+        content.addView(navRow(Strings.t("Traffic monitor"), trafficHeadline()) { openTrafficMonitorScreen() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
-        splitTunnelSummaryButton = navRow("Split tunneling", splitTunnelSummary()) { openSplitTunnelScreen() }
+        splitTunnelSummaryButton = navRow(Strings.t("Split tunneling"), splitTunnelSummary()) { openSplitTunnelScreen() }
         content.addView(splitTunnelSummaryButton, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2839,7 +2844,7 @@ class MainActivity : Activity() {
         // PERF moved here off the home screen: a once-a-year knob does not earn
         // a quarter of the first thing the user sees.
         lateinit var perfRow: OrbitSettingsRow
-        perfRow = navRow("Performance", perfProfile().label) {
+        perfRow = navRow(Strings.t("Performance"), perfProfile().label) {
             choosePerfProfile { perfRow.setValue(perfProfile().label) }
         }
         content.addView(perfRow, LinearLayout.LayoutParams(
@@ -2847,7 +2852,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
 
-        content.addView(sectionLabel("CONNECTION"), LinearLayout.LayoutParams(
+        content.addView(sectionLabel(Strings.t("CONNECTION")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
@@ -2858,7 +2863,7 @@ class MainActivity : Activity() {
         // it changes what every row below it means. Burying it under Psiphon/Tor
         // detail would repeat the mistake the log-level chips made: a real decision
         // parked where nobody looks.
-        val typeRow = navRow("Tunnel type", tunnelTypeLabel()) { chooseTunnelType() }
+        val typeRow = navRow(Strings.t("Tunnel type"), tunnelTypeLabel()) { chooseTunnelType() }
         tunnelTypeRow = typeRow
         content.addView(typeRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2867,7 +2872,7 @@ class MainActivity : Activity() {
         // The port box: directly under the type it belongs to, and inert until SOCKS
         // is chosen. Greyed rather than hidden, so the user can see that choosing
         // SOCKS is what unlocks it instead of a row appearing out of nowhere.
-        val portRow = navRow("SOCKS port", proxyPortValue()) { editProxyPort() }
+        val portRow = navRow(Strings.t("SOCKS port"), proxyPortValue()) { editProxyPort() }
         proxyPortRow = portRow
         content.addView(portRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2884,7 +2889,7 @@ class MainActivity : Activity() {
         val lanRow = OrbitToggleRow(
             this,
             palette,
-            "Share over LAN",
+            Strings.t("Share over LAN"),
             lanSharingSubtitle(),
             lanSharingEnabled() && lanSharingCapable(),
         ) { on ->
@@ -2915,13 +2920,13 @@ class MainActivity : Activity() {
         // current mode has to be repaintable from outside this builder. Without
         // that, picking a mode only appeared after leaving and re-entering
         // settings, because this row was built once with the old value.
-        val modeRow = navRow("Connection mode", selectedProtocol.label) { openModeScreen() }
+        val modeRow = navRow(Strings.t("Connection mode"), selectedProtocol.label) { openModeScreen() }
         connectionModeRow = modeRow
         content.addView(modeRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
-        content.addView(navRow("Tunnel controls", "Shaping · Anti-DPI") { openTunnelControlsScreen() }, LinearLayout.LayoutParams(
+        content.addView(navRow(Strings.t("Tunnel controls"), "Shaping · Anti-DPI") { openTunnelControlsScreen() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
@@ -2929,7 +2934,7 @@ class MainActivity : Activity() {
         // like live filters and were in fact a build-time core setting — a tap did
         // nothing until the next connect. Here the value is visible in the row and
         // the "next connection" wording sets the expectation.
-        val logLevelRow = navRow("Log verbosity", logLevel().label) { chooseLogLevel() }
+        val logLevelRow = navRow(Strings.t("Log verbosity"), logLevel().label) { chooseLogLevel() }
         logVerbosityRow = logLevelRow
         content.addView(logLevelRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2938,14 +2943,14 @@ class MainActivity : Activity() {
         // Both rows came off the home screen's action bar, which was removed to make
         // room for a six-transport rail. They sit under Log verbosity because that is
         // the row that decides what the log will contain.
-        content.addView(navRow("Log", "What the tunnel did") { openLogsScreen() }, LinearLayout.LayoutParams(
+        content.addView(navRow(Strings.t("Log"), "What the tunnel did") { openLogsScreen() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
         // Names the two transports it applies to. As an unlabelled action-bar button
         // it looked global, and on Psiphon, Tor or SHARD there is nothing to scan —
         // those transports find their own paths.
-        val scanRow = navRow("Scan Mode", scanModeSummary()) { openScannerScreen() }
+        val scanRow = navRow(Strings.t("Scan Mode"), scanModeSummary()) { openScannerScreen() }
         scannerRow = scanRow
         content.addView(scanRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2955,7 +2960,7 @@ class MainActivity : Activity() {
         // Psiphon gets its own section: all three controls below are meaningless
         // unless the chain is armed, and grouping them says that structurally
         // instead of relying on the user to infer it from a mixed list.
-        content.addView(sectionLabel("PSIPHON"), LinearLayout.LayoutParams(
+        content.addView(sectionLabel(Strings.t("PSIPHON")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
@@ -2970,8 +2975,8 @@ class MainActivity : Activity() {
         val chainRow = OrbitToggleRow(
             this,
             palette,
-            "Psiphon over WARP",
-            "Tunnel Psiphon inside a WARP transport",
+            Strings.t("Psiphon over WARP"),
+            Strings.t("Tunnel Psiphon inside a WARP transport"),
             // The EFFECTIVE state, not the stored preference: the key is global, but
             // this switch is Psiphon's. Showing the raw preference made the switch
             // sit lit-and-disabled on MASQUE — green, so it read as "on", while being
@@ -2989,7 +2994,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
 
-        val outerRow = navRow("Outer transport", chainOuterMode().label) {
+        val outerRow = navRow(Strings.t("Outer transport"), chainOuterMode().label) {
             chooseChainOuterMode { chainOuterRow?.setValue(chainOuterMode().label) }
         }
         chainOuterRow = outerRow
@@ -2999,7 +3004,7 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(8) })
         // Last of the three: the transport row decides what carries Psiphon, this
         // one decides where Psiphon comes out. Reading downwards follows the packet.
-        val countryRow = navRow("Preferred country", egressRegionLabel()) {
+        val countryRow = navRow(Strings.t("Preferred country"), egressRegionLabel()) {
             chooseEgressRegion { egressRegionRow?.setValue(egressRegionLabel()) }
         }
         egressRegionRow = countryRow
@@ -3010,11 +3015,11 @@ class MainActivity : Activity() {
 
         // Tor section, mirroring the Psiphon one: the mode picker is the only
         // control, and it is meaningful regardless of what else is set.
-        content.addView(sectionLabel("TOR"), LinearLayout.LayoutParams(
+        content.addView(sectionLabel(Strings.t("TOR")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        val torModeRow = navRow("Connection mode", torMode().label) {
+        val torModeRow = navRow(Strings.t("Connection mode"), torMode().label) {
             chooseTorMode {
                 torModeRowRef?.setValue(torMode().label)
                 // The mode decides whether the chain can apply at all, so both the
@@ -3043,7 +3048,7 @@ class MainActivity : Activity() {
         // lie the greyed rows exist to prevent. Nothing is lost: the mode row above
         // is gated the same way, so a user who cannot reach this box cannot reach
         // the mode that consumes it either.
-        val torBridgeRow = navRow("Manual bridge", TorManualBridges.summary(this)) {
+        val torBridgeRow = navRow(Strings.t("Manual bridge"), TorManualBridges.summary(this)) {
             editTorBridges()
         }
         torBridgeRowRef = torBridgeRow
@@ -3058,8 +3063,8 @@ class MainActivity : Activity() {
         val torChainRow = OrbitToggleRow(
             this,
             palette,
-            "Tor over WARP",
-            "Direct, Meek and your own bridges, inside a WARP transport",
+            Strings.t("Tor over WARP"),
+            Strings.t("Direct, Meek and your own bridges, inside a WARP transport"),
             chainArmed(Protocol.TOR) && selectedProtocol == Protocol.TOR &&
                 TorManager.isChainable(this, torMode()),
         ) { armed ->
@@ -3075,7 +3080,7 @@ class MainActivity : Activity() {
         // Tor's outer transport, mirroring Psiphon's row and in the same position
         // relative to its switch: which WARP tunnel carries Tor. Writes Tor's own
         // key, so pinning WoW for Psiphon leaves Tor on Auto.
-        val torOuterRow = navRow("Outer transport", torChainOuterMode().label) {
+        val torOuterRow = navRow(Strings.t("Outer transport"), torChainOuterMode().label) {
             chooseTorChainOuterMode { torChainOuterRow?.setValue(torChainOuterMode().label) }
         }
         torChainOuterRow = torOuterRow
@@ -3086,7 +3091,7 @@ class MainActivity : Activity() {
         // Same control as Psiphon's "Preferred country", same wording, same
         // preference-not-a-pin semantics — deliberately, because to the user it is
         // the same question. Underneath it is tor's ExitNodes with StrictNodes 0.
-        val torCountryRow = navRow("Preferred country", torRegionLabel()) {
+        val torCountryRow = navRow(Strings.t("Preferred country"), torRegionLabel()) {
             chooseTorRegion { torRegionRowRef?.setValue(torRegionLabel()) }
         }
         torRegionRowRef = torCountryRow
@@ -3112,11 +3117,11 @@ class MainActivity : Activity() {
         // which is what the chain exists to achieve for Psiphon, and wrapping
         // fragmented TLS inside a second tunnel both doubles the latency and
         // destroys the fragmentation's effect — the DPI sees the outer tunnel.
-        content.addView(sectionLabel("SHARD"), LinearLayout.LayoutParams(
+        content.addView(sectionLabel(Strings.t("SHARD")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        val shardRow = navRow("Node list", shardPoolSummary()) {
+        val shardRow = navRow(Strings.t("Node list"), shardPoolSummary()) {
             // force = true: the whole point of tapping this is to bypass the
             // six-hour interval the background job honours.
             shardPoolRow?.setValue("Updating…")
@@ -3226,18 +3231,18 @@ class MainActivity : Activity() {
                         val octets = ip.split(".").map { it.toIntOrNull() ?: -1 }
                         if (octets.all { it in 0..255 }) {
                             prefs.putString("shard_custom_cf_ip", ip)
-                            toastShort("Custom Cloudflare IP applied: $ip")
+                            toastShort(Strings.t("Custom Cloudflare IP applied: $ip"))
                         } else {
-                            toastShort("Invalid IP address")
+                            toastShort(Strings.t("Invalid IP address"))
                             return@setOnClickListener
                         }
                     } else {
-                        toastShort("Invalid IP format (use IPv4)")
+                        toastShort(Strings.t("Invalid IP format (use IPv4)"))
                         return@setOnClickListener
                     }
                 }
                 prefs.apply()
-                if (ip.isEmpty()) toastShort("Custom IP cleared")
+                if (ip.isEmpty()) toastShort(Strings.t("Custom IP cleared"))
             }
         }
         inputRow.addView(applyButton)
@@ -3258,7 +3263,7 @@ class MainActivity : Activity() {
         val splitRow = OrbitToggleRow(
             this,
             palette,
-            "Smart Split",
+            Strings.t("Smart Split"),
             SmartSplit.summary(this),
             SmartSplit.enabled(this),
         ) { on ->
@@ -3276,11 +3281,11 @@ class MainActivity : Activity() {
         // ever needs to know a measurement happened at all. A carrier that changes
         // its DPI, or a cached "not effective here" from a bad minute on the
         // network, would otherwise be sticky until the app's data is cleared.
-        val remeasureRow = navRow("Re-measure network", "") {
+        val remeasureRow = navRow(Strings.t("Re-measure network"), "") {
             SmartSplit.forgetMeasurements(this)
             smartSplitRow?.setSubtitle(SmartSplit.summary(this))
             renderChainCard()
-            toastShort("Will re-measure on the next connect")
+            toastShort(Strings.t("Will re-measure on the next connect"))
         }
         content.addView(remeasureRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3289,51 +3294,58 @@ class MainActivity : Activity() {
 
         // APPEARANCE, like BACKUP below it, is about the app rather than about a
         // tunnel, so it sits out here and not under Tunnel Controls.
-        content.addView(sectionLabel("APPEARANCE"), LinearLayout.LayoutParams(
+        content.addView(sectionLabel(Strings.t("APPEARANCE")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
         // No stored reference: picking a theme calls recreate(), so the row is
         // rebuilt with the new value rather than being repainted in place.
-        content.addView(navRow("Theme", AppAppearance.mode(this).label) { chooseTheme() }, LinearLayout.LayoutParams(
+        content.addView(navRow(Strings.t("Theme"), AppAppearance.mode(this).label) { chooseTheme() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
+        // Language sits directly under Theme: both are appearance-scale choices
+        // that repaint the whole app via recreate(). No stored reference for
+        // the same reason — the settings page is rebuilt, not repainted.
+        content.addView(navRow(Strings.t("Language"), AppLanguage.label(currentLanguagePref())) { chooseLanguage() }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
 
         // BACKUP sits outside Tunnel Controls, next to ABOUT: it is about the
         // app's own state, not about how a tunnel is shaped, and burying it in a
         // troubleshooting sub-page is where a user would never look for it after
         // reinstalling.
-        content.addView(sectionLabel("BACKUP"), LinearLayout.LayoutParams(
+        content.addView(sectionLabel(Strings.t("BACKUP")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        val backupRow = navRow("Back up settings", backupSummary()) { exportSettings() }
+        val backupRow = navRow(Strings.t("Back up settings"), backupSummary()) { exportSettings() }
         settingsBackupRow = backupRow
         content.addView(backupRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
-        content.addView(navRow("Restore settings", "From a backup file") { importSettings() }, LinearLayout.LayoutParams(
+        content.addView(navRow(Strings.t("Restore settings"), "From a backup file") { importSettings() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
-        content.addView(navRow("Reset to defaults", "Forget every setting") { confirmResetSettings() }, LinearLayout.LayoutParams(
+        content.addView(navRow(Strings.t("Reset to defaults"), "Forget every setting") { confirmResetSettings() }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
 
-        content.addView(sectionLabel("ABOUT"), LinearLayout.LayoutParams(
+        content.addView(sectionLabel(Strings.t("ABOUT")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        content.addView(navRow("Check for updates", "v${appVersion()}") {
+        content.addView(navRow(Strings.t("Check for updates"), "v${appVersion()}") {
             appUpdater.checkForUpdate()
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(10) })
-        content.addView(navRow("Source on GitHub", iconRes = R.drawable.ic_github) {
+        content.addView(navRow(Strings.t("Source on GitHub"), iconRes = R.drawable.ic_github) {
             openLink("https://github.com/mbm110/MSN-GUARD")
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3403,9 +3415,9 @@ class MainActivity : Activity() {
         content.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { closeTunnelControlsScreen() }, LinearLayout.LayoutParams(dp(48), dp(56)))
-            addView(label("Tunnel controls", 22f, INK, TypefaceStyle.MEDIUM))
+            addView(label(Strings.t("Tunnel controls"), 22f, INK, TypefaceStyle.MEDIUM))
         })
-        content.addView(label("Applied on your next connection", 13.5f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label(Strings.t("Applied on your next connection"), 13.5f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(22) })
         // Title and current value are separate columns now, so a long value
@@ -3416,7 +3428,7 @@ class MainActivity : Activity() {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 ).apply { topMargin = dp(9) })
             }
-        content.addView(sectionLabel("CONNECTION SHAPING"))
+        content.addView(sectionLabel(Strings.t("CONNECTION SHAPING")))
         lateinit var obfRow: OrbitSettingsRow
         obfRow = addControl("Obfuscation", obfuscationProfile().label) {
             chooseObfuscation { obfRow.setValue(obfuscationProfile().label) }
@@ -3427,12 +3439,12 @@ class MainActivity : Activity() {
             preferences().edit().putBoolean(RETRY_OBFUSCATION, !retryObfuscationProfiles()).apply()
             retryRow.setValue(if (retryObfuscationProfiles()) "On" else "Off")
         }
-        content.addView(sectionLabel("ROUTING"), LinearLayout.LayoutParams(
+        content.addView(sectionLabel(Strings.t("ROUTING")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        addControl("Manual endpoint", manualEndpoint() ?: "Automatic") { editManualEndpoint() }
+        addControl("Manual endpoint", manualEndpoint() ?: Strings.t("Automatic")) { editManualEndpoint() }
         addControl("Gateway cache", defaultEndpointDiscovery().label) { manageGatewayCache() }
-        content.addView(sectionLabel("TROUBLESHOOTING"), LinearLayout.LayoutParams(
+        content.addView(sectionLabel(Strings.t("TROUBLESHOOTING")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
         lateinit var tlsRow: OrbitSettingsRow
@@ -3457,7 +3469,7 @@ class MainActivity : Activity() {
         // The underlying prefs and the core's env bridge are untouched, so the
         // knobs still exist for the CLI; they are simply no longer surfaced as
         // settings that silently do nothing on this device.
-        content.addView(sectionLabel("ANTI-DPI"), LinearLayout.LayoutParams(
+        content.addView(sectionLabel(Strings.t("ANTI-DPI")), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
         lateinit var fragRow: OrbitSettingsRow
@@ -3512,15 +3524,15 @@ class MainActivity : Activity() {
         sheet.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            addView(label("Obfuscation", 22f, INK, TypefaceStyle.MEDIUM))
+            addView(label(Strings.t("Obfuscation"), 22f, INK, TypefaceStyle.MEDIUM))
         })
-        sheet.addView(label("Adjust traffic-shape padding for filtered networks", 14f, MUTED), LinearLayout.LayoutParams(
+        sheet.addView(label(Strings.t("Adjust traffic-shape padding for filtered networks"), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
         val options = mutableMapOf<ObfuscationProfile, SelectionOption>()
         ObfuscationProfile.entries.forEachIndexed { index, profile ->
             val title = label(profile.label, 16f, INK, TypefaceStyle.MEDIUM)
-            val indicator = label("SELECTED", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+            val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
             val row = LinearLayout(this).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 orientation = LinearLayout.HORIZONTAL
@@ -3828,7 +3840,7 @@ class MainActivity : Activity() {
         sheet.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            addView(label("Manual bridge", 22f, INK, TypefaceStyle.MEDIUM))
+            addView(label(Strings.t("Manual bridge"), 22f, INK, TypefaceStyle.MEDIUM))
         })
         sheet.addView(label(
             "One bridge per line, exactly as you received it. obfs4, meek_lite, " +
@@ -3881,9 +3893,9 @@ class MainActivity : Activity() {
             renderChainCard()
             dialog.dismiss()
             if (torMode() != TorManager.TorMode.MANUAL) {
-                toastShort("Saved — set Connection mode to Manual bridge to use it")
+                toastShort(Strings.t("Saved — set Connection mode to Manual bridge to use it"))
             } else {
-                toastShort("Saved — applies on the next connect")
+                toastShort(Strings.t("Saved — applies on the next connect"))
             }
         }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
         sheet.addView(buttons, LinearLayout.LayoutParams(
@@ -3910,7 +3922,7 @@ class MainActivity : Activity() {
     /** What the settings row shows: "Automatic" or "🇩🇪 Germany". */
     private fun torRegionLabel(): String {
         val code = torRegion()
-        return if (code == TorRegions.AUTO) "Automatic" else TorRegions.label(code)
+        return if (code == TorRegions.AUTO) Strings.t("Automatic") else TorRegions.label(code)
     }
 
     /**
@@ -3934,7 +3946,7 @@ class MainActivity : Activity() {
             options = options,
             selected = torRegion(),
             label = { code ->
-                if (code == TorRegions.AUTO) "Automatic" else TorRegions.label(code)
+                if (code == TorRegions.AUTO) Strings.t("Automatic") else TorRegions.label(code)
             },
             description = { code ->
                 if (code == TorRegions.AUTO) {
@@ -3981,7 +3993,7 @@ class MainActivity : Activity() {
     /** What the settings row shows: "Automatic" or "🇩🇪 Germany". */
     private fun egressRegionLabel(): String {
         val code = egressRegion()
-        return if (code == CoreConfig.EGRESS_REGION_AUTO) "Automatic" else PsiphonRegions.label(code)
+        return if (code == CoreConfig.EGRESS_REGION_AUTO) Strings.t("Automatic") else PsiphonRegions.label(code)
     }
 
     /**
@@ -3994,10 +4006,9 @@ class MainActivity : Activity() {
      * says so, because a control that silently disobeys is worse than one that
      * explains its limits.
      *
-     * Applies to Psiphon over WARP only; a plain Psiphon connect always takes
-     * whichever server answers first. That is enforced in the service
-     * (armRegionPhase reads the preference only when chained), and this row is
-     * disabled with the chain off so the two can never disagree.
+     * Applies to every Psiphon connect, plain or over WARP: the row is live
+     * whenever Psiphon is selected, and the service honours the choice either
+     * way (armRegionPhase no longer gates on chainMode).
      */
     /**
      * Dark or light.
@@ -4030,15 +4041,56 @@ class MainActivity : Activity() {
         }
     }
 
+    /** The raw preference, including "system" — what the Language row displays. */
+    private fun currentLanguagePref(): String =
+        preferences().getString(AppLanguage.PREF, "system") ?: "system"
+
+    /**
+     * Pick the UI language: system, English, Persian, Chinese.
+     *
+     * Exactly the theme's shape: write the preference, recreate(), and the
+     * whole tree is rebuilt reading [Strings.t] at every label. The tunnel is
+     * untouched — it lives in the service, not the activity. The service's
+     * own status strings pick the new language on their next sendStatus
+     * because AppLanguage reads the preference per call.
+     */
+    private fun chooseLanguage() {
+        val options = listOf("system") + AppLanguage.SUPPORTED
+        showChoiceSheet(
+            title = Strings.t("Language"),
+            subtitle = "Applies straight away. A running tunnel is not interrupted.",
+            options = options,
+            selected = currentLanguagePref(),
+            label = { code -> AppLanguage.label(code) },
+            description = { code ->
+                when (code) {
+                    "system" -> if (AppLanguage.current() == "fa") {
+                        "انگلیسی، تا مگر دستگاه روی فارسی یا چینی باشد"
+                    } else if (AppLanguage.current() == "zh") {
+                        "英语，除非设备系统语言为波斯语或中文"
+                    } else {
+                        "English unless the device is set to فارسی or 中文"
+                    }
+                    else -> AppLanguage.label(code)
+                }
+            },
+        ) { chosen ->
+            if (chosen == currentLanguagePref()) return@showChoiceSheet
+            AppLanguage.set(this, chosen)
+            ConnectionLog.record("UI language set to ${AppLanguage.label(chosen)}")
+            recreate()
+        }
+    }
+
     private fun chooseEgressRegion(after: (() -> Unit)? = null) {
         val options = listOf(CoreConfig.EGRESS_REGION_AUTO) + PsiphonRegions.options(this)
         showChoiceSheet(
             title = "Preferred country",
-            subtitle = "Psiphon over WARP tries this first. If it will not connect, all countries are tried.",
+            subtitle = "Psiphon tries this country first. If it will not connect, all countries are tried.",
             options = options,
             selected = egressRegion(),
             label = { code ->
-                if (code == CoreConfig.EGRESS_REGION_AUTO) "Automatic" else PsiphonRegions.label(code)
+                if (code == CoreConfig.EGRESS_REGION_AUTO) Strings.t("Automatic") else PsiphonRegions.label(code)
             },
             description = { code ->
                 if (code == CoreConfig.EGRESS_REGION_AUTO) {
@@ -4096,7 +4148,7 @@ class MainActivity : Activity() {
      */
     private fun chooseTunnelType() {
         if (!modeControlsEnabled || TunnelStatus.isActive()) {
-            toastShort("Disconnect first to change the tunnel type")
+            toastShort(Strings.t("Disconnect first to change the tunnel type"))
             return
         }
         showChoiceSheet(
@@ -4123,12 +4175,12 @@ class MainActivity : Activity() {
             // app pointed at it would break on its first UDP flow. Say so at the
             // moment of the choice instead of letting the connect fail later.
             if (chosen == CoreConfig.TUNNEL_MODE_PROXY && selectedProtocol == Protocol.TOR) {
-                toastShort("Tor cannot run as a SOCKS proxy — pick another transport")
+                toastShort(Strings.t("Tor cannot run as a SOCKS proxy — pick another transport"))
             } else if (chosen == CoreConfig.TUNNEL_MODE_PROXY && selectedProtocol == Protocol.SHARD) {
                 // SHARD's refusal has a different cause — no byte counter in a proxy
                 // data path — but the same remedy, and it also has a better answer:
                 // Share over LAN already works in VPN mode.
-                toastShort("SHARD runs as a VPN — use Share over LAN instead")
+                toastShort(Strings.t("SHARD runs as a VPN — use Share over LAN instead"))
             }
             // The port row is the thing that visibly reacts to this choice, so it is
             // repainted and re-enabled in the same gesture, and the LAN row with it:
@@ -4157,11 +4209,11 @@ class MainActivity : Activity() {
      */
     private fun editProxyPort() {
         if (!CoreConfig.proxyOnly(this)) {
-            toastShort("Set Tunnel type to SOCKS proxy first")
+            toastShort(Strings.t("Set Tunnel type to SOCKS proxy first"))
             return
         }
         if (TunnelStatus.isActive()) {
-            toastShort("Disconnect first to change the port")
+            toastShort(Strings.t("Disconnect first to change the port"))
             return
         }
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
@@ -4180,7 +4232,7 @@ class MainActivity : Activity() {
         sheet.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            addView(label("SOCKS port", 22f, INK, TypefaceStyle.MEDIUM))
+            addView(label(Strings.t("SOCKS port"), 22f, INK, TypefaceStyle.MEDIUM))
         })
         // The address is stated here because it is the question every user of this
         // feature actually has, and getting it wrong is the most likely way for the
@@ -4210,7 +4262,7 @@ class MainActivity : Activity() {
             preferences().edit().putInt(CoreConfig.PROXY_PORT_PREF, typed).apply()
             proxyPortRow?.setValue(proxyPortValue())
             ConnectionLog.record("SOCKS port set to $typed — applies on the next connect")
-            toastShort("SOCKS port set to $typed")
+            toastShort(Strings.t("SOCKS port set to $typed"))
             dialog.dismiss()
         }, LinearLayout.LayoutParams(dp(112), dp(56)).apply { leftMargin = dp(10) })
         sheet.addView(entry, LinearLayout.LayoutParams(
@@ -4320,9 +4372,9 @@ class MainActivity : Activity() {
         sheet.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            addView(label("Manual endpoint", 22f, INK, TypefaceStyle.MEDIUM))
+            addView(label(Strings.t("Manual endpoint"), 22f, INK, TypefaceStyle.MEDIUM))
         })
-        sheet.addView(label("Numeric IPv4 or bracketed IPv6 address with port. Bypasses discovery.", 14f, MUTED), LinearLayout.LayoutParams(
+        sheet.addView(label(Strings.t("Numeric IPv4 or bracketed IPv6 address with port. Bypasses discovery."), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
         sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
@@ -4525,7 +4577,7 @@ class MainActivity : Activity() {
         val rows = mutableMapOf<T, SelectionOption>()
         options.forEachIndexed { index, item ->
             val optionTitle = label(label(item), 16f, INK, TypefaceStyle.MEDIUM)
-            val indicator = label("SELECTED", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+            val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
             val row = LinearLayout(this).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 orientation = LinearLayout.HORIZONTAL
@@ -4654,8 +4706,18 @@ class MainActivity : Activity() {
             setChecked(psiphonChained)
             setAvailable(chainAvailable)
         }
-        // The two rows below follow the switch's VISIBLE state, not the preference,
-        // for the same reason: with the switch reading off they must not look live.
+        // The two rows below used to follow the switch's VISIBLE state one for
+        // one. They no longer do, and the split is the point:
+        //
+        // * "Outer transport" is a property of the WARP chain, so it stays
+        //   alive exactly while the chain is armed.
+        // * "Preferred country" is a property of PSIPHON itself — the
+        //   service honours the choice on a plain connect too (armRegionPhase
+        //   reads it regardless of chainMode), so the row is live the moment
+        //   Psiphon is selected, chain off or on. Field request: the row used
+        //   to grey out with the chain off, which read as "the setting is
+        //   dead" while the picker behind it had been fully functional for
+        //   plain connects all along.
         val childrenAvailable = chainAvailable && psiphonChained
         chainOuterRow?.apply {
             setValue(chainOuterMode().label)
@@ -4663,7 +4725,7 @@ class MainActivity : Activity() {
         }
         egressRegionRow?.apply {
             setValue(egressRegionLabel())
-            setAvailable(childrenAvailable)
+            setAvailable(chainAvailable)
         }
         // LAN sharing is no longer Psiphon-only: MASQUE/WireGuard/WoW publish a real
         // SOCKS5 listener in SOCKS tunnel type, and Tor publishes its own SocksPort
@@ -4745,9 +4807,9 @@ class MainActivity : Activity() {
         content.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { closeTrafficMonitorScreen() }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            addView(label("Traffic monitor", 22f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) })
+            addView(label(Strings.t("Traffic monitor"), 22f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) })
         })
-        content.addView(label("Traffic carried by MSN-GUARD. Per-app attribution is not available from encrypted tunnel counters.", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label(Strings.t("Traffic carried by MSN-GUARD. Per-app attribution is not available from encrypted tunnel counters."), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
@@ -4771,7 +4833,7 @@ class MainActivity : Activity() {
     }
 
     private fun addTrafficMetric(parent: LinearLayout, title: String): TextView {
-        val value = label("Waiting for tunnel traffic", 18f, INK, TypefaceStyle.MEDIUM)
+        val value = label(Strings.t("Waiting for tunnel traffic"), 18f, INK, TypefaceStyle.MEDIUM)
         parent.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(15), dp(18), dp(15))
@@ -4832,18 +4894,18 @@ class MainActivity : Activity() {
         val header = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { closeSplitTunnelScreen() }, LinearLayout.LayoutParams(dp(48), dp(56)))
-            addView(label("Split tunneling", 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(label(Strings.t("Split tunneling"), 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(createSettingsButton("Done", backgroundOverride = primary, textColorOverride = primaryContainer) {
                 settings.save(settings.mode(), selected)
                 closeSplitTunnelScreen()
             }, LinearLayout.LayoutParams(dp(88), dp(40)).apply { marginEnd = dp(4) })
         }
         content.addView(header)
-        content.addView(label("Choose which apps use MSN-GUARD. Changes apply next connection.", 14f, MUTED), LinearLayout.LayoutParams(
+        content.addView(label(Strings.t("Choose which apps use MSN-GUARD. Changes apply next connection."), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(20) })
-        content.addView(label("MODE", 12f, MUTED).apply { letterSpacing = 0.1f })
+        content.addView(label(Strings.t("MODE"), 12f, MUTED).apply { letterSpacing = 0.1f })
         val modeOptions = mutableMapOf<SplitTunnelSettings.Mode, SelectionOption>()
         SplitTunnelSettings.Mode.entries.forEachIndexed { index, mode ->
             val option = createSplitModeOption(mode, settings.mode()) { chosen ->
@@ -4903,7 +4965,7 @@ class MainActivity : Activity() {
         content.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { closeSplitTunnelAppsScreen() }, LinearLayout.LayoutParams(dp(48), dp(56)))
-            addView(label("Apps", 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(label(Strings.t("Apps"), 22f, INK, TypefaceStyle.MEDIUM), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(createSettingsButton("Done", backgroundOverride = primary, textColorOverride = primaryContainer) {
                 settings.save(mode, selected.toHashSet())
                 closeSplitTunnelAppsScreen()
@@ -4962,7 +5024,7 @@ class MainActivity : Activity() {
             // WRAP_CONTENT keeps the caption out of that branch: it is measured
             // AT_MOST the page width, counts its real width toward the box, and a
             // longer translation still wraps normally instead of being clipped.
-            addView(label("Scanning installed apps…", 14f, MUTED).apply {
+            addView(label(Strings.t("Scanning installed apps…"), 14f, MUTED).apply {
                 gravity = Gravity.CENTER
                 setPadding(0, dp(16), 0, 0)
             }, LinearLayout.LayoutParams(
@@ -5137,7 +5199,7 @@ class MainActivity : Activity() {
         onSelect: (SplitTunnelSettings.Mode) -> Unit,
     ): SelectionOption {
         val title = label(mode.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label("SELECTED", 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = 0.08f }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(18), 0, dp(18), 0)
@@ -5433,7 +5495,7 @@ class MainActivity : Activity() {
         // user watches the search move — this is the whole point of doing it here
         // rather than inside the service.
         updateConnectionMode(protocol)
-        showConnectionProgress("Auto Scan", "Trying ${protocol.label}…")
+        showConnectionProgress(Strings.t("Auto Scan"), "Trying ${protocol.label}…")
         // The previous rung's session may still be unwinding. Consent is already
         // granted at this point (the first rung asked for it), so this goes straight
         // to the service.
@@ -5499,7 +5561,7 @@ class MainActivity : Activity() {
             // advance the ladder a second time.
             cancelVerification()
             if (!advanceAutoScan()) {
-                showFailure("No transport connected on this network — try again or pick one yourself")
+                showFailure(Strings.t("No transport connected on this network — try again or pick one yourself"))
             }
         }, autoScanBudgetMs(AUTO_SCAN_LADDER[rung]))
     }
@@ -5617,17 +5679,17 @@ class MainActivity : Activity() {
         // STARTING and SCANNING are also CONNECTING on the dial, so a stale
         // percentage from the previous attempt would still be drawn.
         orbitDial.progressPercent = -1
-        showConnectionProgress("Starting", "Preparing ${selectedProtocol.label} tunnel")
+        showConnectionProgress(Strings.t("Starting"), "Preparing ${selectedProtocol.label} tunnel")
     }
 
     private fun showScanning() {
         orbitDial.progressPercent = -1
-        showConnectionProgress("Scanning", "Finding the best MASQUE gateway")
+        showConnectionProgress(Strings.t("Scanning"), Strings.t("Finding the best MASQUE gateway"))
     }
 
     private fun showConnectionProgress(title: String, detail: String) {
         latencyRequest++
-        chipLatency.text = "Latency —"
+        chipLatency.text = Strings.t("Latency —")
         visualState = OrbitDialView.State.CONNECTING
         orbitDial.state = visualState
         renderStatusLed()
@@ -5640,7 +5702,7 @@ class MainActivity : Activity() {
         // the ladder's line a moment after it is drawn, and a user watching the
         // screen cannot tell an automatic search from an ordinary connect.
         if (autoScanIndex >= 0) {
-            connectionTitle.text = "Auto Scan"
+            connectionTitle.text = Strings.t("Auto Scan")
             connectionDetail.text = "Trying ${AUTO_SCAN_LADDER[autoScanIndex].label}" +
                 " (${autoScanIndex + 1} of ${AUTO_SCAN_LADDER.size})"
         } else {
@@ -5716,7 +5778,7 @@ class MainActivity : Activity() {
         // Belongs to the tunnel that just died; keeping it would show a stale exit
         // next to a failure message.
         clearCoreExitIp()
-        chipLatency.text = "Latency —"
+        chipLatency.text = Strings.t("Latency —")
         visualState = OrbitDialView.State.FAILED
         orbitDial.state = visualState
         renderStatusLed()
@@ -6427,7 +6489,7 @@ class MainActivity : Activity() {
          * started for SHARD. The service branches on it before touching
          * NativeCore, the same way the Psiphon and Tor names do.
          */
-        SHARD("SHARD", "shard", "Public nodes, auto-selected; no setup"),
+        SHARD(Strings.t("SHARD"), "shard", "Public nodes, auto-selected; no setup"),
     }
 
     private enum class ScanTarget(

@@ -291,7 +291,7 @@ object SmartSplit {
         !enabled(context) -> "Off"
         measuredUnavailable(context) -> "On · not effective on this network"
         cachedProfile(context) == null -> "On · will measure this network"
-        else -> "On · tuned for this network"
+        else -> Strings.t("On · tuned for this network")
     }
 
     /**

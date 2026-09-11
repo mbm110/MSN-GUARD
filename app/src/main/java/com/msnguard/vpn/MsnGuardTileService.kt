@@ -281,11 +281,11 @@ class MsnGuardTileService : TileService() {
             // laid out from the order, but the two enums are read as one list by
             // anyone maintaining them, and the tile's default is the first entry's
             // sibling on the main screen.
-            WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel"),
-            MASQUE("MASQUE", "masque", "HTTP/3 tunnel"),
-            WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel"),
-            PSIPHON("Psiphon", "psiphon", "SOCKS5 proxy tunnel"),
-            TOR("Tor", "tor", "Onion routing"),
+            WIREGUARD(Strings.t("WireGuard"), "wireguard", "WireGuard tunnel"),
+            MASQUE(Strings.t("MASQUE"), "masque", "HTTP/3 tunnel"),
+            WARP_IN_WARP(Strings.t("WARP-on-WARP"), "gool", "Double-layer tunnel"),
+            PSIPHON(Strings.t("Psiphon"), "psiphon", "SOCKS5 proxy tunnel"),
+            TOR(Strings.t("Tor"), "tor", "Onion routing"),
         }
 
         enum class ScanTarget(
@@ -293,9 +293,9 @@ class MsnGuardTileService : TileService() {
             val coreName: String,
             val description: String,
         ) {
-            IPV4("IPv4", "v4", "Scan IPv4 endpoints only"),
-            IPV6("IPv6", "v6", "Scan IPv6 endpoints only"),
-            BOTH("Both", "both", "Scan IPv4 and IPv6 endpoints"),
+            IPV4(Strings.t("IPv4"), "v4", "Scan IPv4 endpoints only"),
+            IPV6(Strings.t("IPv6"), "v6", "Scan IPv6 endpoints only"),
+            BOTH(Strings.t("Both"), "both", "Scan IPv4 and IPv6 endpoints"),
         }
 
         enum class ScanMode(
@@ -303,11 +303,11 @@ class MsnGuardTileService : TileService() {
             val coreName: String,
             val description: String,
         ) {
-            TURBO("Turbo", "turbo", "Fastest scan; first verified route wins"),
-            BALANCED("Balanced", "balanced", "Default mix of speed and coverage"),
-            THOROUGH("Thorough", "thorough", "Deep scan; selects best latency"),
-            STEALTH("Stealth", "stealth", "Quiet, patient probing"),
-            IRONCLAD("Ironclad", "ironclad", "Strict CONNECT-IP verification before selection"),
+            TURBO(Strings.t("Turbo"), "turbo", "Fastest scan; first verified route wins"),
+            BALANCED(Strings.t("Balanced"), "balanced", "Default mix of speed and coverage"),
+            THOROUGH(Strings.t("Thorough"), "thorough", "Deep scan; selects best latency"),
+            STEALTH(Strings.t("Stealth"), "stealth", "Quiet, patient probing"),
+            IRONCLAD(Strings.t("Ironclad"), "ironclad", "Strict CONNECT-IP verification before selection"),
         }
 
         enum class EndpointDiscovery(
@@ -315,8 +315,8 @@ class MsnGuardTileService : TileService() {
             val coreName: String,
             val description: String,
         ) {
-            CACHE("Cache & refresh", "cache", "Use verified gateways first, then discover more"),
-            FRESH("Fresh scan", "fresh", "Start a new scan every connection"),
+            CACHE(Strings.t("Cache & refresh"), "cache", "Use verified gateways first, then discover more"),
+            FRESH(Strings.t("Fresh scan"), "fresh", "Start a new scan every connection"),
         }
 
         enum class MasqueTransport(
@@ -324,20 +324,20 @@ class MsnGuardTileService : TileService() {
             val coreName: String,
             val description: String,
         ) {
-            H3("HTTP/3", "h3", "QUIC; best on healthy UDP networks"),
-            H2("HTTP/2", "h2", "TCP; use when UDP or QUIC is blocked"),
+            H3(Strings.t("HTTP/3"), "h3", "QUIC; best on healthy UDP networks"),
+            H2(Strings.t("HTTP/2"), "h2", "TCP; use when UDP or QUIC is blocked"),
         }
 
         enum class ObfuscationProfile(val label: String, val coreName: String, val description: String) {
-            OFF("Off", "off", "No traffic-shape padding"),
-            LIGHT("Light", "light", "Lower overhead on mild filtering"),
-            BALANCED("Balanced", "balanced", "Recommended filtering resistance"),
-            AGGRESSIVE("Aggressive", "aggressive", "Highest resistance; slower setup"),
+            OFF(Strings.t("Off"), "off", "No traffic-shape padding"),
+            LIGHT(Strings.t("Light"), "light", "Lower overhead on mild filtering"),
+            BALANCED(Strings.t("Balanced"), "balanced", "Recommended filtering resistance"),
+            AGGRESSIVE(Strings.t("Aggressive"), "aggressive", "Highest resistance; slower setup"),
         }
 
         enum class TlsCurvePreset(val label: String, val coreName: String, val description: String) {
-            CHROME("Chrome", "chrome", "Chrome TLS curve ordering"),
-            COMPATIBILITY("Compatibility", "compatibility", "P-256 and X25519 only"),
+            CHROME(Strings.t("Chrome"), "chrome", "Chrome TLS curve ordering"),
+            COMPATIBILITY(Strings.t("Compatibility"), "compatibility", "P-256 and X25519 only"),
         }
     }
 }
