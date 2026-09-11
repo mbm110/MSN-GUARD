@@ -290,8 +290,6 @@ class MsnGuardTileService : TileService() {
 
             val label: String get() = Strings.t(enLabel)
             val description: String get() = Strings.t(enDescription)
-
-            val label: String get() = Strings.t(enLabel)
         }
 
         enum class ScanTarget(
