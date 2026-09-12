@@ -572,13 +572,20 @@ object Strings {
         }
     }
 
-    /** Translate a %s template, then substitute [args] in order. */
+    /**
+     * Translate a %s template, then substitute [args] in order.
+     *
+     * A literal `%` that is not part of a `%s` placeholder is folded to a single
+     * `%` — the templates are written as `%s%%` for readability (the table's keys
+     * are also greppable English), and this is where the `%%` becomes one `%`.
+     * Without the fold, `tf("CONNECTING %s%%", 15)` printed `15%%`.
+     */
     fun tf(english: String, vararg args: Any?): String {
         var out = t(english)
         val parts = out.split("%s")
         val sb = StringBuilder()
         for ((i, p) in parts.withIndex()) {
-            sb.append(p)
+            sb.append(p.replace("%%", "%"))
             if (i < args.size && i < parts.size - 1) sb.append(args[i].toString())
         }
         return sb.toString()

@@ -123,6 +123,8 @@ object SmartSplit {
     class FragmentProfile(
         /** Stored in preferences; must stay stable across versions. Never displayed. */
         val key: String,
+        /** The publisher's `remarks` for the config these masks came from. Not user-visible. */
+        val name: String,
         /** The `finalmask.tcp` array, verbatim from the mirror. */
         val masks: JSONArray,
         /** Probe budget for THIS profile. */

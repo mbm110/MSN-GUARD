@@ -1,0 +1,3 @@
+Transport buttons 12.5sp; title/detail spacing tighter (zh compact);
+fold %% to % in Strings.tf (Connecting 15%% bug); Smart Split uses only the
+field-verified profile (Serverless-v50-fragB) until fragA works upstream; v1.8.6 (98)

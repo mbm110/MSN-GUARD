@@ -255,7 +255,7 @@ class TransportRail(
                     }
                 }.apply {
                     this.text = labels[index]
-                    textSize = 10.5f
+                    textSize = 12.5f
                     setTextColor(palette.faint)
                     letterSpacing = spacing(0.05f)
                     typeface = Typefaces.medium(context)

@@ -1365,11 +1365,11 @@ class MainActivity : Activity() {
         addView(connectionTitle, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(14) })
+        ).apply { topMargin = when (AppLanguage.current()) { "zh" -> dp(10); "fa" -> dp(11); else -> dp(11) } })
         addView(connectionDetail, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(3) })
+        ).apply { topMargin = when (AppLanguage.current()) { "zh" -> dp(1); "fa" -> dp(2); else -> dp(2) } })
 
         val chipLine = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
