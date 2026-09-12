@@ -73,13 +73,11 @@ object Typefaces {
 
     /**
      * Persian needs more leading than the console's tight default: diacritics
-     * and letter dots clip at 1.0. 1.5 gives the status lines room to breathe
-     * without changing the row heights the layout was tuned against.
-     * Chinese needs a little over 1.0 for the dense glyph blocks.
+     * and letter dots clip at 1.0. Chinese keeps the compact system leading so
+     * localized rows do not squeeze the connection dial.
      */
     fun lineHeightMult(): Float = when (AppLanguage.current()) {
         "fa" -> 1.5f
-        "zh" -> 1.2f
         else -> 1.0f
     }
 

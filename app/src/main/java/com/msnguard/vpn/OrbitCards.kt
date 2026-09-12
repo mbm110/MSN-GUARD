@@ -58,7 +58,9 @@ class ExitNodeCard(
             medium -> Typefaces.medium(context)
             else -> Typefaces.regular(context)
         }
-        setLineSpacing(0f, Typefaces.lineHeightMult())
+        if (AppLanguage.current() != "en") {
+            setLineSpacing(0f, Typefaces.lineHeightMult())
+        }
     }
 
     init {
@@ -246,7 +248,9 @@ class OrbitActionBar(
                 setTextColor(Sculpt.withAlpha(palette.muted, 0.95f))
                 letterSpacing = spacing(0.11f)
                 typeface = Typefaces.medium(context)
-                setLineSpacing(0f, Typefaces.lineHeightMult())
+                if (AppLanguage.current() != "en") {
+                    setLineSpacing(0f, Typefaces.lineHeightMult())
+                }
                 setSingleLine(true)
                 ellipsize = TextUtils.TruncateAt.END
                 gravity = Gravity.CENTER
@@ -348,7 +352,9 @@ class ChainModeCard(
             textSize = 11f
             letterSpacing = spacing(0.1f)
             typeface = Typefaces.medium(context)
-            setLineSpacing(0f, Typefaces.lineHeightMult())
+            if (AppLanguage.current() != "en") {
+                setLineSpacing(0f, Typefaces.lineHeightMult())
+            }
             setSingleLine(true)
         }
         subtitleView = TextView(context).apply {
@@ -363,6 +369,7 @@ class ChainModeCard(
         ).apply { topMargin = px(1) })
         addView(column, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
             leftMargin = px(11)
+            if (AppLanguage.current() != "en") rightMargin = px(14)
         })
 
         badgeView = TextView(context).apply {

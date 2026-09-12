@@ -542,10 +542,17 @@ class MainActivity : Activity() {
         orbitDial = OrbitDialView(this, palette).apply {
             setOnClickListener { toggleTunnel() }
         }
-        connectionTitle = label(textSize = 25f, color = INK, style = TypefaceStyle.MEDIUM).apply {
+        val localizedTypography = AppLanguage.current() != "en"
+        connectionTitle = label(
+            textSize = if (localizedTypography) 25f else 21f,
+            color = INK,
+            style = TypefaceStyle.MEDIUM,
+        ).apply {
             gravity = Gravity.CENTER
-            typeface = Typefaces.extraBold(this@MainActivity)
-            setPadding(dp(10), dp(2), dp(10), dp(3))
+            if (localizedTypography) {
+                typeface = Typefaces.extraBold(this@MainActivity)
+                setPadding(dp(10), dp(2), dp(10), dp(3))
+            }
             // One line, always. Every headline this view shows is short ("Connecting",
             // "Auto Scan", "Connection degraded"), and a wrap would change the
             // console's height — see connectionDetail below for why that is the
@@ -3198,7 +3205,9 @@ class MainActivity : Activity() {
             text = Strings.t("Enter Your Cloudflare IP")
             textSize = 13.5f
             typeface = Typefaces.medium(this@MainActivity)
-            setLineSpacing(0f, Typefaces.lineHeightMult())
+            if (AppLanguage.current() != "en") {
+                setLineSpacing(0f, Typefaces.lineHeightMult())
+            }
             setTextColor(INK)
         }
         customIpRow.addView(customIpTitle)
@@ -3242,7 +3251,9 @@ class MainActivity : Activity() {
             text = Strings.t("Apply")
             textSize = 12f
             typeface = Typefaces.medium(this@MainActivity)
-            setLineSpacing(0f, Typefaces.lineHeightMult())
+            if (AppLanguage.current() != "en") {
+                setLineSpacing(0f, Typefaces.lineHeightMult())
+            }
             gravity = Gravity.CENTER
             setTextColor(palette.mint)
             setPadding(dp(16), dp(10), dp(16), dp(10))
@@ -3381,6 +3392,12 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(10) })
         content.addView(navRow(Strings.t("Source on GitHub"), iconRes = R.drawable.ic_github) {
             openLink("https://github.com/mbm110/MSN-GUARD")
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) })
+        content.addView(navRow(Strings.t("Telegram Channel"), iconRes = R.drawable.ic_telegram) {
+            openLink("https://t.me/MSN_GUARD")
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -5278,7 +5295,9 @@ class MainActivity : Activity() {
         } else {
             Typefaces.regular(this)
         }
-        option.title.setLineSpacing(0f, Typefaces.lineHeightMult())
+        if (AppLanguage.current() != "en") {
+            option.title.setLineSpacing(0f, Typefaces.lineHeightMult())
+        }
         option.indicator.animate().cancel()
         if (selected) {
             option.indicator.visibility = View.VISIBLE
@@ -6255,7 +6274,9 @@ class MainActivity : Activity() {
         this.textSize = textSize
         setTextColor(color)
         // Persian/Chinese ship offline fonts; see Typefaces for why per-language.
-        setLineSpacing(0f, Typefaces.lineHeightMult())
+        if (AppLanguage.current() != "en") {
+            setLineSpacing(0f, Typefaces.lineHeightMult())
+        }
         if (singleLine) {
             setSingleLine(true)
             ellipsize = android.text.TextUtils.TruncateAt.END

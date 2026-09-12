@@ -84,11 +84,16 @@ class SmartSplitCard(
             textSize = 11f
             letterSpacing = spacing(0.1f)
             typeface = Typefaces.medium(context)
+            if (AppLanguage.current() != "en") {
+                setLineSpacing(0f, Typefaces.lineHeightMult())
+            }
             setSingleLine(true)
         }
         subtitleView = TextView(context).apply {
             textSize = 9.5f
-            setLineSpacing(0f, Typefaces.lineHeightMult())
+            if (AppLanguage.current() != "en") {
+                setLineSpacing(0f, Typefaces.lineHeightMult())
+            }
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
         }
@@ -98,13 +103,13 @@ class SmartSplitCard(
             LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = px(4) }
+            ).apply { topMargin = if (AppLanguage.current() == "en") px(1) else px(4) }
         )
         addView(
             column,
             LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 leftMargin = px(11)
-                rightMargin = px(14)
+                if (AppLanguage.current() != "en") rightMargin = px(14)
             }
         )
 
@@ -113,7 +118,13 @@ class SmartSplitCard(
             letterSpacing = spacing(0.12f)
             typeface = Typefaces.medium(context)
             gravity = Gravity.CENTER
-            setPadding(px(10), px(6), px(10), px(6))
+            val localized = AppLanguage.current() != "en"
+            setPadding(
+                px(if (localized) 10 else 9),
+                px(if (localized) 6 else 4),
+                px(if (localized) 10 else 9),
+                px(if (localized) 6 else 4),
+            )
         }
         addView(
             badgeView,

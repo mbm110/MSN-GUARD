@@ -46,18 +46,24 @@ class OrbitSectionHeader(
         })
         addView(TextView(context).apply {
             this.text = text
-            // 15.5sp + bold: the section headers carry the page's structure and
-            // were the smallest text on it. Brighter than muted so they read as
-            // headers on the dark canvas (still within the text ramp).
-            textSize = 15.5f
+            val english = AppLanguage.current() == "en"
+            textSize = if (english) 11.5f else 15.5f
             setTextColor(
-                if (AppAppearance.isDark(palette.muted))
+                if (english) {
+                    palette.muted
+                } else if (AppAppearance.isDark(palette.muted)) {
                     Sculpt.blend(palette.muted, palette.mint, 0.45f)
-                else palette.muted
+                } else {
+                    palette.muted
+                }
             )
-            letterSpacing = if (AppLanguage.current() != "en") 0f else 0.14f
-            typeface = Typefaces.bold(context)
-            setLineSpacing(0f, Typefaces.lineHeightMult())
+            letterSpacing = if (english) 0.14f else 0f
+            typeface = if (english) {
+                Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            } else {
+                Typefaces.bold(context)
+            }
+            if (!english) setLineSpacing(0f, Typefaces.lineHeightMult())
         })
     }
 
@@ -133,11 +139,15 @@ class OrbitSettingsRow(
             textSize = 15f
             setTextColor(if (destructive) destructiveColor else palette.ink)
             typeface = Typefaces.medium(context)
-            setLineSpacing(0f, Typefaces.lineHeightMult())
-            // Two lines instead of an ellipsis: long Persian/Chinese titles
-            // ("میان‌بر زدن تونل") were being cut to "میان‌بر زدن ت…".
-            maxLines = 2
-            ellipsize = null
+            val english = AppLanguage.current() == "en"
+            if (!english) setLineSpacing(0f, Typefaces.lineHeightMult())
+            if (english) {
+                setSingleLine(true)
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            } else {
+                maxLines = 2
+                ellipsize = null
+            }
         }
         addView(titleView, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
@@ -146,9 +156,15 @@ class OrbitSettingsRow(
             textSize = 13.5f
             setTextColor(Sculpt.withAlpha(palette.muted, 0.95f))
             typeface = Typefaces.regular(context)
-            setLineSpacing(0f, Typefaces.lineHeightMult())
-            maxLines = 2
-            ellipsize = null
+            val english = AppLanguage.current() == "en"
+            if (!english) setLineSpacing(0f, Typefaces.lineHeightMult())
+            if (english) {
+                setSingleLine(true)
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            } else {
+                maxLines = 2
+                ellipsize = null
+            }
             visibility = if (value.isNullOrBlank()) GONE else VISIBLE
         }
         // The value gets at most half the row: past that the title starts
@@ -315,7 +331,9 @@ class OrbitToggleRow(
                 textSize = 15f
                 setTextColor(palette.ink)
                 typeface = Typefaces.medium(context)
-                setLineSpacing(0f, Typefaces.lineHeightMult())
+                if (AppLanguage.current() != "en") {
+                    setLineSpacing(0f, Typefaces.lineHeightMult())
+                }
             })
             addView(subtitleView, LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,

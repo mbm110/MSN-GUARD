@@ -41,7 +41,9 @@ private fun Context.orbitLabel(
         medium -> Typefaces.medium(context)
         else -> Typefaces.regular(context)
     }
-    setLineSpacing(0f, Typefaces.lineHeightMult())
+    if (AppLanguage.current() != "en") {
+        setLineSpacing(0f, Typefaces.lineHeightMult())
+    }
 }
 
 /**
@@ -257,10 +259,15 @@ class TransportRail(
                     setTextColor(palette.faint)
                     letterSpacing = spacing(0.05f)
                     typeface = Typefaces.medium(context)
-                    setLineSpacing(0f, Typefaces.lineHeightMult())
                     gravity = Gravity.CENTER
-                    maxLines = 2
-                    ellipsize = null
+                    if (AppLanguage.current() == "en") {
+                        setSingleLine(true)
+                        ellipsize = TextUtils.TruncateAt.END
+                    } else {
+                        setLineSpacing(0f, Typefaces.lineHeightMult())
+                        maxLines = 2
+                        ellipsize = null
+                    }
                     isClickable = true
                     isFocusable = true
                     setOnClickListener {
