@@ -35,12 +35,13 @@ private fun Context.orbitLabel(
     this.text = text
     textSize = size
     setTextColor(color)
-    letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing
+    letterSpacing = if (AppLanguage.current() != "en") 0f else spacing
     typeface = when {
-        mono -> Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
-        medium -> Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        else -> Typeface.create("sans", Typeface.NORMAL)
+        mono -> Typefaces.mono(this)
+        medium -> Typefaces.medium(this)
+        else -> Typefaces.regular(this)
     }
+    setLineSpacing(0f, Typefaces.lineHeightMult())
 }
 
 /**
@@ -255,10 +256,11 @@ class TransportRail(
                     textSize = 10.5f
                     setTextColor(palette.faint)
                     letterSpacing = spacing(0.05f)
-                    typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                    typeface = Typefaces.medium(context)
+                    setLineSpacing(0f, Typefaces.lineHeightMult())
                     gravity = Gravity.CENTER
-                    setSingleLine(true)
-                    ellipsize = TextUtils.TruncateAt.END
+                    maxLines = 2
+                    ellipsize = null
                     isClickable = true
                     isFocusable = true
                     setOnClickListener {
@@ -389,4 +391,4 @@ class TransportRail(
 }
 
 /** Neon letter-spacing scatters Persian's joined letters — clamp for Persian. */
-private fun spacing(v: Float): Float = if (AppLanguage.current() == "fa") 0f else v
+private fun spacing(v: Float): Float = if (AppLanguage.current() != "en") 0f else v

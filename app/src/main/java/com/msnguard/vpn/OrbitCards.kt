@@ -50,12 +50,15 @@ class ExitNodeCard(
         text = value
         textSize = size
         setTextColor(color)
-        letterSpacing = spacing
+        // The spacing argument is the Latin design value; Persian/Chinese render
+        // with 0 — joined and dense scripts shatter under letter-spacing.
+        letterSpacing = if (AppLanguage.current() != "en") 0f else spacing
         typeface = when {
-            mono -> Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
-            medium -> Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            else -> Typeface.create("sans", Typeface.NORMAL)
+            mono -> Typefaces.mono(context)
+            medium -> Typefaces.medium(context)
+            else -> Typefaces.regular(context)
         }
+        setLineSpacing(0f, Typefaces.lineHeightMult())
     }
 
     init {
@@ -242,7 +245,8 @@ class OrbitActionBar(
                 textSize = 8.5f
                 setTextColor(Sculpt.withAlpha(palette.muted, 0.95f))
                 letterSpacing = spacing(0.11f)
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                typeface = Typefaces.medium(context)
+                setLineSpacing(0f, Typefaces.lineHeightMult())
                 setSingleLine(true)
                 ellipsize = TextUtils.TruncateAt.END
                 gravity = Gravity.CENTER
@@ -343,7 +347,8 @@ class ChainModeCard(
             text = Strings.t("PSIPHON OVER WARP")
             textSize = 11f
             letterSpacing = spacing(0.1f)
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            typeface = Typefaces.medium(context)
+            setLineSpacing(0f, Typefaces.lineHeightMult())
             setSingleLine(true)
         }
         subtitleView = TextView(context).apply {
@@ -363,7 +368,7 @@ class ChainModeCard(
         badgeView = TextView(context).apply {
             textSize = 8.5f
             letterSpacing = spacing(0.12f)
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            typeface = Typefaces.medium(context)
             gravity = Gravity.CENTER
             setPadding(px(9), px(4), px(9), px(4))
         }
@@ -399,19 +404,28 @@ class ChainModeCard(
      * selected. Repaints immediately for the same reason [setOuterSummary] does.
      */
     fun setInner(name: String) {
-        innerName = name.uppercase()
-        titleView.text = Strings.tf("%s OVER WARP", innerName)
+        // Display name as given — the caller passes the localized "تور"/"سایفون"
+        // (or "Tor"/"Psiphon"); uppercasing here would break the Persian glyphs.
+        innerName = name
+        titleView.text = if (AppLanguage.current() == "en") {
+            Strings.tf("%s OVER WARP", name.uppercase())
+        } else {
+            Strings.tf("%s OVER WARP", name)
+        }
         setArmed(armed)
     }
 
     /**
      * The inner transport as prose: "Psiphon", "Tor".
      *
-     * [innerName] is stored upper-cased for the title, which is shouting in a
-     * sentence, so it is title-cased here rather than at every use site.
+     * In English the title is upper-cased; this returns the title-case form for
+     * sentences. Persian/Chinese display names are used verbatim.
      */
     private fun innerLabel(): String =
-        innerName.take(1) + innerName.drop(1).lowercase()
+        if (AppLanguage.current() == "en")
+            innerName.take(1) + innerName.drop(1).lowercase()
+        else
+            innerName
 
     /** Description of what the chain does, shown when armed. */
     private fun armedSubtitle(): String =
@@ -583,4 +597,4 @@ private class GlyphView(
 }
 
 /** Neon letter-spacing scatters Persian's joined letters — clamp for Persian. */
-private fun spacing(v: Float): Float = if (AppLanguage.current() == "fa") 0f else v
+private fun spacing(v: Float): Float = if (AppLanguage.current() != "en") 0f else v

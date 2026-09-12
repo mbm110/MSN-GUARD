@@ -722,8 +722,9 @@ class OrbitFooterWave(
     }
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.CENTER
-        typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
-        letterSpacing = 0.18f
+        typeface = Typefaces.medium(context)
+        // Latin-only: Persian/Chinese glyphs shatter under letter-spacing.
+        letterSpacing = if (AppLanguage.current() != "en") 0f else 0.18f
     }
     private val density = resources.displayMetrics.density
     private val path = Path()

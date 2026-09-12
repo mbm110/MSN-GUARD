@@ -28,8 +28,8 @@ android {
         applicationId = "com.msnguard.vpn"
         minSdk = 26
         targetSdk = 36
-        versionCode = 95
-        versionName = "1.8.3"
+        versionCode = 96
+        versionName = "1.8.4"
 
     }
 
@@ -52,6 +52,12 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    androidResources {
+        // .ttf stays stored (not deflated) so Typeface can mmap it; also avoids
+        // a double compress pass on 6.8MB of fonts.
+        noCompress += "ttf"
     }
 
     packaging {

@@ -542,8 +542,10 @@ class MainActivity : Activity() {
         orbitDial = OrbitDialView(this, palette).apply {
             setOnClickListener { toggleTunnel() }
         }
-        connectionTitle = label(textSize = 21f, color = INK, style = TypefaceStyle.MEDIUM).apply {
+        connectionTitle = label(textSize = 25f, color = INK, style = TypefaceStyle.MEDIUM).apply {
             gravity = Gravity.CENTER
+            typeface = Typefaces.extraBold(this@MainActivity)
+            setPadding(dp(10), dp(2), dp(10), dp(3))
             // One line, always. Every headline this view shows is short ("Connecting",
             // "Auto Scan", "Connection degraded"), and a wrap would change the
             // console's height — see connectionDetail below for why that is the
@@ -625,7 +627,15 @@ class MainActivity : Activity() {
             )
         }
 
-        mainRoot = FrameLayout(this).apply { setBackgroundColor(CANVAS) }
+        mainRoot = FrameLayout(this).apply {
+            setBackgroundColor(CANVAS)
+            // Mirror the UI language: Persian lays out right-to-left, the
+            // Latin/Chinese consoles left-to-right. Views inherit this once.
+            layoutDirection = when (AppLanguage.current()) {
+                "fa" -> android.view.View.LAYOUT_DIRECTION_RTL
+                else -> android.view.View.LAYOUT_DIRECTION_LTR
+            }
+        }
         val header = createHeader()
         val console = createConnectionConsole()
         // The console can still scroll, but it is meant not to need it: the dial
@@ -1223,7 +1233,9 @@ class MainActivity : Activity() {
     }
 
     private fun railLabel(protocol: Protocol): String = when (protocol) {
-        Protocol.WARP_IN_WARP -> "WoW"
+        // "WoW" is the table key for the short rail label; the enum's own label
+        // is the longer "WARP-on-WARP" which would not fit the rail cells.
+        Protocol.WARP_IN_WARP -> Strings.t("WoW")
         else -> protocol.label
     }
 
@@ -2566,7 +2578,12 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(2) })
             addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(indicator)
+            // 12dp between the label column and the SELECTED chip: "انتخاب‌شده"
+            // read as glued to the option title in Persian.
+            addView(indicator, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { leftMargin = dp(12) })
         }
         return SelectionOption(row, title, indicator, 18).also { setSelectionState(it, selected, animate = false) }
     }
@@ -2593,7 +2610,12 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(2) })
             addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(indicator)
+            // 12dp between the label column and the SELECTED chip: "انتخاب‌شده"
+            // read as glued to the option title in Persian.
+            addView(indicator, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { leftMargin = dp(12) })
         }
         return SelectionOption(row, title, indicator, 18).also { setSelectionState(it, selected, animate = false) }
     }
@@ -2617,7 +2639,12 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(2) })
             addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(indicator)
+            // 12dp between the label column and the SELECTED chip: "انتخاب‌شده"
+            // read as glued to the option title in Persian.
+            addView(indicator, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { leftMargin = dp(12) })
         }
         return SelectionOption(row, title, indicator, 18).also { setSelectionState(it, selected, animate = false) }
     }
@@ -2644,7 +2671,12 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(2) })
             addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(indicator)
+            // 12dp between the label column and the SELECTED chip: "انتخاب‌شده"
+            // read as glued to the option title in Persian.
+            addView(indicator, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { leftMargin = dp(12) })
         }
         return SelectionOption(row, title, indicator, 18).also { setSelectionState(it, selected, animate = false) }
     }
@@ -3165,7 +3197,8 @@ class MainActivity : Activity() {
         val customIpTitle = TextView(this).apply {
             text = Strings.t("Enter Your Cloudflare IP")
             textSize = 13.5f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            typeface = Typefaces.medium(this@MainActivity)
+            setLineSpacing(0f, Typefaces.lineHeightMult())
             setTextColor(INK)
         }
         customIpRow.addView(customIpTitle)
@@ -3208,7 +3241,8 @@ class MainActivity : Activity() {
         val applyButton = TextView(this).apply {
             text = Strings.t("Apply")
             textSize = 12f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            typeface = Typefaces.medium(this@MainActivity)
+            setLineSpacing(0f, Typefaces.lineHeightMult())
             gravity = Gravity.CENTER
             setTextColor(palette.mint)
             setPadding(dp(16), dp(10), dp(16), dp(10))
@@ -3545,7 +3579,10 @@ class MainActivity : Activity() {
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 ).apply { topMargin = dp(2) })
                 addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                addView(indicator)
+                addView(indicator, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { leftMargin = dp(12) })
                 setOnClickListener {
                     preferences().edit().putString(OBFUSCATION_PROFILE, profile.coreName).apply()
                     options.forEach { (item, option) -> setSelectionState(option, item == profile, animate = true) }
@@ -4061,6 +4098,8 @@ class MainActivity : Activity() {
             options = options,
             selected = currentLanguagePref(),
             label = { code -> AppLanguage.label(code) },
+            // Only "system" explains itself; the named languages do not repeat
+            // their own name under the label — that read as a doubled title.
             description = { code ->
                 when (code) {
                     "system" -> if (AppLanguage.current() == "fa") {
@@ -4070,7 +4109,7 @@ class MainActivity : Activity() {
                     } else {
                         "English unless the device is set to فارسی or 中文"
                     }
-                    else -> AppLanguage.label(code)
+                    else -> ""
                 }
             },
         ) { chosen ->
@@ -4134,7 +4173,10 @@ class MainActivity : Activity() {
     /** Value shown on the port row — the port, or why it is inert. */
     private fun proxyPortValue(): String {
         val port = CoreConfig.proxyListenPort(this)
-        return if (CoreConfig.proxyOnly(this)) "$port" else "$port · VPN mode"
+        return if (CoreConfig.proxyOnly(this)) "$port"
+        // LRM keeps "10808 · …" in that order under the RTL paragraph
+        // direction Persian runs in; without it the port jumps to the far side.
+        else "\u200E$port · ${Strings.t("VPN mode")}"
     }
 
     /**
@@ -4591,11 +4633,19 @@ class MainActivity : Activity() {
                 isFocusable = true
                 val labels = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
                 labels.addView(optionTitle)
-                labels.addView(label(description(item), 13f, MUTED), LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(2) })
+                // A blank description renders as an empty line under the title
+                // (the language picker showed its own name twice); skip it.
+                val desc = description(item)
+                if (desc.isNotBlank()) {
+                    labels.addView(label(desc, 13f, MUTED), LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply { topMargin = dp(2) })
+                }
                 addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                addView(indicator)
+                addView(indicator, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { leftMargin = dp(12) })
                 setOnClickListener {
                     // Refusal comes first, and nothing moves if it fires: the
                     // marker, the callback and the stored preference all stay on
@@ -4876,7 +4926,7 @@ class MainActivity : Activity() {
     /** One-line month total, shown as the Traffic monitor row's value. */
     private fun trafficHeadline(): String =
         if (trafficMonthRx + trafficMonthTx == 0L) Strings.t("No data yet")
-        else formatTraffic(trafficMonthRx + trafficMonthTx) + " this month"
+        else "\u200E" + formatTraffic(trafficMonthRx + trafficMonthTx) + " " + Strings.t("this month")
 
     private fun formatTraffic(bytes: Long): String = when {
         bytes < 1_024 -> "$bytes B"
@@ -5223,10 +5273,12 @@ class MainActivity : Activity() {
             option.radius,
             if (selected) primary else SURFACE_VARIANT,
         )
-        option.title.typeface = android.graphics.Typeface.create(
-            if (selected) "sans-serif-medium" else "sans",
-            android.graphics.Typeface.NORMAL,
-        )
+        option.title.typeface = if (selected) {
+            Typefaces.medium(this)
+        } else {
+            Typefaces.regular(this)
+        }
+        option.title.setLineSpacing(0f, Typefaces.lineHeightMult())
         option.indicator.animate().cancel()
         if (selected) {
             option.indicator.visibility = View.VISIBLE
@@ -5993,7 +6045,7 @@ class MainActivity : Activity() {
         }
         // Which transport is being wrapped, so the card cannot read
         // "PSIPHON OVER WARP" while the rail has Tor selected.
-        chainCard.setInner(if (selectedProtocol == Protocol.TOR) "TOR" else "PSIPHON")
+        chainCard.setInner(if (selectedProtocol == Protocol.TOR) Strings.t("Tor") else Strings.t("Psiphon"))
         // Two separate facts, and collapsing them was a bug: "locked" is not the
         // same as "does not apply". Connected on Psiphon is locked but fully
         // applicable — the chain is carrying the session — so the card must keep
@@ -6190,7 +6242,7 @@ class MainActivity : Activity() {
      * Neon letter-spacing scatters Persian's joined letters, so it is
      * clamped to zero whenever the UI language is Persian.
      */
-    private fun spacing(v: Float): Float = if (AppLanguage.current() == "fa") 0f else v
+    private fun spacing(v: Float): Float = if (AppLanguage.current() != "en") 0f else v
 
     private fun label(
         text: String = "",
@@ -6202,13 +6254,15 @@ class MainActivity : Activity() {
         this.text = text
         this.textSize = textSize
         setTextColor(color)
+        // Persian/Chinese ship offline fonts; see Typefaces for why per-language.
+        setLineSpacing(0f, Typefaces.lineHeightMult())
         if (singleLine) {
             setSingleLine(true)
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
         typeface = when (style) {
-            TypefaceStyle.REGULAR -> android.graphics.Typeface.create("sans", android.graphics.Typeface.NORMAL)
-            TypefaceStyle.MEDIUM -> android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+            TypefaceStyle.REGULAR -> Typefaces.regular(this@MainActivity)
+            TypefaceStyle.MEDIUM -> Typefaces.medium(this@MainActivity)
         }
     }
 

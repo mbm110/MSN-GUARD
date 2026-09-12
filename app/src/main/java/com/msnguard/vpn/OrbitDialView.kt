@@ -116,8 +116,9 @@ class OrbitDialView(
     private var loopAnimator: ValueAnimator? = null
     private var tickAnimator: ValueAnimator? = null
 
-    private val monoTypeface: Typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
-    private val labelTypeface: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+    private val monoTypeface: Typeface = Typefaces.mono(context)
+    private val labelTypeface: Typeface
+        get() = Typefaces.medium(context)
 
     init {
         isClickable = true
@@ -544,7 +545,7 @@ class OrbitDialView(
 
             textPaint.typeface = labelTypeface
             textPaint.textSize = 9f * density * geo
-            textPaint.letterSpacing = if (AppLanguage.current() == "fa") 0f else 0.19f
+            textPaint.letterSpacing = if (AppLanguage.current() != "en") 0f else 0.19f
             textPaint.color = Sculpt.withAlpha(palette.faint, 0.95f)
             canvas.drawText(Strings.t("SESSION"), cx, cy + 27f * density * geo, textPaint)
             textPaint.letterSpacing = spacing(0f)
@@ -571,7 +572,7 @@ class OrbitDialView(
             textPaint.typeface = labelTypeface
             textPaint.textAlign = Paint.Align.CENTER
             textPaint.textSize = 10.5f * density * geo
-            textPaint.letterSpacing = if (AppLanguage.current() == "fa") 0f else 0.19f
+            textPaint.letterSpacing = if (AppLanguage.current() != "en") 0f else 0.19f
             textPaint.color = palette.amberText
             // The percentage stays, appended to the caption instead of occupying
             // the middle of the dial: it is real information when the transport
@@ -625,7 +626,7 @@ class OrbitDialView(
         textPaint.typeface = labelTypeface
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.textSize = 10.5f * density * geo
-        textPaint.letterSpacing = if (AppLanguage.current() == "fa") 0f else 0.19f
+        textPaint.letterSpacing = if (AppLanguage.current() != "en") 0f else 0.19f
         // CONNECTING never reaches here — it returned above with its own glyph —
         // so only the resting and failed captions are left.
         textPaint.color = when (state) {
@@ -863,4 +864,4 @@ class OrbitDialView(
 }
 
 /** Neon letter-spacing scatters Persian's joined letters — clamp for Persian. */
-private fun spacing(v: Float): Float = if (AppLanguage.current() == "fa") 0f else v
+private fun spacing(v: Float): Float = if (AppLanguage.current() != "en") 0f else v

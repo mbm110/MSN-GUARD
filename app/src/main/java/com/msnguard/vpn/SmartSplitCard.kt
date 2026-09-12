@@ -83,11 +83,12 @@ class SmartSplitCard(
             text = Strings.t("SMART SPLIT")
             textSize = 11f
             letterSpacing = spacing(0.1f)
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            typeface = Typefaces.medium(context)
             setSingleLine(true)
         }
         subtitleView = TextView(context).apply {
             textSize = 9.5f
+            setLineSpacing(0f, Typefaces.lineHeightMult())
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
         }
@@ -97,21 +98,22 @@ class SmartSplitCard(
             LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = px(1) }
+            ).apply { topMargin = px(4) }
         )
         addView(
             column,
             LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 leftMargin = px(11)
+                rightMargin = px(14)
             }
         )
 
         badgeView = TextView(context).apply {
             textSize = 8.5f
             letterSpacing = spacing(0.12f)
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            typeface = Typefaces.medium(context)
             gravity = Gravity.CENTER
-            setPadding(px(9), px(4), px(9), px(4))
+            setPadding(px(10), px(6), px(10), px(6))
         }
         addView(
             badgeView,
@@ -259,4 +261,4 @@ private class SplitGlyphView(
 }
 
 /** Neon letter-spacing scatters Persian's joined letters — clamp for Persian. */
-private fun spacing(v: Float): Float = if (AppLanguage.current() == "fa") 0f else v
+private fun spacing(v: Float): Float = if (AppLanguage.current() != "en") 0f else v

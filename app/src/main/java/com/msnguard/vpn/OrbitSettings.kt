@@ -46,10 +46,18 @@ class OrbitSectionHeader(
         })
         addView(TextView(context).apply {
             this.text = text
-            textSize = 11.5f
-            setTextColor(palette.muted)
-            letterSpacing = if (AppLanguage.current() == "fa") 0f else 0.14f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            // 15.5sp + bold: the section headers carry the page's structure and
+            // were the smallest text on it. Brighter than muted so they read as
+            // headers on the dark canvas (still within the text ramp).
+            textSize = 15.5f
+            setTextColor(
+                if (AppAppearance.isDark(palette.muted))
+                    Sculpt.blend(palette.muted, palette.mint, 0.45f)
+                else palette.muted
+            )
+            letterSpacing = if (AppLanguage.current() != "en") 0f else 0.14f
+            typeface = Typefaces.bold(context)
+            setLineSpacing(0f, Typefaces.lineHeightMult())
         })
     }
 
@@ -124,9 +132,12 @@ class OrbitSettingsRow(
             text = title
             textSize = 15f
             setTextColor(if (destructive) destructiveColor else palette.ink)
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setSingleLine(true)
-            ellipsize = android.text.TextUtils.TruncateAt.END
+            typeface = Typefaces.medium(context)
+            setLineSpacing(0f, Typefaces.lineHeightMult())
+            // Two lines instead of an ellipsis: long Persian/Chinese titles
+            // ("میان‌بر زدن تونل") were being cut to "میان‌بر زدن ت…".
+            maxLines = 2
+            ellipsize = null
         }
         addView(titleView, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
@@ -134,8 +145,10 @@ class OrbitSettingsRow(
             text = value.orEmpty()
             textSize = 13.5f
             setTextColor(Sculpt.withAlpha(palette.muted, 0.95f))
-            setSingleLine(true)
-            ellipsize = android.text.TextUtils.TruncateAt.END
+            typeface = Typefaces.regular(context)
+            setLineSpacing(0f, Typefaces.lineHeightMult())
+            maxLines = 2
+            ellipsize = null
             visibility = if (value.isNullOrBlank()) GONE else VISIBLE
         }
         // The value gets at most half the row: past that the title starts
@@ -301,7 +314,8 @@ class OrbitToggleRow(
                 text = title
                 textSize = 15f
                 setTextColor(palette.ink)
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                typeface = Typefaces.medium(context)
+                setLineSpacing(0f, Typefaces.lineHeightMult())
             })
             addView(subtitleView, LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
