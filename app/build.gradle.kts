@@ -55,9 +55,10 @@ android {
     }
 
     androidResources {
-        // .ttf stays stored (not deflated) so Typeface can mmap it; also avoids
-        // a double compress pass on 6.8MB of fonts.
-        noCompress += "ttf"
+        // Fonts deflate well (~30-40%); letting AAPT compress them keeps the
+        // arm64 APK under Telegram's 50 MB document cap while load cost stays
+        // negligible (ResourcesCompat caches the Typeface).
+        // noCompress is intentionally NOT set for ttf.
     }
 
     packaging {
