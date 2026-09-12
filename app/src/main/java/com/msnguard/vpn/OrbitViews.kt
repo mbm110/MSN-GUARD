@@ -37,9 +37,9 @@ private fun Context.orbitLabel(
     setTextColor(color)
     letterSpacing = if (AppLanguage.current() != "en") 0f else spacing
     typeface = when {
-        mono -> Typefaces.mono(this)
-        medium -> Typefaces.medium(this)
-        else -> Typefaces.regular(this)
+        mono -> Typefaces.mono(context)
+        medium -> Typefaces.medium(context)
+        else -> Typefaces.regular(context)
     }
     setLineSpacing(0f, Typefaces.lineHeightMult())
 }
