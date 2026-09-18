@@ -2962,7 +2962,7 @@ class MainActivity : Activity() {
         // PROFILE sits above everything, because the profile decides what every
         // row below it means. It is the only section that rebuilds the whole
         // page on a change, so it has to be read first and built first.
-        content.addView(expandableSection(Strings.t("PROFILE"), id = "PROFILE", id = "PROFILE") { body ->
+        content.addView(expandableSection(Strings.t("PROFILE"), id = "PROFILE") { body ->
             profileRow = navRow(Strings.t("Profile"), Profiles.activeName(this)) { chooseProfile() }
             body.addView(profileRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2979,7 +2979,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ))
-        content.addView(expandableSection(Strings.t("PROTECTION"), id = "PROTECTION", id = "PROTECTION") { body ->
+        content.addView(expandableSection(Strings.t("PROTECTION"), id = "PROTECTION") { body ->
             body.addView(createToggleRow(Strings.t("Kill switch"), Strings.t("Block all traffic if the tunnel drops"), killSwitchEnabled()) {
                 preferences().edit().putBoolean(KILL_SWITCH, it).apply()
             }, LinearLayout.LayoutParams(
@@ -7335,9 +7335,12 @@ class MainActivity : Activity() {
         body: (LinearLayout) -> Unit,
     ): ExpandableSection {
         val key = "section_open_" + sectionId(id)
-        return ExpandableSection(this, palette, title, initiallyExpanded = false) { expanded ->
-            profiled().edit().putBoolean(key, expanded).apply()
-        }.apply {
+        return ExpandableSection(this, palette, title, initiallyExpanded = false,
+            onExpansionChanged = { expanded ->
+                profiled().edit().putBoolean(key, expanded).apply()
+            },
+            body = body,
+        ).apply {
             if (profiled().getBoolean(key, false)) setExpanded(true, animate = false)
         }
     }
