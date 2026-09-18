@@ -816,11 +816,8 @@ class MainActivity : Activity() {
         // Every row this touches is null unless the settings page is on screen, so
         // this is a no-op everywhere else.
         refreshPsiphonRows()
-        // Battery optimization: the row shows the doze-whitelist state, and the
-        // only way to change it is to leave for the system dialog and come back.
-        // Without this the row would still say "Optimized" over a whitelist the
-        // user just granted.
-        batteryRow?.setValue(batteryOptimizationLabel())
+        // The battery-optimization row's value is a fixed call to action, so it
+        // needs no refresh on return from the system dialog.
     }
 
     /**
@@ -1860,11 +1857,10 @@ class MainActivity : Activity() {
             // that ConnectionLog mirrors to keeps everything up to its 256KB cap.
             addView(createLogActionButton(Strings.t("COPY")) { copyFullLog() })
             addView(createLogActionButton(Strings.t("SHARE")) { shareFullLog() })
-            // The encrypted-export key button is gone from the user's screen. The
-            // export is encrypted and the key is the only way to read it, which is
-            // exactly why it must not sit next to SHARE in a shipped build — the two
-            // files are a pair, and handing the pair to a user is handing them a log
-            // they cannot read. shareKeyFile() stays callable from a debug path.
+            // Log Key is gone from this screen: the export is plain text now, so
+            // there is nothing left to decrypt. LogRedactor's tokenisation is the
+            // only privacy layer, and that needs no key — it is stable, so a code
+            // book read from the same source answers any question about a token.
         }
         content.addView(header)
         content.addView(label(Strings.t("Tunnel and VPN events"), 14f, MUTED), LinearLayout.LayoutParams(
@@ -2290,15 +2286,16 @@ class MainActivity : Activity() {
     }
 
     /**
-     * The plain log, encrypted with [LogCipher].
+     * The full log, as plain text, for both COPY and SHARE.
      *
-     * [fullLogText] is kept plain for the app's own screen, which is already
-     * behind a permission gate; this is the one that leaves the device, so this
-     * is the one that is encrypted. The whole batch is one ciphertext: a reader
-     * with the key gets the log exactly as it was written, including the header
-     * line carrying the version and protocol.
+     * It was encrypted once (AES-256-GCM, [LogCipher]) on the theory that the
+     * export carries a wiring diagram of the bypass. In practice the user could
+     * never read their own log without hunting down a key file — which made the
+     * export useless exactly when it is needed: reporting a connection failure.
+     * The [LogRedactor] already tokenises user-identifying parts, and that is
+     * the privacy line that matters.
      */
-    private fun encryptedExport(): String = LogCipher.encrypt(fullLogText())
+    private fun plainExport(): String = fullLogText()
 
     /**
      * Copies the full log to the clipboard on a background thread.
@@ -2310,7 +2307,7 @@ class MainActivity : Activity() {
      */
     private fun copyFullLog() {
         Thread({
-            val text = runCatching { encryptedExport() }.getOrElse { Strings.tf("Could not read the log: %s", it.message.toString()) }
+            val text = runCatching { plainExport() }.getOrElse { Strings.tf("Could not read the log: %s", it.message.toString()) }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 val clipboard = getSystemService(ClipboardManager::class.java)
@@ -2321,7 +2318,7 @@ class MainActivity : Activity() {
                 // button, and being told twice is better than not being told.
                 Toast.makeText(
                     this,
-                    Strings.tf("Log copied (%s KB, encrypted)", text.length / 1024),
+                    Strings.tf("Log copied (%s KB)", text.length / 1024),
                     Toast.LENGTH_SHORT,
                 ).show()
             }
@@ -2340,7 +2337,7 @@ class MainActivity : Activity() {
             val result = runCatching {
                 val dir = File(cacheDir, "logs").apply { mkdirs() }
                 val target = File(dir, "msn-guard-log.txt")
-                target.writeText(encryptedExport())
+                target.writeText(plainExport())
                 target
             }
             runOnUiThread {
@@ -2353,7 +2350,7 @@ class MainActivity : Activity() {
                         Intent.createChooser(
                             Intent(Intent.ACTION_SEND)
                                 .setType("text/plain")
-                                .putExtra(Intent.EXTRA_SUBJECT, "MSN-GUARD log (encrypted)")
+                                .putExtra(Intent.EXTRA_SUBJECT, "MSN-GUARD log")
                                 .putExtra(Intent.EXTRA_STREAM, uri)
                                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
                             Strings.t("Share log"),
@@ -2365,13 +2362,9 @@ class MainActivity : Activity() {
     }
 
     /**
-     * Shares the Log Key file — the one thing that decrypts an exported log.
-     *
-     * The export is encrypted on purpose (see [LogCipher]), and a log without
-     * its key is unreadable noise. This is the bridge: it writes a plain-text
-     * key file into cacheDir and hands it to the same share sheet, so the user
-     * can keep the key where they keep their logs, or forward it to whoever is
-     * reading one.
+     * Shares the Log Key file. Retained for debug builds only — the export has
+     * been plain text since the cipher was dropped, so on a shipped build this
+     * key decrypts nothing.
      */
     private fun shareKeyFile() {
         Thread({
@@ -3018,7 +3011,7 @@ class MainActivity : Activity() {
             // does not name. An auto-reconnect cannot help when the process is
             // dead, and the kill switch cannot stay up either — so on those
             // devices this row is what makes the tunnel survive a locked screen.
-            batteryRow = navRow(Strings.t("Battery Optimization"), batteryOptimizationLabel()) {
+            batteryRow = navRow(Strings.t("Battery Optimization"), Strings.t("Tap to allow background running")) {
                 requestBatteryOptimization()
             }
             body.addView(batteryRow, LinearLayout.LayoutParams(
@@ -7319,16 +7312,6 @@ class MainActivity : Activity() {
      * claiming nothing needs doing.
      */
     @SuppressLint("BatteryLife")
-    private fun isBatteryOptimized(): Boolean {
-        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return true
-        return !pm.isIgnoringBatteryOptimizations(packageName)
-    }
-
-    /** The row's value: the state Android reports, in the user's language. */
-    private fun batteryOptimizationLabel(): String =
-        if (isBatteryOptimized()) Strings.t("Optimized — tap to allow background running")
-        else Strings.t("Unrestricted")
-
     /**
      * Open the system dialog that asks to be exempted from battery
      * optimisation (the doze whitelist).
