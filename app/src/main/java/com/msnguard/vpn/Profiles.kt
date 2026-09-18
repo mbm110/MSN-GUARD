@@ -132,8 +132,11 @@ object Profiles {
 
     /**
      * The logical key behind a physical one, or null for un-profiled keys.
+     *
+     * Visible to the file, not just [switch]: [ProfiledPrefs.getAll] exposes
+     * logical keys and has to invert the prefix.
      */
-    private fun stripProfile(key: String): String? {
+    fun stripProfile(key: String): String? {
         if (key.length < 3 || key[0] != 'p' || !key[1].isDigit()) return null
         return key.substring(2)
     }
