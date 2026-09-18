@@ -1658,9 +1658,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             strategy.timeoutSeconds
         }
         val budget = seconds.toLong() + 8L
-        ladderTimer = ladderScheduler.schedule({
-            if (ladderActive.get() && !psiphonVpnActivated) escalateLadder()
-        }, budget, TimeUnit.SECONDS)
+        // runCatching: onDestroy()'s ladderScheduler.shutdownNow() can land
+        // between the latch and the schedule; an uncaught
+        // RejectedExecutionException here killed the whole process. Same
+        // discipline as the exit-rotation schedule below.
+        runCatching {
+            ladderTimer = ladderScheduler.schedule({
+                if (ladderActive.get() && !psiphonVpnActivated) escalateLadder()
+            }, budget, TimeUnit.SECONDS)
+        }.onFailure {
+            ladderActive.set(false)
+        }
     }
 
 
@@ -1721,10 +1729,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private fun scheduleLadderAttribution() {
         if (!attributionPending.compareAndSet(false, true)) return
         val rungAtConnect = ladderIndex
-        ladderScheduler.schedule({
-            attributionPending.set(false)
-            if (!stopRequested.get()) recordLadderWinner(rungAtConnect)
-        }, 2, TimeUnit.SECONDS)
+        // runCatching: see armLadderTimer — onDestroy() shuts this scheduler
+        // down, and the rejection it throws here is uncaught and process-killing.
+        runCatching {
+            ladderScheduler.schedule({
+                attributionPending.set(false)
+                if (!stopRequested.get()) recordLadderWinner(rungAtConnect)
+            }, 2, TimeUnit.SECONDS)
+        }
     }
 
     /**
@@ -4678,10 +4690,21 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         prevRx = rx
         prevSpeedSampleMs = now
 
-        val (monthTx, monthRx) = recordMonthlyTraffic(
-            (tx - accountedTx).coerceAtLeast(0),
-            (rx - accountedRx).coerceAtLeast(0),
-        )
+        val deltaTx = (tx - accountedTx).coerceAtLeast(0)
+        val deltaRx = (rx - accountedRx).coerceAtLeast(0)
+        // v2.0.6 diagnostic: the "150 GB reported against 10 GB used" field
+        // report cannot come from the delta math alone (worst case modelled is
+        // 2x, when a dying core's stale absolute samples land after
+        // resetSessionTraffic zeroed the baseline). Record any sample that
+        // claims more than 50 MB in a single tick — no legitimate 1 s sample
+        // carries that, so the log it leaves names the actual source.
+        if (deltaTx > 50L * 1024 * 1024 || deltaRx > 50L * 1024 * 1024) {
+            ConnectionLog.record(
+                "traffic: large delta tx=${deltaTx / 1024 / 1024}MB rx=${deltaRx / 1024 / 1024}MB" +
+                    " (sample tx=$tx rx=$rx, accounted tx=$accountedTx rx=$accountedRx)"
+            )
+        }
+        val (monthTx, monthRx) = recordMonthlyTraffic(deltaTx, deltaRx)
         accountedTx = tx
         accountedRx = rx
         // A plain tunnel that has moved real bytes is evidence about this carrier

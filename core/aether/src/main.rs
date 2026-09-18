@@ -2415,7 +2415,44 @@ async fn run_wireguard(
                         }
                         match chosen {
                             Some(v) => v,
-                            None => return Err(AetherError::NoCleanEndpoint),
+                            // v2.0.6: fall back to a fresh scan instead of failing
+                            // the whole connect. The user's pin is a hint, not a
+                            // contract: when it stops answering on this carrier the
+                            // useful outcome is a working tunnel, and the pool has
+                            // other edges. Previously this returned NoCleanEndpoint,
+                            // which surfaced as "switch protocol" — the exact field
+                            // report — and forced the user to flip endpoint_discovery
+                            // to Fresh by hand.
+                            //
+                            // `forced` is borrowed here and stays set for the rest of
+                            // the loop, so the retry arm below does not re-test the
+                            // dead pin forever: after this branch the loop's own
+                            // last_good/cooldown machinery owns the peer choice, and
+                            // a pin that comes back to life still works next connect.
+                            None => {
+                                log::warn!(
+                                    "[-] forced peer {peer} failed every profile; falling back to a fresh scan"
+                                );
+                                let excluded: HashSet<SocketAddr> =
+                                    endpoint_cooldowns.keys().copied().collect();
+                                match hunt_wg_peer(
+                                    &identity,
+                                    &candidates,
+                                    &mode_str,
+                                    ip,
+                                    options.wireguard_data_check,
+                                    &excluded,
+                                )
+                                .await
+                                {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        log::warn!("[-] fallback scan after failed pin also failed: {e}; retrying shortly");
+                                        tokio::time::sleep(wg_reconnect_delay()).await;
+                                        continue;
+                                    }
+                                }
+                            }
                         }
                     } else {
                         let excluded: HashSet<SocketAddr> =
@@ -2538,6 +2575,13 @@ async fn run_wireguard_tunnel(
     let mut http_task = None;
     let local_task = if let Some(fd) = options.tun_fd {
         log::info!("[+] Android TUN bridge active");
+        // v2.0.6: same push as run_masque_tunnel. Without it the DoT/DoH lists
+        // the user entered on the DNS screen were silently ignored on this
+        // transport — the resolvers were parsed into StartOptions but nothing
+        // ever handed them to the engine, so a WireGuard user's encrypted DNS
+        // never answered. Both fields ride the same smart_dns engine, so the
+        // call site mirrors the MASQUE one exactly.
+        push_encrypted_resolvers(options);
         tokio::spawn(tun::bridge(fd, ipv4, inbound_rx, outbound_tx, options.smart_dns))
     } else {
         let stack = netstack::spawn(
