@@ -2956,334 +2956,330 @@ class MainActivity : Activity() {
                 setPadding(dp(4), 0, 0, 0)
             })
         }
-        content.addView(sectionLabel(Strings.t("PROTECTION")), LinearLayout.LayoutParams(
+        content.addView(expandableSection(Strings.t("PROTECTION"), initiallyExpanded = true) { body ->
+            body.addView(createToggleRow(Strings.t("Kill switch"), Strings.t("Block all traffic if the tunnel drops"), killSwitchEnabled()) {
+                preferences().edit().putBoolean(KILL_SWITCH, it).apply()
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+
+            // Auto-reconnect sits next to the kill switch because the two answer the
+            // same question — "the tunnel just died, now what?" — and a user who wants
+            // one usually wants the other. It is deliberately NOT tied to the kill
+            // switch: blocking traffic and retrying are independent choices, and
+            // pairing them would mean you cannot retry without blocking.
+            body.addView(createToggleRow(
+                Strings.t("Auto reconnect"),
+                Strings.t("Reconnect automatically if the tunnel drops"),
+                autoReconnectEnabled(),
+            ) {
+                preferences().edit().putBoolean(MsnGuardVpnService.AUTO_RECONNECT_PREF, it).apply()
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+        }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ))
-        lateinit var killSwitchRow: LinearLayout
-        killSwitchRow = createToggleRow(Strings.t("Kill switch"), Strings.t("Block all traffic if the tunnel drops"), killSwitchEnabled()) {
-            preferences().edit().putBoolean(KILL_SWITCH, it).apply()
-        }
-        content.addView(killSwitchRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
 
-        // Auto-reconnect sits next to the kill switch because the two answer the
-        // same question — "the tunnel just died, now what?" — and a user who wants
-        // one usually wants the other. It is deliberately NOT tied to the kill
-        // switch: blocking traffic and retrying are independent choices, and
-        // pairing them would mean you cannot retry without blocking.
-        val autoReconnectRow = createToggleRow(
-            Strings.t("Auto reconnect"),
-            Strings.t("Reconnect automatically if the tunnel drops"),
-            autoReconnectEnabled(),
-        ) {
-            preferences().edit().putBoolean(MsnGuardVpnService.AUTO_RECONNECT_PREF, it).apply()
-        }
-        content.addView(autoReconnectRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-
-        content.addView(sectionLabel(Strings.t("ROUTING & DATA")), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(26) })
-        content.addView(navRow(Strings.t("Traffic monitor"), trafficHeadline()) { openTrafficMonitorScreen() }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
-        splitTunnelSummaryButton = navRow(Strings.t("Split tunneling"), splitTunnelSummary()) { openSplitTunnelScreen() }
-        content.addView(splitTunnelSummaryButton, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        // The switch this writes existed before, fed only the removed proxy mode's
-        // SOCKS bind, and was deleted because in VPN mode it changed nothing the
-        // user could see. It changes something now: the service applies the
-        // preference on every VPN path — SHARD, Psiphon, Tor and the chain included,
-        // not just the Rust core — so a printer, NAS or router page reached by its
-        // local address stays reachable while the tunnel is up.
-        //
-        // Off by default, and it must stay that way: sending LAN destinations around
-        // the tunnel is a routing decision the user should make, and on Tor it means
-        // those destinations leave the circuit.
-        val lanBypassRow = createToggleRow(
-            Strings.t("Local network access"),
-            Strings.t("Reach printers, NAS and your router while connected"),
-            lanBypassEnabled(),
-        ) {
-            preferences().edit().putBoolean(MsnGuardVpnService.LAN_BYPASS_PREF, it).apply()
-        }
-        content.addView(lanBypassRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        // PERF moved here off the home screen: a once-a-year knob does not earn
-        // a quarter of the first thing the user sees.
-        lateinit var perfRow: OrbitSettingsRow
-        perfRow = navRow(Strings.t("Performance"), perfProfile().label) {
-            choosePerfProfile { perfRow.setValue(perfProfile().label) }
-        }
-        content.addView(perfRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-
-        content.addView(sectionLabel(Strings.t("CONNECTION")), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(26) })
-        // Tunnel type comes FIRST in this section, above the transport picker.
-        //
-        // It is the most consequential switch in the app — it decides whether the
-        // whole phone is tunnelled or only the apps the user points at a port — and
-        // it changes what every row below it means. Burying it under Psiphon/Tor
-        // detail would repeat the mistake the log-level chips made: a real decision
-        // parked where nobody looks.
-        val typeRow = navRow(Strings.t("Tunnel type"), tunnelTypeLabel()) { chooseTunnelType() }
-        tunnelTypeRow = typeRow
-        content.addView(typeRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
-        // The port box: directly under the type it belongs to, and inert until SOCKS
-        // is chosen. Greyed rather than hidden, so the user can see that choosing
-        // SOCKS is what unlocks it instead of a row appearing out of nowhere.
-        val portRow = navRow(Strings.t("SOCKS port"), proxyPortValue()) { editProxyPort() }
-        proxyPortRow = portRow
-        content.addView(portRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        // Share over LAN, directly under the port it publishes.
-        //
-        // Moved out of the PSIPHON section: it is not Psiphon's any more. Every
-        // transport can be shared now — Psiphon in both tunnel types, MASQUE/
-        // WireGuard/WoW in SOCKS mode, Tor through its own SocksPort in VPN mode —
-        // so keeping it under a PSIPHON header would say the opposite of what it
-        // does. It belongs next to Tunnel type and SOCKS port, which are the two
-        // rows that decide what actually gets shared.
-        val lanRow = OrbitToggleRow(
-            this,
-            palette,
-            Strings.t("Share over LAN"),
-            lanSharingSubtitle(),
-            lanSharingEnabled() && lanSharingCapable(),
-        ) { on ->
-            preferences().edit().putBoolean(CoreConfig.LAN_SHARING_PREF, on).apply()
-            ConnectionLog.record(
-                if (on) {
-                    Strings.t("LAN sharing enabled — applies on the next connect")
-                } else {
-                    Strings.t("LAN sharing disabled — applies on the next connect")
-                }
-            )
-            // Log the interface survey whenever sharing is switched on. Two builds
-            // in a row advertised an unreachable address and the only evidence was
-            // a screenshot of the result; this records the inputs.
-            if (on) {
-                ConnectionLog.record("LAN survey: " + CoreConfig.describeLocalNetworks(this))
+        content.addView(expandableSection(Strings.t("ROUTING & DATA")) { body ->
+            body.addView(navRow(Strings.t("Traffic monitor"), trafficHeadline()) { openTrafficMonitorScreen() }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+            splitTunnelSummaryButton = navRow(Strings.t("Split tunneling"), splitTunnelSummary()) { openSplitTunnelScreen() }
+            body.addView(splitTunnelSummaryButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            // The switch this writes existed before, fed only the removed proxy mode's
+            // SOCKS bind, and was deleted because in VPN mode it changed nothing the
+            // user could see. It changes something now: the service applies the
+            // preference on every VPN path — SHARD, Psiphon, Tor and the chain included,
+            // not just the Rust core — so a printer, NAS or router page reached by its
+            // local address stays reachable while the tunnel is up.
+            //
+            // Off by default, and it must stay that way: sending LAN destinations around
+            // the tunnel is a routing decision the user should make, and on Tor it means
+            // those destinations leave the circuit.
+            body.addView(createToggleRow(
+                Strings.t("Local network access"),
+                Strings.t("Reach printers, NAS and your router while connected"),
+                lanBypassEnabled(),
+            ) {
+                preferences().edit().putBoolean(MsnGuardVpnService.LAN_BYPASS_PREF, it).apply()
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            // PERF moved here off the home screen: a once-a-year knob does not earn
+            // a quarter of the first thing the user sees.
+            val perfRow = navRow(Strings.t("Performance"), perfProfile().label) {
+                choosePerfProfile { perfRow.setValue(perfProfile().label) }
             }
-            lanSharingRow?.setSubtitle(lanSharingSubtitle())
-            refreshPsiphonRows()
-        }
-        lanSharingRow = lanRow
-        content.addView(lanRow, LinearLayout.LayoutParams(
+            body.addView(perfRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+        }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        // Held in a field, not a local: the mode screen is a separate page that
-        // writes the preference and pops back here, so the row that shows the
-        // current mode has to be repaintable from outside this builder. Without
-        // that, picking a mode only appeared after leaving and re-entering
-        // settings, because this row was built once with the old value.
-        val modeRow = navRow(Strings.t("Connection mode"), selectedProtocol.label) { openModeScreen() }
-        connectionModeRow = modeRow
-        content.addView(modeRow, LinearLayout.LayoutParams(
+        ).apply { topMargin = dp(26) })
+
+        content.addView(expandableSection(Strings.t("CONNECTION")) { body ->
+            // Tunnel type comes FIRST in this section, above the transport picker.
+            //
+            // It is the most consequential switch in the app — it decides whether the
+            // whole phone is tunnelled or only the apps the user points at a port —
+            // and it changes what every row below it means. Burying it under Psiphon/Tor
+            // detail would repeat the mistake the log-level chips made: a real decision
+            // parked where nobody looks.
+            tunnelTypeRow = navRow(Strings.t("Tunnel type"), tunnelTypeLabel()) { chooseTunnelType() }
+            body.addView(tunnelTypeRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+            // The port box: directly under the type it belongs to, and inert until SOCKS
+            // is chosen. Greyed rather than hidden, so the user can see that choosing
+            // SOCKS is what unlocks it instead of a row appearing out of nowhere.
+            proxyPortRow = navRow(Strings.t("SOCKS port"), proxyPortValue()) { editProxyPort() }
+            body.addView(proxyPortRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            // Share over LAN, directly under the port it publishes.
+            //
+            // Moved out of the PSIPHON section: it is not Psiphon's any more. Every
+            // transport can be shared now — Psiphon in both tunnel types, MASQUE/
+            // WireGuard/WoW in SOCKS mode, Tor through its own SocksPort in VPN mode —
+            // so keeping it under a PSIPHON header would say the opposite of what it
+            // does. It belongs next to Tunnel type and SOCKS port, which are the two
+            // rows that decide what actually gets shared.
+            lanSharingRow = OrbitToggleRow(
+                this,
+                palette,
+                Strings.t("Share over LAN"),
+                lanSharingSubtitle(),
+                lanSharingEnabled() && lanSharingCapable(),
+            ) { on ->
+                preferences().edit().putBoolean(CoreConfig.LAN_SHARING_PREF, on).apply()
+                ConnectionLog.record(
+                    if (on) {
+                        Strings.t("LAN sharing enabled — applies on the next connect")
+                    } else {
+                        Strings.t("LAN sharing disabled — applies on the next connect")
+                    }
+                )
+                // Log the interface survey whenever sharing is switched on. Two builds
+                // in a row advertised an unreachable address and the only evidence was
+                // a screenshot of the result; this records the inputs.
+                if (on) {
+                    ConnectionLog.record("LAN survey: " + CoreConfig.describeLocalNetworks(this))
+                }
+                lanSharingRow?.setSubtitle(lanSharingSubtitle())
+                refreshPsiphonRows()
+            }
+            body.addView(lanSharingRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            // Held in a field, not a local: the mode screen is a separate page that
+            // writes the preference and pops back here, so the row that shows the
+            // current mode has to be repaintable from outside this builder. Without
+            // that, picking a mode only appeared after leaving and re-entering
+            // settings, because this row was built once with the old value.
+            connectionModeRow = navRow(Strings.t("Connection mode"), selectedProtocol.label) { openModeScreen() }
+            body.addView(connectionModeRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+            body.addView(navRow(Strings.t("Tunnel controls"), Strings.t("Shaping · Anti-DPI")) { openTunnelControlsScreen() }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            // Log verbosity: moved here from the Logs screen, where five chips looked
+            // like live filters and were in fact a build-time core setting — a tap did
+            // nothing until the next connect. Here the value is visible in the row and
+            // the "next connection" wording sets the expectation.
+            logVerbosityRow = navRow(Strings.t("Log verbosity"), logLevel().label) { chooseLogLevel() }
+            body.addView(logVerbosityRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            // Both rows came off the home screen's action bar, which was removed to make
+            // room for a six-transport rail. They sit under Log verbosity because that is
+            // the row that decides what the log will contain.
+            body.addView(navRow(Strings.t("Log"), Strings.t("What the tunnel did")) { openLogsScreen() }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            // Names the two transports it applies to. As an unlabelled action-bar button
+            // it looked global, and on Psiphon, Tor or SHARD there is nothing to scan —
+            // those transports find their own paths.
+            scannerRow = navRow(Strings.t("Scan Mode"), scanModeSummary()) { openScannerScreen() }
+            body.addView(scannerRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+        }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
-        content.addView(navRow(Strings.t("Tunnel controls"), Strings.t("Shaping · Anti-DPI")) { openTunnelControlsScreen() }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        // Log verbosity: moved here from the Logs screen, where five chips looked
-        // like live filters and were in fact a build-time core setting — a tap did
-        // nothing until the next connect. Here the value is visible in the row and
-        // the "next connection" wording sets the expectation.
-        val logLevelRow = navRow(Strings.t("Log verbosity"), logLevel().label) { chooseLogLevel() }
-        logVerbosityRow = logLevelRow
-        content.addView(logLevelRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        // Both rows came off the home screen's action bar, which was removed to make
-        // room for a six-transport rail. They sit under Log verbosity because that is
-        // the row that decides what the log will contain.
-        content.addView(navRow(Strings.t("Log"), Strings.t("What the tunnel did")) { openLogsScreen() }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        // Names the two transports it applies to. As an unlabelled action-bar button
-        // it looked global, and on Psiphon, Tor or SHARD there is nothing to scan —
-        // those transports find their own paths.
-        val scanRow = navRow(Strings.t("Scan Mode"), scanModeSummary()) { openScannerScreen() }
-        scannerRow = scanRow
-        content.addView(scanRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
+        ).apply { topMargin = dp(26) })
 
         // Psiphon gets its own section: all three controls below are meaningless
         // unless the chain is armed, and grouping them says that structurally
         // instead of relying on the user to infer it from a mixed list.
-        content.addView(sectionLabel(Strings.t("PSIPHON")), LinearLayout.LayoutParams(
+        content.addView(expandableSection(Strings.t("PSIPHON")) { body ->
+            // The switch comes first because it gates the two rows under it. Toggling
+            // it repaints them in place — and the home-screen card too, which is the
+            // same setting shown twice and must never disagree.
+            //
+            // Built as an OrbitToggleRow directly rather than through createToggleRow():
+            // that helper returns LinearLayout, and this row has to be re-checked and
+            // re-enabled from outside the builder (the home-screen card writes the same
+            // preference, and the chain is only available on the PSIPHON transport).
+            psiphonChainRow = OrbitToggleRow(
+                this,
+                palette,
+                Strings.t("Psiphon over WARP"),
+                Strings.t("Tunnel Psiphon inside a WARP transport"),
+                // The EFFECTIVE state, not the stored preference: the key is global, but
+                // this switch is Psiphon's. Showing the raw preference made the switch
+                // sit lit-and-disabled on MASQUE — green, so it read as "on", while being
+                // greyed, so it read as "off". Displaying the effective value makes the
+                // two agree.
+                chainArmed(Protocol.PSIPHON) && selectedProtocol == Protocol.PSIPHON,
+            ) { armed ->
+                setChainArmed(armed, Protocol.PSIPHON)
+                renderChainCard()
+                refreshPsiphonRows()
+            }
+            body.addView(psiphonChainRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+
+            chainOuterRow = navRow(Strings.t("Outer transport"), chainOuterMode().label) {
+                chooseChainOuterMode { chainOuterRow?.setValue(chainOuterMode().label) }
+            }
+            body.addView(chainOuterRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            // Last of the three: the transport row decides what carries Psiphon, this
+            // one decides where Psiphon comes out. Reading downwards follows the packet.
+            egressRegionRow = navRow(Strings.t("Preferred country"), egressRegionLabel()) {
+                chooseEgressRegion { egressRegionRow?.setValue(egressRegionLabel()) }
+            }
+            body.addView(egressRegionRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+        }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        // The switch comes first because it gates the two rows under it. Toggling
-        // it repaints them in place — and the home-screen card too, which is the
-        // same setting shown twice and must never disagree.
-        //
-        // Built as an OrbitToggleRow directly rather than through createToggleRow():
-        // that helper returns LinearLayout, and this row has to be re-checked and
-        // re-enabled from outside the builder (the home-screen card writes the same
-        // preference, and the chain is only available on the PSIPHON transport).
-        val chainRow = OrbitToggleRow(
-            this,
-            palette,
-            Strings.t("Psiphon over WARP"),
-            Strings.t("Tunnel Psiphon inside a WARP transport"),
-            // The EFFECTIVE state, not the stored preference: the key is global, but
-            // this switch is Psiphon's. Showing the raw preference made the switch
-            // sit lit-and-disabled on MASQUE — green, so it read as "on", while being
-            // greyed, so it read as "off". Displaying the effective value makes the
-            // two agree.
-            chainArmed(Protocol.PSIPHON) && selectedProtocol == Protocol.PSIPHON,
-        ) { armed ->
-            setChainArmed(armed, Protocol.PSIPHON)
-            renderChainCard()
-            refreshPsiphonRows()
-        }
-        psiphonChainRow = chainRow
-        content.addView(chainRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
-
-        val outerRow = navRow(Strings.t("Outer transport"), chainOuterMode().label) {
-            chooseChainOuterMode { chainOuterRow?.setValue(chainOuterMode().label) }
-        }
-        chainOuterRow = outerRow
-        content.addView(outerRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        // Last of the three: the transport row decides what carries Psiphon, this
-        // one decides where Psiphon comes out. Reading downwards follows the packet.
-        val countryRow = navRow(Strings.t("Preferred country"), egressRegionLabel()) {
-            chooseEgressRegion { egressRegionRow?.setValue(egressRegionLabel()) }
-        }
-        egressRegionRow = countryRow
-        content.addView(countryRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
 
         // Tor section, mirroring the Psiphon one: the mode picker is the only
         // control, and it is meaningful regardless of what else is set.
-        content.addView(sectionLabel(Strings.t("TOR")), LinearLayout.LayoutParams(
+        content.addView(expandableSection(Strings.t("TOR")) { body ->
+            torModeRowRef = navRow(Strings.t("Connection mode"), torMode().label) {
+                chooseTorMode {
+                    torModeRowRef?.setValue(torMode().label)
+                    // The mode decides whether the chain can apply at all, so both the
+                    // switch below and the home card have to be repainted after a pick —
+                    // otherwise arming stays lit under a freshly pinned obfs4.
+                    refreshPsiphonRows()
+                    renderChainCard()
+                }
+            }
+            body.addView(torModeRowRef, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+            // The user's own bridges, directly under the mode row that consumes them.
+            //
+            // Placed here rather than behind an "advanced" screen because a user who
+            // has a bridge got it from somewhere and is looking for exactly this box;
+            // burying it is what makes people conclude the app cannot use their bridge.
+            //
+            // Gated on the TOR transport exactly like every other row in this section.
+            // It was briefly left live everywhere, on the theory that pasting a bridge
+            // before switching Tor on is the normal order of operations — but that made
+            // it the one row on a MASQUE page that looked fully interactive while
+            // configuring a transport the next connect would not use, which is the same
+            // lie the greyed rows exist to prevent. Nothing is lost: the mode row above
+            // is gated the same way, so a user who cannot reach this box cannot reach
+            // the mode that consumes it either.
+            torBridgeRowRef = navRow(Strings.t("Manual bridge"), TorManualBridges.summary(this)) {
+                editTorBridges()
+            }
+            body.addView(torBridgeRowRef, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            // Tor's own chain switch, separate from Psiphon's. Placed directly under the
+            // mode row because the mode is what decides whether it can apply: Direct and
+            // Meek can be chained, obfs4 and Snowflake cannot, and Manual depends on
+            // what the pasted lines use.
+            torChainRowRef = OrbitToggleRow(
+                this,
+                palette,
+                Strings.t("Tor over WARP"),
+                Strings.t("Direct, Meek and your own bridges, inside a WARP transport"),
+                chainArmed(Protocol.TOR) && selectedProtocol == Protocol.TOR &&
+                    TorManager.isChainable(this, torMode()),
+            ) { armed ->
+                setChainArmed(armed, Protocol.TOR)
+                renderChainCard()
+                refreshPsiphonRows()
+            }
+            body.addView(torChainRowRef, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            // Tor's outer transport, mirroring Psiphon's row and in the same position
+            // relative to its switch: which WARP tunnel carries Tor. Writes Tor's own
+            // key, so pinning WoW for Psiphon leaves Tor on Auto.
+            torChainOuterRow = navRow(Strings.t("Outer transport"), torChainOuterMode().label) {
+                chooseTorChainOuterMode { torChainOuterRow?.setValue(torChainOuterMode().label) }
+            }
+            body.addView(torChainOuterRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            // Same control as Psiphon's "Preferred country", same wording, same
+            // preference-not-a-pin semantics — deliberately, because to the user it is
+            // the same question. Underneath it is tor's ExitNodes with StrictNodes 0.
+            torRegionRowRef = navRow(Strings.t("Preferred country"), torRegionLabel()) {
+                chooseTorRegion { torRegionRowRef?.setValue(torRegionLabel()) }
+            }
+            body.addView(torRegionRowRef, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+        }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        val torModeRow = navRow(Strings.t("Connection mode"), torMode().label) {
-            chooseTorMode {
-                torModeRowRef?.setValue(torMode().label)
-                // The mode decides whether the chain can apply at all, so both the
-                // switch below and the home card have to be repainted after a pick —
-                // otherwise arming stays lit under a freshly pinned obfs4.
-                refreshPsiphonRows()
-                renderChainCard()
-            }
-        }
-        torModeRowRef = torModeRow
-        content.addView(torModeRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
-        // The user's own bridges, directly under the mode row that consumes them.
+        // Only after BOTH sections' rows are constructed and their refs assigned.
         //
-        // Placed here rather than behind an "advanced" screen because a user who
-        // has a bridge got it from somewhere and is looking for exactly this box;
-        // burying it is what makes people conclude the app cannot use their bridge.
-        //
-        // Gated on the TOR transport exactly like every other row in this section.
-        // It was briefly left live everywhere, on the theory that pasting a bridge
-        // before switching Tor on is the normal order of operations — but that made
-        // it the one row on a MASQUE page that looked fully interactive while
-        // configuring a transport the next connect would not use, which is the same
-        // lie the greyed rows exist to prevent. Nothing is lost: the mode row above
-        // is gated the same way, so a user who cannot reach this box cannot reach
-        // the mode that consumes it either.
-        val torBridgeRow = navRow(Strings.t("Manual bridge"), TorManualBridges.summary(this)) {
-            editTorBridges()
-        }
-        torBridgeRowRef = torBridgeRow
-        content.addView(torBridgeRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        // Tor's own chain switch, separate from Psiphon's. Placed directly under the
-        // mode row because the mode is what decides whether it can apply: Direct and
-        // Meek can be chained, obfs4 and Snowflake cannot, and Manual depends on
-        // what the pasted lines use.
-        val torChainRow = OrbitToggleRow(
-            this,
-            palette,
-            Strings.t("Tor over WARP"),
-            Strings.t("Direct, Meek and your own bridges, inside a WARP transport"),
-            chainArmed(Protocol.TOR) && selectedProtocol == Protocol.TOR &&
-                TorManager.isChainable(this, torMode()),
-        ) { armed ->
-            setChainArmed(armed, Protocol.TOR)
-            renderChainCard()
-            refreshPsiphonRows()
-        }
-        torChainRowRef = torChainRow
-        content.addView(torChainRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        // Tor's outer transport, mirroring Psiphon's row and in the same position
-        // relative to its switch: which WARP tunnel carries Tor. Writes Tor's own
-        // key, so pinning WoW for Psiphon leaves Tor on Auto.
-        val torOuterRow = navRow(Strings.t("Outer transport"), torChainOuterMode().label) {
-            chooseTorChainOuterMode { torChainOuterRow?.setValue(torChainOuterMode().label) }
-        }
-        torChainOuterRow = torOuterRow
-        content.addView(torOuterRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        // Same control as Psiphon's "Preferred country", same wording, same
-        // preference-not-a-pin semantics — deliberately, because to the user it is
-        // the same question. Underneath it is tor's ExitNodes with StrictNodes 0.
-        val torCountryRow = navRow(Strings.t("Preferred country"), torRegionLabel()) {
-            chooseTorRegion { torRegionRowRef?.setValue(torRegionLabel()) }
-        }
-        torRegionRowRef = torCountryRow
-        content.addView(torCountryRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        // Only now, with BOTH sections' rows constructed and their refs assigned.
         // This call used to sit right after the Psiphon rows, where torChainRowRef
         // and torRegionRowRef were still null — so the Tor rows were built and
         // never had their availability applied, and both stayed fully live on a
         // page where MASQUE or Psiphon was the selected transport.
-        refreshPsiphonRows()
+        //
+        // It also cannot sit at the top level any more: expandableSection's body
+        // runs while the section is built, so refs are assigned there — but the
+        // sections below (SHARD, APPEARANCE, BACKUP, ABOUT) have not been built
+        // yet at this point in the function. Nothing in them is read by
+        // refreshPsiphonRows, but moving the call past the last section keeps the
+        // invariant the comment describes literally true: every row the call
+        // touches exists by the time it runs.
+        //
+        // ↓ moved to after ABOUT, see below.
 
         // SHARD has exactly one setting, and it is not really a setting: the node
         // list. Everything else about this transport is automatic by design — the
@@ -3296,257 +3292,261 @@ class MainActivity : Activity() {
         // which is what the chain exists to achieve for Psiphon, and wrapping
         // fragmented TLS inside a second tunnel both doubles the latency and
         // destroys the fragmentation's effect — the DPI sees the outer tunnel.
-        content.addView(sectionLabel(Strings.t("SHARD")), LinearLayout.LayoutParams(
+        content.addView(expandableSection(Strings.t("SHARD")) { body ->
+            shardPoolRow = navRow(Strings.t("Node list"), shardPoolSummary()) {
+                // force = true: the whole point of tapping this is to bypass the
+                // six-hour interval the background job honours.
+                shardPoolRow?.setValue(Strings.t("Updating…"))
+                // The policy file rides the same tap. It is what decides how many paths
+                // each node has, so refreshing the node list without it would leave the
+                // count in the summary computed from stale edges.
+                RemotePolicy.refreshIfDue(this@MainActivity, force = true)
+                // The Smart Split profiles ride the same tap: the mirror is part of
+                // what makes SHARD connect, and refreshing the node list without it
+                // would leave a stale fragment ladder for the next Smart Split
+                // connect.
+                SmartSplitSub.refreshIfDue(this@MainActivity, force = true)
+                ShardSubscription.refreshIfDue(this@MainActivity, force = true) { count ->
+                    runOnUiThread {
+                        shardPoolRow?.setValue(shardPoolSummary())
+                        toastShort(
+                            if (count > 0) Strings.tf("%s nodes available", count) else Strings.t("Could not update the list")
+                        )
+                    }
+                }
+            }
+            body.addView(shardPoolRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+
+            // Custom Cloudflare IP row: user can enter their own Cloudflare IP and apply it
+            // to all SHARD configs. When set, this IP replaces the node address in the
+            // outbound config, so SHARD connects through the user's chosen edge.
+            val customIpRow = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(12), dp(16), dp(12))
+                background = Sculpt.sculptedBackground(
+                    resources.displayMetrics.density,
+                    Sculpt.recess(SURFACE, 0.16f),
+                    14,
+                    Sculpt.withAlpha(DIVIDER, 0.15f),
+                )
+            }
+            val customIpTitle = TextView(this).apply {
+                text = Strings.t("Enter Your Cloudflare IP")
+                textSize = 13.5f
+                typeface = Typefaces.medium(this@MainActivity)
+                if (AppLanguage.current() != "en") {
+                    setLineSpacing(0f, Typefaces.lineHeightMult())
+                }
+                setTextColor(INK)
+            }
+            customIpRow.addView(customIpTitle)
+
+            val customIpSubtitle = TextView(this).apply {
+                text = Strings.t("This IP will replace all node addresses in SHARD configs")
+                textSize = 10.5f
+                setTextColor(MUTED)
+                setPadding(0, dp(2), 0, dp(8))
+            }
+            customIpRow.addView(customIpSubtitle)
+
+            val inputRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val customIpInput = EditText(this).apply {
+                hint = "e.g. 104.16.0.1"
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    rightMargin = dp(8)
+                }
+                // Load current value if set
+                val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
+                val current = prefs.getString("shard_custom_cf_ip", "")?.trim().orEmpty()
+                if (current.isNotEmpty()) setText(current)
+                setBackground(Sculpt.sculptedBackground(
+                    resources.displayMetrics.density,
+                    Sculpt.recess(SURFACE, 0.16f),
+                    8,
+                    Sculpt.withAlpha(DIVIDER, 0.15f),
+                ))
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                setTextColor(INK)
+                setHintTextColor(MUTED)
+                setSingleLine(true)
+            }
+            inputRow.addView(customIpInput)
+
+            val applyButton = TextView(this).apply {
+                text = Strings.t("Apply")
+                textSize = 12f
+                typeface = Typefaces.medium(this@MainActivity)
+                if (AppLanguage.current() != "en") {
+                    setLineSpacing(0f, Typefaces.lineHeightMult())
+                }
+                gravity = Gravity.CENTER
+                setTextColor(palette.mint)
+                setPadding(dp(16), dp(10), dp(16), dp(10))
+                setBackground(Sculpt.sculptedBackground(
+                    resources.displayMetrics.density,
+                    Sculpt.withAlpha(palette.mint, 0.12f),
+                    8,
+                    Sculpt.withAlpha(palette.mint, 0.3f),
+                ))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    val ip = customIpInput.text.toString().trim()
+                    val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE).edit()
+                    if (ip.isEmpty()) {
+                        prefs.remove("shard_custom_cf_ip")
+                    } else {
+                        // Basic validation: must be an IP address format
+                        if (ip.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))) {
+                            val octets = ip.split(".").map { it.toIntOrNull() ?: -1 }
+                            if (octets.all { it in 0..255 }) {
+                                prefs.putString("shard_custom_cf_ip", ip)
+                                toastShort(Strings.tf("Custom Cloudflare IP applied: %s", ip))
+                            } else {
+                                toastShort(Strings.t("Invalid IP address"))
+                                return@setOnClickListener
+                            }
+                        } else {
+                            toastShort(Strings.t("Invalid IP format (use IPv4)"))
+                            return@setOnClickListener
+                        }
+                    }
+                    prefs.apply()
+                    if (ip.isEmpty()) toastShort(Strings.t("Custom IP cleared"))
+                }
+            }
+            inputRow.addView(applyButton)
+            customIpRow.addView(inputRow)
+            body.addView(customIpRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+
+            // The home-screen card's mirror, for the same reason the Psiphon chain has
+            // one: someone looking for a feature they saw on the main screen looks in
+            // settings, and a control that exists in only one of the two places reads as
+            // a bug. Both write the same key through [setSmartSplitEnabled].
+            // Built as an OrbitToggleRow directly, not through createToggleRow(): that
+            // helper returns LinearLayout, and this row's subtitle has to be rewritten
+            // from outside the builder — the measurement it reports changes on connect
+            // and when the user clears it.
+            smartSplitRow = OrbitToggleRow(
+                this,
+                palette,
+                Strings.t("Smart Split"),
+                SmartSplit.summary(this),
+                SmartSplit.enabled(this),
+            ) { on ->
+                setSmartSplitEnabled(on)
+                smartSplitRow?.setSubtitle(SmartSplit.summary(this))
+                renderChainCard()
+            }
+            body.addView(smartSplitRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+
+            // The escape hatch for a wrong measurement, and the only reason the user
+            // ever needs to know a measurement happened at all. A carrier that changes
+            // its DPI, or a cached "not effective here" from a bad minute on the
+            // network, would otherwise be sticky until the app's data is cleared.
+            body.addView(navRow(Strings.t("Re-measure network"), "") {
+                SmartSplit.forgetMeasurements(this)
+                smartSplitRow?.setSubtitle(SmartSplit.summary(this))
+                renderChainCard()
+                toastShort(Strings.t("Will re-measure on the next connect"))
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+        }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        val shardRow = navRow(Strings.t("Node list"), shardPoolSummary()) {
-            // force = true: the whole point of tapping this is to bypass the
-            // six-hour interval the background job honours.
-            shardPoolRow?.setValue(Strings.t("Updating…"))
-            // The policy file rides the same tap. It is what decides how many paths
-            // each node has, so refreshing the node list without it would leave the
-            // count in the summary computed from stale edges.
-            RemotePolicy.refreshIfDue(this, force = true)
-            // The Smart Split profiles ride the same tap: the mirror is part of
-            // what makes SHARD connect, and refreshing the node list without it
-            // would leave a stale fragment ladder for the next Smart Split
-            // connect.
-            SmartSplitSub.refreshIfDue(this, force = true)
-            ShardSubscription.refreshIfDue(this, force = true) { count ->
-                runOnUiThread {
-                    shardPoolRow?.setValue(shardPoolSummary())
-                    toastShort(
-                        if (count > 0) Strings.tf("%s nodes available", count) else Strings.t("Could not update the list")
-                    )
-                }
-            }
-        }
-        shardPoolRow = shardRow
-        content.addView(shardRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
-
-        // Custom Cloudflare IP row: user can enter their own Cloudflare IP and apply it
-        // to all SHARD configs. When set, this IP replaces the node address in the
-        // outbound config, so SHARD connects through the user's chosen edge.
-        val customIpRow = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-            background = Sculpt.sculptedBackground(
-                resources.displayMetrics.density,
-                Sculpt.recess(SURFACE, 0.16f),
-                14,
-                Sculpt.withAlpha(DIVIDER, 0.15f),
-            )
-        }
-        val customIpTitle = TextView(this).apply {
-            text = Strings.t("Enter Your Cloudflare IP")
-            textSize = 13.5f
-            typeface = Typefaces.medium(this@MainActivity)
-            if (AppLanguage.current() != "en") {
-                setLineSpacing(0f, Typefaces.lineHeightMult())
-            }
-            setTextColor(INK)
-        }
-        customIpRow.addView(customIpTitle)
-
-        val customIpSubtitle = TextView(this).apply {
-            text = Strings.t("This IP will replace all node addresses in SHARD configs")
-            textSize = 10.5f
-            setTextColor(MUTED)
-            setPadding(0, dp(2), 0, dp(8))
-        }
-        customIpRow.addView(customIpSubtitle)
-
-        val inputRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val customIpInput = EditText(this).apply {
-            hint = "e.g. 104.16.0.1"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                rightMargin = dp(8)
-            }
-            // Load current value if set
-            val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
-            val current = prefs.getString("shard_custom_cf_ip", "")?.trim().orEmpty()
-            if (current.isNotEmpty()) setText(current)
-            setBackground(Sculpt.sculptedBackground(
-                resources.displayMetrics.density,
-                Sculpt.recess(SURFACE, 0.16f),
-                8,
-                Sculpt.withAlpha(DIVIDER, 0.15f),
-            ))
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            setTextColor(INK)
-            setHintTextColor(MUTED)
-            setSingleLine(true)
-        }
-        inputRow.addView(customIpInput)
-
-        val applyButton = TextView(this).apply {
-            text = Strings.t("Apply")
-            textSize = 12f
-            typeface = Typefaces.medium(this@MainActivity)
-            if (AppLanguage.current() != "en") {
-                setLineSpacing(0f, Typefaces.lineHeightMult())
-            }
-            gravity = Gravity.CENTER
-            setTextColor(palette.mint)
-            setPadding(dp(16), dp(10), dp(16), dp(10))
-            setBackground(Sculpt.sculptedBackground(
-                resources.displayMetrics.density,
-                Sculpt.withAlpha(palette.mint, 0.12f),
-                8,
-                Sculpt.withAlpha(palette.mint, 0.3f),
-            ))
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                val ip = customIpInput.text.toString().trim()
-                val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE).edit()
-                if (ip.isEmpty()) {
-                    prefs.remove("shard_custom_cf_ip")
-                } else {
-                    // Basic validation: must be an IP address format
-                    if (ip.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))) {
-                        val octets = ip.split(".").map { it.toIntOrNull() ?: -1 }
-                        if (octets.all { it in 0..255 }) {
-                            prefs.putString("shard_custom_cf_ip", ip)
-                            toastShort(Strings.tf("Custom Cloudflare IP applied: %s", ip))
-                        } else {
-                            toastShort(Strings.t("Invalid IP address"))
-                            return@setOnClickListener
-                        }
-                    } else {
-                        toastShort(Strings.t("Invalid IP format (use IPv4)"))
-                        return@setOnClickListener
-                    }
-                }
-                prefs.apply()
-                if (ip.isEmpty()) toastShort(Strings.t("Custom IP cleared"))
-            }
-        }
-        inputRow.addView(applyButton)
-        customIpRow.addView(inputRow)
-        content.addView(customIpRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
-
-        // The home-screen card's mirror, for the same reason the Psiphon chain has
-        // one: someone looking for a feature they saw on the main screen looks in
-        // settings, and a control that exists in only one of the two places reads as
-        // a bug. Both write the same key through [setSmartSplitEnabled].
-        // Built as an OrbitToggleRow directly, not through createToggleRow(): that
-        // helper returns LinearLayout, and this row's subtitle has to be rewritten
-        // from outside the builder — the measurement it reports changes on connect
-        // and when the user clears it.
-        val splitRow = OrbitToggleRow(
-            this,
-            palette,
-            Strings.t("Smart Split"),
-            SmartSplit.summary(this),
-            SmartSplit.enabled(this),
-        ) { on ->
-            setSmartSplitEnabled(on)
-            smartSplitRow?.setSubtitle(SmartSplit.summary(this))
-            renderChainCard()
-        }
-        smartSplitRow = splitRow
-        content.addView(splitRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
-
-        // The escape hatch for a wrong measurement, and the only reason the user
-        // ever needs to know a measurement happened at all. A carrier that changes
-        // its DPI, or a cached "not effective here" from a bad minute on the
-        // network, would otherwise be sticky until the app's data is cleared.
-        val remeasureRow = navRow(Strings.t("Re-measure network"), "") {
-            SmartSplit.forgetMeasurements(this)
-            smartSplitRow?.setSubtitle(SmartSplit.summary(this))
-            renderChainCard()
-            toastShort(Strings.t("Will re-measure on the next connect"))
-        }
-        content.addView(remeasureRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
 
         // APPEARANCE, like BACKUP below it, is about the app rather than about a
         // tunnel, so it sits out here and not under Tunnel Controls.
-        content.addView(sectionLabel(Strings.t("APPEARANCE")), LinearLayout.LayoutParams(
+        content.addView(expandableSection(Strings.t("APPEARANCE")) { body ->
+            // No stored reference: picking a theme calls recreate(), so the row is
+            // rebuilt with the new value rather than being repainted in place.
+            body.addView(navRow(Strings.t("Theme"), AppAppearance.mode(this@MainActivity).label) { chooseTheme() }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+            // Language sits directly under Theme: both are appearance-scale choices
+            // that repaint the whole app via recreate(). No stored reference for
+            // the same reason — the settings page is rebuilt, not repainted.
+            body.addView(navRow(Strings.t("Language"), AppLanguage.label(currentLanguagePref())) { chooseLanguage() }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+        }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        // No stored reference: picking a theme calls recreate(), so the row is
-        // rebuilt with the new value rather than being repainted in place.
-        content.addView(navRow(Strings.t("Theme"), AppAppearance.mode(this).label) { chooseTheme() }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
-        // Language sits directly under Theme: both are appearance-scale choices
-        // that repaint the whole app via recreate(). No stored reference for
-        // the same reason — the settings page is rebuilt, not repainted.
-        content.addView(navRow(Strings.t("Language"), AppLanguage.label(currentLanguagePref())) { chooseLanguage() }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
 
         // BACKUP sits outside Tunnel Controls, next to ABOUT: it is about the
         // app's own state, not about how a tunnel is shaped, and burying it in a
         // troubleshooting sub-page is where a user would never look for it after
         // reinstalling.
-        content.addView(sectionLabel(Strings.t("BACKUP")), LinearLayout.LayoutParams(
+        content.addView(expandableSection(Strings.t("BACKUP")) { body ->
+            settingsBackupRow = navRow(Strings.t("Back up settings"), backupSummary()) { exportSettings() }
+            body.addView(settingsBackupRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+            body.addView(navRow(Strings.t("Restore settings"), Strings.t("From a backup file")) { importSettings() }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            body.addView(navRow(Strings.t("Reset to defaults"), Strings.t("Forget every setting")) { confirmResetSettings() }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+        }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        val backupRow = navRow(Strings.t("Back up settings"), backupSummary()) { exportSettings() }
-        settingsBackupRow = backupRow
-        content.addView(backupRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
-        content.addView(navRow(Strings.t("Restore settings"), Strings.t("From a backup file")) { importSettings() }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        content.addView(navRow(Strings.t("Reset to defaults"), Strings.t("Forget every setting")) { confirmResetSettings() }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
 
-        content.addView(sectionLabel(Strings.t("ABOUT")), LinearLayout.LayoutParams(
+        content.addView(expandableSection(Strings.t("ABOUT")) { body ->
+            body.addView(navRow(Strings.t("Check for updates"), "v${appVersion()}") {
+                appUpdater.checkForUpdate()
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+            body.addView(navRow(Strings.t("Source on GitHub"), iconRes = R.drawable.ic_github) {
+                openLink("https://github.com/mbm110/MSN-GUARD")
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            body.addView(navRow(Strings.t("Telegram Channel"), iconRes = R.drawable.ic_telegram) {
+                openLink("https://t.me/MSN_GUARD")
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            body.addView(label("MSN-GUARD ${appVersion()}", 11.5f, Sculpt.withAlpha(MUTED, 0.7f)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                letterSpacing = spacing(0.06f)
+                setPadding(0, dp(22), 0, 0)
+            })
+        }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        content.addView(navRow(Strings.t("Check for updates"), "v${appVersion()}") {
-            appUpdater.checkForUpdate()
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(10) })
-        content.addView(navRow(Strings.t("Source on GitHub"), iconRes = R.drawable.ic_github) {
-            openLink("https://github.com/mbm110/MSN-GUARD")
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        content.addView(navRow(Strings.t("Telegram Channel"), iconRes = R.drawable.ic_telegram) {
-            openLink("https://t.me/MSN_GUARD")
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) })
-        content.addView(label("MSN-GUARD ${appVersion()}", 11.5f, Sculpt.withAlpha(MUTED, 0.7f)).apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-            letterSpacing = spacing(0.06f)
-            setPadding(0, dp(22), 0, 0)
-        })
+
+        // Now every row refreshPsiphonRows touches — Psiphon's three and Tor's
+        // five — has been built and its ref assigned by the sections above.
+        refreshPsiphonRows()
 
         scroll.addView(content)
         page.addView(scroll, FrameLayout.LayoutParams(
@@ -3619,45 +3619,80 @@ class MainActivity : Activity() {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 ).apply { topMargin = dp(9) })
             }
-        content.addView(sectionLabel(Strings.t("CONNECTION SHAPING")))
-        lateinit var obfRow: OrbitSettingsRow
-        obfRow = addControl(Strings.t("Obfuscation"), obfuscationProfile().label) {
-            chooseObfuscation { obfRow.setValue(obfuscationProfile().label) }
-        }
-        addControl(Strings.t("Advanced obfuscation"), advancedObfuscationSummary()) { editAdvancedObfuscation() }
-        lateinit var retryRow: OrbitSettingsRow
-        retryRow = addControl(Strings.t("WireGuard retries"), if (retryObfuscationProfiles()) Strings.t("On") else Strings.t("Off")) {
-            preferences().edit().putBoolean(RETRY_OBFUSCATION, !retryObfuscationProfiles()).apply()
-            retryRow.setValue(if (retryObfuscationProfiles()) Strings.t("On") else Strings.t("Off"))
-        }
-        content.addView(sectionLabel(Strings.t("ROUTING")), LinearLayout.LayoutParams(
+        // The sub-page's own sections get expandable bodies. Each carries its own
+        // state, same as the main settings page. The rows are nullable locals
+        // because their click handlers read them back after a user pick — a
+        // lateinit local cannot be captured before assignment without crashing.
+        var obfRow: OrbitSettingsRow? = null
+        var retryRow: OrbitSettingsRow? = null
+        content.addView(expandableSection(Strings.t("CONNECTION SHAPING"), initiallyExpanded = true) { body ->
+            obfRow = navRow(Strings.t("Obfuscation"), obfuscationProfile().label) {
+                chooseObfuscation { obfRow?.setValue(obfuscationProfile().label) }
+            }
+            body.addView(obfRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(9) })
+            body.addView(navRow(Strings.t("Advanced obfuscation"), advancedObfuscationSummary()) { editAdvancedObfuscation() }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(9) })
+            retryRow = navRow(Strings.t("WireGuard retries"), if (retryObfuscationProfiles()) Strings.t("On") else Strings.t("Off")) {
+                preferences().edit().putBoolean(RETRY_OBFUSCATION, !retryObfuscationProfiles()).apply()
+                retryRow?.setValue(if (retryObfuscationProfiles()) Strings.t("On") else Strings.t("Off"))
+            }
+            body.addView(retryRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(9) })
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+
+        content.addView(expandableSection(Strings.t("ROUTING")) { body ->
+            // v1.9.8: assign to the class fields, not local vals. A previous build
+            // declared `val manualEndpointRow` here, which shadowed the field —
+            // later setValue() calls hit a null field and the displayed value never
+            // refreshed until the screen was rebuilt.
+            manualEndpointRow = navRow(Strings.t("Manual endpoint"), manualEndpoint() ?: Strings.t("Automatic")) { editManualEndpoint() }
+            body.addView(manualEndpointRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(9) })
+            gatewayCacheRow = navRow(Strings.t("Gateway cache"), defaultEndpointDiscovery().label) { manageGatewayCache() }
+            body.addView(gatewayCacheRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(9) })
+            // v2.0.0: the AI Mode row is gone. The Smart DNS Split engine it
+            // toggled never produced a working Gemini lookup in the field, and the
+            // DNS screen now owns resolver configuration outright.
+            body.addView(navRow(Strings.t("Custom DNS"), customDnsLabel()) {
+                openDnsScreen()
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(9) })
+        }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        // v1.9.8: assign to the class fields, not local vals. A previous build
-        // declared `val manualEndpointRow` here, which shadowed the field —
-        // later setValue() calls hit a null field and the displayed value never
-        // refreshed until the screen was rebuilt.
-        manualEndpointRow = addControl(Strings.t("Manual endpoint"), manualEndpoint() ?: Strings.t("Automatic")) { editManualEndpoint() }
-        gatewayCacheRow = addControl(Strings.t("Gateway cache"), defaultEndpointDiscovery().label) { manageGatewayCache() }
-        // v2.0.0: the AI Mode row is gone. The Smart DNS Split engine it
-        // toggled never produced a working Gemini lookup in the field, and the
-        // DNS screen now owns resolver configuration outright.
-        lateinit var dnsRow: OrbitSettingsRow
-        dnsRow = addControl(Strings.t("Custom DNS"), customDnsLabel()) {
-            openDnsScreen()
-        }
-        content.addView(sectionLabel(Strings.t("TROUBLESHOOTING")), LinearLayout.LayoutParams(
+
+        content.addView(expandableSection(Strings.t("TROUBLESHOOTING")) { body ->
+            // Local rows, not class fields: nothing outside this sub-page repaints
+            // them, so the fields the originals used were never written from anywhere
+            // else either — keeping the same shape as locals is the minimal change.
+            var tlsRow: OrbitSettingsRow? = null
+            tlsRow = navRow(Strings.t("TLS fingerprint"), tlsCurvePreset().label) {
+                chooseTlsCurvePreset { tlsRow?.setValue(tlsCurvePreset().label) }
+            }
+            body.addView(tlsRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(9) })
+            var verificationRow: OrbitSettingsRow? = null
+            verificationRow = navRow(Strings.t("WireGuard verification"), if (wireGuardDataCheck()) Strings.t("Strict") else Strings.t("Fast")) {
+                preferences().edit().putBoolean(WIREGUARD_DATA_CHECK, !wireGuardDataCheck()).apply()
+                verificationRow?.setValue(if (wireGuardDataCheck()) Strings.t("Strict") else Strings.t("Fast"))
+            }
+            body.addView(verificationRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(9) })
+        }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        lateinit var tlsRow: OrbitSettingsRow
-        tlsRow = addControl(Strings.t("TLS fingerprint"), tlsCurvePreset().label) {
-            chooseTlsCurvePreset { tlsRow.setValue(tlsCurvePreset().label) }
-        }
-        lateinit var verificationRow: OrbitSettingsRow
-        verificationRow = addControl(Strings.t("WireGuard verification"), if (wireGuardDataCheck()) Strings.t("Strict") else Strings.t("Fast")) {
-            preferences().edit().putBoolean(WIREGUARD_DATA_CHECK, !wireGuardDataCheck()).apply()
-            verificationRow.setValue(if (wireGuardDataCheck()) Strings.t("Strict") else Strings.t("Fast"))
-        }
         // The "VPN CORE" section is gone. It held DNS resolvers, Destination
         // routing, and Zero Trust — all three are proxy-mode features:
         //
@@ -3671,24 +3706,31 @@ class MainActivity : Activity() {
         // The underlying prefs and the core's env bridge are untouched, so the
         // knobs still exist for the CLI; they are simply no longer surfaced as
         // settings that silently do nothing on this device.
-        content.addView(sectionLabel(Strings.t("ANTI-DPI")), LinearLayout.LayoutParams(
+        content.addView(expandableSection(Strings.t("ANTI-DPI"), initiallyExpanded = true) { body ->
+            var fragRow: OrbitSettingsRow? = null
+            fragRow = navRow(Strings.t("TLS fragmentation"), if (h2Fragmentation() == H2Fragmentation.ON) Strings.t("On") else Strings.t("Off")) {
+                chooseH2Fragmentation {
+                    fragRow?.setValue(if (h2Fragmentation() == H2Fragmentation.ON) Strings.t("On") else Strings.t("Off"))
+                }
+            }
+            body.addView(fragRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(9) })
+            // Mixed-case SNI (L×Box spec 028): randomise the casing of the SNI on
+            // every ClientHello. A single toggle, because there is nothing to tune
+            // — it is either changing the bytes on the wire or it is not.
+            var sniRow: OrbitSettingsRow? = null
+            sniRow = navRow(Strings.t("Mixed-case SNI"), if (mixedCaseSni()) Strings.t("On") else Strings.t("Off")) {
+                chooseMixedCaseSni {
+                    sniRow?.setValue(if (mixedCaseSni()) Strings.t("On") else Strings.t("Off"))
+                }
+            }
+            body.addView(sniRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(9) })
+        }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        lateinit var fragRow: OrbitSettingsRow
-        fragRow = addControl(Strings.t("TLS fragmentation"), if (h2Fragmentation() == H2Fragmentation.ON) Strings.t("On") else Strings.t("Off")) {
-            chooseH2Fragmentation {
-                fragRow.setValue(if (h2Fragmentation() == H2Fragmentation.ON) Strings.t("On") else Strings.t("Off"))
-            }
-        }
-        // Mixed-case SNI (L×Box spec 028): randomise the casing of the SNI on
-        // every ClientHello. A single toggle, because there is nothing to tune
-        // — it is either changing the bytes on the wire or it is not.
-        lateinit var sniRow: OrbitSettingsRow
-        sniRow = addControl(Strings.t("Mixed-case SNI"), if (mixedCaseSni()) Strings.t("On") else Strings.t("Off")) {
-            chooseMixedCaseSni {
-                sniRow.setValue(if (mixedCaseSni()) Strings.t("On") else Strings.t("Off"))
-            }
-        }
         scroll.addView(content)
         page.addView(scroll)
         page.setOnApplyWindowInsetsListener { _, insets ->
@@ -7195,6 +7237,28 @@ class MainActivity : Activity() {
 
     /** Section caption with a neon tick, for the settings pages. */
     private fun sectionLabel(text: String): View = OrbitSectionHeader(this, palette, text)
+
+    /**
+     * An expandable section of the settings page.
+     *
+     * Thin wrapper over [ExpandableSection] so call sites read as
+     * `expandableSection("PSIPHON") { it.addView(row) }` and stay symmetrical
+     * with the plain `sectionLabel(...)` they replace.
+     */
+    private fun expandableSection(
+        title: String,
+        initiallyExpanded: Boolean = false,
+        body: (LinearLayout) -> Unit,
+    ): ExpandableSection = ExpandableSection(this, palette, title, initiallyExpanded, body = body)
+
+    private fun expandableSection(
+        title: String,
+        initiallyExpanded: Boolean = false,
+        onExpansionChanged: (Boolean) -> Unit,
+        body: (LinearLayout) -> Unit,
+    ): ExpandableSection = ExpandableSection(
+        this, palette, title, initiallyExpanded, onExpansionChanged, body,
+    )
 
     /** A sculpted navigation row: title on the left, current value on the right. */
     private fun navRow(
