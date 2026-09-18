@@ -633,7 +633,7 @@ object ShardConfigs {
         smartSplit: SmartSplit.FragmentProfile? = null,
     ): String {
         val outbounds = JSONArray()
-            .put(outbound(context, node, "proxy"))
+            .put(outbound(context, node, "proxy", mux = false))
             .put(
                 JSONObject().apply {
                     put("tag", "blackhole")
