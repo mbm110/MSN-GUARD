@@ -1133,6 +1133,31 @@ class MainActivity : Activity() {
         if (verifyInFlight) return
         verifyInFlight = true
         val request = ++verifyRequest
+
+        // DIAGNOSTIC BYPASS — plain SHARD only.
+        //
+        // Plain SHARD connects (the race picks a node, xray boots, the SOCKS
+        // listener comes up) and then the verification gate kills the session
+        // anyway. This skips the gate for that one transport so we can see whether
+        // the tunnel itself is healthy: if Telegram connects and the byte counters
+        // move with the gate out of the way, the tunnel is fine and the problem is
+        // the probe; if nothing loads, the tunnel is really dead.
+        //
+        // Smart Split is deliberately NOT covered: that path already passes the
+        // gate, so skipping it would tell us nothing and only weaken the check we
+        // know works. The condition below is therefore plain SHARD and nothing else.
+        val plainShard = TunnelStatus.isActive() &&
+            Tun2SocksManager.isRunning &&
+            !TunnelStatus.isNativeTunMode &&
+            !SmartSplit.enabled(this)
+        if (plainShard) {
+            ConnectionLog.record("Verification skipped — plain SHARD diagnostic bypass")
+            showVerifying()
+            showConnected()
+            verifyInFlight = false
+            return
+        }
+
         // Byte counter at the moment the transport claimed to be up. The probe
         // below cannot see the tunnel in native mode (see pingAnyEndpoint: our
         // package is disallowed on the TUN, so the request leaves over the
