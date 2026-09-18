@@ -818,12 +818,8 @@ class MainActivity : Activity() {
         refreshPsiphonRows()
         // Battery optimization: the only way to change the whitelist is to leave
         // for the system dialog and come back, so re-read the real state here.
-        // The switch and the subtitle must follow Android, not a local flag.
-        (batteryRow as? OrbitToggleRow)?.let { row ->
-            val exempted = isBatteryExempted()
-            row.setChecked(exempted)
-            row.setSubtitle(batteryOptimizationLabel())
-        }
+        // The switch must follow Android, not a local flag.
+        (batteryRow as? OrbitToggleRow)?.setChecked(isBatteryExempted())
     }
 
     /**
@@ -1043,6 +1039,7 @@ class MainActivity : Activity() {
      */
     private fun verifyTimeoutMs(): Long =
         if (TorManager.isTorActive) TOR_VERIFY_TIMEOUT_MS else VERIFY_TIMEOUT_MS
+
     /**
      * Probe every health-check endpoint in turn, returning the first success.
      *
@@ -1125,27 +1122,6 @@ class MainActivity : Activity() {
         return trafficRx >= target
     }
 
-    /**
-     * Whether the verification gate may trust the core's byte counters instead of
-     * an HTTP probe.
-     *
-     * The native transports (WireGuard/MASQUE/WoW) set [TunnelStatus.isNativeTunMode],
-     * and SHARD does not — the flag means "the Rust core owns a TUN", which SHARD's
-     * userspace stack never is. But the question this gate actually asks is "is the
-     * byte counter a trustworthy witness?", and SHARD's is: [ShardSocksFront.sessionRx]
-     * counts bytes its relay actually handed back to a client, polled by
-     * [MsnGuardVpnService.startShardTrafficPolling] into the same `trafficRx` the
-     * native path feeds.
-     *
-     * Without this, SHARD fell to [pingAnyEndpoint], whose HTTP probe resolves
-     * [PING_URLS] on the carrier link. Those hostnames include `www.google.com`,
-     * which Iranian carriers poison, so the probe failed over a tunnel that was
-     * carrying traffic — "stuck at verifying", then torn down. The byte counter
-     * is the witness that cannot be faked that way.
-     */
-    private fun byteCountersAreAuthoritative(): Boolean =
-        TunnelStatus.isNativeTunMode || ShardSocksFront.isRunning
-
     private fun beginVerification() {
         // Already verified and live: a Psiphon rotation and the native core's own
         // reconnect loop both re-broadcast CONNECTED mid-session, and neither must
@@ -1170,13 +1146,7 @@ class MainActivity : Activity() {
             // In native TUN mode the HTTP probe rides the carrier link, not the
             // tunnel, so it proves nothing. Gate on in-tunnel bytes instead and
             // use the probe only for the latency figure afterwards.
-            //
-            // SHARD is not native, but its byte counter is just as authoritative
-            // — see [byteCountersAreAuthoritative] — and its probe resolves
-            // [PING_URLS] on the carrier link, where Iranian carriers poison the
-            // hostnames. Gating on bytes is what stops a tunnel that is carrying
-            // traffic from being torn down as fake.
-            val nativeMode = byteCountersAreAuthoritative()
+            val nativeMode = TunnelStatus.isNativeTunMode
             if (nativeMode) {
                 val moved = awaitTunnelBytes(request, rxAtStart, deadline)
                 runOnUiThread {
@@ -3043,15 +3013,9 @@ class MainActivity : Activity() {
             // does not name. An auto-reconnect cannot help when the process is
             // dead, and the kill switch cannot stay up either — so on those
             // devices this row is what makes the tunnel survive a locked screen.
-            //
-            // The subtitle carries the state, not the call to action: the row's
-            // own switch already shows on/off, and "Tap to allow…" told the user
-            // nothing they could not see from the switch position. The label says
-            // what the state means — exempt, or about to be killed — in the
-            // user's language.
             batteryRow = createToggleRow(
                 Strings.t("Battery Optimization"),
-                batteryOptimizationLabel(),
+                Strings.t("Tap to allow background running"),
                 isBatteryExempted(),
             ) { _ -> requestBatteryOptimization() }
             body.addView(batteryRow, LinearLayout.LayoutParams(
@@ -7356,20 +7320,6 @@ class MainActivity : Activity() {
         val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
         return pm.isIgnoringBatteryOptimizations(packageName)
     }
-
-    /**
-     * The state the Battery Optimization row shows under its title.
-     *
-     * The row's switch already carries on/off, so the subtitle owes the user the
-     * *meaning* of that state, not another way of saying it: exempt means the
-     * tunnel survives a locked screen, and not-exempt means the vendor's power
-     * manager is free to kill it. That is the choice the user is actually making
-     * when they tap the row, and "Tap to allow background running" did not state
-     * either side of it.
-     */
-    private fun batteryOptimizationLabel(): String =
-        if (isBatteryExempted()) Strings.t("On — background running allowed")
-        else Strings.t("Off — tap to allow background running")
 
     /**
      * Open the system dialog that asks to be exempted from battery
