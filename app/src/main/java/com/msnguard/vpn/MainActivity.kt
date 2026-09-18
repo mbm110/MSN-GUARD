@@ -156,7 +156,7 @@ class MainActivity : Activity() {
     private var pendingBackupJson: String? = null
     private var settingsBackupRow: OrbitSettingsRow? = null
     private var profileRow: OrbitSettingsRow? = null
-    private var batteryRow: OrbitToggleRow? = null
+    private var batteryRow: LinearLayout? = null
     private var manualEndpointRow: OrbitSettingsRow? = null
     private var gatewayCacheRow: OrbitSettingsRow? = null
     private var visualState = OrbitDialView.State.DISCONNECTED
@@ -818,8 +818,8 @@ class MainActivity : Activity() {
         refreshPsiphonRows()
         // Battery optimization: the only way to change the whitelist is to leave
         // for the system dialog and come back, so re-read the real state here.
-        // setChecked() repaints without firing the toggle callback.
-        batteryRow?.setChecked(isBatteryExempted())
+        // The switch must follow Android, not a local flag.
+        (batteryRow as? OrbitToggleRow)?.setChecked(isBatteryExempted())
     }
 
     /**
