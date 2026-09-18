@@ -76,8 +76,8 @@ class ExpandableSection(
         chevron.rotation = if (initiallyExpanded) 180f else 0f
         header.setOnClickListener { toggle() }
 
-        addView(header, LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        addView(content, LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+        addView(header, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        addView(content, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             topMargin = dp(8)
         })
 
@@ -181,7 +181,7 @@ class ExpandableSection(
                 }
                 if (!english) setLineSpacing(0f, Typefaces.lineHeightMult())
                 isSingleLine = true
-            }, LayoutParams(0, WRAP_CONTENT, 1f))
+            }, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(chevron, LayoutParams(dp(18), dp(18)).apply { leftMargin = dp(8) })
         }
 
