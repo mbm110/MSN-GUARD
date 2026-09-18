@@ -926,7 +926,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
          * everything, LAN destinations included, goes through the tunnel.
          */
         const val LAN_BYPASS_PREF = "lan_bypass"
-
+        /** "Bypass Iran": Iranian IP ranges are excluded from the TUN. */
+        const val IRAN_BYPASS_PREF = "iran_bypass"
         /**
          * Watchdog ticks a native core tunnel (MASQUE/WireGuard/WoW) may stay
          * byte-silent while the screen is ON before the watchdog tears it
@@ -2397,6 +2398,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         // choice has to apply to chained runs too, and our own package
                         // stays off the TUN in every mode.
                         .applyLanAccess(tun = address)
+                        .applyIranBypass()
                         .applySplitTunneling()
                         .establish() ?: error("Android could not establish the VPN interface")
                     vpnModeActive.set(true)
@@ -2514,7 +2516,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // default. Printers and NAS boxes are not reachable through Tor
                     // in any case, so without it those destinations simply fail.
                     .applyLanAccess(tun = address)
-                    .applySplitTunneling()
+                    .applyIranBypass()
+                        .applySplitTunneling()
                     .establish() ?: error("Android could not establish the VPN interface")
                 vpnModeActive.set(true)
 
@@ -2673,7 +2676,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // TUN's resolver before the tunnel exists.
                     .addDnsServer(address.router)
                     .applyLanAccess(tun = address)
-                    .applySplitTunneling()
+                    .applyIranBypass()
+                        .applySplitTunneling()
                     .establish() ?: error("Android could not establish the VPN interface")
                 vpnModeActive.set(true)
 
@@ -4104,6 +4108,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         // choice and still keeps our own process off the TUN in every
                         // mode — which the DNS bootstrap above depends on.
                         .applyLanAccess(tun = address)
+                        .applyIranBypass()
                         .applySplitTunneling()
                         .establish() ?: error("Android could not establish the VPN interface")
                     vpnModeActive.set(true)
@@ -4232,7 +4237,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     .applyDns(effectiveConfig, addresses)
                     .applyGatewayProxy(effectiveConfig, addresses)
                     .applyLanAccess(addresses)
-                    .applySplitTunneling()
+                    .applyIranBypass()
+                        .applySplitTunneling()
                     // applySplitTunneling() handles app exclusion per mode.
                     .establish() ?: error("Android could not establish the VPN interface")
                 ConnectionLog.record("Scanning gateways for VPN")
@@ -4523,6 +4529,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 //    only the apps that were being tunnelled get blocked; apps the
                 //    user deliberately kept off the tunnel were never protected by it,
                 //    so cutting them off would be a failure the switch never promised.
+                .applyIranBypass()
                 .applySplitTunneling()
                 .establish()
             ConnectionLog.record("Kill switch VPN active; all traffic blocked")
@@ -5570,8 +5577,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     /**
      * Upstream v0.8.0 renamed the LAN preference from `lan_sharing` to
-     * `lan_bypass` and migrates the old value on first read. Kept verbatim so the
-     * service and the merged MainActivity agree on which key is authoritative.
+     * `lan_bypass` and migrates the old value on first read. Kept verbatim so
+     * the service and the merged MainActivity agree on which key is authoritative.
      */
     private fun lanBypassEnabled(): Boolean {
         val prefs = profiled()
@@ -5580,6 +5587,57 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             return true
         }
         return prefs.getBoolean(LAN_BYPASS_PREF, false)
+    }
+
+    /** "Bypass Iran" toggle. Profiled: a routing choice is per-profile settings. */
+    private fun iranBypassEnabled(): Boolean = profiled().getBoolean(IRAN_BYPASS_PREF, false)
+
+    /**
+     * "Bypass Iran" — send Iranian destinations around the tunnel entirely.
+     *
+     * Done at the Android VPN layer, not inside any transport. [excludeRoute]
+     * tells the kernel not to route these destinations through our TUN at all,
+     * which is the only place a rule can cover every transport the app can run:
+     * the core's TUN bridge (WireGuard/MASQUE/WoW) never sees a routing rule,
+     * Psiphon/Tor/SHARD go through tun2socks, and the chained outer leg is its
+     * own socket. One excludeRoute applies to all of them, and to every app on
+     * the phone, because none of them ever reach the tunnel.
+     *
+     * The list is a CIDR file in assets rather than a `geoip:ir` tag because
+     * the trimmed geoip.dat shipped for SHARD's rules does not carry the
+     * `ir` tag, and a missing tag is a hard xray startup failure — while a
+     * missing CIDR file here is only a logged no-op.
+     *
+     * Off by default for the same reason LAN bypass is: it is a routing
+     * decision the user should make. An Iranian site that the tunnel was
+     * deliberately carrying — a banking app that blocks foreign source
+     * addresses, or an exit-country choice — stops working the moment this is
+     * on, and that is the user's call, not ours.
+     */
+    private fun Builder.applyIranBypass(): Builder {
+        if (!iranBypassEnabled()) return this
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            ConnectionLog.record("Iran bypass uses system local routes on Android 12 and older")
+            return this
+        }
+        var applied = 0
+        var skipped = 0
+        assets.open("geoip-iran.cidr").bufferedReader().use { reader ->
+            reader.forEachLine { line ->
+                val cidr = line.trim()
+                if (cidr.isEmpty() || cidr.startsWith('#')) return@forEachLine
+                val (address, prefix) = cidr.split('/')
+                val prefixValue = prefix.toIntOrNull() ?: return@forEachLine
+                try {
+                    excludeRoute(IpPrefix(InetAddress.getByName(address), prefixValue))
+                    applied++
+                } catch (e: Exception) {
+                    skipped++
+                }
+            }
+        }
+        ConnectionLog.record("Iran bypass active: $applied IPv4 ranges excluded, $skipped unparseable")
+        return this
     }
 
     private fun Builder.applyTunnelAddresses(addresses: NativeCore.TunnelAddresses): Builder {

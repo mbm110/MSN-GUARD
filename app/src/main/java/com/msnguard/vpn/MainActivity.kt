@@ -1,5 +1,6 @@
 package com.msnguard.vpn
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.Dialog
 import android.content.BroadcastReceiver
@@ -23,6 +24,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings as AndroidSettings
 import android.text.InputType
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
@@ -153,6 +156,7 @@ class MainActivity : Activity() {
     private var pendingBackupJson: String? = null
     private var settingsBackupRow: OrbitSettingsRow? = null
     private var profileRow: OrbitSettingsRow? = null
+    private var batteryRow: OrbitSettingsRow? = null
     private var manualEndpointRow: OrbitSettingsRow? = null
     private var gatewayCacheRow: OrbitSettingsRow? = null
     private var visualState = OrbitDialView.State.DISCONNECTED
@@ -812,6 +816,11 @@ class MainActivity : Activity() {
         // Every row this touches is null unless the settings page is on screen, so
         // this is a no-op everywhere else.
         refreshPsiphonRows()
+        // Battery optimization: the row shows the doze-whitelist state, and the
+        // only way to change it is to leave for the system dialog and come back.
+        // Without this the row would still say "Optimized" over a whitelist the
+        // user just granted.
+        batteryRow?.setValue(batteryOptimizationLabel())
     }
 
     /**
@@ -2972,13 +2981,6 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(10) })
-            body.addView(label(
-                Strings.t("Four independent sets of settings. Each keeps its own protocol, transport, kill switch and shaping. Backup, restore and reset cover all four."),
-                12.5f, Sculpt.withAlpha(MUTED, 0.95f),
-            ), LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(6); leftMargin = dp(2) })
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -3003,6 +3005,23 @@ class MainActivity : Activity() {
             ) {
                 preferences().edit().putBoolean(MsnGuardVpnService.AUTO_RECONNECT_PREF, it).apply()
             }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+
+            // BATTERY OPTIMIZATION. Not a toggle: it is a row that opens the
+            // system's doze-whitelist dialog, so it reads the current state and
+            // shows it as the row's value the way a toggle would.
+            //
+            // This is the single most-asked-for row on Huawei and Xiaomi, whose
+            // vendor power managers kill a foreground service the doze whitelist
+            // does not name. An auto-reconnect cannot help when the process is
+            // dead, and the kill switch cannot stay up either — so on those
+            // devices this row is what makes the tunnel survive a locked screen.
+            batteryRow = navRow(Strings.t("Battery Optimization"), batteryOptimizationLabel()) {
+                requestBatteryOptimization()
+            }
+            body.addView(batteryRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
@@ -3037,6 +3056,32 @@ class MainActivity : Activity() {
                 lanBypassEnabled(),
             ) {
                 preferences().edit().putBoolean(MsnGuardVpnService.LAN_BYPASS_PREF, it).apply()
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+
+            // BYPASS IRAN. Iranian IP ranges leave through the carrier link and
+            // never enter the tunnel. Implemented as Android excludeRoute() on
+            // the TUN, which is the only layer every transport passes through —
+            // see MsnGuardVpnService.applyIranBypass for why a rule inside any
+            // one transport would leave the others uncovered.
+            //
+            // Off by default. An Iranian destination the user was deliberately
+            // tunnelling (a bank that blocks foreign source addresses, an
+            // exit-country choice) stops working the moment this is on, so this
+            // is the user's routing decision to make.
+            body.addView(createToggleRow(
+                Strings.t("Bypass Iran"),
+                Strings.t("Iranian sites and apps go direct, outside the tunnel"),
+                iranBypassEnabled(),
+            ) {
+                preferences().edit().putBoolean(MsnGuardVpnService.IRAN_BYPASS_PREF, it).apply()
+                // The TUN is already up with the old route table; the exclusion
+                // only takes effect on the next establish(). Reconnecting is the
+                // honest way to say "this needs a second" rather than silently
+                // leaving the old routing in place until the next reboot.
+                if (it) toastShort(Strings.t("Reconnect to apply the new routing"))
             }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -7267,6 +7312,60 @@ class MainActivity : Activity() {
     private fun killSwitchEnabled(): Boolean = preferences().getBoolean(KILL_SWITCH, false)
 
     /**
+     * Whether Android's doze whitelist already exempts this app.
+     *
+     * A missing PowerManager or an unknown package state reads as "optimized"
+     * (true), which is the safe direction: the row offers the fix, rather than
+     * claiming nothing needs doing.
+     */
+    @SuppressLint("BatteryLife")
+    private fun isBatteryOptimized(): Boolean {
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return true
+        return !pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    /** The row's value: the state Android reports, in the user's language. */
+    private fun batteryOptimizationLabel(): String =
+        if (isBatteryOptimized()) Strings.t("Optimized — tap to allow background running")
+        else Strings.t("Unrestricted")
+
+    /**
+     * Open the system dialog that asks to be exempted from battery
+     * optimisation (the doze whitelist).
+     *
+     * Two shapes, because the direct one is not universal:
+     *  - ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS with a `package:` data URI
+     *    lands the user on a one-tap "Allow" for this app specifically. This is
+     *    what the permission was granted for.
+     *  - It throws ActivityNotFoundException on ROMs that do not ship the
+     *    intent (some vendor power managers replace it wholesale), and the
+     *    fallback is the full battery-optimisation list, where the user finds
+     *    the app and toggles it themselves.
+     *
+     * onResume() refreshes the row's label, so coming back from either dialog
+     * shows the new state without a rebuild.
+     */
+    @SuppressLint("BatteryLife")
+    private fun requestBatteryOptimization() {
+        try {
+            val intent = Intent(AndroidSettings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = "package:$packageName".toUri()
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (_: Exception) {
+            try {
+                val intent = Intent(AndroidSettings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                startActivity(intent)
+            } catch (_: Exception) {
+                ConnectionLog.record("Battery optimization: no system settings activity available")
+                toastShort(Strings.t("This device has no battery optimization settings"))
+            }
+        }
+    }
+    /**
      * Auto-reconnect preference, read through the service's own key and default so
      * the toggle and the retry loop can never disagree about what "on" means.
      */
@@ -7291,6 +7390,11 @@ class MainActivity : Activity() {
         // 1.4.x sees the switch already on instead of a switch that reads OFF over
         // routing that is on.
         preferences().getBoolean("lan_sharing", false),
+    )
+
+    /** The Bypass Iran toggle. Reads the same key the TUN builder excludes by. */
+    private fun iranBypassEnabled(): Boolean = preferences().getBoolean(
+        MsnGuardVpnService.IRAN_BYPASS_PREF, false,
     )
 
     private fun savedProtocol(): Protocol {

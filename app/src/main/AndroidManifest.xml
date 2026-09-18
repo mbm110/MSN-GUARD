@@ -22,6 +22,15 @@
          prefixes, which is a guess rather than an answer. Read-only, and it is one
          of the permissions Play Protect does not treat as sensitive. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!--
+      REQUEST_IGNORE_BATTERY_OPTIMIZATIONS: the Settings ▸ Battery Optimization
+      button. Android's doze whitelist is the one thing that keeps a tunnel alive
+      behind a closed screen on some OEMs — Huawei and Xiaomi kill background
+      services that are not on it. Requesting the dialog is the documented way to
+      ask, and the reason Google accepts it for VPN apps. Not requested at
+      runtime anywhere else: it opens only when the user taps that row.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- REQUEST_INSTALL_PACKAGES is intentionally absent. The updater used to
          download an APK and drive the package installer, which needs this
          permission and is the static signature Play Protect and the OEM scanners
