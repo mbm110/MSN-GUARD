@@ -399,7 +399,18 @@ object ShardConfigs {
                     "tlsSettings",
                     JSONObject().apply {
                         put("serverName", node.serverName)
-                        if (node.fingerprint.isNotEmpty()) put("fingerprint", node.fingerprint)
+                        // `fp=unsafe` is what the whole subscription ships, and it is
+                        // passed through verbatim at line 402. That is not a neutral
+                        // choice: it tells the fork to emit a bare, uncamouflaged
+                        // ClientHello, and Iranian DPI blocks it within seconds of
+                        // the tunnel coming up — the session connects, then dies in
+                        // ~13s with three failed probes, exactly the field symptom.
+                        // Patterniha's own app maps `unsafe` to a real browser
+                        // fingerprint, which is why the same config works there and
+                        // not here. chrome is the safest replacement: it is the most
+                        // common TLS client on this carrier, so its ClientHello is
+                        // the one shape a censor cannot afford to block.
+                        put("fingerprint", "chrome")
                         if (node.cipherSuites.isNotEmpty()) put("cipherSuites", node.cipherSuites)
                         if (node.alpn.isNotEmpty()) {
                             put("alpn", JSONArray().apply { node.alpn.split(',').forEach { put(it.trim()) } })
