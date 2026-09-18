@@ -5630,18 +5630,20 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 val prefixValue = prefix.toIntOrNull() ?: return@forEachLine
                 try {
                     val prefixObj = IpPrefix(InetAddress.getByName(address), prefixValue)
-                    val bytes = prefixObj.address
                     // Never exclude RFC1918/private space. The tun2socks transports
                     // (SHARD, Psiphon, Tor) put the TUN itself on 10/8, 172.16/12 or
                     // 192.168/16, and a geo file for Iran has no business carrying
                     // them — but if it does, excluding it blackholes the tunnel's
                     // own address plan and the connect dies in verification.
                     // geoip-iran.cidr shipped 10.0.0.0/8 and broke every SHARD connect.
-                    val isPrivate = bytes.size == 4 && (
-                        (bytes[0] == 10.toByte()) ||
-                            (bytes[0] == 172.toByte() && bytes[1] in 16..31) ||
-                            (bytes[0] == 192.toByte() && bytes[1] == 168.toByte())
-                        )
+                    val isPrivate = when (val raw = prefixObj.address.address) {
+                        byteArrayOf() -> false
+                        else -> raw.size == 4 && (
+                            (raw[0] == 10.toByte()) ||
+                                (raw[0] == 172.toByte() && raw[1] in 16..31) ||
+                                (raw[0] == 192.toByte() && raw[1] == 168.toByte())
+                            )
+                    }
                     if (isPrivate || prefixObj.prefixLength <= 7) {
                         skipped++
                         return@forEachLine

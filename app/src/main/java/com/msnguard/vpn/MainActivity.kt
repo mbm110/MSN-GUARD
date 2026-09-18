@@ -7305,14 +7305,6 @@ class MainActivity : Activity() {
     private fun killSwitchEnabled(): Boolean = preferences().getBoolean(KILL_SWITCH, false)
 
     /**
-     * Whether Android's doze whitelist already exempts this app.
-     *
-     * A missing PowerManager or an unknown package state reads as "optimized"
-     * (true), which is the safe direction: the row offers the fix, rather than
-     * claiming nothing needs doing.
-     */
-    @SuppressLint("BatteryLife")
-    /**
      * Open the system dialog that asks to be exempted from battery
      * optimisation (the doze whitelist).
      *
@@ -7324,9 +7316,6 @@ class MainActivity : Activity() {
      *    intent (some vendor power managers replace it wholesale), and the
      *    fallback is the full battery-optimisation list, where the user finds
      *    the app and toggles it themselves.
-     *
-     * onResume() refreshes the row's label, so coming back from either dialog
-     * shows the new state without a rebuild.
      */
     @SuppressLint("BatteryLife")
     private fun requestBatteryOptimization() {
