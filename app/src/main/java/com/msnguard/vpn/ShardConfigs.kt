@@ -551,6 +551,20 @@ object ShardConfigs {
                             put("udp", false)
                         }
                     )
+                    // Sniffing on, for the same reason as the live tunnel: [ShardProbe]
+                    // sends the probe hostname as an ATYP=3 domain, and without sniffing
+                    // xray hands it to the VLESS outbound, which resolves it on the
+                    // carrier link. On a network with poisoned DNS the race then
+                    // discards every reachable node before the tunnel is ever built.
+                    // `routeOnly: true` keeps the dial on the address the rule picked.
+                    put(
+                        "sniffing",
+                        JSONObject().apply {
+                            put("enabled", true)
+                            put("destOverride", JSONArray().put("tls").put("http").put("quic"))
+                            put("routeOnly", true)
+                        }
+                    )
                 }
             )
             // No mux during the race: the probe is a single short flow, so a
@@ -574,6 +588,29 @@ object ShardConfigs {
                 put("loglevel", "none")
                 put("access", "none")
             })
+            // The race resolves the probe hostname the same way the live tunnel does:
+            // inside the config, not on the carrier link. One `dns` outbound shared by
+            // every probe inbound — the resolver has no path of its own here, and
+            // [ShardProbe] is the only traffic these inbounds will ever see.
+            outbounds.put(JSONObject().apply {
+                put("tag", "dns-out")
+                put("protocol", "dns")
+                put(
+                    "settings",
+                    JSONObject().apply {
+                        put("nonIPQuery", "drop")
+                        put("userLevel", 1)
+                    }
+                )
+            })
+            rules.put(
+                JSONObject().apply {
+                    put("type", "field")
+                    put("port", 53)
+                    put("outboundTag", "dns-out")
+                }
+            )
+            put("dns", plainDns(context))
             put("inbounds", inbounds)
             put("outbounds", outbounds)
             put("routing", JSONObject().put("rules", rules))
@@ -635,31 +672,22 @@ object ShardConfigs {
                     put("tag", "direct-plain")
                     put("protocol", "freedom")
                 })
-                .put(JSONObject().apply {
-                    put("tag", "dns-out")
-                    put("protocol", "dns")
-                    // Non-IP queries (HTTPS/SVCB records, mostly) are dropped rather
-                    // than forwarded: they would be answered by whichever resolver
-                    // this outbound happens to reach, and an ECH-bearing HTTPS record
-                    // arriving over the wrong path is worse than no record.
-                    // Level 1 belongs to this outbound alone: connIdle 12 s instead
-                    // of the fork's 300 s default, so a finished DNS exchange stops
-                    // holding state for five minutes. Matches upstream's value.
-                    //
-                    // It goes INSIDE `settings`, and that placement is not cosmetic:
-                    // `userLevel` is a field of the dns outbound's own settings
-                    // struct (infra/conf/dns_proxy.go), NOT of the outbound object.
-                    // Put one level up and xray parses the config, reports
-                    // `Configuration OK.` and ignores it — a silent no-op.
-                    put(
-                        "settings",
-                        JSONObject().apply {
-                            put("nonIPQuery", "drop")
-                            put("userLevel", 1)
-                        }
-                    )
-                })
         }
+        // The `dns` outbound the port-53 rule points at. Shared by Smart Split and
+        // plain SHARD — it answers a query instead of forwarding it, so it has no
+        // path of its own and needs no fragment profile. See the `nonIPQuery` note
+        // in [smartSplitDns] for why these settings live inside `settings`.
+        outbounds.put(JSONObject().apply {
+            put("tag", "dns-out")
+            put("protocol", "dns")
+            put(
+                "settings",
+                JSONObject().apply {
+                    put("nonIPQuery", "drop")
+                    put("userLevel", 1)
+                }
+            )
+        })
         return JSONObject().apply {
             put("policy", policy())
             put(
@@ -724,21 +752,28 @@ object ShardConfigs {
                     // the name — an extra failure mode and a DNS leak surface. Both
                     // were tested against the real binary; both route correctly, and
                     // this is the safer one.
-                    if (smartSplit != null) {
-                        put(
-                            "sniffing",
-                            JSONObject().apply {
-                                put("enabled", true)
-                                put("destOverride", JSONArray().put("tls").put("http").put("quic"))
-                                put("routeOnly", true)
-                                // `quic` next to tls/http: a QUIC initial carries the
-                                // SNI too, so with it the `domain:`/`geosite:` rules
-                                // below decide QUIC flows as well instead of falling
-                                // to the catch-all. Cheap — same sniff, one more
-                                // parser — and it only reads the first packet.
-                            }
-                        )
-                    }
+                    //
+                    // This used to be Smart-Split-only. It is now on for plain SHARD
+                    // too, and that is the fix for the "verifying → failed" failure:
+                    // [ShardProbe] sends its probe hostname as a SOCKS5 ATYP=3
+                    // domain so the tunnel resolves it, not the phone. Without
+                    // sniffing, xray hands that name straight to the VLESS outbound,
+                    // which resolves it on the carrier link — poisoned DNS answers a
+                    // reachable node as unreachable. Sniffing keeps the name inside
+                    // the config's own resolver (see [plainDns] below).
+                    put(
+                        "sniffing",
+                        JSONObject().apply {
+                            put("enabled", true)
+                            put("destOverride", JSONArray().put("tls").put("http").put("quic"))
+                            put("routeOnly", true)
+                            // `quic` next to tls/http: a QUIC initial carries the
+                            // SNI too, so with it the `domain:`/`geosite:` rules
+                            // below decide QUIC flows as well instead of falling
+                            // to the catch-all. Cheap — same sniff, one more
+                            // parser — and it only reads the first packet.
+                        }
+                    )
                 }
             )
             if (listenHost != "127.0.0.1") {
@@ -763,6 +798,19 @@ object ShardConfigs {
             if (smartSplit != null) {
                 put("dns", smartSplitDns(context))
                 put("routing", JSONObject().put("rules", smartSplitRules(context)))
+            } else {
+                // The plain-SHARD resolver and rule table. Two rules, no fragments.
+                //
+                // Why even without Smart Split the config needs a `dns` module:
+                // [ShardProbe] sends the health-check hostname as a SOCKS5 ATYP=3
+                // domain so the phone does not resolve it on the carrier link. xray
+                // only routes that name to a resolver when the `dns` outbound and the
+                // port-53 rule exist — without them the name falls to the VLESS
+                // outbound, which resolves it over the carrier link, and on a network
+                // with poisoned DNS a reachable node is scored unreachable. That is
+                // the "verifying → failed" failure this removes.
+                put("dns", plainDns(context))
+                put("routing", JSONObject().put("rules", plainRules()))
             }
         }.toString()
     }
@@ -1102,6 +1150,87 @@ object ShardConfigs {
      * falling through to the wrong resolver, which would put a sanctioned name's
      * lookup on the direct path.
      */
+    /**
+     * The resolver for plain SHARD (no Smart Split).
+     *
+     * Everything [smartSplitDns] needs a fragment profile for is absent here: there
+     * is no `direct-frag`, so the resolver's own connection leaves through `proxy`
+     * and is fragmented by nothing — which is fine, because the node is the only
+     * path in this mode and the censor sees one TLS session to a Cloudflare edge
+     * either way.
+     *
+     * What is kept is the part that fixes the failure: a DoH server that resolves
+     * inside the config, so [ShardProbe]'s ATYP=3 hostname never falls to the
+     * carrier link.
+     *
+     * - `doh` is the general resolver, queried over the node.
+     * - `shard-dns` pins the probe hosts to the same server, so the health check
+     *   resolves exactly where the traffic it is measuring will go.
+     */
+    private fun plainDns(context: Context): JSONObject {
+        return JSONObject().apply {
+            put("queryStrategy", "UseSystem")
+            put("useSystemHosts", true)
+            put("serveStale", true)
+            put("hosts", JSONObject().put("cloudflare-dns.com", "challenges.cloudflare.com"))
+            put(
+                "servers",
+                JSONArray()
+                    .put(
+                        JSONObject().apply {
+                            put("tag", "shard-dns")
+                            put("address", "https://1.1.1.1/dns-query")
+                            // The health-probe hosts only. [ShardProbe.RULE_HOSTS]
+                            // names the same three, and keeping the two lists in one
+                            // file is what stops them drifting apart.
+                            put("domains", JSONArray().apply {
+                                ShardProbe.RULE_HOSTS.forEach { put("full:$it") }
+                            })
+                            put("timeoutMs", 12000)
+                        }
+                    )
+                    .put(
+                        JSONObject().apply {
+                            put("tag", "doh")
+                            put("address", "https://cloudflare-dns.com/dns-query")
+                            put("timeoutMs", 12000)
+                        }
+                    )
+            )
+        }
+    }
+
+    /**
+     * The plain-SHARD rule table. Two rules, and the second is the whole point.
+     *
+     * 1. Port 53 → `dns-out`, which is what makes [plainDns]'s servers apply at
+     *    all. Without it a DNS query is just traffic to port 53 and leaves through
+     *    `proxy` unresolved.
+     * 2. The probe's own three endpoints → `proxy`. [ShardProbe] sends them as
+     *    hostnames on plaintext port 80; nothing else in this config matches tcp/80
+     *    (`proxy` is the default outbound, so they would reach it anyway — but
+     *    naming them keeps the watchdog honest if a future rule is inserted above
+     *    the default, the same trap rule 3b guards in [smartSplitRules]).
+     */
+    private fun plainRules(): JSONArray {
+        fun rule(build: JSONObject.() -> Unit) = JSONObject().apply {
+            put("type", "field")
+            build()
+        }
+        return JSONArray()
+            .put(rule {
+                put("port", 53)
+                put("outboundTag", "dns-out")
+            })
+            .put(rule {
+                put("domain", JSONArray().apply {
+                    ShardProbe.RULE_HOSTS.forEach { put("full:$it") }
+                })
+                put("port", ShardProbe.RULE_PORTS)
+                put("outboundTag", "proxy")
+            })
+    }
+
     private fun smartSplitDns(context: Context): JSONObject {
         val sanctioned = JSONArray().apply { sanctionedRuleDomains(context).forEach { put(it) } }
         val iranian = JSONArray()
