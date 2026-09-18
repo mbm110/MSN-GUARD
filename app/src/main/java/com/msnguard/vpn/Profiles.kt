@@ -104,19 +104,36 @@ object Profiles {
      *
      * Returns 0 when the target is already active, which the caller uses to
      * skip the recreate.
+     *
+     * ## Upgrade migration
+     *
+     * An install from before this feature holds bare keys (`kill_switch`), with
+     * no prefix at all. Those belong to Profile A — the first profile anyone
+     * has. Prefixing them on the *first ever switch* is what keeps an existing
+     * user's settings: without it, reading `p0_kill_switch` after the round trip
+     * finds nothing and silently resets the row to its default.
      */
     fun switch(context: Context, index: Int): Int {
         if (index !in 0 until COUNT) return 0
-        val from = active(context)
-        if (from == index) return 0
+        if (active(context) == index) return 0
         val prefs = context.getSharedPreferences(SETTINGS_FILE, Context.MODE_PRIVATE)
-        val all = prefs.all
+        val snapshot = prefs.all
         val editor = prefs.edit()
+
+        // One pass. A key is either already prefixed (p2_kill_switch) — in which
+        // case stripProfile returns its logical name — or bare (kill_switch), in
+        // which case stripProfile returns null and the key IS its own logical
+        // name. Both end up rewritten to the target profile's prefix.
+        //
+        // The bare case is the upgrade path: an install from before this feature
+        // holds unprefixed keys, and they belong to whatever profile is active.
+        // Sending them to the target on the first switch is what keeps an
+        // existing user's settings — reading p0_kill_switch after the round trip
+        // would otherwise find nothing and silently reset the row.
         var moved = 0
-        all.forEach { (key, value) ->
+        snapshot.forEach { (key, value) ->
             if (!isProfiled(key)) return@forEach
-            // Strip whatever profile owns it now, then apply the target's.
-            val bare = stripProfile(key) ?: return@forEach
+            val bare = stripProfile(key) ?: key
             editor.remove(key)
             editor.putValue(profiledKey(index, bare), value)
             moved++
@@ -145,9 +162,43 @@ object Profiles {
     fun isProfiled(key: String): Boolean =
         key !in KEYS_NOT_PROFILED && !PREFIXES_NOT_PROFILED.any(key::startsWith)
 
-    /** Physical key for [key] in the active profile. */
-    fun key(context: Context, key: String): String =
-        if (isProfiled(key)) profiledKey(active(context), key) else key
+    /**
+     * Physical key for [key] in the active profile.
+     *
+     * Reads a bare key as the active profile's: an install from before profiles
+     * existed holds unprefixed keys, and they belong to whatever profile the user
+     * is on. This is what makes the upgrade transparent — every row keeps its
+     * value without a migration having to run first.
+     */
+    fun key(context: Context, key: String): String {
+        if (!isProfiled(key)) return key
+        return profiledKey(active(context), key)
+    }
+
+    /**
+     * Prefix every bare profiled key with the active profile's prefix, once.
+     *
+     * Called from onCreate. The fallback in [key] makes this optional, not
+     * load-bearing — but leaving bare keys in place means [switch] has to handle
+     * two shapes of the same logical key forever, and the fallback silently
+     * moves a setting when the user never asked it to move. Doing it up front
+     * means there is one shape, and [switch] is a pure relabel.
+     */
+    fun migrateIfNeeded(context: Context): Int {
+        val prefs = context.getSharedPreferences(SETTINGS_FILE, Context.MODE_PRIVATE)
+        val prefix = profiledKey(active(context), "")
+        val bare = prefs.all.entries.filter { (key, _) ->
+            isProfiled(key) && stripProfile(key) == null
+        }
+        if (bare.isEmpty()) return 0
+        val editor = prefs.edit()
+        bare.forEach { (key, value) ->
+            editor.remove(key)
+            editor.putValue(prefix + key, value)
+        }
+        editor.commit()
+        return bare.size
+    }
 
     /**
      * Clear every profiled key in every profile.

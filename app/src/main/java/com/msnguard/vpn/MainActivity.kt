@@ -496,6 +496,10 @@ class MainActivity : Activity() {
         // recreate() never orphans it.
         AppLanguage.appContext = applicationContext
         palette = AppAppearance.load(this)
+        // Profiles: prefix any settings key written before this feature existed,
+        // so an upgrade keeps every value the user set. Idempotent — a second
+        // run finds nothing bare and returns 0.
+        Profiles.migrateIfNeeded(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             // A registered OnBackInvokedCallback ALWAYS consumes the gesture — its
             // `onBackInvoked()` returns Unit, so unlike `onBackPressed()` there is
@@ -5560,7 +5564,16 @@ class MainActivity : Activity() {
     }
 
     private fun probeDot(entry: String): Boolean {
-        val (host, port) = splitHostPort(entry, 853)
+        // Strip the scheme the field's own placeholder tells the user to type.
+        // Without this, splitHostPort sees "tls://dns.google" as one host and
+        // createSocket resolves it literally — UnknownHostException, reported
+        // to the user as "unreachable" for a server that is perfectly fine.
+        // probeDoh strips its own prefix; this had to match.
+        val stripped = entry
+            .removePrefix("tls://")
+            .removePrefix("dot://")
+            .trim()
+        val (host, port) = splitHostPort(stripped, 853)
         val socket = javax.net.ssl.SSLSocketFactory.getDefault().createSocket(host, port)
             as javax.net.ssl.SSLSocket
         return socket.use {
