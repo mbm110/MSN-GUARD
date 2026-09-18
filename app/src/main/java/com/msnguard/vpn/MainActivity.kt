@@ -7349,7 +7349,7 @@ class MainActivity : Activity() {
     private fun requestBatteryOptimization() {
         try {
             val intent = Intent(AndroidSettings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                data = "package:$packageName".toUri()
+                data = Uri.parse("package:$packageName")
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             startActivity(intent)
