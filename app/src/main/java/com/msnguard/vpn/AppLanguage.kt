@@ -64,9 +64,17 @@ object AppLanguage {
         context.profiled()
             .getBoolean(PREF_CHOSEN, false)
 
+    /**
+     * Record the user's language choice.
+     *
+     * `commit()`, not `apply()`: the caller follows this with `recreate()`, which
+     * destroys and rebuilds the activity immediately. An async write that loses
+     * the race leaves the rebuilt activity reading no choice at all — the
+     * language picker shows again, and the user cannot get into the app.
+     */
     fun set(context: Context, code: String) {
         context.profiled()
-            .edit().putString(PREF, code).putBoolean(PREF_CHOSEN, true).apply()
+            .edit().putString(PREF, code).putBoolean(PREF_CHOSEN, true).commit()
     }
 
     /** Holds the application context so t() works from the service too. */

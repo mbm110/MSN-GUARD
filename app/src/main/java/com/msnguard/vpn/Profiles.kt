@@ -59,8 +59,18 @@ object Profiles {
      * and the backup only needs to know it in order to keep doing what it does
      * for every other key.
      */
+    /**
+     * Preference keys that must stay global regardless of profile.
+     *
+     * Learned state, counters, the profile choice itself, and the UI's own
+     * language: a language switch is not a per-transport setting, and making it
+     * one would mean a user who picks فارسی in Profile A sees English in
+     * Profile B.
+     */
     val KEYS_NOT_PROFILED = setOf(
         ACTIVE_PROFILE,
+        AppLanguage.PREF,
+        AppLanguage.PREF_CHOSEN,
         // Traffic and usage counters: a record of what happened, not a choice.
         "rx_total", "tx_total", "month_start", "traffic_stats",
         // Learned state — see SettingsBackup.TRANSIENT_KEYS. Named in both
@@ -183,21 +193,43 @@ object Profiles {
      * two shapes of the same logical key forever, and the fallback silently
      * moves a setting when the user never asked it to move. Doing it up front
      * means there is one shape, and [switch] is a pure relabel.
+     *
+     * Also strips the profile prefix from keys that turned out to be global —
+     * the language keys were profiled in 2.0.8/2.0.9 and are not any more. A user
+     * who picked a language in those builds has `p0_app_language` on disk; leaving
+     * it there would make the picker prompt again on this upgrade, and the
+     * language row in Settings would read nothing.
      */
     fun migrateIfNeeded(context: Context): Int {
         val prefs = context.getSharedPreferences(SETTINGS_FILE, Context.MODE_PRIVATE)
         val prefix = profiledKey(active(context), "")
-        val bare = prefs.all.entries.filter { (key, _) ->
-            isProfiled(key) && stripProfile(key) == null
-        }
-        if (bare.isEmpty()) return 0
+        var changed = 0
         val editor = prefs.edit()
-        bare.forEach { (key, value) ->
+
+        // Bare profiled keys -> the active profile's prefix.
+        prefs.all.entries.filter { (key, _) ->
+            isProfiled(key) && stripProfile(key) == null
+        }.forEach { (key, value) ->
             editor.remove(key)
             editor.putValue(prefix + key, value)
+            changed++
         }
-        editor.commit()
-        return bare.size
+
+        // Prefixed keys that are now global -> bare. isProfiled is the current
+        // truth, so a key it rejects is global no matter what shape it is in.
+        prefs.all.entries.filter { (key, _) ->
+            !isProfiled(key) && stripProfile(key) != null
+        }.forEach { (key, value) ->
+            val bare = stripProfile(key)!!
+            if (!prefs.all.keys.contains(bare)) {
+                editor.remove(key)
+                editor.putValue(bare, value)
+                changed++
+            }
+        }
+
+        if (changed > 0) editor.commit()
+        return changed
     }
 
     /**
