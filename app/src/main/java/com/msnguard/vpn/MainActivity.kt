@@ -3016,8 +3016,9 @@ class MainActivity : Activity() {
             ).apply { topMargin = dp(8) })
             // PERF moved here off the home screen: a once-a-year knob does not earn
             // a quarter of the first thing the user sees.
-            val perfRow = navRow(Strings.t("Performance"), perfProfile().label) {
-                choosePerfProfile { perfRow.setValue(perfProfile().label) }
+            var perfRow: OrbitSettingsRow? = null
+            perfRow = navRow(Strings.t("Performance"), perfProfile().label) {
+                choosePerfProfile { perfRow?.setValue(perfProfile().label) }
             }
             body.addView(perfRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,

@@ -7,6 +7,7 @@ import android.graphics.Typeface
 import android.transition.AutoTransition
 import android.transition.TransitionManager
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.view.animation.PathInterpolator
 import android.widget.LinearLayout
@@ -49,6 +50,7 @@ class ExpandableSection(
     private val body: (LinearLayout) -> Unit,
 ) : LinearLayout(context) {
 
+    private var sectionTitle: String = title
     private val density = resources.displayMetrics.density
 
     private val content: LinearLayout
@@ -68,7 +70,7 @@ class ExpandableSection(
         val header = HeaderRow(context, palette, title).apply {
             isClickable = true
             isFocusable = true
-            contentDescription = "$title ${if (expanded) "باز" else "بسته"} — برای تغییر، ضربه بزنید"
+            contentDescription = "$sectionTitle ${if (expanded) "باز" else "بسته"} — برای تغییر، ضربه بزنید"
         }
         chevron = header.chevronView()
         chevron.rotation = if (initiallyExpanded) 180f else 0f
@@ -105,7 +107,7 @@ class ExpandableSection(
             .setDuration(220)
             .setInterpolator(PathInterpolator(0.2f, 0f, 0f, 1f))
             .start()
-        contentDescription = "$title ${if (expanded) "باز" else "بسته"} — برای تغییر، ضربه بزنید"
+        contentDescription = "$sectionTitle ${if (expanded) "باز" else "بسته"} — برای تغییر، ضربه بزنید"
         onExpansionChanged?.invoke(expanded)
     }
 
@@ -139,7 +141,7 @@ class ExpandableSection(
      * the chevron is pinned to the far right without a second container — one
      * weight-less LinearLayout cheaper in the view tree.
      */
-    private class HeaderRow(
+    private inner class HeaderRow(
         context: Context,
         palette: AppAppearance.Palette,
         text: String,
@@ -195,7 +197,7 @@ class ExpandableSection(
      * path instead would force a redraw per frame, and the view clips to its own
      * bounds, so a 180° rotation of a symmetric chevron lands on the same pixels.
      */
-    private class ChevronView(context: Context, private val color: Int) : View(context) {
+    private inner class ChevronView(context: Context, private val color: Int) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeCap = Paint.Cap.ROUND
@@ -204,7 +206,7 @@ class ExpandableSection(
 
         init {
             // The glow is a shadow layer, and shadow layers need software.
-            setLayerType(LAYER_TYPE_SOFTWARE, null)
+            setLayerType(View.LAYER_TYPE_SOFTWARE, null)
         }
 
         override fun onDraw(canvas: Canvas) {
@@ -226,12 +228,12 @@ class ExpandableSection(
      * tick, kept duplicated rather than shared so the two can diverge if a
      * section header ever needs a different accent.
      */
-    private class TickView(context: Context, private val color: Int) : View(context) {
+    private inner class TickView(context: Context, private val color: Int) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val density = resources.displayMetrics.density
 
         init {
-            setLayerType(LAYER_TYPE_SOFTWARE, null)
+            setLayerType(View.LAYER_TYPE_SOFTWARE, null)
         }
 
         override fun onDraw(canvas: Canvas) {
