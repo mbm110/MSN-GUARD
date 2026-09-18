@@ -7,6 +7,7 @@ import java.io.InputStreamReader
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import com.msnguard.vpn.profiled
 
 /**
  * Owns the Tor process and its pluggable transport.
@@ -313,7 +314,7 @@ object TorManager {
      * to.
      */
     fun chainArmed(context: Context): Boolean =
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
             .getBoolean(CHAIN_ARMED_PREF, CHAIN_ARMED_DEFAULT) &&
             isChainable(context, selectedMode(context))
 
@@ -367,7 +368,7 @@ object TorManager {
 
     fun selectedMode(context: Context): TorMode =
         TorMode.from(
-            context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            context.profiled()
                 .getString(MODE_PREF, TorMode.AUTO.key)
         )
 
@@ -1093,7 +1094,7 @@ object TorManager {
             // through the rest of the ladder. The remembered rung is retried
             // first rather than exclusively, so a bridge that has since been
             // blocked still escalates.
-            val remembered = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            val remembered = context.profiled()
                 .getString(winnerPref(chained), null)
                 ?.let { key -> rungs.firstOrNull { it.mode.key == key } }
             if (remembered == null) rungs else listOf(remembered) + rungs.filter { it !== remembered }
@@ -1121,7 +1122,7 @@ object TorManager {
 
             activeMode = rung.mode
             if (selected == TorMode.AUTO) {
-                context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit()
+                context.profiled().edit()
                     .putString(winnerPref(chained), rung.mode.key).apply()
             }
             return true

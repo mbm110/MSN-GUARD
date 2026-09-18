@@ -1,6 +1,7 @@
 package com.msnguard.vpn
 
 import android.content.Context
+import com.msnguard.vpn.profiled
 
 /**
  * The exit countries a user may ask Tor for, and the names to show for them.
@@ -133,7 +134,7 @@ object TorRegions {
      * like censorship.
      */
     fun selected(context: Context): String? {
-        val stored = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val stored = context.profiled()
             .getString(REGION_PREF, AUTO)
             ?.trim()
             ?.uppercase()

@@ -57,6 +57,7 @@ import java.net.Proxy
 import java.net.URL
 import kotlin.math.min
 import kotlin.math.roundToInt
+import com.msnguard.vpn.profiled
 
 class MainActivity : Activity() {
     private lateinit var orbitDial: OrbitDialView
@@ -151,6 +152,7 @@ class MainActivity : Activity() {
      */
     private var pendingBackupJson: String? = null
     private var settingsBackupRow: OrbitSettingsRow? = null
+    private var profileRow: OrbitSettingsRow? = null
     private var manualEndpointRow: OrbitSettingsRow? = null
     private var gatewayCacheRow: OrbitSettingsRow? = null
     private var visualState = OrbitDialView.State.DISCONNECTED
@@ -1845,10 +1847,11 @@ class MainActivity : Activity() {
             // that ConnectionLog mirrors to keeps everything up to its 256KB cap.
             addView(createLogActionButton(Strings.t("COPY")) { copyFullLog() })
             addView(createLogActionButton(Strings.t("SHARE")) { shareFullLog() })
-            // The export is encrypted, and the key is the only way to read it.
-            // Sitting the button next to SHARE is what makes that clear: the two
-            // files are a pair, and a log the user cannot read is worse than none.
-            addView(createLogActionButton(Strings.t("Log Key")) { shareKeyFile() })
+            // The encrypted-export key button is gone from the user's screen. The
+            // export is encrypted and the key is the only way to read it, which is
+            // exactly why it must not sit next to SHARE in a shipped build — the two
+            // files are a pair, and handing the pair to a user is handing them a log
+            // they cannot read. shareKeyFile() stays callable from a debug path.
         }
         content.addView(header)
         content.addView(label(Strings.t("Tunnel and VPN events"), 14f, MUTED), LinearLayout.LayoutParams(
@@ -2956,7 +2959,27 @@ class MainActivity : Activity() {
                 setPadding(dp(4), 0, 0, 0)
             })
         }
-        content.addView(expandableSection(Strings.t("PROTECTION"), initiallyExpanded = true) { body ->
+        // PROFILE sits above everything, because the profile decides what every
+        // row below it means. It is the only section that rebuilds the whole
+        // page on a change, so it has to be read first and built first.
+        content.addView(expandableSection(Strings.t("PROFILE"), id = "PROFILE", id = "PROFILE") { body ->
+            profileRow = navRow(Strings.t("Profile"), Profiles.activeName(this)) { chooseProfile() }
+            body.addView(profileRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+            body.addView(label(
+                Strings.t("Four independent sets of settings. Each keeps its own protocol, transport, kill switch and shaping. Backup, restore and reset cover all four."),
+                12.5f, Sculpt.withAlpha(MUTED, 0.95f),
+            ), LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(6); leftMargin = dp(2) })
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+        content.addView(expandableSection(Strings.t("PROTECTION"), id = "PROTECTION", id = "PROTECTION") { body ->
             body.addView(createToggleRow(Strings.t("Kill switch"), Strings.t("Block all traffic if the tunnel drops"), killSwitchEnabled()) {
                 preferences().edit().putBoolean(KILL_SWITCH, it).apply()
             }, LinearLayout.LayoutParams(
@@ -2984,7 +3007,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ))
 
-        content.addView(expandableSection(Strings.t("ROUTING & DATA")) { body ->
+        content.addView(expandableSection(Strings.t("ROUTING & DATA"), id = "ROUTING & DATA") { body ->
             body.addView(navRow(Strings.t("Traffic monitor"), trafficHeadline()) { openTrafficMonitorScreen() }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -3029,7 +3052,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
 
-        content.addView(expandableSection(Strings.t("CONNECTION")) { body ->
+        content.addView(expandableSection(Strings.t("CONNECTION"), id = "CONNECTION") { body ->
             // Tunnel type comes FIRST in this section, above the transport picker.
             //
             // It is the most consequential switch in the app — it decides whether the
@@ -3132,7 +3155,7 @@ class MainActivity : Activity() {
         // Psiphon gets its own section: all three controls below are meaningless
         // unless the chain is armed, and grouping them says that structurally
         // instead of relying on the user to infer it from a mixed list.
-        content.addView(expandableSection(Strings.t("PSIPHON")) { body ->
+        content.addView(expandableSection(Strings.t("PSIPHON"), id = "PSIPHON") { body ->
             // The switch comes first because it gates the two rows under it. Toggling
             // it repaints them in place — and the home-screen card too, which is the
             // same setting shown twice and must never disagree.
@@ -3185,7 +3208,7 @@ class MainActivity : Activity() {
 
         // Tor section, mirroring the Psiphon one: the mode picker is the only
         // control, and it is meaningful regardless of what else is set.
-        content.addView(expandableSection(Strings.t("TOR")) { body ->
+        content.addView(expandableSection(Strings.t("TOR"), id = "TOR") { body ->
             torModeRowRef = navRow(Strings.t("Connection mode"), torMode().label) {
                 chooseTorMode {
                     torModeRowRef?.setValue(torMode().label)
@@ -3293,7 +3316,7 @@ class MainActivity : Activity() {
         // which is what the chain exists to achieve for Psiphon, and wrapping
         // fragmented TLS inside a second tunnel both doubles the latency and
         // destroys the fragmentation's effect — the DPI sees the outer tunnel.
-        content.addView(expandableSection(Strings.t("SHARD")) { body ->
+        content.addView(expandableSection(Strings.t("SHARD"), id = "SHARD") { body ->
             shardPoolRow = navRow(Strings.t("Node list"), shardPoolSummary()) {
                 // force = true: the whole point of tapping this is to bypass the
                 // six-hour interval the background job honours.
@@ -3364,7 +3387,7 @@ class MainActivity : Activity() {
                     rightMargin = dp(8)
                 }
                 // Load current value if set
-                val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
+                val prefs = profiled()
                 val current = prefs.getString("shard_custom_cf_ip", "")?.trim().orEmpty()
                 if (current.isNotEmpty()) setText(current)
                 setBackground(Sculpt.sculptedBackground(
@@ -3400,7 +3423,7 @@ class MainActivity : Activity() {
                 isFocusable = true
                 setOnClickListener {
                     val ip = customIpInput.text.toString().trim()
-                    val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE).edit()
+                    val prefs = profiled().edit()
                     if (ip.isEmpty()) {
                         prefs.remove("shard_custom_cf_ip")
                     } else {
@@ -3474,7 +3497,7 @@ class MainActivity : Activity() {
 
         // APPEARANCE, like BACKUP below it, is about the app rather than about a
         // tunnel, so it sits out here and not under Tunnel Controls.
-        content.addView(expandableSection(Strings.t("APPEARANCE")) { body ->
+        content.addView(expandableSection(Strings.t("APPEARANCE"), id = "APPEARANCE") { body ->
             // No stored reference: picking a theme calls recreate(), so the row is
             // rebuilt with the new value rather than being repainted in place.
             body.addView(navRow(Strings.t("Theme"), AppAppearance.mode(this@MainActivity).label) { chooseTheme() }, LinearLayout.LayoutParams(
@@ -3497,7 +3520,7 @@ class MainActivity : Activity() {
         // app's own state, not about how a tunnel is shaped, and burying it in a
         // troubleshooting sub-page is where a user would never look for it after
         // reinstalling.
-        content.addView(expandableSection(Strings.t("BACKUP")) { body ->
+        content.addView(expandableSection(Strings.t("BACKUP"), id = "BACKUP") { body ->
             settingsBackupRow = navRow(Strings.t("Back up settings"), backupSummary()) { exportSettings() }
             body.addView(settingsBackupRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3516,7 +3539,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
 
-        content.addView(expandableSection(Strings.t("ABOUT")) { body ->
+        content.addView(expandableSection(Strings.t("ABOUT"), id = "ABOUT") { body ->
             body.addView(navRow(Strings.t("Check for updates"), "v${appVersion()}") {
                 appUpdater.checkForUpdate()
             }, LinearLayout.LayoutParams(
@@ -3626,7 +3649,7 @@ class MainActivity : Activity() {
         // lateinit local cannot be captured before assignment without crashing.
         var obfRow: OrbitSettingsRow? = null
         var retryRow: OrbitSettingsRow? = null
-        content.addView(expandableSection(Strings.t("CONNECTION SHAPING"), initiallyExpanded = true) { body ->
+        content.addView(expandableSection(Strings.t("CONNECTION SHAPING"), id = "CONNECTION SHAPING") { body ->
             obfRow = navRow(Strings.t("Obfuscation"), obfuscationProfile().label) {
                 chooseObfuscation { obfRow?.setValue(obfuscationProfile().label) }
             }
@@ -3647,7 +3670,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ))
 
-        content.addView(expandableSection(Strings.t("ROUTING")) { body ->
+        content.addView(expandableSection(Strings.t("ROUTING"), id = "ROUTING") { body ->
             // v1.9.8: assign to the class fields, not local vals. A previous build
             // declared `val manualEndpointRow` here, which shadowed the field —
             // later setValue() calls hit a null field and the displayed value never
@@ -3672,7 +3695,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
 
-        content.addView(expandableSection(Strings.t("TROUBLESHOOTING")) { body ->
+        content.addView(expandableSection(Strings.t("TROUBLESHOOTING"), id = "TROUBLESHOOTING") { body ->
             // Local rows, not class fields: nothing outside this sub-page repaints
             // them, so the fields the originals used were never written from anywhere
             // else either — keeping the same shape as locals is the minimal change.
@@ -3707,7 +3730,7 @@ class MainActivity : Activity() {
         // The underlying prefs and the core's env bridge are untouched, so the
         // knobs still exist for the CLI; they are simply no longer surfaced as
         // settings that silently do nothing on this device.
-        content.addView(expandableSection(Strings.t("ANTI-DPI"), initiallyExpanded = true) { body ->
+        content.addView(expandableSection(Strings.t("ANTI-DPI"), id = "ANTI-DPI") { body ->
             var fragRow: OrbitSettingsRow? = null
             fragRow = navRow(Strings.t("TLS fragmentation"), if (h2Fragmentation() == H2Fragmentation.ON) Strings.t("On") else Strings.t("Off")) {
                 chooseH2Fragmentation {
@@ -4321,6 +4344,39 @@ class MainActivity : Activity() {
      * A device on a locale we do not translate shows English, which is what
      * "system" resolved to anyway.
      */
+    /**
+     * Picks which of the four profiles is active.
+     *
+     * Modelled on [chooseLanguage] deliberately: the same bottom sheet, the same
+     * single-tap row, the same immediate rebuild. Switching a profile changes
+     * what every row below the picker says, and recreate() is the only way to be
+     * sure none of them keeps showing the profile the user just left.
+     *
+     * Refuses while the tunnel is up, for the same reason a restore does: the
+     * running tunnel was configured by the old profile, and a hot swap would
+     * leave the UI and the tunnel disagreeing about which settings are in force.
+     */
+    private fun chooseProfile() {
+        showChoiceSheet(
+            title = Strings.t("Profile"),
+            subtitle = Strings.t("Each profile keeps its own settings. Disconnect first — the running tunnel uses the current profile's configuration."),
+            options = Profiles.NAMES.toList(),
+            selected = Profiles.NAMES[Profiles.active(this)],
+            label = { it },
+            description = { "" },
+        ) { chosen ->
+            val index = Profiles.NAMES.indexOf(chosen)
+            if (index < 0 || index == Profiles.active(this)) return@showChoiceSheet
+            if (TunnelStatus.isActive() || visualState == OrbitDialView.State.CONNECTING) {
+                toastShort(Strings.t("Disconnect first — switching profile changes what the tunnel uses"))
+                return@showChoiceSheet
+            }
+            val moved = Profiles.switch(this, index)
+            ConnectionLog.record("Switched to $chosen ($moved settings keys)")
+            recreate()
+        }
+    }
+
     private fun chooseLanguage() {
         showChoiceSheet(
             title = Strings.t("Language"),
@@ -6108,6 +6164,7 @@ class MainActivity : Activity() {
             splitTunnelAppsPage != null -> closeSplitTunnelAppsScreen()
             splitTunnelPage != null -> closeSplitTunnelScreen()
             trafficMonitorPage != null -> closeTrafficMonitorScreen()
+            dnsPage != null -> closeDnsScreen()
             tunnelControlsPage != null -> closeTunnelControlsScreen()
             showingLogs -> closeLogsScreen()
             showingScanner -> closeScannerScreen()
@@ -7154,7 +7211,14 @@ class MainActivity : Activity() {
         defaultMasqueTransport().label.takeIf { selectedProtocol == Protocol.MASQUE },
     ).joinToString(" · ")
 
-    private fun preferences() = getSharedPreferences(SETTINGS, MODE_PRIVATE)
+    /**
+     * The active profile's preferences.
+     *
+     * Routed through [profiled] so every one of the 43 settings reads and writes
+     * in this class (and the 43 elsewhere) lands in the profile the user picked.
+     * Keys that must stay global are named in [Profiles.KEYS_NOT_PROFILED].
+     */
+    private fun preferences(): SharedPreferences = profiled()
 
     /**
      * Whether the AI Mode shortcut can act on the selected transport.
@@ -7245,21 +7309,42 @@ class MainActivity : Activity() {
      * Thin wrapper over [ExpandableSection] so call sites read as
      * `expandableSection("PSIPHON") { it.addView(row) }` and stay symmetrical
      * with the plain `sectionLabel(...)` they replace.
+     *
+     * Expansion state is persisted per section id, so a section a user opened
+     * stays open when they leave settings and come back. All collapsed by
+     * default: the settings page is long enough that pre-opening anything is
+     * a judgement about which section matters, and the user is the one making
+     * that judgement.
      */
     private fun expandableSection(
         title: String,
-        initiallyExpanded: Boolean = false,
         body: (LinearLayout) -> Unit,
-    ): ExpandableSection = ExpandableSection(this, palette, title, initiallyExpanded, body = body)
+    ): ExpandableSection = expandableSection(title, id = title, body)
 
+    /**
+     * An expandable section, whose open/closed state persists under [id].
+     *
+     * [id] is a stable English key — not [title], which is translated, so a user
+     * who switches the app's language does not lose which sections they had
+     * open. Callers that have no English key pass the title and get [title],
+     * which is stable within one language and is the pre-profile behaviour.
+     */
     private fun expandableSection(
         title: String,
-        initiallyExpanded: Boolean = false,
-        onExpansionChanged: (Boolean) -> Unit,
+        id: String,
         body: (LinearLayout) -> Unit,
-    ): ExpandableSection = ExpandableSection(
-        this, palette, title, initiallyExpanded, onExpansionChanged, body,
-    )
+    ): ExpandableSection {
+        val key = "section_open_" + sectionId(id)
+        return ExpandableSection(this, palette, title, initiallyExpanded = false) { expanded ->
+            profiled().edit().putBoolean(key, expanded).apply()
+        }.apply {
+            if (profiled().getBoolean(key, false)) setExpanded(true, animate = false)
+        }
+    }
+
+    /** A stable id from a section key, used as its expansion-state key. */
+    private fun sectionId(title: String): String =
+        title.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
 
     /** A sculpted navigation row: title on the left, current value on the right. */
     private fun navRow(

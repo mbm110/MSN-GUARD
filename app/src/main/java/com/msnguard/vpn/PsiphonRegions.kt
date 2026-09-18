@@ -1,6 +1,7 @@
 package com.msnguard.vpn
 
 import android.content.Context
+import com.msnguard.vpn.profiled
 
 /**
  * The egress countries a user may ask for, and the names to show for them.
@@ -139,7 +140,7 @@ object PsiphonRegions {
      * the embedded list still carries would remove a working choice.
      */
     fun options(context: Context): List<String> {
-        val cached = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val cached = context.profiled()
             .getString(AVAILABLE_PREF, "")
             .orEmpty()
             .split(',')
@@ -152,7 +153,7 @@ object PsiphonRegions {
     fun remember(context: Context, codes: List<String>) {
         val clean = codes.map { it.trim().uppercase() }.filter(::isCode).distinct().sorted()
         if (clean.isEmpty()) return
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit()
+        context.profiled().edit()
             .putString(AVAILABLE_PREF, clean.joinToString(","))
             .apply()
     }

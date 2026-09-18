@@ -2,6 +2,7 @@ package com.msnguard.vpn
 
 import android.content.Context
 import android.graphics.Color
+import com.msnguard.vpn.profiled
 
 /**
  * The Orbit palettes — one dark, one light, chosen by the user.
@@ -225,12 +226,12 @@ object AppAppearance {
     )
 
     fun mode(context: Context): Mode = Mode.from(
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
             .getString(PREF_KEY, null)
     )
 
     fun setMode(context: Context, mode: Mode) {
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
             .edit()
             .putString(PREF_KEY, mode.key)
             .apply()

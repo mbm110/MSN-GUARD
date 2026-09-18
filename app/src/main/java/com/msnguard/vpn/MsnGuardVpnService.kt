@@ -36,6 +36,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import com.msnguard.vpn.profiled
 
 /**
  * Protocol sets shared between a rung's config and its winner-detection.
@@ -732,7 +733,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * valid memory, and the next successful connect rewrites it.
      */
     private fun rememberedRungIndex(): Int {
-        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val prefs = profiled()
         val shape = ladderSignature()
         val storedShape = prefs.getString(ladderShapeKey(), null)
         if (storedShape != shape) {
@@ -1297,7 +1298,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     override fun onClientAddress(address: String?) {
         if (!address.isNullOrBlank()) {
             ConnectionLog.record("Psiphon exit IP: $address")
-            getSharedPreferences("settings", MODE_PRIVATE).edit()
+            profiled().edit()
                 .putString("last_ip", address).apply()
         }
     }
@@ -1342,7 +1343,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 "Exit country: $exitedIn ($region) — ${PsiphonRegions.name(wanted)} was preferred but unavailable"
             }
         )
-        getSharedPreferences("settings", MODE_PRIVATE).edit()
+        profiled().edit()
             .putString("last_exit_region", region.uppercase()).apply()
         // Psiphon knows its own egress country, which is both earlier and more
         // reliable than the activity's geolocation lookup. One repost, on a
@@ -1800,7 +1801,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         }
 
         val winner = ladder.getOrNull(winnerIndex) ?: return
-        getSharedPreferences("settings", MODE_PRIVATE).edit()
+        profiled().edit()
             .putInt(winningStrategyKey(), winnerIndex)
             // Written together with the index, never separately: the index is only
             // meaningful for the ladder shape that produced it, and
@@ -2726,7 +2727,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     /** Whether the user asked for a verbose log; xray's level follows it. */
     private fun verboseShardLog(): Boolean =
-        getSharedPreferences("settings", MODE_PRIVATE)
+        profiled()
             .getString("log_level", "info")
             .let { it == "debug" || it == "trace" }
 
@@ -3306,7 +3307,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private fun killSwitchArmed(): Boolean =
         !proxyMode &&
-            getSharedPreferences("settings", MODE_PRIVATE).getBoolean("kill_switch", false)
+            profiled().getBoolean("kill_switch", false)
 
     /**
      * Tear the tunnel down and bring it back without a VPN consent dialog.
@@ -3461,7 +3462,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     private fun autoReconnectEnabled(): Boolean =
-        getSharedPreferences("settings", MODE_PRIVATE)
+        profiled()
             .getBoolean(AUTO_RECONNECT_PREF, AUTO_RECONNECT_DEFAULT)
 
     /**
@@ -3503,7 +3504,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         val transport = currentProtocol.lowercase()
         if (transport !in CoreConfig.CHAIN_OUTER_LADDER) return
         plainTransportRecorded = true
-        getSharedPreferences("settings", MODE_PRIVATE).edit()
+        profiled().edit()
             .putString(CoreConfig.PLAIN_WORKING_TRANSPORT_PREF, transport)
             .apply()
         ConnectionLog.record(
@@ -3550,7 +3551,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         val forTor = inner == "Tor"
         val ladder = CoreConfig.chainOuterCandidates(this, forTor)
         val auto = ladder.size > 1
-        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val prefs = profiled()
         // -1, not 0: absent must be distinguishable from "rung 0 worked", or a fresh
         // install would look like it had already proven MASQUE and the plain-history
         // hint below would never be consulted.
@@ -3662,7 +3663,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // Only meaningful for the full ladder: with a pin there is one entry
                 // and the index would refer to the wrong transport later.
                 if (auto) {
-                    getSharedPreferences("settings", MODE_PRIVATE).edit()
+                    profiled().edit()
                         .putInt(CoreConfig.CHAIN_OUTER_PREF, index).apply()
                 }
                 chainOuterCommitted = true
@@ -3799,7 +3800,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // the budget resets here so a quick reconnect (which passes straight
         // through startTunnel) keeps its remaining rotations while a fresh
         // user connect gets all of them back.
-        val wantedCountry = getSharedPreferences("settings", MODE_PRIVATE)
+        val wantedCountry = profiled()
             .getString(EXIT_COUNTRY_PREF, EXIT_COUNTRY_AUTO)?.trim()?.uppercase(Locale.US)
         sessionExitCountry = wantedCountry?.takeIf { it != EXIT_COUNTRY_AUTO && it.length == 2 }
         exitCountryEvaluated = false
@@ -5573,7 +5574,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * service and the merged MainActivity agree on which key is authoritative.
      */
     private fun lanBypassEnabled(): Boolean {
-        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val prefs = profiled()
         if (!prefs.contains(LAN_BYPASS_PREF) && prefs.getBoolean("lan_sharing", false)) {
             prefs.edit().putBoolean(LAN_BYPASS_PREF, true).apply()
             return true

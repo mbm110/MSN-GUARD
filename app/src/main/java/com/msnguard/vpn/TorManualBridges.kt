@@ -1,6 +1,7 @@
 package com.msnguard.vpn
 
 import android.content.Context
+import com.msnguard.vpn.profiled
 
 /**
  * The user's own bridge lines, and the rules Tor actually enforces on them.
@@ -76,13 +77,13 @@ internal object TorManualBridges {
     data class Bridge(val line: String, val transport: String?)
 
     fun raw(context: Context): String =
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
             .getString(BRIDGES_PREF, "")
             .orEmpty()
 
     fun save(context: Context, text: String) {
         val trimmed = text.trim()
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().apply {
+        context.profiled().edit().apply {
             if (trimmed.isEmpty()) remove(BRIDGES_PREF) else putString(BRIDGES_PREF, trimmed)
         }.apply()
     }

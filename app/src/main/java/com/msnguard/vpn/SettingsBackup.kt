@@ -87,7 +87,7 @@ object SettingsBackup {
      * keys were named before this feature existed and renaming them would
      * silently reset every existing user's learned state.
      */
-    private val TRANSIENT_KEYS = setOf(
+    val TRANSIENT_KEYS = setOf(
         // Exit measurement of the last session.
         "last_ip",
         "last_exit_region",
@@ -137,7 +137,7 @@ object SettingsBackup {
      * open rather than sites that are slow. `smart_split_enabled` is a real choice
      * and is deliberately NOT covered by this prefix.
      */
-    private val TRANSIENT_PREFIXES = listOf("smart_split_profile_")
+    val TRANSIENT_PREFIXES = listOf("smart_split_profile_")
 
     /**
      * Preference files cleared by [resetToDefaults] but never exported.
@@ -291,5 +291,9 @@ object SettingsBackup {
                 .clear()
                 .commit()
         }
+        // Profiles: clearing the settings file above already cleared every
+        // profile's keys, since they live in that same file. Nothing extra is
+        // needed here — but the invariant is worth naming, because "reset also
+        // cleared my Profile B" is a question that gets asked.
     }
 }

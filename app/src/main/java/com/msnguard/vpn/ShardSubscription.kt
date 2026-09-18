@@ -5,6 +5,7 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
+import com.msnguard.vpn.profiled
 
 /**
  * Keeps the SHARD node pool fresh, without the user knowing it exists.
@@ -75,7 +76,7 @@ object ShardSubscription {
     private val refreshing = AtomicBoolean(false)
 
     private fun prefs(context: Context) =
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
 
     private fun cacheFile(context: Context) = File(context.filesDir, CACHE_FILE)
 

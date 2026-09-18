@@ -9,6 +9,7 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import com.msnguard.vpn.profiled
 
 object SecureStore {
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
@@ -83,7 +84,7 @@ object SecureStore {
             .putString(key, encrypted)
             .apply()
         // Clean from plain prefs if it was there
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
             .edit()
             .remove(key)
             .apply()
@@ -96,7 +97,7 @@ object SecureStore {
             return decrypt(encrypted).ifBlank { fallback }
         }
         // Fallback to legacy plain settings for migration
-        val plainPrefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val plainPrefs = context.profiled()
         val legacy = plainPrefs.getString(key, null)
         if (!legacy.isNullOrBlank()) {
             putSecret(context, key, legacy)
@@ -110,7 +111,7 @@ object SecureStore {
             .edit()
             .remove(key)
             .apply()
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
             .edit()
             .remove(key)
             .apply()

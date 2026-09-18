@@ -6,6 +6,7 @@ import org.json.JSONObject
 import java.io.File
 import java.net.URLDecoder
 import java.util.Locale
+import com.msnguard.vpn.profiled
 
 /**
  * One proxy node from the SHARD subscription, and the xray config that runs it.
@@ -170,7 +171,7 @@ object ShardConfigs {
      * Returns empty string if not set.
      */
     private fun getCustomCfIp(context: Context): String =
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
             .getString(CUSTOM_CF_IP_PREF, "")?.trim().orEmpty()
 
     /**
@@ -188,7 +189,7 @@ object ShardConfigs {
      * Clear the user's custom Cloudflare IP.
      */
     fun clearCustomCfIp(context: Context) {
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
             .edit()
             .remove(CUSTOM_CF_IP_PREF)
             .apply()

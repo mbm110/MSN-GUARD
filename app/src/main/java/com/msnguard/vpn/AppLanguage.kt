@@ -1,6 +1,7 @@
 package com.msnguard.vpn
 
 import android.content.Context
+import com.msnguard.vpn.profiled
 
 /**
  * The app's UI language: English, Persian, Chinese.
@@ -42,7 +43,7 @@ object AppLanguage {
      */
     fun current(context: Context? = null): String {
         val ctx = context ?: appContext ?: return "en"
-        val prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val prefs = ctx.profiled()
         val stored = prefs.getString(PREF, null)
         // An explicit stored code together with a recorded pick means the choice is made.
         if (stored in SUPPORTED && prefs.getBoolean(PREF_CHOSEN, false)) return stored!!
@@ -60,11 +61,11 @@ object AppLanguage {
 
     /** True once the user has picked a language with the one-time picker. */
     fun hasChosen(context: Context): Boolean =
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
             .getBoolean(PREF_CHOSEN, false)
 
     fun set(context: Context, code: String) {
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
             .edit().putString(PREF, code).putBoolean(PREF_CHOSEN, true).apply()
     }
 

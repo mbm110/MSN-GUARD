@@ -3,6 +3,7 @@ package com.msnguard.vpn
 import android.content.Context
 import org.json.JSONObject
 import java.io.File
+import com.msnguard.vpn.profiled
 
 object CoreConfig {
     /**
@@ -79,7 +80,7 @@ object CoreConfig {
 
     /** Whether the user armed masque-over-masque. */
     fun mimArmed(context: Context): Boolean =
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
             .getBoolean(MIM_ARMED_PREF, MIM_ARMED_DEFAULT)
 
     fun json(context: Context, protocol: String? = null): String =
@@ -91,7 +92,7 @@ object CoreConfig {
      *   owns [SOCKS_PORT] in that mode, so the core has to move aside.
      */
     fun json(context: Context, protocol: String?, listenOverride: Int?): String {
-        val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val prefs = context.profiled()
         fun text(key: String, fallback: String = "") =
             prefs.getString(key, fallback)?.trim().orEmpty()
         val manualObfuscation = JSONObject().apply {
@@ -322,7 +323,7 @@ object CoreConfig {
 
     /** Whether the user has opted into exposing the local proxies on the LAN. */
     fun lanSharingEnabled(context: Context): Boolean =
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
             .getBoolean(LAN_SHARING_PREF, false)
 
     // ---------------------------------------------------------------------
@@ -384,7 +385,7 @@ object CoreConfig {
 
     /** The stored tunnel mode, defaulting to VPN. */
     fun tunnelMode(context: Context): String =
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
             .getString(TUNNEL_MODE_PREF, TUNNEL_MODE_VPN)
             ?.takeIf { it == TUNNEL_MODE_PROXY } ?: TUNNEL_MODE_VPN
 
@@ -404,7 +405,7 @@ object CoreConfig {
      * hand-edited preference cannot leave the tunnel with no listener.
      */
     fun proxyListenPort(context: Context): Int {
-        val stored = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val stored = context.profiled()
             .getInt(PROXY_PORT_PREF, DEFAULT_PROXY_PORT)
         return if (portRejection(stored) == null) stored else DEFAULT_PROXY_PORT
     }
@@ -702,7 +703,7 @@ object CoreConfig {
      * pool and every rung would then fail for a reason that looks like censorship.
      */
     fun egressRegion(context: Context): String? {
-        val stored = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val stored = context.profiled()
             .getString(EGRESS_REGION_PREF, EGRESS_REGION_AUTO)
             ?.trim()
             ?.uppercase()
@@ -725,7 +726,7 @@ object CoreConfig {
      */
     fun chainOuterCandidates(context: Context, forTor: Boolean = false): List<String> {
         val key = if (forTor) CHAIN_OUTER_MODE_TOR_PREF else CHAIN_OUTER_MODE_PREF
-        val mode = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val mode = context.profiled()
             .getString(key, CHAIN_OUTER_AUTO)
             ?.trim()
             .orEmpty()

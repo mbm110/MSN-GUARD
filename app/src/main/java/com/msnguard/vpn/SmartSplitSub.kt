@@ -7,6 +7,7 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
+import com.msnguard.vpn.profiled
 
 /**
  * Keeps the Smart Split fragment profiles fresh, from our own mirror of
@@ -61,7 +62,7 @@ object SmartSplitSub {
     private val refreshing = AtomicBoolean(false)
 
     private fun prefs(context: Context) =
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        context.profiled()
 
     private fun cacheFile(context: Context) = File(context.filesDir, CACHE_FILE)
 
