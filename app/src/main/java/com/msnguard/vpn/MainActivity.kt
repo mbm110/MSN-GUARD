@@ -156,7 +156,7 @@ class MainActivity : Activity() {
     private var pendingBackupJson: String? = null
     private var settingsBackupRow: OrbitSettingsRow? = null
     private var profileRow: OrbitSettingsRow? = null
-    private var batteryRow: OrbitSettingsRow? = null
+    private var batteryRow: OrbitToggleRow? = null
     private var manualEndpointRow: OrbitSettingsRow? = null
     private var gatewayCacheRow: OrbitSettingsRow? = null
     private var visualState = OrbitDialView.State.DISCONNECTED
@@ -816,8 +816,10 @@ class MainActivity : Activity() {
         // Every row this touches is null unless the settings page is on screen, so
         // this is a no-op everywhere else.
         refreshPsiphonRows()
-        // The battery-optimization row's value is a fixed call to action, so it
-        // needs no refresh on return from the system dialog.
+        // Battery optimization: the only way to change the whitelist is to leave
+        // for the system dialog and come back, so re-read the real state here.
+        // setChecked() repaints without firing the toggle callback.
+        batteryRow?.setChecked(isBatteryExempted())
     }
 
     /**
@@ -3011,9 +3013,11 @@ class MainActivity : Activity() {
             // does not name. An auto-reconnect cannot help when the process is
             // dead, and the kill switch cannot stay up either — so on those
             // devices this row is what makes the tunnel survive a locked screen.
-            batteryRow = navRow(Strings.t("Battery Optimization"), Strings.t("Tap to allow background running")) {
-                requestBatteryOptimization()
-            }
+            batteryRow = createToggleRow(
+                Strings.t("Battery Optimization"),
+                Strings.t("Tap to allow background running"),
+                isBatteryExempted(),
+            ) { _ -> requestBatteryOptimization() }
             body.addView(batteryRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -7303,6 +7307,19 @@ class MainActivity : Activity() {
     private fun wireGuardDataCheck(): Boolean = preferences().getBoolean(WIREGUARD_DATA_CHECK, true)
 
     private fun killSwitchEnabled(): Boolean = preferences().getBoolean(KILL_SWITCH, false)
+
+    /**
+     * Whether Android's doze whitelist already exempts this app.
+     *
+     * A missing PowerManager reads as "not exempted" (false), which is the safe
+     * direction: the row offers the fix rather than claiming nothing needs doing.
+     * The opposite — claiming a whitelist that may not exist — is what hides the
+     * setting from the user who needs it most.
+     */
+    private fun isBatteryExempted(): Boolean {
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
+        return pm.isIgnoringBatteryOptimizations(packageName)
+    }
 
     /**
      * Open the system dialog that asks to be exempted from battery
