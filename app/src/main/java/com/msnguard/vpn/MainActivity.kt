@@ -280,6 +280,19 @@ class MainActivity : Activity() {
      * held across pages would repaint a detached view.
      */
     private var smartSplitRow: OrbitToggleRow? = null
+
+    /**
+     * The SHARD section's other rows, gated on SHARD being the selected transport.
+     *
+     * Psiphon and Tor grey their rows the same way — nothing under them can take
+     * effect while a different transport is active — and SHARD's rows are the same
+     * shape of nothing: the node list, the custom IP, Smart Split and its
+     * re-measure all feed a config that is not built when SHARD is not selected.
+     * Kept as fields so [refreshShardRows] can grey them from the mode picker,
+     * exactly as [refreshPsiphonRows] does for its three.
+     */
+    private var shardCustomIpRow: LinearLayout? = null
+    private var shardReMeasureRow: OrbitSettingsRow? = null
     private var splitTunnelDraftMode: SplitTunnelSettings.Mode? = null
     private var splitTunnelDraftPackages: MutableSet<String>? = null
     private var trafficMonitorPage: View? = null
@@ -816,10 +829,7 @@ class MainActivity : Activity() {
         // Every row this touches is null unless the settings page is on screen, so
         // this is a no-op everywhere else.
         refreshPsiphonRows()
-        // Battery optimization: the only way to change the whitelist is to leave
-        // for the system dialog and come back, so re-read the real state here.
-        // The switch must follow Android, not a local flag.
-        (batteryRow as? OrbitToggleRow)?.setChecked(isBatteryExempted())
+        refreshShardRows()
     }
 
     /**
@@ -3004,7 +3014,7 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ))
+        ).apply { topMargin = dp(26) })
         content.addView(expandableSection(Strings.t("PROTECTION"), id = "PROTECTION") { body ->
             body.addView(createToggleRow(Strings.t("Kill switch"), Strings.t("Block all traffic if the tunnel drops"), killSwitchEnabled()) {
                 preferences().edit().putBoolean(KILL_SWITCH, it).apply()
@@ -3038,11 +3048,10 @@ class MainActivity : Activity() {
             // does not name. An auto-reconnect cannot help when the process is
             // dead, and the kill switch cannot stay up either — so on those
             // devices this row is what makes the tunnel survive a locked screen.
-            batteryRow = createToggleRow(
+            batteryRow = navRow(
                 Strings.t("Battery Optimization"),
                 Strings.t("Tap to allow background running"),
-                isBatteryExempted(),
-            ) { _ -> requestBatteryOptimization() }
+            ) { requestBatteryOptimization() }
             body.addView(batteryRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -3175,6 +3184,8 @@ class MainActivity : Activity() {
                 }
                 lanSharingRow?.setSubtitle(lanSharingSubtitle())
                 refreshPsiphonRows()
+        refreshShardRows()
+                refreshShardRows()
             }
             body.addView(lanSharingRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3250,6 +3261,8 @@ class MainActivity : Activity() {
                 setChainArmed(armed, Protocol.PSIPHON)
                 renderChainCard()
                 refreshPsiphonRows()
+        refreshShardRows()
+                refreshShardRows()
             }
             body.addView(psiphonChainRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3287,6 +3300,8 @@ class MainActivity : Activity() {
                     // switch below and the home card have to be repainted after a pick —
                     // otherwise arming stays lit under a freshly pinned obfs4.
                     refreshPsiphonRows()
+        refreshShardRows()
+                refreshShardRows()
                     renderChainCard()
                 }
             }
@@ -3330,6 +3345,8 @@ class MainActivity : Activity() {
                 setChainArmed(armed, Protocol.TOR)
                 renderChainCard()
                 refreshPsiphonRows()
+        refreshShardRows()
+                refreshShardRows()
             }
             body.addView(torChainRowRef, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3418,7 +3435,7 @@ class MainActivity : Activity() {
             // Custom Cloudflare IP row: user can enter their own Cloudflare IP and apply it
             // to all SHARD configs. When set, this IP replaces the node address in the
             // outbound config, so SHARD connects through the user's chosen edge.
-            val customIpRow = LinearLayout(this).apply {
+            shardCustomIpRow = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(16), dp(12), dp(16), dp(12))
                 background = Sculpt.sculptedBackground(
@@ -3428,6 +3445,7 @@ class MainActivity : Activity() {
                     Sculpt.withAlpha(DIVIDER, 0.15f),
                 )
             }
+            val customIpRow = shardCustomIpRow!!
             val customIpTitle = TextView(this).apply {
                 text = Strings.t("Enter Your Cloudflare IP")
                 textSize = 13.5f
@@ -3552,12 +3570,13 @@ class MainActivity : Activity() {
             // ever needs to know a measurement happened at all. A carrier that changes
             // its DPI, or a cached "not effective here" from a bad minute on the
             // network, would otherwise be sticky until the app's data is cleared.
-            body.addView(navRow(Strings.t("Re-measure network"), "") {
+            shardReMeasureRow = navRow(Strings.t("Re-measure network"), "") {
                 SmartSplit.forgetMeasurements(this)
                 smartSplitRow?.setSubtitle(SmartSplit.summary(this))
                 renderChainCard()
                 toastShort(Strings.t("Will re-measure on the next connect"))
-            }, LinearLayout.LayoutParams(
+            }
+            body.addView(shardReMeasureRow!!, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(10) })
@@ -3642,6 +3661,7 @@ class MainActivity : Activity() {
         // Now every row refreshPsiphonRows touches — Psiphon's three and Tor's
         // five — has been built and its ref assigned by the sections above.
         refreshPsiphonRows()
+        refreshShardRows()
 
         scroll.addView(content)
         page.addView(scroll, FrameLayout.LayoutParams(
@@ -4216,6 +4236,7 @@ class MainActivity : Activity() {
             torBridgeRowRef?.setValue(TorManualBridges.summary(this))
             torModeRowRef?.setValue(torMode().label)
             refreshPsiphonRows()
+        refreshShardRows()
             renderChainCard()
         }, LinearLayout.LayoutParams(0, dp(52), 1f))
         buttons.addView(createSettingsButton(
@@ -4240,6 +4261,7 @@ class MainActivity : Activity() {
             // snowflake line cannot ride inside WARP — so both the switch and the
             // home card are repainted before the sheet closes.
             refreshPsiphonRows()
+        refreshShardRows()
             renderChainCard()
             dialog.dismiss()
             if (torMode() != TorManager.TorMode.MANUAL) {
@@ -4707,6 +4729,7 @@ class MainActivity : Activity() {
             // refreshPsiphonRows() ends by calling refreshTunnelTypeRows(), so this
             // one call repaints the port row, the LAN row and every gated row at once.
             refreshPsiphonRows()
+        refreshShardRows()
             ConnectionLog.record(
                 if (chosen == CoreConfig.TUNNEL_MODE_PROXY) {
                     "Tunnel type: SOCKS proxy on port ${CoreConfig.proxyListenPort(this)} — " +
@@ -5235,6 +5258,8 @@ class MainActivity : Activity() {
         logVerbosityRow = null
         scannerRow = null
         shardPoolRow = null
+        shardCustomIpRow = null
+        shardReMeasureRow = null
         settingsBackupRow = null
         settingsPage?.let { animatePageClose(it) { settingsPage = null } }
     }
@@ -5355,6 +5380,42 @@ class MainActivity : Activity() {
         // returning from a sheet) is also a moment the tunnel-type pair can go stale,
         // and one entry point means the two cannot drift apart.
         refreshTunnelTypeRows()
+    }
+
+    /**
+     * Grey the SHARD section unless SHARD is the selected transport.
+     *
+     * Psiphon and Tor do this in [refreshPsiphonRows]; SHARD needs the same
+     * treatment but for its own rows. Every row below the section's switch only
+     * feeds the SHARD outbound, so on a MASQUE or WireGuard page a live row is
+     * a row that promises a change the next connect will ignore. Greying — not
+     * hiding — matches Psiphon and Tor, and keeps the rows visible so the user
+     * can read the pool count and the stored custom IP while they sit greyed.
+     */
+    private fun refreshShardRows() {
+        val shardSelected = selectedProtocol == Protocol.SHARD
+        // modeControlsEnabled is only false for the brief window while a connect is
+        // in flight; the rest of the time it is true and gating on it alone would
+        // leave the rows live on a wrong transport.
+        val available = shardSelected && modeControlsEnabled
+        shardPoolRow?.apply {
+            setValue(shardPoolSummary())
+            setAvailable(available)
+        }
+        // The custom IP box is a raw LinearLayout, not an OrbitSettingsRow, so it
+        // has no setAvailable(). alpha + isClickable are the grey: it stops the
+        // row from answering a tap, and it is the same dim Psiphon's rows take on
+        // through setAvailable. isEnabled is left true on the container because
+        // the EditText inside reads it for its own visuals.
+        shardCustomIpRow?.apply {
+            alpha = if (available) 1.0f else 0.45f
+            isClickable = !available
+            isFocusable = !available
+        }
+        // Smart Split's card and the re-measure row both write to the same SHARD
+        // outbound, so they follow the section.
+        smartSplitRow?.setAvailable(available)
+        shardReMeasureRow?.setAvailable(available)
     }
 
 
@@ -6270,6 +6331,7 @@ class MainActivity : Activity() {
         // settings was left and re-entered.
         connectionModeRow?.setValue(protocol.label)
         refreshPsiphonRows()
+        refreshShardRows()
 
         // Keep the rail in sync when the change came from somewhere else (the
         // mode screen, a restored preference) rather than from a rail tap.
@@ -6878,6 +6940,7 @@ class MainActivity : Activity() {
         // opened a sheet whose choice could not apply. The refs are null when the
         // page is closed, so this is a no-op then.
         refreshPsiphonRows()
+        refreshShardRows()
     }
 
     /**
@@ -7002,6 +7065,7 @@ class MainActivity : Activity() {
         // card is repainted — arming from the home screen must not leave a stale
         // "off" behind in settings.
         refreshPsiphonRows()
+        refreshShardRows()
 
     }
 

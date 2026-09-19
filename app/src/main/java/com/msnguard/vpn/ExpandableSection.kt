@@ -98,13 +98,17 @@ class ExpandableSection(
                 // Matching the chevron's own curve makes the two animations read
                 // as one gesture rather than two speeds layered on top of each other.
                 interpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
-                duration = 220
+                // Measured on a Pixel: 220 ms read as "the phone is thinking", 150 ms
+                // reads as the section following the finger. AutoTransition also fades
+                // the rows in, and that fade is what makes the open feel slow — it
+                // runs for the whole duration on every child at once.
+                duration = 150
             })
         }
         content.visibility = if (expanded) VISIBLE else GONE
         chevron.animate()
             .rotation(if (expanded) 180f else 0f)
-            .setDuration(220)
+            .setDuration(150)
             .setInterpolator(PathInterpolator(0.2f, 0f, 0f, 1f))
             .start()
         contentDescription = "$sectionTitle ${if (expanded) "باز" else "بسته"} — برای تغییر، ضربه بزنید"
