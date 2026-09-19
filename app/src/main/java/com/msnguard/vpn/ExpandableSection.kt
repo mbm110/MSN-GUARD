@@ -4,7 +4,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Typeface
-import android.transition.AutoTransition
+import android.transition.ChangeBounds
 import android.transition.TransitionManager
 import android.view.Gravity
 import android.view.View
@@ -94,14 +94,17 @@ class ExpandableSection(
         val parent = parent as? ViewGroup
         expanded = !expanded
         if (parent != null) {
-            TransitionManager.beginDelayedTransition(parent, AutoTransition().apply {
-                // Matching the chevron's own curve makes the two animations read
-                // as one gesture rather than two speeds layered on top of each other.
+            // ChangeBounds animates the size/position of the views only. The
+            // default AutoTransition also fades every child in, and on a deep
+            // body — the Tunnel Controls page carries four rows plus their own
+            // sub-views — those fades stack into a visible smear that reads as
+            // the phone thinking about it. Height-only is what the gesture
+            // actually needs: the rows arrive because the body grew, not
+            // because they individually dissolved in.
+            TransitionManager.beginDelayedTransition(parent, ChangeBounds().apply {
                 interpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
-                // Measured on a Pixel: 220 ms read as "the phone is thinking", 150 ms
-                // reads as the section following the finger. AutoTransition also fades
-                // the rows in, and that fade is what makes the open feel slow — it
-                // runs for the whole duration on every child at once.
+                // 150 ms matches the chevron; the two read as one gesture
+                // rather than two speeds layered on top of each other.
                 duration = 150
             })
         }
@@ -181,7 +184,7 @@ class ExpandableSection(
                 typeface = if (english) {
                     Typeface.create("sans-serif-medium", Typeface.NORMAL)
                 } else {
-                    Typefaces.bold(context)
+                    Typefaces.semiBold(context)
                 }
                 if (!english) setLineSpacing(0f, Typefaces.lineHeightMult())
                 isSingleLine = true

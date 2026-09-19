@@ -64,7 +64,11 @@ class OrbitSectionHeader(
             typeface = if (english) {
                 Typeface.create("sans-serif-medium", Typeface.NORMAL)
             } else {
-                Typefaces.bold(context)
+                // SemiBold, not Bold: Persian's distinguishing features are the
+                // counters and dots inside the letters, and a 700 weight seals
+                // them. 600 keeps an uppercase section label emphatic without
+                // flattening ع against غ.
+                Typefaces.semiBold(context)
             }
             if (!english) setLineSpacing(0f, Typefaces.lineHeightMult())
         })
@@ -141,7 +145,10 @@ class OrbitSettingsRow(
             text = title
             textSize = 15f
             setTextColor(if (destructive) destructiveColor else palette.ink)
-            typeface = Typefaces.medium(context)
+            // A row title is the strongest text on the row, but "strong" in
+            // Persian is not "heavy": Vazirmatn at 700 closes the counters that
+            // separate ک from گ. SemiBold carries the hierarchy without that.
+            typeface = Typefaces.semiBold(context)
             val english = AppLanguage.current() == "en"
             if (!english) setLineSpacing(0f, Typefaces.lineHeightMult())
             if (english) {
@@ -333,7 +340,7 @@ class OrbitToggleRow(
                 text = title
                 textSize = 15f
                 setTextColor(palette.ink)
-                typeface = Typefaces.medium(context)
+                typeface = Typefaces.semiBold(context)
                 if (AppLanguage.current() != "en") {
                     setLineSpacing(0f, Typefaces.lineHeightMult())
                 }

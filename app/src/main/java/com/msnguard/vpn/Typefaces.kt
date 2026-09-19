@@ -20,6 +20,7 @@ object Typefaces {
 
     @Volatile private var regular: Typeface? = null
     @Volatile private var medium: Typeface? = null
+    @Volatile private var semiBold: Typeface? = null
     @Volatile private var bold: Typeface? = null
     @Volatile private var extraBold: Typeface? = null
     @Volatile private var mono: Typeface? = null
@@ -38,8 +39,25 @@ object Typefaces {
     fun medium(ctx: Context): Typeface {
         val lang = AppLanguage.current()
         return when (lang) {
-            "fa" -> cached(ctx, R.font.vazirmatn_bold) { medium }
+            "fa" -> cached(ctx, R.font.vazirmatn_medium) { medium }
             "zh" -> cached(ctx, R.font.noto_sc_medium) { medium }
+            else -> Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        }
+    }
+
+    /**
+     * Between medium and bold — the weight WhiteAesther's Persian UI is set in.
+     *
+     * Persian has no bold-on-light contrast tradition to lean on: heavy weights
+     * close the counters that distinguish ع from غ and ک from گ, so a heading
+     * that reads as "strong" in Latin reads as "blocked in" here. SemiBold keeps
+     * the emphasis without sealing the letterforms.
+     */
+    fun semiBold(ctx: Context): Typeface {
+        val lang = AppLanguage.current()
+        return when (lang) {
+            "fa" -> cached(ctx, R.font.vazirmatn_semibold) { semiBold }
+            "zh" -> cached(ctx, R.font.noto_sc_bold) { semiBold }
             else -> Typeface.create("sans-serif-medium", Typeface.NORMAL)
         }
     }
@@ -48,7 +66,7 @@ object Typefaces {
     fun bold(ctx: Context): Typeface {
         val lang = AppLanguage.current()
         return when (lang) {
-            "fa" -> cached(ctx, R.font.vazirmatn_extrabold) { bold }
+            "fa" -> cached(ctx, R.font.vazirmatn_bold) { bold }
             "zh" -> cached(ctx, R.font.noto_sc_bold) { bold }
             else -> Typeface.create("sans-serif-medium", Typeface.BOLD)
         }
