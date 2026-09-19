@@ -353,6 +353,7 @@ object Strings {
         "Reconnecting after \\\$reason…" to Triple("Reconnecting after \\\$reason…", "اتصال مجدد بعد از \\\$reason…", "因 \\\$reason 正在重新连接…"),
         "Reconnecting…" to Triple("Reconnecting…", "در حال اتصال مجدد…", "正在重新连接…"),
         "Remove saved gateway latency data" to Triple("Remove saved gateway latency data", "حذف داده‌های تاخیر (Latency) درگاه‌های ذخیره‌شده", "删除已保存网关的延迟数据"),
+        "Saved gateways cleared" to Triple("Saved gateways cleared", "درگاه‌های ذخیره‌شده پاک شدند", "已保存的网关已清除"),
         "Reset" to Triple("Reset", "بازنشانی", "重置"),
         "Reset to defaults" to Triple("Reset to defaults", "بازنشانی به تنظیمات اولیه", "恢复默认设置"),
         "Restore settings" to Triple("Restore settings", "بازیابی تنظیمات", "恢复设置"),

@@ -2648,7 +2648,7 @@ class MainActivity : Activity() {
         options.addView(label(if (selectedProtocol == Protocol.MASQUE) "MASQUE GATEWAY DISCOVERY" else "WIREGUARD ENDPOINT DISCOVERY", 12f, MUTED).apply { letterSpacing = spacing(0.1f) })
         EndpointDiscovery.entries.forEachIndexed { index, discovery ->
             val option = createEndpointDiscoveryOption(discovery) { chosen ->
-                getSharedPreferences(SETTINGS, MODE_PRIVATE).edit()
+                preferences().edit()
                     .putString(ENDPOINT_DISCOVERY, chosen.coreName)
                     .apply()
                 discoveryOptions.forEach { (item, view) -> setSelectionState(view, item == chosen, animate = true) }
@@ -2667,7 +2667,7 @@ class MainActivity : Activity() {
             ).apply { topMargin = dp(20) })
             MasqueTransport.entries.forEachIndexed { index, transport ->
                 val option = createMasqueTransportOption(transport) { chosen ->
-                    getSharedPreferences(SETTINGS, MODE_PRIVATE).edit().putString(DEFAULT_MASQUE_TRANSPORT, chosen.coreName).apply()
+                    preferences().edit().putString(DEFAULT_MASQUE_TRANSPORT, chosen.coreName).apply()
                     transportOptions.forEach { (item, view) -> setSelectionState(view, item == chosen, animate = true) }
                 }
                 transportOptions[transport] = option
@@ -2684,7 +2684,7 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(20) })
         ScanMode.entries.forEachIndexed { index, mode ->
             val option = createScanModeOption(mode) { chosen ->
-                getSharedPreferences(SETTINGS, MODE_PRIVATE).edit().putString(DEFAULT_SCAN_MODE, chosen.coreName).apply()
+                preferences().edit().putString(DEFAULT_SCAN_MODE, chosen.coreName).apply()
                 modeOptions.forEach { (item, view) -> setSelectionState(view, item == chosen, animate = true) }
             }
             modeOptions[mode] = option
@@ -2700,7 +2700,7 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(20) })
         ScanTarget.entries.forEachIndexed { index, target ->
             val option = createScannerOption(target) { chosen ->
-                getSharedPreferences(SETTINGS, MODE_PRIVATE).edit().putString(DEFAULT_SCAN, chosen.coreName).apply()
+                preferences().edit().putString(DEFAULT_SCAN, chosen.coreName).apply()
                 targetOptions.forEach { (item, view) -> setSelectionState(view, item == chosen, animate = true) }
             }
             targetOptions[target] = option
@@ -4889,7 +4889,10 @@ class MainActivity : Activity() {
             when (chosen) {
                 "Cache & refresh" -> preferences().edit().putString(ENDPOINT_DISCOVERY, EndpointDiscovery.CACHE.coreName).apply()
                 "Fresh scan next time" -> preferences().edit().putString(ENDPOINT_DISCOVERY, EndpointDiscovery.FRESH.coreName).apply()
-                else -> File(filesDir, "masque-gateway-cache.json").delete()
+                else -> {
+                    File(filesDir, "masque-gateway-cache.json").delete()
+                    toastShort(Strings.t("Saved gateways cleared"))
+                }
             }
             gatewayCacheRow?.setValue(defaultEndpointDiscovery().label)
         }
@@ -5190,6 +5193,11 @@ class MainActivity : Activity() {
                     }
                     onSelected(item)
                     rows.forEach { (value, option) -> setSelectionState(option, value == item, animate = true) }
+                    // A tap is a decision, not an inspection: leaving the sheet open
+                    // after the choice reads as "nothing happened", and the user
+                    // backs out manually only to find the row still unchanged
+                    // (which was the Gateway cache report). Dismiss on accept.
+                    dialog.dismiss()
                 }
             }
             val option = SelectionOption(row, optionTitle, indicator, 18)
@@ -7328,24 +7336,22 @@ class MainActivity : Activity() {
 
 
     private fun defaultScan(): ScanTarget {
-        val name = getSharedPreferences(SETTINGS, MODE_PRIVATE).getString(DEFAULT_SCAN, ScanTarget.IPV4.coreName)
+        val name = preferences().getString(DEFAULT_SCAN, ScanTarget.IPV4.coreName)
         return ScanTarget.entries.firstOrNull { it.coreName == name } ?: ScanTarget.IPV4
     }
 
     private fun defaultScanMode(): ScanMode {
-        val name = getSharedPreferences(SETTINGS, MODE_PRIVATE).getString(DEFAULT_SCAN_MODE, ScanMode.BALANCED.coreName)
+        val name = preferences().getString(DEFAULT_SCAN_MODE, ScanMode.BALANCED.coreName)
         return ScanMode.entries.firstOrNull { it.coreName == name } ?: ScanMode.BALANCED
     }
 
     private fun defaultEndpointDiscovery(): EndpointDiscovery {
-        val name = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-            .getString(ENDPOINT_DISCOVERY, EndpointDiscovery.CACHE.coreName)
+        val name = preferences().getString(ENDPOINT_DISCOVERY, EndpointDiscovery.CACHE.coreName)
         return EndpointDiscovery.entries.firstOrNull { it.coreName == name } ?: EndpointDiscovery.CACHE
     }
 
     private fun defaultMasqueTransport(): MasqueTransport {
-        val name = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-            .getString(DEFAULT_MASQUE_TRANSPORT, MasqueTransport.H3.coreName)
+        val name = preferences().getString(DEFAULT_MASQUE_TRANSPORT, MasqueTransport.H3.coreName)
         return MasqueTransport.entries.firstOrNull { it.coreName == name } ?: MasqueTransport.H3
     }
 
