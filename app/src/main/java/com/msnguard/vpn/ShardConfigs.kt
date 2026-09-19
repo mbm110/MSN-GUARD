@@ -203,6 +203,9 @@ object ShardConfigs {
     private const val MUX_CONCURRENCY = 8
     private const val XUDP_CONCURRENCY = 16
 
+    /** Tag of the DoH outbound added to every plain-SHARD tunnel. See [dohOutbound]. */
+    private const val DOH_OUTBOUND_TAG = "doh-resolver"
+
     /**
      * Parse a subscription body into nodes, in file order.
      *
@@ -635,6 +638,18 @@ object ShardConfigs {
         val outbounds = JSONArray()
             .put(outbound(context, node, "proxy", mux = false))
             .put(
+                // DoH resolver, chained through the node. This is the fix for the
+                // "Telegram works, nothing in a browser does" symptom: the node's
+                // Cloudflare WebSocket leg silently drops UDP datagrams above ~500
+                // bytes, so a browser's EDNS0-padded DNS query and its QUIC initial
+                // both vanish into the tunnel. TCP has no such ceiling — measured
+                // end to end on the live pool, a 612-byte padded UDP query timed
+                // out while an identical lookup over DoH returned in 95 bytes, and
+                // google/amazon/github/instagram all resolved that way. See
+                // [dohOutbound] and the port-53 rule in [routingRules].
+                dohOutbound()
+            )
+            .put(
                 JSONObject().apply {
                     put("tag", "blackhole")
                     put("protocol", "blackhole")
@@ -767,6 +782,45 @@ object ShardConfigs {
                 )
             }
             put("inbounds", inbounds)
+            // DNS is the one flow plain SHARD cannot leave on its default path: the
+            // node's WebSocket leg drops the UDP datagrams a browser sends, so the
+            // lookup vanishes and every page dies while Telegram — which never
+            // resolves a name — keeps working. Catching port 53 here and answering
+            // it over DoH is the fix. See [dohOutbound].
+            //
+            // With Smart Split this rule is unnecessary: that profile ships its own
+            // DNS config with the same DoH endpoint, and adding this rule beside it
+            // would only create a second resolver to reason about.
+            if (smartSplit == null) {
+                put("dns", JSONObject().apply {
+                    put("queryStrategy", "UseIP")
+                    put("useSystemHosts", true)
+                    put("serveStale", true)
+                    put(
+                        "servers",
+                        JSONArray().put(
+                            JSONObject().apply {
+                                put("tag", DOH_OUTBOUND_TAG)
+                                put("address", "https://cloudflare-dns.com/dns-query")
+                                put("timeoutMs", 12000)
+                            }
+                        )
+                    )
+                })
+                put(
+                    "routing",
+                    JSONObject().put(
+                        "rules",
+                        JSONArray().put(
+                            JSONObject().apply {
+                                put("type", "field")
+                                put("port", 53)
+                                put("outboundTag", DOH_OUTBOUND_TAG)
+                            }
+                        )
+                    )
+                )
+            }
             // Without Smart Split: no routing rules at all: with "proxy" first it is
             // the default outbound and everything goes through the node. blackhole is
             // present only so a future rule has something to point at.
@@ -914,6 +968,59 @@ object ShardConfigs {
                 }
             )
         }
+    }
+
+    /**
+     * A `dns` outbound that resolves over DoH through the node, for plain SHARD.
+     *
+     * ## Why plain SHARD needs it
+     *
+     * [ShardSocksFront] forwards every UDP flow — DNS included — to xray's SOCKS
+     * inbound, and from there to the node over its Cloudflare WebSocket leg. That
+     * leg silently drops UDP datagrams above roughly 500 bytes, measured end to
+     * end against the live pool: 60 and 300 bytes come back, 612 and above never
+     * do, and the cutoff is the same on port 53 as on 443, so it is a size limit
+     * on the transport rather than a port policy.
+     *
+     * A browser is the casualty. Its DNS is EDNS0-padded and its QUIC initial is
+     * ~1200 bytes, so both cross the line; the query enters the tunnel and
+     * vanishes, and the browser waits on a lookup that will never be answered.
+     * Apps with a pinned IP (Telegram, Instagram) never ask, which is exactly the
+     * reported symptom: Telegram fine, every page in Chrome dead.
+     *
+     * Routed to this outbound, a port-53 flow is answered over DoH on port 443,
+     * which rides the WebSocket leg as TCP and has no size limit at all — the same
+     * lookup that times out at 612 bytes over UDP returns in 95 bytes over DoH,
+     * verified for google.com / amazon.com / github.com / instagram.com.
+     *
+     * ## Why `proxySettings` is required
+     *
+     * Without it the `dns` outbound resolves from the phone, i.e. over the carrier
+     * — a resolver leak and a lookup the censor can answer. Chaining it to the
+     * proxy outbound makes the DoH request itself leave through the node.
+     *
+     * ## Why this is separate from [smartSplitDns]
+     *
+     * Smart Split already ships a DoH server table inside its own DNS config, and
+     * that path was measured working. This is the minimal version for the profile
+     * that has no routing rules at all, so it carries no fragmenter, no domain
+     * tables and no localhost server — only the one thing plain SHARD was missing.
+     */
+    private fun dohOutbound(): JSONObject = JSONObject().apply {
+        put("tag", DOH_OUTBOUND_TAG)
+        put("protocol", "dns")
+        put(
+            "settings",
+            JSONObject().apply {
+                put("address", "https://cloudflare-dns.com/dns-query")
+                put("port", 443)
+                // Non-IP queries (HTTPS/SVCB) are dropped rather than answered by
+                // an arbitrary resolver, for the same reason as Smart Split's.
+                put("nonIPQuery", "drop")
+                put("userLevel", 1)
+            }
+        )
+        put("proxySettings", JSONObject().put("tag", "proxy"))
     }
 
     /**
