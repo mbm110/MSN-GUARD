@@ -3767,20 +3767,15 @@ async fn run_mim(
             }
         };
 
-        if candidates.is_empty() {
-            // A pinned endpoint skipped the scan that fills the inner pool, so
-            // dial the pinned hop itself: it is the only edge we can reach.
+        // A pinned endpoint skipped the scan that fills the inner pool, so the
+        // list above is empty: dial the pinned hop itself, the only edge this
+        // device can still reach.
+        let candidates: Vec<SocketAddr> = if candidates.is_empty()
+            && options.forced_peer.is_some()
+        {
             let pinned = SocketAddr::new(peer.ip(), consts::QUIC_PORT);
-            if options.forced_peer.is_some() {
-                log::info!(
-                    "[+] pinned endpoint: using {pinned} as the inner hop too"
-                );
-                vec![pinned]
-            } else {
-                return Err(AetherError::Other(
-                    "no second masque edge is known for the inner hop".into(),
-                ));
-            }
+            log::info!("[+] pinned endpoint: using {pinned} as the inner hop too");
+            vec![pinned]
         } else {
             candidates
         };
