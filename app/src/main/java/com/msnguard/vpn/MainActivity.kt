@@ -4958,7 +4958,7 @@ class MainActivity : Activity() {
                 }, LinearLayout.LayoutParams(0, dp(52), 1f))
         buttons.addView(createSettingsButton(Strings.t("Save")) {
                             val endpoint = field.text.toString().trim()
-                            val validEndpoint = endpoint.isBlank() || Regex("^(?:\\\\d{1,3}(?:\\\\.\\\\d{1,3}){3}|\\\\[[0-9a-fA-F:]+]):([1-9]\\\\d{0,4})$")
+                            val validEndpoint = endpoint.isBlank() || Regex("^(?:\\d{1,3}(?:\\.\\d{1,3}){3}|\\[[0-9a-fA-F:]+]):([1-9]\\d{0,4})$")
                                 .matchEntire(endpoint)?.groupValues?.get(1)?.toIntOrNull()?.let { it in 1..65535 } == true
                             if (!validEndpoint) {
                                 field.error = Strings.t("Use numeric IP:port")
@@ -7700,7 +7700,7 @@ class MainActivity : Activity() {
         // follows because it survives the carriers WireGuard is blocked on, and the
         // one-time Auto Scan ([AUTO_SCAN_LADDER]) walks them in exactly this order.
         WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel", true),
-        MASQUE("MASQUE", "masque", "HTTP/3 tunnel", true),
+        MASQUE("MASQUE", "masque", "HTTP/3 or HTTP/2 tunnel", true),
         WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel", true),
         PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel", true),
         TOR("Tor", "tor", "Onion routing; slowest but hardest to block", true),

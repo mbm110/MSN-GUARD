@@ -283,7 +283,7 @@ class MsnGuardTileService : TileService() {
             // anyone maintaining them, and the tile's default is the first entry's
             // sibling on the main screen.
             WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel"),
-            MASQUE("MASQUE", "masque", "HTTP/3 tunnel"),
+            MASQUE("MASQUE", "masque", "HTTP/3 or HTTP/2 tunnel"),
             WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel"),
             PSIPHON("Psiphon", "psiphon", "SOCKS5 proxy tunnel"),
             TOR("Tor", "tor", "Onion routing");

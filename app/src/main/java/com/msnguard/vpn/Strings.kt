@@ -181,6 +181,7 @@ object Strings {
         "HTTP/2" to Triple("HTTP/2", "HTTP/2", "HTTP/2"),
         "HTTP/3" to Triple("HTTP/3", "HTTP/3", "HTTP/3"),
         "HTTP/3 tunnel" to Triple("HTTP/3 tunnel", "تونل HTTP/3", "HTTP/3 隧道"),
+        "HTTP/3 or HTTP/2 tunnel" to Triple("HTTP/3 or HTTP/2 tunnel", "تونل HTTP/3 یا HTTP/2", "HTTP/3 或 HTTP/2 隧道"),
         "HTTP/3, falling back to HTTP/2 with TLS fragmentation" to Triple("HTTP/3, falling back to HTTP/2 with TLS fragmentation", "پروتکل HTTP/3، با قابلیت بازگشت به HTTP/2 همراه با تکه‌تکه‌سازی TLS", "HTTP/3 协议，必要时降级至带 TLS 分片的 HTTP/2"),
         "High" to Triple("High", "بالا", "高性能"),
         "Highest resistance; slower setup" to Triple("Highest resistance; slower setup", "بیشترین مقاومت؛ اتصال اولیه کندتر", "最强抗封锁，建连时间略长"),
