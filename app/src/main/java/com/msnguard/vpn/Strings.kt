@@ -287,7 +287,7 @@ object Strings {
         "ON" to Triple("ON", "روشن", "开"),
         "Obfuscation" to Triple("Obfuscation", "مخفی‌سازی ترافیک", "流量混淆"),
         "Off" to Triple("Off", "خاموش", "关闭"),
-        "Tap to allow background running" to Triple("Tap to allow background running", "برای اجرای پس‌زمینه ضربه بزنید", "点击以允许后台运行"),
+        "Tap to allow background running" to Triple("Background Running", "اجرا در پس‌زمینه", "后台运行"),
         "On" to Triple("On", "روشن", "开启"),
         "On · not effective on this network" to Triple("On · not effective on this network", "روشن · در این شبکه مؤثر نیست", "开 · 在此网络无效"),
         "On · tuned for this network" to Triple("On · tuned for this network", "روشن · تنظیم برای این شبکه", "开 · 已针对此网络调优"),

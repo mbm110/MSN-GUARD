@@ -3050,7 +3050,7 @@ class MainActivity : Activity() {
             // devices this row is what makes the tunnel survive a locked screen.
             batteryRow = navRow(
                 Strings.t("Battery Optimization"),
-                Strings.t("Tap to allow background running"),
+                Strings.t("Background Running"),
             ) { requestBatteryOptimization() }
             body.addView(batteryRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3059,7 +3059,7 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ))
+        ).apply { topMargin = dp(26) })
 
         content.addView(expandableSection(Strings.t("ROUTING & DATA"), id = "ROUTING & DATA") { body ->
             body.addView(navRow(Strings.t("Traffic monitor"), trafficHeadline()) { openTrafficMonitorScreen() }, LinearLayout.LayoutParams(
@@ -3759,7 +3759,7 @@ class MainActivity : Activity() {
             ).apply { topMargin = dp(9) })
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ))
+        ).apply { topMargin = dp(26) })
 
         content.addView(expandableSection(Strings.t("ROUTING"), id = "ROUTING") { body ->
             // v1.9.8: assign to the class fields, not local vals. A previous build
