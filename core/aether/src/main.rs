@@ -1886,6 +1886,35 @@ async fn run_masque(
         log::warn!("[-] {reconnect_detail}");
         crate::ffi::record_log(&reconnect_detail);
 
+        // A pinned endpoint has no scan to fall back to when it fails, so give
+        // it the one second chance that exists: a second transport, then a
+        // second port. Without this a pinned peer that blocks QUIC retries the
+        // same doomed handshake forever — the user only sees "connecting".
+        //
+        // Each branch fires at most once per session (the flag it sets is the
+        // condition it checks), so this cannot loop.
+        if forced.is_some() {
+            if !masque_h2::enabled() {
+                enable_restricted_h2();
+                crate::ffi::record_log("Pinned endpoint failed on HTTP/3; retrying on HTTP/2");
+                continue;
+            }
+            if peer.port() != consts::QUIC_PORT && last_good_peer.is_some() {
+                let alt = SocketAddr::new(peer.ip(), consts::QUIC_PORT);
+                log::info!(
+                    "[+] pinned port {} does not serve connect-ip; redialling {alt}",
+                    peer.port()
+                );
+                crate::ffi::record_log(format!(
+                    "Retrying pinned endpoint on port {}",
+                    consts::QUIC_PORT
+                ));
+                quick_peer = Some(alt);
+                last_good_peer = None;
+                continue;
+            }
+        }
+
         crate::ffi::emit_status("connecting", Some(reconnect_detail));
 
         tokio::time::sleep(masque_reconnect_delay()).await;
@@ -3485,10 +3514,20 @@ async fn run_masque_in_masque(
 
     let mut chosen: Option<(SocketAddr, MasqueHop, ForwarderGuard)> = None;
 
+    // A pinned outer endpoint leaves the candidate pool empty or holding only
+    // the pinned address itself — the scan that seeds the cache was skipped, so
+    // `inner_masque_candidates` has nothing else to offer. Excluding the outer
+    // peer is right for a scanned pool (a second edge is the whole point) but
+    // fatal here: the pinned hop is the only reachable edge, and refusing to
+    // tunnel through it leaves MIM dialling nothing.
+    let allow_same = !inner_peers
+        .iter()
+        .any(|candidate| candidate.ip() != peer.ip());
+
     for inner_peer in inner_peers
         .iter()
         .copied()
-        .filter(|candidate| candidate.ip() != peer.ip())
+        .filter(|candidate| allow_same || candidate.ip() != peer.ip())
     {
         let (inner_datagram, inner_mtu) = mim_inner_budget(outer_mtu, inner_peer, h2);
 
@@ -3729,10 +3768,22 @@ async fn run_mim(
         };
 
         if candidates.is_empty() {
-            return Err(AetherError::Other(
-                "no second masque edge is known for the inner hop".into(),
-            ));
-        }
+            // A pinned endpoint skipped the scan that fills the inner pool, so
+            // dial the pinned hop itself: it is the only edge we can reach.
+            let pinned = SocketAddr::new(peer.ip(), consts::QUIC_PORT);
+            if options.forced_peer.is_some() {
+                log::info!(
+                    "[+] pinned endpoint: using {pinned} as the inner hop too"
+                );
+                vec![pinned]
+            } else {
+                return Err(AetherError::Other(
+                    "no second masque edge is known for the inner hop".into(),
+                ));
+            }
+        } else {
+            candidates
+        };
 
         match run_masque_in_masque(
             &primary,
