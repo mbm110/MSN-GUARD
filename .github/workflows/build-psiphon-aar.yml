@@ -20,10 +20,6 @@ on:
         description: 'Branch/tag/SHA of shirokhorshid/psiphon-tunnel-core'
         required: false
         default: 'shirokhorshid'
-  push:
-    branches: [ master ]
-    paths:
-      - '.github/workflows/build-psiphon-aar.yml'
 
 jobs:
   build:
@@ -70,14 +66,16 @@ jobs:
           ANDROID_PLATFORM_VERSION: "34"
         run: |
           cd psiphon-core/MobileLibrary/Android
-          # make.bash exports GO111MODULE=off and assumes a GOPATH layout; the
-          # fork's own go.mod tree rejects that. gomobile bind then refuses to run
-          # unless golang.org/x/mobile is a real dependency of the module graph,
-          # which it is not — the fork vendors nothing and declares no mobile dep.
-          # Adding it as a tool directive is exactly what gomobile itself tells you
-          # to do in that error message, and it is what makes bind work in module
-          # mode without rewriting the fork's go.mod by hand.
+          # make.bash exports GO111MODULE=off and assumes a GOPATH clone, which is
+          # not how actions/checkout lays the tree out. In module mode `gomobile
+          # bind` refuses to run unless golang.org/x/mobile is a dependency of the
+          # module it is invoked in — and it resolves gobind from THAT module's
+          # graph, not from the GOPATH binary the step above installed. Recording
+          # the tool directive and then building the gobind it pins is the only
+          # combination that works; installing gobind@latest separately changes
+          # nothing, gomobile never consults it.
           go get -tool golang.org/x/mobile/cmd/gobind
+          go build -o "$HOME/go/bin/gobind" golang.org/x/mobile/cmd/gobind
           export GOCACHE=/tmp
           export CGO_LDFLAGS="-Wl,-z,max-page-size=16384,-z,common-page-size=16384"
           BUILDDATE=$(date --iso-8601=seconds)
