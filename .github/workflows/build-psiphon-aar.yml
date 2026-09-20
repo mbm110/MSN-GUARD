@@ -50,40 +50,53 @@ jobs:
       - name: Setup Android SDK + NDK
         uses: android-actions/setup-android@v3
         with:
-          packages: "ndk;26.3.11579264 cmake;3.22.1 platforms;android-34"
+          # NDK 23 is what the fork's Dockerfile pins. NDK 26 rejects the
+          # android-16 platform that gomobile bind still targets — the failure
+          # is "unsupported API version 16 (not in 21..34)" — and there is no
+          # flag to relax it, the check is inside the NDK's own clang wrapper.
+          packages: "ndk;23.1.7779620 platforms;android-34"
           accept-android-sdk-licenses: "true"
 
       - name: Install gomobile
+        # The fork vendors its own copy of x/mobile under MobileLibrary/go-mobile
+        # and patches init.go so `gomobile init` builds gobind from that same
+        # copy instead of pulling gobind@latest from the network. Two separate
+        # reasons make the stock binary unusable here:
+        #   1. stock gomobile bind targets android-16, which NDK 23+ rejects
+        #      ("unsupported API version 16 (not in 21..34)");
+        #   2. stock gomobile resolves gobind from the network, not from the
+        #      module it is binding, so it can disagree with the pinned version.
+        # Building from the fork's copy fixes both. GO111MODULE=off is required —
+        # the vendored tree has no go.mod of its own and only builds in GOPATH mode.
         run: |
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+          export GOPATH="$HOME/go"
+          mkdir -p "$GOPATH/src/golang.org/x"
+          cp -r psiphon-core/MobileLibrary/go-mobile "$GOPATH/src/golang.org/x/mobile"
+          cd "$GOPATH/src/golang.org/x/mobile"
+          mv ./cmd/gomobile/init.go ./cmd/gomobile/init.go.orig
+          sed -e 's|golang.org/x/mobile/cmd/gobind@latest|golang.org/x/mobile/cmd/gobind|' ./cmd/gomobile/init.go.orig > ./cmd/gomobile/init.go
+          export GO111MODULE=off
+          go install golang.org/x/mobile/cmd/gomobile
+          go install golang.org/x/mobile/cmd/gobind
+          gomobile init -v
+          echo "$GOPATH/bin" >> $GITHUB_PATH
 
       - name: Build the AAR
         env:
           ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
-          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.3.11579264
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/23.1.7779620
           ANDROID_PLATFORM_VERSION: "34"
         run: |
           cd psiphon-core/MobileLibrary/Android
-          # make.bash exports GO111MODULE=off and assumes a GOPATH clone, which is
-          # not how actions/checkout lays the tree out. In module mode `gomobile
-          # bind` refuses to run unless golang.org/x/mobile is a dependency of the
-          # module it is invoked in — and it resolves gobind from THAT module's
-          # graph, not from the GOPATH binary the step above installed. Recording
-          # the tool directive and then building the gobind it pins is the only
-          # combination that works; installing gobind@latest separately changes
-          # nothing, gomobile never consults it.
-          # The fork ships a vendor/ directory, and `go get` above upgrades
-          # several x/* packages past what vendor/modules.txt records. Go then
-          # hard-fails the build as "inconsistent vendoring" rather than falling
-          # back to the module cache. -mod=mod is the documented escape: it tells
-          # this one build to resolve from the module graph and ignore vendor/.
-          # It must be exported because gomobile spawns child `go` invocations
-          # that would otherwise read vendor/ and fail the same way.
-          go get -tool golang.org/x/mobile/cmd/gobind
-          go build -mod=mod -o "$HOME/go/bin/gobind" golang.org/x/mobile/cmd/gobind
+          # The fork ships a vendor/ directory, and the tool directive we add
+          # upgrades several x/* packages past what vendor/modules.txt records.
+          # Go then hard-fails as "inconsistent vendoring" instead of falling
+          # back to the module cache. -mod=mod is the documented escape, and it
+          # is safe: the only local replace, pion/dtls => ./replace/dtls, is a
+          # full module with its own go.mod, so it still resolves from disk.
           export GOFLAGS=-mod=mod
+          export GOPATH="$HOME/go"
+          go get -tool golang.org/x/mobile/cmd/gobind
           export GOCACHE=/tmp
           export CGO_LDFLAGS="-Wl,-z,max-page-size=16384,-z,common-page-size=16384"
           BUILDDATE=$(date --iso-8601=seconds)
