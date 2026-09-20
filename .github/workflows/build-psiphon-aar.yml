@@ -167,9 +167,15 @@ jobs:
           cp psiphon-core/MobileLibrary/Android/ca.psiphon.aar app/libs/psiphon.aar
           ls -la app/libs/
       - name: Commit the swapped AAR
+        env:
+          # The default GITHUB_TOKEN is intentionally read-only for the workflow's
+          # own pushes (403 on push). The AAR is the whole output of this job, so
+          # without a writeable token the run succeeds and delivers nothing.
+          GH_TOKEN: ${{ secrets.AAR_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           git add app/libs/psiphon.aar
           git rm --quiet --cached app/libs/psiphontunnel-2.0.39.aar || true
           rm -f app/libs/psiphontunnel-2.0.39.aar
@@ -190,8 +196,10 @@ jobs:
           echo "FATAL: could not push the rebuilt AAR after 3 attempts" >&2
           exit 1
 
-      - name: Upload the AAR
+      - name: Upload the AAR (even if the commit failed)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: psiphon-aar
-          path: app/libs/ca.psiphon.aar
+          path: app/libs/psiphon.aar
+          if-no-files-found: error
