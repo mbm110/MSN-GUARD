@@ -806,6 +806,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val ACTION_DISCONNECT = "com.msnguard.vpn.DISCONNECT"
         const val ACTION_RECONNECT = "com.msnguard.vpn.RECONNECT"
         const val ACTION_NOTIFICATION_HEALTH = "com.msnguard.vpn.NOTIFICATION_HEALTH"
+        const val ACTION_RESET_IDENTITIES = "com.msnguard.vpn.RESET_IDENTITIES"
         const val ACTION_STATUS = "com.msnguard.vpn.STATUS"
         const val EXTRA_CONFIG = "config"
         const val EXTRA_STATUS = "status"
@@ -2150,6 +2151,20 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 intent.getStringExtra(EXTRA_NOTIFICATION_COUNTRY)?.takeIf { it.isNotBlank() }
                     ?.let { if (currentCountry.isBlank()) currentCountry = it }
                 repostNotification()
+            }
+            ACTION_RESET_IDENTITIES -> {
+                // The tunnel must be gone before the registration files are: the
+                // core holds an open handle to its identity for the whole session.
+                // Stopping first is also what makes this safe while connected —
+                // the user is never left in a half-torn-down state.
+                userInitiatedStop.set(true)
+                reconnectRequested.set(false)
+                exitRotationPending.set(false)
+                killSwitchSealed.set(false)
+                cancelAutoReconnect()
+                stopTunnel()
+                resetIdentities()
+                ConnectionLog.record("WARP identities reset — new account on next connect")
             }
         }
         return Service.START_REDELIVER_INTENT
@@ -5021,7 +5036,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * same phone reaching GB through GOOL's gateway while its MASQUE/WG
      * gateways stayed IR/DE. The country follows the gateway, so rolling the
      * identity only destroyed the one working GB setup (the WoW regression)
-     * and re-registered from an Iranian address.
+     * and re-registered from an Iranian address. The deliberate version lives
+     * in [resetIdentities], gated behind a confirmation the user has to read.
      */
     private fun clearEndpointCaches() {
         val targets = listOf(
@@ -5032,6 +5048,48 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         )
         for (file in targets) {
             if (file.exists()) file.delete()
+        }
+    }
+
+    /**
+     * Wipes every saved WARP/MASQUE registration so the core provisions fresh
+     * identities from the registration API on the next connect.
+     *
+     * This is the "different account, different exit" lever, and it is the one
+     * the automatic rotation is forbidden from pulling (see the v1.9.4 note on
+     * [clearEndpointCaches] — deleting these files on a guess destroyed a
+     * working GB setup). It is safe here because the user pressed the button
+     * deliberately and [ACTION_RESET_IDENTITIES] stops the tunnel before this
+     * runs, so nothing holds these files open.
+     *
+     * The lastconn files and the gateway cache go too: a fresh identity
+     * reconnecting through the endpoint the old one just used would measure the
+     * same egress again, which is exactly the outcome the reset is meant to
+     * escape.
+     *
+     * `preferred-exit-endpoint.json` is NOT touched — a pinned endpoint is the
+     * user's own input, and a fresh identity still has to obey it.
+     */
+    private fun resetIdentities() {
+        // Must mirror derive_sibling_path in main.rs: `aether.toml` + suffix
+        // re-attaches the extension (aether + "-masque" + .toml). Missing or
+        // mis-spelling one of these leaves a stale identity the core is happy to
+        // keep using, and the reset silently does nothing.
+        val targets = listOf(
+            "aether.toml",                    // WireGuard primary
+            "aether-secondary.toml",          // WoW inner-tunnel identity
+            "aether-masque.toml",             // MASQUE primary (cert + device id)
+            "aether-masque-secondary.toml",   // MIM inner-tunnel identity
+            "aether-lastconn.toml",
+            "aether-gool-lastconn.toml",
+            "aether-mim-lastconn.toml",
+            "masque-gateway-cache.json",
+        )
+        for (name in targets) {
+            val file = File(filesDir, name)
+            if (file.exists() && file.delete()) {
+                ConnectionLog.record("Identity reset: deleted $name")
+            }
         }
     }
 

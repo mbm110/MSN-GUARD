@@ -2604,6 +2604,61 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * Wipes the saved WARP/MASQUE registrations so the next connect enrolls fresh
+     * accounts. Deliberately allowed while connected: the service action stops the
+     * tunnel before it touches a single file, so the core never sees its identity
+     * vanish underneath it.
+     */
+    private fun confirmResetIdentities() {
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            background = roundedBackground(SURFACE, 28, SURFACE)
+        }
+        sheet.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label(Strings.t("Reset identity"), 22f, INK, TypefaceStyle.MEDIUM))
+        })
+        sheet.addView(label(
+            Strings.t("Deletes every saved WARP and MASQUE account on this device. The next connect registers new ones from scratch, which can move the tunnel to a different exit address. Your manual endpoint and other settings are kept. Any open tunnel is closed first."),
+            14f, MUTED,
+        ), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        buttons.addView(createSettingsButton(Strings.t("Cancel")) { dialog.dismiss() }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        buttons.addView(createSettingsButton(
+            Strings.t("Reset"),
+            backgroundOverride = primary,
+            textColorOverride = primaryContainer,
+        ) {
+            // The service owns the tunnel and the files together. Sending the
+            // action rather than deleting from the activity keeps the stop and
+            // the delete in one place, in the right order, on the same thread.
+            startService(Intent(this, MsnGuardVpnService::class.java)
+                .setAction(MsnGuardVpnService.ACTION_RESET_IDENTITIES))
+            showDisconnected(Strings.t("Identity reset"))
+            dialog.dismiss()
+        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+        sheet.addView(buttons, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(52),
+        ).apply { topMargin = dp(16) })
+        dialog.setContentView(ScrollView(this).apply {
+            setPadding(dp(16), 0, dp(16), dp(16))
+            addView(sheet)
+        })
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.62f)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+        }
+    }
+
     private fun openScannerScreen(animate: Boolean = true) {
         if (visualState == OrbitDialView.State.CONNECTING ||
             visualState == OrbitDialView.State.CONNECTED ||
@@ -3772,6 +3827,15 @@ class MainActivity : Activity() {
             ).apply { topMargin = dp(9) })
             gatewayCacheRow = navRow(Strings.t("Gateway cache"), defaultEndpointDiscovery().label) { manageGatewayCache() }
             body.addView(gatewayCacheRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(9) })
+            // The "my exit is stuck on Iran" lever. Wipes the saved WARP/MASQUE
+            // registrations so the core enrolls fresh accounts on the next connect —
+            // a different device id can land on a different anycast egress.
+            // Manual endpoint stays: the user pinned it by hand.
+            body.addView(navRow(Strings.t("Reset identity"), Strings.t("New account")) {
+                confirmResetIdentities()
+            }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(9) })
             // v2.0.0: the AI Mode row is gone. The Smart DNS Split engine it
