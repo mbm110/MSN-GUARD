@@ -160,6 +160,7 @@ class MainActivity : Activity() {
     private var manualEndpointRow: OrbitSettingsRow? = null
     private var innerEndpointRow: OrbitSettingsRow? = null
     private var gatewayCacheRow: OrbitSettingsRow? = null
+    private var dnsRow: OrbitSettingsRow? = null
     private var visualState = OrbitDialView.State.DISCONNECTED
     private var receiverRegistered = false
     private var autoPingRunning = false
@@ -3887,11 +3888,12 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(9) })
             // v2.0.0: the AI Mode row is gone. The Smart DNS Split engine it
-            // toggled never produced a working Gemini lookup in the field, and the
-            // DNS screen now owns resolver configuration outright.
-            body.addView(navRow(Strings.t("Custom DNS"), customDnsLabel()) {
+            // toggled never produced a working Gemini lookup in the field, and
+            // the DNS screen now owns resolver configuration outright.
+            dnsRow = navRow(Strings.t("Custom DNS"), customDnsLabel()) {
                 openDnsScreen()
-            }, LinearLayout.LayoutParams(
+            }
+            body.addView(dnsRow!!, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(9) })
         }, LinearLayout.LayoutParams(
@@ -5950,6 +5952,9 @@ class MainActivity : Activity() {
             }
             editors.apply()
             saveDnsLists()
+            // The row summary is not a live view of the preferences; without this
+            // it still reads "Automatic" until the page is rebuilt.
+            dnsRow?.setValue(customDnsLabel())
             closeDnsScreen()
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(52),
@@ -6297,7 +6302,7 @@ class MainActivity : Activity() {
         )
         ConnectionLog.record(
             if (parts.isEmpty()) Strings.t("Custom DNS cleared — the default resolvers answer")
-            else Strings.t("Custom DNS saved: ") + parts.joinToString(", ")
+            else Strings.t("Custom DNS saved:") + " " + parts.joinToString(", ")
         )
     }
 

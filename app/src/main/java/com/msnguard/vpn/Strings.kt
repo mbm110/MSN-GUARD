@@ -291,7 +291,7 @@ object Strings {
         "ON" to Triple("ON", "روشن", "开"),
         "Obfuscation" to Triple("Obfuscation", "مخفی‌سازی ترافیک", "流量混淆"),
         "Off" to Triple("Off", "خاموش", "关闭"),
-        "Tap to allow background running" to Triple("Background Running", "اجرا در پس‌زمینه", "后台运行"),
+        "Background Running" to Triple("Background Running", "اجرا در پس‌زمینه", "后台运行"),
         "On" to Triple("On", "روشن", "开启"),
         "On · not effective on this network" to Triple("On · not effective on this network", "روشن · در این شبکه مؤثر نیست", "开 · 在此网络无效"),
         "On · tuned for this network" to Triple("On · tuned for this network", "روشن · تنظیم برای این شبکه", "开 · 已针对此网络调优"),
@@ -639,6 +639,49 @@ object Strings {
         "فارسی" to Triple("فارسی", "فارسی", "波斯语"),
         "↑ UP" to Triple("↑ UP", "↑ آپلود", "↑ 上传"),
         "↓ DOWN" to Triple("↓ DOWN", "↓ دانلود", "↓ 下载"),
+
+        // --- v2.1.18+ Custom DNS screen, CDN Fronting dialogs and Test feedback ---
+        "DNS" to Triple("DNS", "DNS", "DNS"),
+        "Plain UDP" to Triple("Plain UDP", "UDP ساده", "普通 UDP"),
+        "DNS over TLS (DoT)" to Triple("DNS over TLS (DoT)", "DNS از نوع TLS (DoT)", "DNS over TLS (DoT)"),
+        "DNS over HTTPS (DoH)" to Triple("DNS over HTTPS (DoH)", "DNS از نوع HTTPS (DoH)", "DNS over HTTPS (DoH)"),
+        "Test" to Triple("Test", "تست", "测试"),
+        "Testing…" to Triple("Testing…", "در حال تست…", "测试中…"),
+        "Enter at least one address first" to Triple("Enter at least one address first", "ابتدا حداقل یک آدرس وارد کنید", "请先输入至少一个地址"),
+        "Custom DNS saved:" to Triple("Custom DNS saved:", "DNS سفارشی ذخیره شد:", "自定义 DNS 已保存："),
+        "Resolvers the tunnel answers DNS from. Each transport has its own list, comma-separated. Test before you save — a resolver that does not answer here will not answer through the tunnel either." to Triple(
+            "Resolvers the tunnel answers DNS from. Each transport has its own list, comma-separated. Test before you save — a resolver that does not answer here will not answer through the tunnel either.",
+            "سرورهایی که تونل جواب DNS را از آن‌ها می‌گیرد. هر پروتکل لیست خودش را دارد که با کاما جدا می‌شوند. قبل از ذخیره تست کنید — سروری که اینجا جواب نمی‌دهد از داخل تونل هم جواب نخواهد داد.",
+            "隧道用于应答 DNS 的解析器。每种传输方式各有自己的列表，以逗号分隔。保存前请先测试——在此处无响应的解析器，在隧道内同样不会响应。",
+        ),
+        "Bare IP addresses, optionally with a port. The default port is 53. Fastest, but unencrypted — a carrier can see and hijack these lookups." to Triple(
+            "Bare IP addresses, optionally with a port. The default port is 53. Fastest, but unencrypted — a carrier can see and hijack these lookups.",
+            "آدرس IP خالی، اختیاری همراه پورت. پورت پیش‌فرض ۵۳ است. سریع‌ترین حالت ولی رمزگذاری نشده — اپراتور می‌تواند این درخواست‌ها را ببیند و جعل کند.",
+            "纯 IP 地址，可带端口，默认端口 53。速度最快但未加密——运营商可以查看并劫持这些查询。",
+        ),
+        "Hostnames or IPs with a tls:// prefix, on port 853. The lookup is encrypted; the carrier sees only that you talked to this server." to Triple(
+            "Hostnames or IPs with a tls:// prefix, on port 853. The lookup is encrypted; the carrier sees only that you talked to this server.",
+            "نام دامنه یا IP با پیشوند tls:// روی پورت ۸۵۳. درخواست رمزگذاری می‌شود؛ اپراتور فقط می‌بیند که با این سرور صحبت کرده‌اید.",
+            "带 tls:// 前缀的主机名或 IP，使用端口 853。查询已加密；运营商只能看到你与该服务器通信。",
+        ),
+        "Full https:// URLs, or a host with a doh: prefix. The lookup rides an ordinary HTTPS request, so it is the hardest to block." to Triple(
+            "Full https:// URLs, or a host with a doh: prefix. The lookup rides an ordinary HTTPS request, so it is the hardest to block.",
+            "آدرس کامل https:// یا یک دامنه با پیشوند doh:. درخواست داخل یک درخواست معمولی HTTPS می‌رود، پس سخت‌ترین حالت برای مسدودکردن است.",
+            "完整的 https:// 网址，或带 doh: 前缀的主机名。查询搭载在普通 HTTPS 请求中，因此最难被封锁。",
+        ),
+        "1.1.1.1, 10.202.10.202:53" to Triple("1.1.1.1, 10.202.10.202:53", "1.1.1.1, 10.202.10.202:53", "1.1.1.1, 10.202.10.202:53"),
+        "tls://dns.google, tls://1.1.1.1" to Triple("tls://dns.google, tls://1.1.1.1", "tls://dns.google, tls://1.1.1.1", "tls://dns.google, tls://1.1.1.1"),
+        "https://cloudflare-dns.com/dns-query, doh:dns.quad9.net" to Triple("https://cloudflare-dns.com/dns-query, doh:dns.quad9.net", "https://cloudflare-dns.com/dns-query, doh:dns.quad9.net", "https://cloudflare-dns.com/dns-query, doh:dns.quad9.net"),
+        "Optional extra CDN edge IPs or CIDRs separated by commas, spaces, or new lines. Tried before the built-in list." to Triple(
+            "Optional extra CDN edge IPs or CIDRs separated by commas, spaces, or new lines. Tried before the built-in list.",
+            "آدرس‌های IP یا CIDR اختیاری لبه‌های CDN، جدا شده با کاما، فاصله یا خط جدید. قبل از لیست داخلی امتحان می‌شوند.",
+            "可选的额外 CDN 边缘 IP 或 CIDR，以逗号、空格或换行分隔。优先于内置列表尝试。",
+        ),
+        "Optional extra SNI hostnames separated by commas, spaces, or new lines. No-SNI variants are also tested." to Triple(
+            "Optional extra SNI hostnames separated by commas, spaces, or new lines. No-SNI variants are also tested.",
+            "نام دامنه‌های اختیاری SNI، جدا شده با کاما، فاصله یا خط جدید. حالت‌های بدون SNI هم امتحان می‌شوند.",
+            "可选的额外 SNI 主机名，以逗号、空格或换行分隔。也会尝试无 SNI 的变体。",
+        ),
     )
 
     /** Translate [key] into the active language, falling back to English. */
