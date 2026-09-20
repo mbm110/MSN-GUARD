@@ -5910,17 +5910,45 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(4); bottomMargin = dp(20) })
 
+        // The three fields are kept here so the Save button below can read what the
+        // user actually typed. saveDnsLists() reads from SharedPreferences, and
+        // nothing else ever wrote the typed text there — Save closed the page and
+        // left the preferences empty, so Custom DNS read "Automatic" for a list
+        // the user had just filled in and tested.
+        val fields = mutableMapOf<String, EditText>()
+
         addDnsField(content, Strings.t("Plain UDP"), CUSTOM_DNS_UDP,
             Strings.t("Bare IP addresses, optionally with a port. The default port is 53. Fastest, but unencrypted — a carrier can see and hijack these lookups."),
-            Strings.t("1.1.1.1, 10.202.10.202:53"))
+            Strings.t("1.1.1.1, 10.202.10.202:53")) { fields[CUSTOM_DNS_UDP] = it }
         addDnsField(content, Strings.t("DNS over TLS (DoT)"), CUSTOM_DNS_DOT,
             Strings.t("Hostnames or IPs with a tls:// prefix, on port 853. The lookup is encrypted; the carrier sees only that you talked to this server."),
-            Strings.t("tls://dns.google, tls://1.1.1.1"))
+            Strings.t("tls://dns.google, tls://1.1.1.1")) { fields[CUSTOM_DNS_DOT] = it }
         addDnsField(content, Strings.t("DNS over HTTPS (DoH)"), CUSTOM_DNS_DOH,
             Strings.t("Full https:// URLs, or a host with a doh: prefix. The lookup rides an ordinary HTTPS request, so it is the hardest to block."),
-            Strings.t("https://cloudflare-dns.com/dns-query, doh:dns.quad9.net"))
+            Strings.t("https://cloudflare-dns.com/dns-query, doh:dns.quad9.net")) { fields[CUSTOM_DNS_DOH] = it }
 
         content.addView(createSettingsButton(Strings.t("Save")) {
+            // Commit the typed text before anything else reads it.
+            val editors = preferences().edit()
+            for ((key, field) in fields) {
+                val raw = field.text.toString().trim()
+                val entries = raw.split(',', ';', ' ', '\n')
+                    .map(String::trim).filter(String::isNotEmpty).distinct()
+                val transport = when (key) {
+                    CUSTOM_DNS_DOT -> "dot"
+                    CUSTOM_DNS_DOH -> "doh"
+                    else -> "udp"
+                }
+                for (entry in entries) {
+                    CoreConfig.validateDnsEntry(transport, entry)?.let { problem ->
+                        field.error = "$entry: $problem"
+                        return@createSettingsButton
+                    }
+                }
+                if (entries.isEmpty()) editors.remove(key)
+                else editors.putString(key, entries.joinToString(", "))
+            }
+            editors.apply()
             saveDnsLists()
             closeDnsScreen()
         }, LinearLayout.LayoutParams(
@@ -5958,6 +5986,7 @@ class MainActivity : Activity() {
         prefKey: String,
         description: String,
         hint: String,
+        onField: (EditText) -> Unit = {},
     ) {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -5984,6 +6013,7 @@ class MainActivity : Activity() {
         card.addView(field, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ))
+        onField(field)
         card.addView(status, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
@@ -5995,6 +6025,21 @@ class MainActivity : Activity() {
             if (entries.isEmpty()) {
                 field.error = Strings.t("Enter at least one address first")
                 return@createSettingsButton
+            }
+            // A probe that can never connect wastes four seconds a host, and the
+            // failure reads as "unreachable" for a server that is fine — the
+            // entry just is not shaped the way the transport needs. Reject those
+            // here, before the network call, with the reason.
+            val transport = when (prefKey) {
+                CUSTOM_DNS_DOT -> "dot"
+                CUSTOM_DNS_DOH -> "doh"
+                else -> "udp"
+            }
+            for (entry in entries) {
+                CoreConfig.validateDnsEntry(transport, entry)?.let { problem ->
+                    field.error = "$entry: $problem"
+                    return@createSettingsButton
+                }
             }
             status.text = Strings.t("Testing…")
             testDnsServers(prefKey, entries) { result ->
@@ -6050,6 +6095,9 @@ class MainActivity : Activity() {
                 results.add(if (ok) Strings.tf("%s: OK", entry) else Strings.tf("%s: unreachable", entry))
             }
             val okCount = results.count { it.contains("OK") }
+            // "%d" reached the user untouched because the translation table only
+            // substitutes %s; tf() now normalises it. Kept readable in both
+            // numberings so the line still makes sense translated.
             report(Strings.tf("%d of %d answered", okCount, results.size) + " · " + results.joinToString(" · "))
         }.start()
     }

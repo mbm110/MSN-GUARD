@@ -431,6 +431,84 @@ object CoreConfig {
             }
     }
 
+    /**
+     * One entry of a custom-DNS list, per transport.
+     *
+     * Plain UDP accepts a bare IP or host with an optional port. DoT requires the
+     * `tls://`/`dot://` prefix the field's own placeholder tells the user to type
+     * — a bare IP is silently accepted without it, and the resolver never gets a
+     * TLS server. DoH requires `https://` or `doh:`, for the same reason.
+     */
+    fun validateDnsEntry(transport: String, entry: String): String? {
+        val raw = entry.trim()
+        if (raw.isEmpty()) return "empty entry"
+
+        when (transport) {
+            "dot" -> {
+                val body = raw.removePrefix("tls://").removePrefix("dot://")
+                    .removePrefix("TLS://").removePrefix("DOT://").trim()
+                if (body == raw.trim()) {
+                    return "DoT entries need the tls:// prefix, e.g. tls://dns.google"
+                }
+                val (host, port) = splitDnsHostPort(body, 853)
+                if (!isValidDnsHost(host)) return "\"$host\" is not an IP or hostname"
+                if (port !in 1..65535) return "port $port is out of range"
+            }
+            "doh" -> {
+                val body = raw.removePrefix("doh:").removePrefix("DOH:").trim()
+                val isHttps = body.startsWith("https://", ignoreCase = true)
+                if (body == raw.trim() && !isHttps) {
+                    return "DoH entries need https:// or the doh: prefix, e.g. https://cloudflare-dns.com/dns-query"
+                }
+                if (isHttps) {
+                    val after = body.substring(8)
+                    val hostPart = after.substringBefore('/').substringBefore('?')
+                    val host = hostPortHost(hostPart)
+                    if (!isValidDnsHost(host)) return "\"$host\" is not an IP or hostname"
+                } else {
+                    val host = hostPortHost(body.substringBefore('/'))
+                    if (!isValidDnsHost(host)) return "\"$host\" is not an IP or hostname"
+                }
+            }
+            else -> {
+                // Plain UDP speaks neither prefix. A tls:// entry here is silently
+                // handed to Android's resolver, which cannot parse it and drops
+                // the lookup; the user needs to hear that they filed it wrong.
+                for (prefix in listOf("tls://", "dot://", "https://", "doh:")) {
+                    if (raw.startsWith(prefix, ignoreCase = true)) {
+                        return "this is a $prefix entry — it belongs in the field above for that transport"
+                    }
+                }
+                val (host, port) = splitDnsHostPort(raw, 53)
+                if (!isValidDnsHost(host)) return "\"$host\" is not an IP or hostname"
+                if (port !in 1..65535) return "port $port is out of range"
+            }
+        }
+        return null
+    }
+
+    private fun isValidDnsHost(host: String): Boolean =
+        isValidIpv4(host) || host.contains(':') || isValidHostname(host)
+
+    /** "host", "host:port", "[v6]:port" → host, port. */
+    private fun splitDnsHostPort(entry: String, defaultPort: Int): Pair<String, Int> {
+        if (entry.startsWith('[')) {
+            val close = entry.indexOf(']')
+            if (close <= 0) return entry.substring(1) to defaultPort
+            val host = entry.substring(1, close)
+            val rest = entry.substring(close + 1)
+            val port = rest.removePrefix(":").toIntOrNull() ?: defaultPort
+            return host to port
+        }
+        val colon = entry.lastIndexOf(':')
+        if (colon <= 0) return entry to defaultPort
+        val maybePort = entry.substring(colon + 1).toIntOrNull()
+        if (maybePort == null) return entry to defaultPort
+        return entry.substring(0, colon) to maybePort
+    }
+
+    private fun hostPortHost(entry: String): String = splitDnsHostPort(entry, 443).first
+
 
     /**
      * Whether Psiphon's local proxies listen on 0.0.0.0 instead of 127.0.0.1.

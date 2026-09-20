@@ -664,6 +664,11 @@ object Strings {
      */
     fun tf(english: String, vararg args: Any?): String {
         var out = t(english)
+        // The table holds %s placeholders only, but callers reach for %d and %1$s
+        // as well, and those came back out of the translation untouched — the DNS
+        // test reported a literal "%d of %d answered" to the user. Normalise to
+        // the %s shape this substitutor actually handles before splitting.
+        out = out.replace("%d", "%s")
         val parts = out.split("%s")
         val sb = StringBuilder()
         for ((i, p) in parts.withIndex()) {
