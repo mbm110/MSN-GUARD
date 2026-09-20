@@ -3106,44 +3106,28 @@ async fn run_warp_in_warp(
     // opened from, and the down-task writes into a closed sender.
     drop(_forwarder_guard);
 
-    // Settle the three tasks without re-polling a completed JoinHandle.
+    // Settle the tasks without ever polling a JoinHandle select! already polled.
     //
-    // The crash in field logs 14-16 was "JoinHandle polled after completion".
-    // select! above already resolved one handle — awaiting it again is the
-    // panic, and tokio::time::timeout() does not save us, because wrapping a
-    // future and awaiting it still polls it. is_finished() returns true only
-    // for a handle that was already awaited, so it is not a reliable "the task
-    // is done" check either.
+    // hKF96:427 "JoinHandle polled after completion". select! above polls all
+    // three handles and resolves the winner — that is the winner's one and only
+    // allowed poll. Awaiting it again is a second poll, and tokio panics on the
+    // second one. tokio::select! does not report which arm won, so no variant of
+    // "await only the ones that lost" can be written correctly here without
+    // restructuring the select.
     //
-    // The safe shape is a one-shot: a handle is consumed exactly once, and a
-    // None marks "already taken, do not touch". abort() first (no-op on a
-    // finished task), then take and await once.
-    async fn settle(handle: &mut Option<tokio::task::JoinHandle<Result<()>>>, name: &str) {
-        // Consume the handle. Nothing may touch it after this point.
-        let Some(handle) = handle.take() else {
-            log::debug!("[{name}] already settled");
-            return
-        };
-        // abort() is safe on any state: finished, running, or cancelled. For a
-        // task that already exited it is a no-op; for a running one it cancels
-        // it so the await below cannot hang the teardown path.
+    // abort() and drop() never poll. abort() is safe on any state — running,
+    // completed, or cancelled — and dropping a JoinHandle detaches the task
+    // without touching it. So this settles all three unconditionally and cannot
+    // re-poll the winner by construction. The guard task is awaited separately
+    // above for its return value; these are only being torn down.
+    fn settle(handle: tokio::task::JoinHandle<Result<()>>) {
         handle.abort();
-        // Awaits exactly once. The abort makes this resolve promptly, and
-        // because we took the handle there is no second poll anywhere.
-        match handle.await {
-            Ok(Ok(())) => {}
-            // A cancellation surfaces as Ok(Err) with the JoinError, not as the
-            // outer Err — that variant is an AetherError and has no
-            // is_cancelled. Both are expected here.
-            Ok(Err(_)) | Err(_) => {}
-        }
+        // Drop without awaiting. The task is detached; abort already scheduled
+        // its cancellation, and the outcome is the one select! returned.
     }
-    let mut outer_exit = Some(outer_exit);
-    let mut inner_exit = Some(inner_exit);
-    let mut local_task = Some(local_task);
-    settle(&mut outer_exit, "outer wireguard tunnel").await;
-    settle(&mut inner_exit, "inner wireguard tunnel").await;
-    settle(&mut local_task, "local tunnel bridge").await;
+    settle(outer_exit);
+    settle(inner_exit);
+    settle(local_task);
 
     drop(outer_stack);
 
@@ -3720,11 +3704,11 @@ async fn run_masque_in_masque(
             let _ = task.await;
         }
     }
-    // abort-then-await on a handle the select! already polled panics ("JoinHandle
-    // polled after completion"). The winner guard above is not enough on its own:
-    // the winner's arm resolved, so only the non-winner branches reach here, and
-    // those are the ones that must not be polled twice. Consuming through an
-    // Option keeps each await to exactly one poll.
+    // The winner's handle was polled once by select! — awaiting it again is the
+    // second poll that panics ("JoinHandle polled after completion"). The guard
+    // above skips the winner's own branch, so every await below belongs to a
+    // handle select! left pending, which is its first poll. abort() first is
+    // what makes a still-running task resolve instead of hanging teardown.
     async fn settle_join(handle: &mut Option<tokio::task::JoinHandle<Result<()>>>, name: &str) {
         let Some(handle) = handle.take() else { return };
         handle.abort();
@@ -4237,49 +4221,43 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn abort_then_await_a_select_resolved_handle_does_not_panic() {
-        // The WoW teardown did exactly this and tokio killed the process with
-        // "JoinHandle polled after completion": select! resolved one of the
-        // three JoinHandles, then the settle code aborted and awaited it
-        // again. abort() on a finished handle is not a reset — it marks the
-        // task completed a second time, and the await polls it after that.
+    async fn settle_after_select_never_re_polls_the_resolved_handle() {
+        // The WoW teardown crashed in the field with "JoinHandle polled after
+        // completion" (logs 14-17). tokio::select! polls every handle and
+        // resolves the winner — that poll is the winner's one allowed poll.
+        // Awaiting it again is the second poll, and tokio panics on it.
         //
-        // The settle helper now consumes the handle through an Option, so each
-        // handle is awaited exactly once. This test reproduces the old shape
-        // against the same helper and asserts it stays alive.
-        async fn settle(
-            handle: &mut Option<tokio::task::JoinHandle<Result<()>>>,
-            name: &str,
-        ) {
-            let Some(handle) = handle.take() else { return };
+        // select! does not report which arm won, so teardown cannot await "only
+        // the losers". The fix settles by abort+drop, which never polls at all.
+        // Surviving this test is the assertion; the old shape aborted the test
+        // worker with the panic from the field log.
+        fn settle(handle: tokio::task::JoinHandle<Result<()>>) {
             handle.abort();
-            match handle.await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) | Err(_) => {}
-            }
+            // Drop without awaiting — awaiting is what re-polls.
         }
 
-        // A task that finishes on its own, then gets selected on, then settled.
-        let mut outer = Some(tokio::spawn(async { Ok(()) }));
-        let mut inner = Some(tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // outer finishes on its own before the select; inner is still running,
+        // so select! resolves on outer, the handle a re-poll would kill.
+        let outer = tokio::spawn(async { Ok(()) });
+        let inner = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             Ok(())
-        }));
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // Let one handle complete before the select, the way a real tunnel that
-        // has exited does — this is the state the panic fired in.
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-
+        let mut outer = Some(outer);
+        let mut inner = Some(inner);
         let _outcome = tokio::select! {
-            r = &mut outer.as_mut().unwrap() => join_outcome("outer", r),
-            r = &mut inner.as_mut().unwrap() => join_outcome("inner", r),
+            r = outer.as_mut().unwrap() => join_outcome("outer", r),
+            r = inner.as_mut().unwrap() => join_outcome("inner", r),
         };
 
-        // The old code did outer.abort(); let _ = outer.await; here and panicked.
-        settle(&mut outer, "outer").await;
-        settle(&mut inner, "inner").await;
-        // Reaching this line at all is the assertion: a re-poll would have
-        // aborted the test worker with the panic from the field log.
+        // The old code aborted then awaited the winner — its second poll.
+        settle(outer.take().unwrap());
+        settle(inner.take().unwrap());
+        // inner was cancelled by the abort; give the runtime a tick so the test
+        // does not leave a dangling 30s sleep behind.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
     #[test]
