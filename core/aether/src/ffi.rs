@@ -195,6 +195,7 @@ impl Default for NativeStartOptions {
             wireguard_config_path: None,
             masque_config_path: None,
             forced_peer: None,
+            forced_inner_peer: None,
             scan_mode: "balanced".into(),
             ip_scan: "v4".into(),
             obfuscation_profile: None,
@@ -757,5 +758,36 @@ mod tests {
     fn rejects_missing_config_path() {
         let native: NativeStartOptions = serde_json::from_str("{}").unwrap();
         assert!(StartOptions::try_from(native).is_err());
+    }
+
+    #[test]
+    fn parses_forced_inner_peer() {
+        // The nested transports read this to give the second hop its own edge.
+        // A bad value here is a hard start failure, not a silent no-op.
+        let native: NativeStartOptions = serde_json::from_str(
+            r#"{"config_path":"aether.toml","forced_peer":"188.114.96.96:890","forced_inner_peer":"162.159.198.1:443"}"#,
+        )
+        .unwrap();
+        let options = StartOptions::try_from(native).unwrap();
+        assert_eq!(
+            options.forced_peer,
+            Some("188.114.96.96:890".parse().unwrap())
+        );
+        assert_eq!(
+            options.forced_inner_peer,
+            Some("162.159.198.1:443".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn inner_peer_defaults_to_none() {
+        // Nobody who upgrades sets this: the field must be absent-and-None, or
+        // every existing user's WoW would suddenly try to dial a new address.
+        let native: NativeStartOptions = serde_json::from_str(
+            r#"{"config_path":"aether.toml","forced_peer":"188.114.96.96:890"}"#,
+        )
+        .unwrap();
+        let options = StartOptions::try_from(native).unwrap();
+        assert!(options.forced_inner_peer.is_none());
     }
 }
