@@ -74,8 +74,16 @@ jobs:
           # the tool directive and then building the gobind it pins is the only
           # combination that works; installing gobind@latest separately changes
           # nothing, gomobile never consults it.
+          # The fork ships a vendor/ directory, and `go get` above upgrades
+          # several x/* packages past what vendor/modules.txt records. Go then
+          # hard-fails the build as "inconsistent vendoring" rather than falling
+          # back to the module cache. -mod=mod is the documented escape: it tells
+          # this one build to resolve from the module graph and ignore vendor/.
+          # It must be exported because gomobile spawns child `go` invocations
+          # that would otherwise read vendor/ and fail the same way.
           go get -tool golang.org/x/mobile/cmd/gobind
-          go build -o "$HOME/go/bin/gobind" golang.org/x/mobile/cmd/gobind
+          go build -mod=mod -o "$HOME/go/bin/gobind" golang.org/x/mobile/cmd/gobind
+          export GOFLAGS=-mod=mod
           export GOCACHE=/tmp
           export CGO_LDFLAGS="-Wl,-z,max-page-size=16384,-z,common-page-size=16384"
           BUILDDATE=$(date --iso-8601=seconds)
