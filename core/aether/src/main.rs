@@ -3105,13 +3105,45 @@ async fn run_warp_in_warp(
     // the panic: open_udp() splits of a handle that outlives the stack it was
     // opened from, and the down-task writes into a closed sender.
     drop(_forwarder_guard);
-    outer_exit.abort();
-    inner_exit.abort();
-    local_task.abort();
 
-    let _ = outer_exit.await;
-    let _ = inner_exit.await;
-    let _ = local_task.await;
+    // Settle the three tasks without re-polling a completed JoinHandle.
+    //
+    // The crash in field logs 14-16 was "JoinHandle polled after completion".
+    // select! above already resolved one handle — awaiting it again is the
+    // panic, and tokio::time::timeout() does not save us, because wrapping a
+    // future and awaiting it still polls it. is_finished() returns true only
+    // for a handle that was already awaited, so it is not a reliable "the task
+    // is done" check either.
+    //
+    // The safe shape is a one-shot: a handle is consumed exactly once, and a
+    // None marks "already taken, do not touch". abort() first (no-op on a
+    // finished task), then take and await once.
+    async fn settle(handle: &mut Option<tokio::task::JoinHandle<Result<()>>>, name: &str) {
+        // Consume the handle. Nothing may touch it after this point.
+        let Some(handle) = handle.take() else {
+            log::debug!("[{name}] already settled");
+            return
+        };
+        // abort() is safe on any state: finished, running, or cancelled. For a
+        // task that already exited it is a no-op; for a running one it cancels
+        // it so the await below cannot hang the teardown path.
+        handle.abort();
+        // Awaits exactly once. The abort makes this resolve promptly, and
+        // because we took the handle there is no second poll anywhere.
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) if e.is_cancelled() => {}
+            Ok(Err(e)) => log::warn!("[-] [{name}] settle error: {e}"),
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => log::warn!("[-] [{name}] settle join error: {e}"),
+        }
+    }
+    let mut outer_exit = Some(outer_exit);
+    let mut inner_exit = Some(inner_exit);
+    let mut local_task = Some(local_task);
+    settle(&mut outer_exit, "outer wireguard tunnel").await;
+    settle(&mut inner_exit, "inner wireguard tunnel").await;
+    settle(&mut local_task, "local tunnel bridge").await;
 
     drop(outer_stack);
 
@@ -3688,13 +3720,29 @@ async fn run_masque_in_masque(
             let _ = task.await;
         }
     }
+    // abort-then-await on a handle the select! already polled panics ("JoinHandle
+    // polled after completion"). The winner guard above is not enough on its own:
+    // the winner's arm resolved, so only the non-winner branches reach here, and
+    // those are the ones that must not be polled twice. Consuming through an
+    // Option keeps each await to exactly one poll.
+    async fn settle_join(handle: &mut Option<tokio::task::JoinHandle<Result<()>>>, name: &str) {
+        let Some(handle) = handle.take() else { return };
+        handle.abort();
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) if e.is_cancelled() => {}
+            Ok(Err(e)) => log::warn!("[-] [{name}] settle error: {e}"),
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => log::warn!("[-] [{name}] settle join error: {e}"),
+        }
+    }
+    let mut outer_exit = Some(outer.exit);
+    let mut inner_exit = Some(inner.exit);
     if winner != Winner::Outer {
-        outer.exit.abort();
-        let _ = (&mut outer.exit).await;
+        settle_join(&mut outer_exit, "outer masque tunnel").await;
     }
     if winner != Winner::Inner {
-        inner.exit.abort();
-        let _ = (&mut inner.exit).await;
+        settle_join(&mut inner_exit, "inner masque tunnel").await;
     }
 
     // A session that ends was still a WORKING session: it carried traffic
@@ -4188,6 +4236,55 @@ fn spawn_masque_cache_refresh(probe: prober::MasqueProbe, cache_path: Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abort_then_await_a_select_resolved_handle_does_not_panic() {
+        // The WoW teardown did exactly this and tokio killed the process with
+        // "JoinHandle polled after completion": select! resolved one of the
+        // three JoinHandles, then the settle code aborted and awaited it
+        // again. abort() on a finished handle is not a reset — it marks the
+        // task completed a second time, and the await polls it after that.
+        //
+        // The settle helper now consumes the handle through an Option, so each
+        // handle is awaited exactly once. This test reproduces the old shape
+        // against the same helper and asserts it stays alive.
+        async fn settle(
+            handle: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+            name: &str,
+        ) {
+            let Some(handle) = handle.take() else { return };
+            handle.abort();
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) if e.is_cancelled() => {}
+                Ok(Err(e)) => log::warn!("[-] [{name}] settle error: {e}"),
+                Err(e) if e.is_cancelled() => {}
+                Err(e) => log::warn!("[-] [{name}] settle join error: {e}"),
+            }
+        }
+
+        // A task that finishes on its own, then gets selected on, then settled.
+        let mut outer = Some(tokio::spawn(async { Ok(()) }));
+        let mut inner = Some(tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Ok(())
+        }));
+
+        // Let one handle complete before the select, the way a real tunnel that
+        // has exited does — this is the state the panic fired in.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let _outcome = tokio::select! {
+            r = &mut outer.as_mut().unwrap() => join_outcome("outer", r),
+            r = &mut inner.as_mut().unwrap() => join_outcome("inner", r),
+        };
+
+        // The old code did outer.abort(); let _ = outer.await; here and panicked.
+        settle(&mut outer, "outer").await;
+        settle(&mut inner, "inner").await;
+        // Reaching this line at all is the assertion: a re-poll would have
+        // aborted the test worker with the panic from the field log.
+    }
 
     #[test]
     fn start_options_have_app_safe_defaults() {
