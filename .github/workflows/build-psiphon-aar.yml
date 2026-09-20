@@ -1,0 +1,173 @@
+name: Build Psiphon AAR (Shirokhorshid CDN-fronting core)
+
+# Builds ca.psiphon.aar from the Shirokhorshid fork of psiphon-tunnel-core.
+#
+# Why this exists at all: the stock psiphontunnel-2.0.39.aar is built from
+# Psiphon-Labs upstream, and upstream does not know the CDN-fronting config keys
+# (FrontedMeekDialOverrides, FrontedMeekCDNScanSpec, the FRONTED-MEEK-CDN-*
+# protocol names). Shirokhorshid added all of that in its own fork of the Go
+# core, so the keys have to be compiled in — there is no way to make the old
+# binary honour them, they are unknown JSON fields and are silently ignored.
+#
+# The AAR is checked into the repo as app/libs/ca.psiphon.aar and rebuilt only
+# when the fork moves or when we say so. It is NOT rebuilt on every APK build:
+# the ~25 min Go toolchain + gomobile cost would double every CI run for a
+# binary that changes a few times a year.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch/tag/SHA of shirokhorshid/psiphon-tunnel-core'
+        required: false
+        default: 'shirokhorshid'
+  push:
+    branches: [ master ]
+    paths:
+      - '.github/workflows/build-psiphon-aar.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo (to receive the AAR)
+        uses: actions/checkout@v4
+
+      - name: Checkout the Shirokhorshid Go core fork
+        uses: actions/checkout@v4
+        with:
+          repository: shirokhorshid/psiphon-tunnel-core
+          ref: ${{ github.event.inputs.ref || 'shirokhorshid' }}
+          path: psiphon-core
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'psiphon-core/go.mod'
+          cache-dependency-path: 'psiphon-core/go.sum'
+
+      - name: Setup Android SDK + NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;26.3.11579264 cmake;3.22.1 platforms;android-34"
+          accept-android-sdk-licenses: "true"
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Build the AAR
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.3.11579264
+          ANDROID_PLATFORM_VERSION: "34"
+        run: |
+          cd psiphon-core/MobileLibrary/Android
+          # make.bash assumes a GOPATH layout and sets GO111MODULE=off, which the
+          # fork's go.mod-based tree rejects. gomobile bind works on the module
+          # path directly, so we call it ourselves and keep the jar/repack steps.
+          export GOCACHE=/tmp
+          export CGO_LDFLAGS="-Wl,-z,max-page-size=16384,-z,common-page-size=16384"
+          BUILDDATE=$(date --iso-8601=seconds)
+          BUILDREV=$(git rev-parse --short HEAD)
+          GOVERSION=$(go version | awk '{print $3}')
+          LDFLAGS="\
+          -checklinkname=0 \
+          -s -w \
+          -X github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon/common/buildinfo.buildDate=$BUILDDATE \
+          -X github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon/common/buildinfo.buildRepo=https://github.com/shirokhorshid/psiphon-tunnel-core.git \
+          -X github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon/common/buildinfo.buildRev=$BUILDREV \
+          -X github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon/common/buildinfo.goVersion=$GOVERSION \
+          -extldflags=-Wl,-z,max-page-size=16384,-z,common-page-size=16384 \
+          "
+          echo -e "${BUILDDATE}\nhttps://github.com/shirokhorshid/psiphon-tunnel-core.git\n${BUILDREV}\n" > psiphon-tunnel-core_buildinfo.txt
+
+          gomobile bind -v -x -target=android/arm,android/arm64,android/386,android/amd64 -ldflags="$LDFLAGS" github.com/Psiphon-Labs/psiphon-tunnel-core/MobileLibrary/psi
+
+          mkdir -p build-tmp/psi
+          unzip -o psi.aar -d build-tmp/psi
+          cp -f PsiphonTunnel/AndroidManifest.xml build-tmp/psi/AndroidManifest.xml
+          mkdir -p build-tmp/psi/res/xml
+          cp -f PsiphonTunnel/ca_psiphon_psiphontunnel_backup_rules.xml build-tmp/psi/res/xml/ca_psiphon_psiphontunnel_backup_rules.xml
+
+          javac -d build-tmp -bootclasspath $ANDROID_HOME/platforms/android-$ANDROID_PLATFORM_VERSION/android.jar -source 1.8 -target 1.8 -classpath build-tmp/psi/classes.jar PsiphonTunnel/PsiphonTunnel.java
+          cd build-tmp
+          jar uf psi/classes.jar ca/psiphon/*.class
+          cd -  # back to MobileLibrary/Android
+          cd build-tmp/psi
+          printf -- "-keep class psi.** { *; }\n-keep class ca.psiphon.** { *; }\n" >> proguard.txt
+          rm -f ../../ca.psiphon.aar
+          zip -r ../../ca.psiphon.aar ./
+          cd -
+          rm -rf build-tmp
+
+      - name: Verify the CDN-fronting keys are really in the binary
+        run: |
+          # The whole point of this workflow. If this check ever passes on a
+          # build that lacks the keys, we have shipped a silent no-op.
+          python3 - <<'EOF'
+          import zipfile, sys
+          z = zipfile.ZipFile('psiphon-core/MobileLibrary/Android/ca.psiphon.aar')
+          names = [n for n in z.namelist() if 'libgojni' in n and 'arm64' in n]
+          assert names, "no arm64 libgojni in the AAR"
+          d = z.read(names[0])
+          required = [
+              b'FrontedMeekDialOverrides',
+              b'FrontedMeekCDNScanSpec',
+              b'FrontedMeekCDNScanUseBuiltInSpec',
+              b'FRONTED-MEEK-CDN-OSSH',
+          ]
+          missing = [k for k in required if d.count(k) == 0]
+          if missing:
+              sys.exit("FATAL: AAR is missing CDN-fronting support: %s" % [m.decode() for m in missing])
+          print("AAR verified: all CDN-fronting keys present in", names[0])
+          EOF
+
+      - name: Swap the AAR into app/libs (replacing the upstream build)
+        run: |
+          # The gradle file pulls in EVERY *.aar under app/libs via fileTree, so
+          # leaving the old one next to the new one would put two copies of
+          # ca.psiphon.PsiphonTunnel on the classpath at once — duplicate classes,
+          # hard build failure, and no way to tell which one won.
+          #
+          # The old AAR is deleted, not kept as a .bak: a renamed-but-still-.aar
+          # file in this directory is picked up by the same fileTree glob.
+          rm -f app/libs/psiphontunnel-2.0.39.aar
+          cp psiphon-core/MobileLibrary/Android/ca.psiphon.aar app/libs/psiphon.aar
+          ls -la app/libs/
+      - name: Commit the swapped AAR
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add app/libs/psiphon.aar
+          git rm --quiet --cached app/libs/psiphontunnel-2.0.39.aar || true
+          rm -f app/libs/psiphontunnel-2.0.39.aar
+          # commit is a no-op if the AAR is byte-identical to what is already there
+          git commit -m "chore: rebuild ca.psiphon.aar from shirokhorshid/psiphon-tunnel-core@${{ github.event.inputs.ref || 'shirokhorshid' }}" || echo "AAR unchanged, nothing to commit"
+          # A rejected push (remote moved since checkout) is retried with a rebase
+          # rather than abandoned: this workflow is the only producer of the AAR,
+          # and leaving the freshly built binary uncommitted means the next APK
+          # build silently falls back to the upstream AAR that lacks CDN fronting.
+          for attempt in 1 2 3; do
+            if git push; then
+              echo "pushed"
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt); rebasing on remote and retrying"
+            git pull --rebase origin "${{ github.ref_name }}" || git rebase --abort
+          done
+          echo "FATAL: could not push the rebuilt AAR after 3 attempts" >&2
+          exit 1
+
+      - name: Upload the AAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: psiphon-aar
+          path: app/libs/ca.psiphon.aar
