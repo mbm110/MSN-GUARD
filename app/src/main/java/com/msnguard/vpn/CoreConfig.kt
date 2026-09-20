@@ -166,6 +166,10 @@ object CoreConfig {
             // chain's outer legs always scan.
             if (listenOverride == null) {
                 putOpt("forced_peer", text("manual_endpoint").ifBlank { null })
+                // The inner hop of a nested transport. Empty means "same as the
+                // outer", which is the behaviour every version before this had —
+                // so an unset field changes nothing for existing users.
+                putOpt("forced_inner_peer", text("manual_inner_endpoint").ifBlank { null })
             }
             put("obfuscation_profile", text("obfuscation_profile", "balanced"))
             putOpt("obfuscation_parameters", manualObfuscation.takeIf { it.length() > 0 }?.toString())

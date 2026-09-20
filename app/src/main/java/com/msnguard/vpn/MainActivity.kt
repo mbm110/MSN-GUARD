@@ -158,6 +158,7 @@ class MainActivity : Activity() {
     private var profileRow: OrbitSettingsRow? = null
     private var batteryRow: LinearLayout? = null
     private var manualEndpointRow: OrbitSettingsRow? = null
+    private var innerEndpointRow: OrbitSettingsRow? = null
     private var gatewayCacheRow: OrbitSettingsRow? = null
     private var visualState = OrbitDialView.State.DISCONNECTED
     private var receiverRegistered = false
@@ -3825,6 +3826,13 @@ class MainActivity : Activity() {
             body.addView(manualEndpointRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(9) })
+            // The inner hop of a nested transport. Hidden unless the user picked
+            // one: on a single-hop protocol the row is meaningless, and showing a
+            // control that cannot do anything is worse than not having it.
+            innerEndpointRow = navRow(Strings.t("Inner hop endpoint"), manualInnerEndpoint() ?: Strings.t("Same as outer")) { editInnerEndpoint() }
+            body.addView(innerEndpointRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(9) })
             gatewayCacheRow = navRow(Strings.t("Gateway cache"), defaultEndpointDiscovery().label) { manageGatewayCache() }
             body.addView(gatewayCacheRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -5038,6 +5046,74 @@ class MainActivity : Activity() {
                             dialog.dismiss()
                         }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
                 sheet.addView(buttons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(16) })
+        dialog.setContentView(FrameLayout(this).apply {
+            setPadding(dp(16), 0, dp(16), dp(16))
+            addView(sheet)
+        })
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.62f)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+        }
+    }
+
+    /**
+     * The inner hop of WoW / MIM. Blank reverts to "same as the outer endpoint",
+     * which is what every version before this did, so Clear is a real undo.
+     *
+     * Deliberately NOT gated on the selected protocol here. The row is offered
+     * wherever the user is, because the point is to set it up before switching
+     * to a nested transport — the same reason Manual endpoint is not gated.
+     */
+    private fun editInnerEndpoint() {
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val field = EditText(this).apply {
+            setText(manualInnerEndpoint().orEmpty())
+            hint = Strings.t("IP:port, blank for automatic")
+            setTextColor(INK)
+            setHintTextColor(MUTED)
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT
+            setPadding(dp(18), 0, dp(18), 0)
+            background = roundedBackground(SURFACE_VARIANT, 16, SURFACE_VARIANT)
+        }
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            background = roundedBackground(SURFACE, 28, SURFACE)
+        }
+        sheet.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label(Strings.t("Inner hop endpoint"), 22f, INK, TypefaceStyle.MEDIUM))
+        })
+        sheet.addView(label(Strings.t("The second hop of a nested tunnel (WoW, Masque over Masque). Blank means the inner tunnel uses the same address as the outer one."), 14f, MUTED), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
+        val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        buttons.addView(createSettingsButton(Strings.t("Clear")) {
+            preferences().edit().remove(MANUAL_INNER_ENDPOINT).apply()
+            field.setText("")
+            innerEndpointRow?.setValue(Strings.t("Same as outer"))
+        }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        buttons.addView(createSettingsButton(Strings.t("Save")) {
+            val endpoint = field.text.toString().trim()
+            val validEndpoint = endpoint.isBlank() || Regex("^(?:\\d{1,3}(?:\\.\\d{1,3}){3}|\\[[0-9a-fA-F:]+]):([1-9]\\d{0,4})$")
+                .matchEntire(endpoint)?.groupValues?.get(1)?.toIntOrNull()?.let { it in 1..65535 } == true
+            if (!validEndpoint) {
+                field.error = Strings.t("Use numeric IP:port")
+                return@createSettingsButton
+            }
+            preferences().edit().apply {
+                if (endpoint.isBlank()) remove(MANUAL_INNER_ENDPOINT) else putString(MANUAL_INNER_ENDPOINT, endpoint)
+            }.apply()
+            innerEndpointRow?.setValue(manualInnerEndpoint() ?: Strings.t("Same as outer"))
+            dialog.dismiss()
+        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+        sheet.addView(buttons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(16) })
         dialog.setContentView(FrameLayout(this).apply {
             setPadding(dp(16), 0, dp(16), dp(16))
             addView(sheet)
@@ -7451,6 +7527,14 @@ class MainActivity : Activity() {
 
     private fun manualEndpoint(): String? = preferences().getString(MANUAL_ENDPOINT, null)?.takeIf(String::isNotBlank)
 
+    /**
+     * The pinned INNER hop, or null when the two hops should share one address.
+     *
+     * Only read by the nested transports (WoW, MIM); on every other protocol the
+     * core ignores it, so this stays blank for a plain-WireGuard or MASQUE user.
+     */
+    private fun manualInnerEndpoint(): String? = preferences().getString(MANUAL_INNER_ENDPOINT, null)?.takeIf(String::isNotBlank)
+
     private fun retryObfuscationProfiles(): Boolean = preferences().getBoolean(RETRY_OBFUSCATION, true)
 
     private fun advancedObfuscationSummary(): String =
@@ -8121,6 +8205,7 @@ class MainActivity : Activity() {
         const val OBFUSCATION_I1 = "obfuscation_i1"
         const val OBFUSCATION_I2 = "obfuscation_i2"
         const val MANUAL_ENDPOINT = "manual_endpoint"
+        const val MANUAL_INNER_ENDPOINT = "manual_inner_endpoint"
         const val CUSTOM_DNS = "dns_servers"
         /** v2.0.0: per-transport DNS lists. [CUSTOM_DNS] stays the plain-UDP
          * union, because that is all Android's own resolver list can speak. */

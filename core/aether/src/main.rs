@@ -62,6 +62,14 @@ pub struct StartOptions {
     pub masque_config_path: Option<String>,
     pub protocol: Protocol,
     pub forced_peer: Option<SocketAddr>,
+    /// The pinned INNER hop for the two nested transports.
+    ///
+    /// `forced_peer` pins the outer edge only. On WoW the inner tunnel has always
+    /// dialled that same address through `spawn_udp_forwarder(&outer_stack, peer)`,
+    /// and on MIM it has always been excluded from the inner pool and left to a
+    /// scan that a pinned endpoint skipped. This field is what lets the two hops
+    /// differ — the whole point of nesting is a second edge.
+    pub forced_inner_peer: Option<SocketAddr>,
     pub scan_mode: ScanMode,
     pub ip_scan: IpScan,
     pub obfuscation_profile: Option<String>,
@@ -179,6 +187,7 @@ impl StartOptions {
             masque_config_path: None,
             protocol,
             forced_peer: None,
+            forced_inner_peer: None,
             scan_mode: ScanMode::Balanced,
             ip_scan: IpScan::V4,
             obfuscation_profile: None,
@@ -2972,7 +2981,15 @@ async fn run_warp_in_warp(
 
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
-    let (forwarder, _forwarder_guard) = spawn_udp_forwarder(&outer_stack, peer).await?;
+    // The inner hop may be a DIFFERENT edge than the outer one. Defaulting to
+    // `peer` here is what made "pin one endpoint" mean "pin both hops to it" on
+    // WoW — the nested tunnel never got a second edge, which is the only reason
+    // nesting exists.
+    let inner_peer = options.forced_inner_peer.unwrap_or(peer);
+    let (forwarder, _forwarder_guard) = spawn_udp_forwarder(&outer_stack, inner_peer).await?;
+    if inner_peer != peer {
+        log::info!("[+] inner hop pinned to {inner_peer}, outer to {peer}");
+    }
     log::info!("[+] inner endpoint tunneled through outer warp via {forwarder}");
 
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
@@ -3769,10 +3786,12 @@ async fn run_mim(
 
         // A pinned endpoint skipped the scan that fills the inner pool, so the
         // list above is empty: dial the pinned hop itself, the only edge this
-        // device can still reach.
-        let candidates: Vec<SocketAddr> = if candidates.is_empty()
-            && options.forced_peer.is_some()
-        {
+        // device can still reach. An explicit inner pin always wins, and is the
+        // only way to give MIM a second edge that differs from the outer one.
+        let candidates: Vec<SocketAddr> = if let Some(inner) = options.forced_inner_peer {
+            log::info!("[+] inner hop pinned to {inner}, outer to {peer}");
+            vec![inner]
+        } else if candidates.is_empty() && options.forced_peer.is_some() {
             let pinned = SocketAddr::new(peer.ip(), consts::QUIC_PORT);
             log::info!("[+] pinned endpoint: using {pinned} as the inner hop too");
             vec![pinned]

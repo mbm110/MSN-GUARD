@@ -139,6 +139,7 @@ struct NativeStartOptions {
     wireguard_config_path: Option<String>,
     masque_config_path: Option<String>,
     forced_peer: Option<String>,
+    forced_inner_peer: Option<String>,
     scan_mode: String,
     ip_scan: String,
     obfuscation_profile: Option<String>,
@@ -243,6 +244,10 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.forced_peer = value
             .forced_peer
             .map(|peer| parse_address("forced_peer", &peer))
+            .transpose()?;
+        options.forced_inner_peer = value
+            .forced_inner_peer
+            .map(|peer| parse_address("forced_inner_peer", &peer))
             .transpose()?;
         options.scan_mode = ScanMode::parse(&value.scan_mode);
         options.ip_scan = IpScan::parse(&value.ip_scan);
