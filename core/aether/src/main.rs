@@ -3100,6 +3100,11 @@ async fn run_warp_in_warp(
     if let Some(task) = &http_task {
         task.abort();
     }
+    // The forwarder dials through the OUTER stack, so it must die before the
+    // stack does — dropping outer_stack with the forwarder still pumping was
+    // the panic: open_udp() splits of a handle that outlives the stack it was
+    // opened from, and the down-task writes into a closed sender.
+    drop(_forwarder_guard);
     outer_exit.abort();
     inner_exit.abort();
     local_task.abort();

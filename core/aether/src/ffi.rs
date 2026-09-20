@@ -481,7 +481,17 @@ unsafe fn aether_start_json_inner(json: *const c_char, tun_fd: Option<i32>) -> i
     match result {
         Ok(code) => code,
         Err(_) => {
-            set_last_error("panic in Aether native core");
+            // The panic hook (install_panic_hook) already stored the real
+            // "PANIC file:line: payload" through set_last_error, and that is the
+            // message worth surfacing. Overwriting it unconditionally here turns
+            // every crash report into the same useless string, which is exactly
+            // why two field logs (14, 15) show "panic in Aether native core" with
+            // no location. Fall back to it only when the hook never ran — a panic
+            // on a thread the hook was not installed for.
+            let existing = LAST_ERROR.lock().map(|g| g.to_str().unwrap_or("").to_string()).unwrap_or_default();
+            if existing.is_empty() {
+                set_last_error("panic in Aether native core");
+            }
             -3
         }
     }
@@ -534,7 +544,10 @@ pub unsafe extern "C" fn aether_prepare_json(json: *const c_char) -> i32 {
     match result {
         Ok(code) => code,
         Err(_) => {
-            set_last_error("panic in Aether native core");
+            let existing = LAST_ERROR.lock().map(|g| g.to_str().unwrap_or("").to_string()).unwrap_or_default();
+            if existing.is_empty() {
+                set_last_error("panic in Aether native core");
+            }
             -3
         }
     }
@@ -716,6 +729,30 @@ mod tests {
         assert!(
             stored.contains("PANIC"),
             "must be tagged for grep, got: {stored}"
+        );
+    }
+
+    #[test]
+    fn a_caught_panic_keeps_the_hook_message_and_is_not_overwritten() {
+        // The catch_unwind handler used to call set_last_error("panic in Aether
+        // native core") unconditionally, which clobbered the "PANIC file:line:
+        // payload" the hook had just stored. Two field logs arrived with the
+        // generic string and no location, so this is the regression that made
+        // an overnight crash undiagnosable. The handler now defers to the hook
+        // and only falls back when nothing was stored.
+        install_panic_hook();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            panic!("run_warp_in_warp: forwarder guard dropped out of order");
+        }));
+        assert!(result.is_err(), "the panic must be caught, not escape");
+        let stored = last_error_for_test();
+        assert!(
+            stored.contains("run_warp_in_warp: forwarder guard dropped out of order"),
+            "the hook message must survive the catch, got: {stored}"
+        );
+        assert!(
+            !stored.trim().eq("panic in Aether native core"),
+            "the generic fallback must not overwrite a real panic message"
         );
     }
 

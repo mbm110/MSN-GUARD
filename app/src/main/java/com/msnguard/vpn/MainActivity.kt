@@ -1159,8 +1159,16 @@ class MainActivity : Activity() {
         //
         // Smart Split is deliberately NOT covered: that path already passes the
         // gate, so skipping it would tell us nothing and only weaken the check we
-        // know works. The condition below is therefore plain SHARD and nothing else.
-        val plainShard = TunnelStatus.isActive() &&
+        // know works.
+        //
+        // The transport check is not cosmetic. Psiphon and Tor reach the device
+        // through Tun2Socks too, so `Tun2SocksManager.isRunning` is true on all
+        // three and the condition without it skipped verification for Psiphon as
+        // well — logs 13-15 show the bypass firing on a Psiphon-over-WARP session,
+        // where the gate is the only thing that would have caught a handshake-only
+        // tunnel. Restricted to the one transport it was written for.
+        val plainShard = selectedProtocol == Protocol.SHARD &&
+            TunnelStatus.isActive() &&
             Tun2SocksManager.isRunning &&
             !TunnelStatus.isNativeTunMode &&
             !SmartSplit.enabled(this)
@@ -3297,9 +3305,38 @@ class MainActivity : Activity() {
         // unless the chain is armed, and grouping them says that structurally
         // instead of relying on the user to infer it from a mixed list.
         content.addView(expandableSection(Strings.t("PSIPHON"), id = "PSIPHON") { body ->
-            // The switch comes first because it gates the two rows under it. Toggling
-            // it repaints them in place — and the home-screen card too, which is the
-            // same setting shown twice and must never disagree.
+            // The mode row sits FIRST: it decides the dial model for every connect,
+            // and the two CDN fields below only exist to feed it. Reading order
+            // matches the packet — mode first, then what the chain carries.
+            psiphonModeRow = navRow(Strings.t("Connection mode"), psiphonModeLabel()) {
+                choosePsiphonMode()
+            }
+            body.addView(psiphonModeRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) })
+            // Only reachable in CDN Fronting mode. In Auto the rows are gone, and
+            // the config builder ignores whatever they hold.
+            cdnEdgeIpsRow = navRow(Strings.t("CDN edge IPs"), cdnEdgeIpsLabel()) {
+                editCdnEdgeIps()
+            }
+            body.addView(cdnEdgeIpsRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            cdnSniRow = navRow(Strings.t("CDN SNI hostnames"), cdnSniLabel()) {
+                editCdnSni()
+            }
+            body.addView(cdnSniRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            refreshPsiphonModeRows()
+
+            // The switch comes after the mode row because it gates the two rows
+            // under it. Toggling it repaints them in place — and the home-screen
+            // card too, which is the same setting shown twice and must never
+            // disagree.
             //
             // Built as an OrbitToggleRow directly rather than through createToggleRow():
             // that helper returns LinearLayout, and this row has to be re-checked and
@@ -3344,32 +3381,6 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
-            // The mode row decides whether the two CDN fields below are visible.
-            // It sits at the top of the Psiphon section, above the transport rows.
-            psiphonModeRow = navRow(Strings.t("Connection mode"), psiphonModeLabel()) {
-                choosePsiphonMode()
-            }
-            body.addView(psiphonModeRow, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(8) })
-            // Only reachable in CDN Fronting mode. In Auto the rows are gone, and
-            // the config builder ignores whatever they hold.
-            cdnEdgeIpsRow = navRow(Strings.t("CDN edge IPs"), cdnEdgeIpsLabel()) {
-                editCdnEdgeIps()
-            }
-            body.addView(cdnEdgeIpsRow, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(8) })
-            cdnSniRow = navRow(Strings.t("CDN SNI hostnames"), cdnSniLabel()) {
-                editCdnSni()
-            }
-            body.addView(cdnSniRow, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(8) })
-            refreshPsiphonModeRows()
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -4263,10 +4274,25 @@ class MainActivity : Activity() {
      * the user to tap it, and there is nothing to type until the mode is on.
      */
     private fun refreshPsiphonModeRows() {
-        psiphonModeRow?.setValue(psiphonModeLabel())
-        val cdn = CoreConfig.isCdnFronting(this)
-        cdnEdgeIpsRow?.apply { visibility = if (cdn) View.VISIBLE else View.GONE }
-        cdnSniRow?.apply { visibility = if (cdn) View.VISIBLE else View.GONE }
+        // The three rows above the chain switch are Psiphon's dial model. On any
+        // other transport they are inert — WoW/MASQUE/WireGuard never read them —
+        // and leaving them lit made a WoW user think they had a connection mode.
+        // Greyed rather than hidden: the section still shows what Psiphon offers,
+        // but nothing under it can be set while another transport is selected.
+        val psiphonSelected = selectedProtocol == Protocol.PSIPHON
+        psiphonModeRow?.apply {
+            setValue(psiphonModeLabel())
+            setAvailable(psiphonSelected)
+        }
+        val cdn = psiphonSelected && CoreConfig.isCdnFronting(this)
+        cdnEdgeIpsRow?.apply {
+            visibility = if (cdn) View.VISIBLE else View.GONE
+            setAvailable(cdn)
+        }
+        cdnSniRow?.apply {
+            visibility = if (cdn) View.VISIBLE else View.GONE
+            setAvailable(cdn)
+        }
     }
 
     private fun editCdnEdgeIps() {
@@ -5669,6 +5695,11 @@ class MainActivity : Activity() {
             setValue(egressRegionLabel())
             setAvailable(chainAvailable)
         }
+        // The mode row and the two CDN fields above the switch are gated here too,
+        // so that every path which repaints this section also dims the dial model
+        // when the transport is not Psiphon. Callers that switch the transport go
+        // through updateConnectionMode, which calls this directly.
+        refreshPsiphonModeRows()
         // LAN sharing is no longer Psiphon-only: MASQUE/WireGuard/WoW publish a real
         // SOCKS5 listener in SOCKS tunnel type, and Tor publishes its own SocksPort
         // in VPN mode. [lanSharingCapable] holds the per-transport rule; the row is
@@ -6683,6 +6714,9 @@ class MainActivity : Activity() {
         // settings was left and re-entered.
         connectionModeRow?.setValue(protocol.label)
         refreshPsiphonRows()
+        // refreshPsiphonRows() now repaints the mode row and the two CDN fields as
+        // well, so the dial model dims on a non-Psiphon transport on the same
+        // refresh that dims the chain rows — one source of truth for the section.
         refreshShardRows()
 
         // Keep the rail in sync when the change came from somewhere else (the
