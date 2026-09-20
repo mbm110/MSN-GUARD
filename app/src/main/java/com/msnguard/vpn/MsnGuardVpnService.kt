@@ -71,6 +71,23 @@ private val PROTOCOLS_DIRECT = listOf(
 )
 
 /**
+ * The CDN-fronted protocol family, used as a hard `LimitTunnelProtocols` when
+ * the user picks CDN Fronting mode.
+ *
+ * Carried from Shirokhorshid's `CDN_FRONTING_TUNNEL_PROTOCOLS`. These three
+ * differ from the plain FRONTED-MEEK set in [PROTOCOLS_FRONTED] by dialling a
+ * *CDN* edge (Akamai/Fastly) instead of a Psiphon-owned fronting address —
+ * that is what makes them the mode that survives a carrier null-routing every
+ * Psiphon server IP. All three are TCP, so the whole set survives the chain
+ * mode protocol narrowing too.
+ */
+private val PROTOCOLS_CDN_FRONTING = listOf(
+    "FRONTED-MEEK-CDN-OSSH",
+    "FRONTED-MEEK-CDN-HTTP-OSSH",
+    "FRONTED-MEEK-CDN-QUIC-OSSH",
+)
+
+/**
  * Every protocol that can cross a SOCKS5 upstream proxy — i.e. TCP only.
  *
  * Used as a HARD limit (`LimitTunnelProtocols`, not the `InitialLimit…`
@@ -96,6 +113,13 @@ private val PROTOCOLS_DIRECT = listOf(
 private val PROTOCOLS_CHAINABLE = listOf(
     "FRONTED-MEEK-OSSH",
     "FRONTED-MEEK-HTTP-OSSH",
+    // The CDN-fronted family, all TCP. Without them in this list, CDN Fronting
+    // mode dies the moment the chain (Psiphon over WARP) is armed: the hard
+    // protocol limit below is reapplied after the mode and would narrow the
+    // family to nothing, and the tunnel would have no protocol left to try.
+    "FRONTED-MEEK-CDN-OSSH",
+    "FRONTED-MEEK-CDN-HTTP-OSSH",
+    "FRONTED-MEEK-CDN-QUIC-OSSH",
     "TLS-OSSH",
     "UNFRONTED-MEEK-HTTPS-OSSH",
     "UNFRONTED-MEEK-OSSH",
@@ -1401,6 +1425,147 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     override fun getPsiphonConfig(): String = psiphonConfigJson
 
+    /**
+     * CDN Fronting overrides, translated from Shirokhorshid's
+     * `makeCdnFrontingDialOverrides` / `makeCdnFrontingScanSpec`.
+     *
+     * What Psiphon does with these: `FrontedMeekDialOverrides` is a list of
+     * "when you would have dialled address X, dial Y instead and present SNI Z".
+     * FRONTED-MEEK-CDN protocols never touch a Psiphon-owned IP — they always
+     * connect to a CDN edge and ask the edge for a Psiphon domain, so the censor
+     * sees a plain CDN-shaped TLS handshake. That is why the mode survives
+     * operators that null-route every Psiphon server IP, and also why the
+     * overrides must be on whenever the mode is: without them the protocol has
+     * no dial address at all.
+     *
+     * User entries come first and the built-in Akamai edges follow, so a blank
+     * field is not "fewer edges", it is "the standard set". Probability 1.0
+     * because the default is 0.0 and a coin flip would silently leave the
+     * overrides unused.
+     */
+    private fun putCdnFrontingConfig(config: JSONObject) {
+        // The SNI list is used twice: the first entry is the override's SNI
+        // value, and the whole list seeds the scan spec below.
+        val customSni = CoreConfig.parseCdnSniList(CoreConfig.cdnSniHostnames(this))
+        val edgeSni = customSni.firstOrNull().orEmpty()
+
+        val overrides = JSONArray()
+        val dialAddresses = HashSet<String>()
+
+        // Fastly overrides, verbatim from upstream: two matchers (by provider ID
+        // and by dial-address regex) both pointing at pypi.org, which is a
+        // Fastly front Psiphon can also use. h2 + http/1.1 because Fastly
+        // negotiates both, while the Akamai edge overrides below are http/1.1 only.
+        overrides.put(cdnOverride(
+            id = "fastly-provider",
+            matchProvider = JSONArray(listOf("(?i)fastly")),
+            matchDial = null,
+            dialAddress = "pypi.org",
+            sni = "pypi.org",
+            verifyNames = JSONArray(listOf(
+                "www.python.org", "pypi.org", "fastly.com", "www.fastly.com",
+                "developer.fastly.com", "githubassets.com", "github.com",
+                "github.io", "githubusercontent.com"
+            )),
+            alpn = JSONArray(listOf("h2", "http/1.1")),
+        ))
+        overrides.put(cdnOverride(
+            id = "fastly-address",
+            matchProvider = null,
+            matchDial = JSONArray(listOf("(?i)(fastly|pypi|python|github)")),
+            dialAddress = "pypi.org",
+            sni = "pypi.org",
+            verifyNames = JSONArray(listOf(
+                "www.python.org", "pypi.org", "fastly.com", "www.fastly.com",
+                "developer.fastly.com", "githubassets.com", "github.com",
+                "github.io", "githubusercontent.com"
+            )),
+            alpn = JSONArray(listOf("h2", "http/1.1")),
+        ))
+
+        // The user's own edges first, then the built-ins. Same SNI for every
+        // edge — one fronting domain covers the whole CDN, which is the point
+        // of fronting.
+        val userEdges = CoreConfig.parseCdnIpList(CoreConfig.cdnEdgeIps(this))
+        val allEdges = (userEdges + CoreConfig.CDN_EDGE_IPS)
+        allEdges.forEachIndexed { index, ip ->
+            if (dialAddresses.add(ip)) {
+                overrides.put(cdnEdgeOverride(
+                    id = if (index < userEdges.size) "user-edge-$index" else "edge-$index",
+                    ipAddress = ip,
+                    customSni = edgeSni,
+                    existing = overrides,
+                ))
+            }
+        }
+
+        config.put("FrontedMeekDialOverrides", overrides)
+        config.put("FrontedMeekDialOverridesProbability", 1.0)
+        // Let Psiphon still scan its own built-in edges alongside ours.
+        config.put("FrontedMeekCDNScanUseBuiltInSpec", true)
+
+        // The scan spec is only meaningful with at least one IP to scan. An
+        // empty list here would be a config with a scan spec and no candidates,
+        // so it is omitted rather than sent empty.
+        val userIps = CoreConfig.parseCdnIpList(CoreConfig.cdnEdgeIps(this))
+        if (userIps.isNotEmpty()) {
+            val spec = JSONObject()
+            spec.put("IPCandidates", JSONArray(userIps))
+            if (customSni.isNotEmpty()) {
+                spec.put("SNIServerNames", JSONArray(customSni))
+            }
+            config.put("FrontedMeekCDNScanSpec", spec)
+        }
+    }
+
+    private fun cdnOverride(
+        id: String,
+        matchProvider: JSONArray?,
+        matchDial: JSONArray?,
+        dialAddress: String,
+        sni: String,
+        verifyNames: JSONArray,
+        alpn: JSONArray,
+    ): JSONObject = JSONObject().apply {
+        put("OverrideID", id)
+        matchProvider?.let { put("MatchFrontingProviderIDRegexes", it) }
+        matchDial?.let { put("MatchDialAddressRegexes", it) }
+        put("DialAddresses", JSONArray(listOf(dialAddress)))
+        put("SNIServerName", sni)
+        put("VerifyServerNames", verifyNames)
+        put("ALPNProtocols", alpn)
+        put("TLSProfile", "Chrome-83")
+    }
+
+    private fun cdnEdgeOverride(
+        id: String,
+        ipAddress: String,
+        customSni: String,
+        existing: JSONArray,
+    ): JSONObject {
+        // Blank custom SNI: the edge's own address is the SNI and the Akamai
+        // verification names are trusted, exactly as Shirokhorshid does. Sending
+        // a raw IP as SNI is legal TLS and is what makes the default work.
+        val sniServerName = if (customSni.isEmpty()) ipAddress else customSni
+        val verify = JSONArray()
+        val added = HashSet<String>()
+        fun addUnique(value: String) {
+            if (value.isNotEmpty() && added.add(value)) verify.put(value)
+        }
+        addUnique(sniServerName)
+        addUnique(ipAddress)
+        CoreConfig.CDN_DEFAULT_VERIFY_NAMES.forEach { addUnique(it) }
+        return cdnOverride(
+            id = id,
+            matchProvider = null,
+            matchDial = JSONArray(listOf(".*")),
+            dialAddress = ipAddress,
+            sni = sniServerName,
+            verifyNames = verify,
+            alpn = JSONArray(listOf("http/1.1")),
+        )
+    }
+
     private fun buildPsiphonConfig(): String {
         // In VPN mode: fixed 1819, so the TUN can be pre-created before Psiphon
         // starts. In proxy mode: the port the user typed, because that listener IS
@@ -1512,6 +1677,27 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             ConnectionLog.record(
                 "Strategy ${ladderIndex + 1}/${activeLadder.size} " +
                     "(${strategy.name}): ${strategy.label} — ${strategy.timeoutSeconds}s budget"
+            )
+        }
+
+        // CDN Fronting, applied after the rung so the mode wins over whatever the
+        // rung asked for. The rung only orders protocols; this one *replaces* the
+        // set with the FRONTED-MEEK-CDN family and supplies the dial overrides
+        // that family needs. Order matters both ways: the rung's tactics and
+        // worker sizing stay in place underneath, so a CDN session keeps the same
+        // anti-censorship tuning instead of losing it.
+        //
+        // In chain mode the hard protocol limit is reapplied further down, which
+        // narrows this family again to the TCP-only subset — the CDN protocols
+        // are all TCP, so nothing is lost there.
+        if (CoreConfig.isCdnFronting(this)) {
+            putCdnFrontingConfig(config)
+            config.put("LimitTunnelProtocols", JSONArray(PROTOCOLS_CDN_FRONTING))
+            ConnectionLog.record(
+                "CDN Fronting mode: FRONTED-MEEK-CDN only" +
+                    if (CoreConfig.parseCdnIpList(CoreConfig.cdnEdgeIps(this)).isNotEmpty()) {
+                        ", ${CoreConfig.parseCdnIpList(CoreConfig.cdnEdgeIps(this)).size} user edge(s) first"
+                    } else ""
             )
         }
 

@@ -219,6 +219,9 @@ class MainActivity : Activity() {
     private var chainOuterRow: OrbitSettingsRow? = null
     private var torChainOuterRow: OrbitSettingsRow? = null
     private var egressRegionRow: OrbitSettingsRow? = null
+    private var psiphonModeRow: OrbitSettingsRow? = null
+    private var cdnEdgeIpsRow: OrbitSettingsRow? = null
+    private var cdnSniRow: OrbitSettingsRow? = null
 
     /** LAN-sharing switch; its subtitle carries the live proxy address. */
     private var lanSharingRow: OrbitToggleRow? = null
@@ -3341,6 +3344,32 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
+            // The mode row decides whether the two CDN fields below are visible.
+            // It sits at the top of the Psiphon section, above the transport rows.
+            psiphonModeRow = navRow(Strings.t("Connection mode"), psiphonModeLabel()) {
+                choosePsiphonMode()
+            }
+            body.addView(psiphonModeRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            // Only reachable in CDN Fronting mode. In Auto the rows are gone, and
+            // the config builder ignores whatever they hold.
+            cdnEdgeIpsRow = navRow(Strings.t("CDN edge IPs"), cdnEdgeIpsLabel()) {
+                editCdnEdgeIps()
+            }
+            body.addView(cdnEdgeIpsRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            cdnSniRow = navRow(Strings.t("CDN SNI hostnames"), cdnSniLabel()) {
+                editCdnSni()
+            }
+            body.addView(cdnSniRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            refreshPsiphonModeRows()
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -4191,6 +4220,151 @@ class MainActivity : Activity() {
     private fun torMode(): TorManager.TorMode = TorManager.selectedMode(this)
 
     /**
+     * Psiphon's connection mode: Auto (the ladder and Psiphon's own tactics,
+     * everything as it was before this setting existed) or CDN Fronting only.
+     *
+     * The choice sheet mirrors Shirokhorshid's protocol-selection preference,
+     * narrowed to the two options that make sense here: this app has no Conduit
+     * relays of its own, and "Direct" is already what rung D of the ladder does.
+     */
+    private fun choosePsiphonMode(after: (() -> Unit)? = null) = showChoiceSheet(
+        title = Strings.t("Connection mode"),
+        subtitle = Strings.t("Choose how the app connects to servers"),
+        options = listOf(CoreConfig.PSIPHON_MODE_AUTO, CoreConfig.PSIPHON_MODE_CDN),
+        selected = CoreConfig.psiphonConnectionMode(this),
+        label = { if (it == CoreConfig.PSIPHON_MODE_CDN) Strings.t("CDN Fronting") else Strings.t("Automatic") },
+        description = { mode ->
+            if (mode == CoreConfig.PSIPHON_MODE_CDN) {
+                Strings.t("CDN Fronting - Use CDN fronting only")
+            } else {
+                Strings.t("Auto - The app chooses the best protocol, including CDN fronting")
+            }
+        },
+    ) { chosen ->
+        preferences().edit()
+            .putString(CoreConfig.PSIPHON_MODE_PREF, chosen)
+            .apply()
+        ConnectionLog.record(
+            if (chosen == CoreConfig.PSIPHON_MODE_CDN) {
+                "Psiphon connection mode: CDN Fronting only"
+            } else {
+                "Psiphon connection mode: Auto"
+            }
+        )
+        refreshPsiphonModeRows()
+        after?.invoke()
+    }
+
+    /**
+     * Repaints the mode row and toggles the two CDN field rows.
+     *
+     * The fields are only meaningful in CDN Fronting mode, so they are hidden in
+     * Auto. Hiding is deliberate rather than disabling: a disabled row invites
+     * the user to tap it, and there is nothing to type until the mode is on.
+     */
+    private fun refreshPsiphonModeRows() {
+        psiphonModeRow?.setValue(psiphonModeLabel())
+        val cdn = CoreConfig.isCdnFronting(this)
+        cdnEdgeIpsRow?.apply { visibility = if (cdn) View.VISIBLE else View.GONE }
+        cdnSniRow?.apply { visibility = if (cdn) View.VISIBLE else View.GONE }
+    }
+
+    private fun editCdnEdgeIps() {
+        editMultilineField(
+            title = Strings.t("CDN edge IPs"),
+            hint = Strings.t("e.g. 23.215.0.206, 23.12.147.13/32"),
+            description = Strings.t(
+                "Optional extra CDN edge IPs or CIDRs separated by commas, spaces, or new lines. " +
+                    "Tried before the built-in list."
+            ),
+            current = CoreConfig.cdnEdgeIps(this),
+            pref = CoreConfig.PSIPHON_CDN_IPS_PREF,
+            row = cdnEdgeIpsRow,
+            after = { cdnEdgeIpsRow?.setValue(cdnEdgeIpsLabel()) },
+        )
+    }
+
+    private fun editCdnSni() {
+        editMultilineField(
+            title = Strings.t("CDN SNI hostnames"),
+            hint = Strings.t("e.g. a.akamaized.net, www.fastly.com"),
+            description = Strings.t(
+                "Optional extra SNI hostnames separated by commas, spaces, or new lines. " +
+                    "No-SNI variants are also tested."
+            ),
+            current = CoreConfig.cdnSniHostnames(this),
+            pref = CoreConfig.PSIPHON_CDN_SNI_PREF,
+            row = cdnSniRow,
+            after = { cdnSniRow?.setValue(cdnSniLabel()) },
+        )
+    }
+
+    /**
+     * Shared text editor for the two CDN fields. Both accept a free-form list, so
+     * they share one dialog — multiline, since these are lists and a single-line
+     * field would hide everything after the first entry.
+     */
+    private fun editMultilineField(
+        title: String,
+        hint: String,
+        description: String,
+        current: String,
+        pref: String,
+        row: OrbitSettingsRow?,
+        after: () -> Unit,
+    ) {
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val field = EditText(this).apply {
+            setText(current)
+            this.hint = hint
+            setTextColor(INK)
+            setHintTextColor(MUTED)
+            setSingleLine(false)
+            setLines(4)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            setPadding(dp(18), dp(12), dp(18), dp(12))
+            background = roundedBackground(SURFACE_VARIANT, 16, SURFACE_VARIANT)
+        }
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            background = roundedBackground(SURFACE, 28, SURFACE)
+        }
+        sheet.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label(title, 22f, INK, TypefaceStyle.MEDIUM))
+        })
+        sheet.addView(label(description, 14f, MUTED), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { height = dp(140) })
+        val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        buttons.addView(createSettingsButton(Strings.t("Clear")) {
+            preferences().edit().remove(pref).apply()
+            field.setText("")
+            after()
+        }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        buttons.addView(createSettingsButton(Strings.t("Save")) {
+            preferences().edit().putString(pref, field.text.toString()).apply()
+            after()
+            dialog.dismiss()
+        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+        sheet.addView(buttons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(16) })
+        dialog.setContentView(FrameLayout(this).apply {
+            setPadding(dp(16), 0, dp(16), dp(16))
+            addView(sheet)
+        })
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.62f)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+        }
+    }
+
+    /**
      * Pick how Tor connects.
      *
      * Auto walks Direct → obfs4 → Meek → Snowflake on every connect, starting
@@ -4438,6 +4612,33 @@ class MainActivity : Activity() {
     private fun egressRegionLabel(): String {
         val code = egressRegion()
         return if (code == CoreConfig.EGRESS_REGION_AUTO) Strings.t("Automatic") else PsiphonRegions.label(code)
+    }
+
+    private fun psiphonModeLabel(): String =
+        if (CoreConfig.isCdnFronting(this)) Strings.t("CDN Fronting") else Strings.t("Automatic")
+
+    /**
+     * CDN edge IPs subtitle. Mirrors Shirokhorshid's
+     * `cdnFrontingCustomIpListPreferenceSummaryConfigured` — the count is what
+     * the user actually needs to see, because a typo that silently dropped an
+     * entry would otherwise look like a saved setting that does nothing.
+     */
+    private fun cdnEdgeIpsLabel(): String {
+        val count = CoreConfig.parseCdnIpList(CoreConfig.cdnEdgeIps(this)).size
+        return if (count == 0) {
+            Strings.t("Built-in CDN edges") + " (${CoreConfig.CDN_EDGE_IPS.size})"
+        } else {
+            Strings.t("Using N entries").replace("N", count.toString())
+        }
+    }
+
+    private fun cdnSniLabel(): String {
+        val list = CoreConfig.parseCdnSniList(CoreConfig.cdnSniHostnames(this))
+        return when {
+            list.isEmpty() -> Strings.t("No custom SNI")
+            list.size == 1 -> Strings.t("Using SNI").replace("SNI", list[0])
+            else -> Strings.t("Using N hostnames").replace("N", list.size.toString())
+        }
     }
 
     /**
@@ -5392,6 +5593,9 @@ class MainActivity : Activity() {
         smartSplitRow = null
         chainOuterRow = null
         egressRegionRow = null
+        psiphonModeRow = null
+        cdnEdgeIpsRow = null
+        cdnSniRow = null
         lanSharingRow = null
         torModeRowRef = null
         torChainRowRef = null

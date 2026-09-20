@@ -292,6 +292,147 @@ object CoreConfig {
     const val EGRESS_REGION_AUTO = "auto"
 
     /**
+     * How Psiphon picks its protocol family: [PSIPHON_MODE_AUTO] lets the ladder
+     * and Psiphon's own tactics decide (the only mode that existed before 2.1.18),
+     * [PSIPHON_MODE_CDN] restricts the tunnel to the FRONTED-MEEK-CDN protocols
+     * and forces the CDN dial overrides below.
+     */
+    const val PSIPHON_MODE_PREF = "psiphon_connection_mode"
+    const val PSIPHON_MODE_AUTO = "auto"
+    const val PSIPHON_MODE_CDN = "cdn_fronting"
+
+    /**
+     * The CDN edge IPs the user wants tried *first*, one per line/comma/space.
+     *
+     * Empty means "use the built-in edges", which is the behaviour the app has
+     * always had. This is deliberately a plain string and not a structured list:
+     * the value is typed by hand into a text field, and a malformed entry must
+     * not break the config — [parseCdnIpList] drops anything that is not a valid
+     * IPv4 address or CIDR, exactly as Shirokhorshid does.
+     */
+    const val PSIPHON_CDN_IPS_PREF = "psiphon_cdn_edge_ips"
+
+    /**
+     * Extra SNI hostnames to front the CDN dial with.
+     *
+     * Empty means "no custom SNI": the override then sends the edge's own IP as
+     * the SNI value and additionally trusts the Akamai verification names, which
+     * is how Psiphon's stock CDN fronting works. The user's list is tried in
+     * order and a no-SNI variant is also attempted (upstream tests that itself).
+     */
+    const val PSIPHON_CDN_SNI_PREF = "psiphon_cdn_sni_hostnames"
+
+    /**
+     * The built-in CDN edges, in the order upstream dials them.
+     *
+     * Carried verbatim from Shirokhorshid's `makeCdnFrontingDialOverrides` —
+     * these are Akamai edges that serve Psiphon's fronted domains, and without
+     * at least one reachable edge the FRONTED-MEEK-CDN protocols have nothing to
+     * dial. The user's own IPs are tried ahead of these, never instead of them,
+     * so leaving the field blank is always safe.
+     */
+    val CDN_EDGE_IPS = listOf(
+        "23.215.0.206", "23.215.0.203", "23.212.250.91", "23.212.250.78",
+        "23.12.147.13", "23.12.147.29", "23.73.207.8", "23.73.207.15",
+        "92.123.102.43",
+    )
+
+    /**
+     * Hostnames a blank CDN SNI field falls back to.
+     *
+     * Not dial addresses — they are the `VerifyServerNames` Psiphon must accept
+     * the edge certificate for when the user has not given a fronting domain of
+     * their own. Without these the TLS handshake fails on an edge whose
+     * certificate names the CDN, not the IP we dialled.
+     */
+    val CDN_DEFAULT_VERIFY_NAMES = listOf(
+        "a248.e.akamai.net", "a.akamaized.net", "a.akamaized-staging.net",
+        "a.akamaihd.net", "a.akamaihd-staging.net", "www.akamai.com",
+    )
+
+    /** Connection mode: auto, or CDN fronting only. */
+    fun psiphonConnectionMode(context: Context): String {
+        val stored = context.profiled()
+            .getString(PSIPHON_MODE_PREF, PSIPHON_MODE_AUTO)
+            ?.trim()
+            .orEmpty()
+            .lowercase()
+        return if (stored == PSIPHON_MODE_CDN) PSIPHON_MODE_CDN else PSIPHON_MODE_AUTO
+    }
+
+    /** True only in CDN Fronting mode — the field rows are gated on this. */
+    fun isCdnFronting(context: Context): Boolean =
+        psiphonConnectionMode(context) == PSIPHON_MODE_CDN
+
+    /** The raw text the user typed, untouched (validation happens on use). */
+    fun cdnEdgeIps(context: Context): String =
+        context.profiled().getString(PSIPHON_CDN_IPS_PREF, "").orEmpty()
+
+    fun cdnSniHostnames(context: Context): String =
+        context.profiled().getString(PSIPHON_CDN_SNI_PREF, "").orEmpty()
+
+    /**
+     * Parses the raw CDN IP text into a deduplicated list of valid IPv4/CIDR
+     * entries, in the order the user wrote them.
+     *
+     * Mirrors Shirokhorshid's `parseCdnFrontingCustomIpCandidates`, including
+     * the tolerance for commas, spaces, semicolons and newlines as separators.
+     * A garbage entry is skipped, never propagated — the Go core would reject
+     * the whole config otherwise and the tunnel would not start at all.
+     */
+    fun parseCdnIpList(raw: String): List<String> {
+        val seen = HashSet<String>()
+        return raw.split("[\\s,;]+".toRegex())
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && (isValidIpv4(it) || isValidIpv4Cidr(it)) }
+            .filter { seen.add(it) }
+    }
+
+    /**
+     * Parses the raw SNI text into deduplicated, lowercased hostnames.
+     *
+     * Mirrors `parseCdnFrontingCustomSniList`. Hostnames only — an IP address or
+     * a space inside a label is not a valid SNI and is dropped rather than sent.
+     */
+    fun parseCdnSniList(raw: String): List<String> {
+        val seen = HashSet<String>()
+        return raw.split("[\\s,;]+".toRegex())
+            .map { it.trim().lowercase() }
+            .filter { it.isNotEmpty() && isValidHostname(it) }
+            .filter { seen.add(it) }
+    }
+
+    private fun isValidIpv4(value: String): Boolean {
+        val parts = value.split(".", limit = 4)
+        if (parts.size != 4) return false
+        return parts.all { part ->
+            part.isNotEmpty() && part.length <= 3 &&
+                part.all { it.isDigit() } && part.toIntOrNull()?.let { it in 0..255 } == true
+        }
+    }
+
+    private fun isValidIpv4Cidr(value: String): Boolean {
+        val slash = value.indexOf('/')
+        if (slash <= 0) return false
+        val prefix = value.substring(0, slash)
+        val bits = value.substring(slash + 1)
+        return isValidIpv4(prefix) &&
+            bits.isNotEmpty() && bits.length <= 2 &&
+            bits.all { it.isDigit() } && bits.toIntOrNull()?.let { it in 0..32 } == true
+    }
+
+    private fun isValidHostname(value: String): Boolean {
+        if (value.isEmpty() || value.length > 253) return false
+        return value.split(".")
+            .all { label ->
+                label.isNotEmpty() && label.length <= 63 &&
+                    label.all { it.isLetterOrDigit() || it == '-' } &&
+                    !label.startsWith('-') && !label.endsWith('-')
+            }
+    }
+
+
+    /**
      * Whether Psiphon's local proxies listen on 0.0.0.0 instead of 127.0.0.1.
      *
      * Off by default, and deliberately so: binding to 0.0.0.0 exposes an OPEN,

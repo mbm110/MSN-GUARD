@@ -320,6 +320,30 @@ object Strings {
         "Porcelain — grey page, white cards" to Triple("Porcelain — grey page, white cards", "چینی — صفحه خاکستری، کارت‌های سفید", "陶瓷白 — 灰底白卡片风格"),
         "Portugal" to Triple("Portugal", "پرتغال", "葡萄牙"),
         "Preferred country" to Triple("Preferred country", "کشور ترجیحی", "首选国家/地区"),
+        "Choose how the app connects to servers" to Triple("Choose how the app connects to servers", "نحوه اتصال برنامه به سرورها را انتخاب کنید", "选择应用的连接服务器方式"),
+        "CDN Fronting" to Triple("CDN Fronting", " CDN فرونتینگ", "CDN 前置"),
+        "CDN Fronting - Use CDN fronting only" to Triple("CDN Fronting - Use CDN fronting only", "فقط از CDN فرونتینگ استفاده کن", "CDN 前置 - 仅使用 CDN 前置"),
+        "Auto - The app chooses the best protocol, including CDN fronting" to Triple("Auto - The app chooses the best protocol, including CDN fronting", "Automatic - برنامه بهترین پروتکل را انتخاب می‌کند، از جمله CDN فرونتینگ", "自动 - 应用选择最佳协议，包括 CDN 前置"),
+        "CDN edge IPs" to Triple("CDN edge IPs", "آیپی‌های لبه CDN", "CDN 边缘 IP"),
+        "CDN SNI hostnames" to Triple("CDN SNI hostnames", "نام‌های میزبان SNI در CDN", "CDN SNI 主机名"),
+        "Optional extra CDN edge IPs or CIDRs separated by commas, spaces, or new lines. Tried before the built-in list." to Triple(
+            "Optional extra CDN edge IPs or CIDRs separated by commas, spaces, or new lines. Tried before the built-in list.",
+            "آیپی یا CIDRهای اضافی لبه CDN، با کاما، فاصله یا خط جدید جدا شوند. قبل از لیست پیش‌فرض امتحان می‌شوند.",
+            "可选的额外 CDN 边缘 IP 或 CIDR，以逗号、空格或换行分隔。会先于内置列表尝试。"
+        ),
+        "Optional extra SNI hostnames separated by commas, spaces, or new lines. No-SNI variants are also tested." to Triple(
+            "Optional extra SNI hostnames separated by commas, spaces, or new lines. No-SNI variants are also tested.",
+            "نام‌های میزبان SNI اضافی، با کاما، فاصله یا خط جدید جدا شوند. حالت بدون SNI هم امتحان می‌شود.",
+            "可选的额外 SNI 主机名，以逗号、空格或换行分隔。也会尝试无 SNI 的变体。"
+        ),
+        "Built-in CDN edges" to Triple("Built-in CDN edges", "لبه‌های پیش‌فرض CDN", "内置 CDN 边缘"),
+        "No custom SNI" to Triple("No custom SNI", "بدون SNI اختصاصی", "无自定义 SNI"),
+        "Using N entries" to Triple("Using N entries", "N مورد فعال است", "已使用 N 个条目"),
+        "Using N hostnames" to Triple("Using N hostnames", "N نام میزبان فعال است", "已使用 N 个主机名"),
+        "Using SNI" to Triple("Using SNI", "SNI فعال است", "已使用 SNI"),
+        "e.g. 23.215.0.206, 23.12.147.13/32" to Triple("e.g. 23.215.0.206, 23.12.147.13/32", "مثال: 23.215.0.206, 23.12.147.13/32", "例如: 23.215.0.206, 23.12.147.13/32"),
+        "e.g. a.akamaized.net, www.fastly.com" to Triple("e.g. a.akamaized.net, www.fastly.com", "مثال: a.akamaized.net, www.fastly.com", "例如: a.akamaized.net, www.fastly.com"),
+
         "Profile" to Triple("Profile", "پروفایل", "配置方案"),
         "PROFILE" to Triple("PROFILE", "پروفایل", "配置方案"),
         "Profile A" to Triple("Profile A", "پروفایل A", "配置方案 A"),
