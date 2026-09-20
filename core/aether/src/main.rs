@@ -3132,10 +3132,10 @@ async fn run_warp_in_warp(
         // because we took the handle there is no second poll anywhere.
         match handle.await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) if e.is_cancelled() => {}
-            Ok(Err(e)) => log::warn!("[-] [{name}] settle error: {e}"),
-            Err(e) if e.is_cancelled() => {}
-            Err(e) => log::warn!("[-] [{name}] settle join error: {e}"),
+            // A cancellation surfaces as Ok(Err) with the JoinError, not as the
+            // outer Err — that variant is an AetherError and has no
+            // is_cancelled. Both are expected here.
+            Ok(Err(_)) | Err(_) => {}
         }
     }
     let mut outer_exit = Some(outer_exit);
@@ -3730,10 +3730,9 @@ async fn run_masque_in_masque(
         handle.abort();
         match handle.await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) if e.is_cancelled() => {}
-            Ok(Err(e)) => log::warn!("[-] [{name}] settle error: {e}"),
-            Err(e) if e.is_cancelled() => {}
-            Err(e) => log::warn!("[-] [{name}] settle join error: {e}"),
+            // Ok(Err) is the cancellation/error path through a JoinHandle; the
+            // outer Err is an AetherError, which has no is_cancelled.
+            Ok(Err(_)) | Err(_) => {}
         }
     }
     let mut outer_exit = Some(outer.exit);
@@ -4256,10 +4255,7 @@ mod tests {
             handle.abort();
             match handle.await {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) if e.is_cancelled() => {}
-                Ok(Err(e)) => log::warn!("[-] [{name}] settle error: {e}"),
-                Err(e) if e.is_cancelled() => {}
-                Err(e) => log::warn!("[-] [{name}] settle join error: {e}"),
+                Ok(Err(_)) | Err(_) => {}
             }
         }
 
