@@ -104,48 +104,41 @@ object Profiles {
     fun activeName(context: Context): String = NAMES[active(context)]
 
     /**
-     * Remaps every profiled key in [SETTINGS_FILE] so [index] becomes the active
-     * profile, and returns the number of keys that moved.
+     * Makes [index] the active profile, returning whether anything moved.
      *
-     * A switch is not a restore: it must not drop anything, and it must be
-     * visible before the next connect. So the move is committed synchronously,
-     * and the caller recreates the activity so no row keeps showing the profile
-     * the user just left.
+     * Every profile's settings live on disk permanently under its own prefix,
+     * so switching is changing [ACTIVE_PROFILE] and nothing else: profile A's
+     * block stays where it is while the user configures B, and it is exactly
+     * what they left when they come back. There is nothing to copy, rename or
+     * drop, and no window in which a block can be lost.
      *
-     * Returns 0 when the target is already active, which the caller uses to
-     * skip the recreate.
+     * The one thing that must still move is a *bare* profiled key — the shape
+     * an install from before this feature holds. It has no prefix, so it cannot
+     * outlive a switch as-is: reading `p0_kill_switch` afterwards finds nothing
+     * and the row silently resets to its default. Those keys belong to the
+     * profile the user is leaving, and are prefixed with it here, once.
      *
-     * ## Upgrade migration
-     *
-     * An install from before this feature holds bare keys (`kill_switch`), with
-     * no prefix at all. Those belong to Profile A — the first profile anyone
-     * has. Prefixing them on the *first ever switch* is what keeps an existing
-     * user's settings: without it, reading `p0_kill_switch` after the round trip
-     * finds nothing and silently resets the row to its default.
+     * The commit is synchronous so the state is settled before the caller
+     * recreates the activity; [moved] is what the caller uses to decide whether
+     * a recreate is needed at all.
      */
     fun switch(context: Context, index: Int): Int {
         if (index !in 0 until COUNT) return 0
-        if (active(context) == index) return 0
+        val from = active(context)
+        if (from == index) return 0
         val prefs = context.getSharedPreferences(SETTINGS_FILE, Context.MODE_PRIVATE)
-        val snapshot = prefs.all
         val editor = prefs.edit()
 
-        // One pass. A key is either already prefixed (p2_kill_switch) — in which
-        // case stripProfile returns its logical name — or bare (kill_switch), in
-        // which case stripProfile returns null and the key IS its own logical
-        // name. Both end up rewritten to the target profile's prefix.
-        //
-        // The bare case is the upgrade path: an install from before this feature
-        // holds unprefixed keys, and they belong to whatever profile is active.
-        // Sending them to the target on the first switch is what keeps an
-        // existing user's settings — reading p0_kill_switch after the round trip
-        // would otherwise find nothing and silently reset the row.
+        // Prefix the pre-profiles shape onto the profile being left. Keys that
+        // already carry a prefix belong to some profile's own block and are left
+        // where they are — that is the whole point of keeping all four blocks.
+        val sourcePrefix = profiledKey(from, "")
         var moved = 0
-        snapshot.forEach { (key, value) ->
+        prefs.all.forEach { (key, value) ->
             if (!isProfiled(key)) return@forEach
-            val bare = stripProfile(key) ?: key
+            if (stripProfile(key) != null) return@forEach
             editor.remove(key)
-            editor.putValue(profiledKey(index, bare), value)
+            editor.putValue(sourcePrefix + key, value)
             moved++
         }
         editor.putInt(ACTIVE_PROFILE, index).commit()
@@ -164,8 +157,12 @@ object Profiles {
      * logical keys and has to invert the prefix.
      */
     fun stripProfile(key: String): String? {
-        if (key.length < 3 || key[0] != 'p' || !key[1].isDigit()) return null
-        return key.substring(2)
+        // The prefix is three characters: 'p', digit, '_'. Taking two leaves a
+        // leading underscore on the logical name, which profiledKey then turns
+        // into p1__kill_switch on the next switch — a different key every hop,
+        // so nothing is ever read back and every profile silently resets.
+        if (key.length < 3 || key[0] != 'p' || !key[1].isDigit() || key[2] != '_') return null
+        return key.substring(3)
     }
 
     /** True if a key carries per-profile state. */
@@ -228,6 +225,29 @@ object Profiles {
             }
         }
 
+        // Collapse keys whose logical name picked up leading underscores. The
+        // old stripProfile took substring(2) off a three-character prefix, so
+        // every switch renamed p0_kill_switch to p1__kill_switch to p0___kill
+        // _switch. Those are still "prefixed" and still profiled, so the passes
+        // above leave them alone and the app reads p1_kill_switch, finds nothing
+        // and shows the default — a settings loss that survives the fix itself.
+        // The newest hop has the value the user last set, so the collapsed key
+        // keeps it and the older, longer variants are dropped.
+        prefs.all.entries.filter { (key, _) ->
+            isProfiled(key) && stripProfile(key)?.startsWith("_") == true
+        }.sortedBy { it.key.length }.forEach { (key, value) ->
+            val profile = key.substring(0, 2).toInt()
+            val logical = stripProfile(key)!!.dropWhile { it == '_' }
+            val canonical = profiledKey(profile, logical)
+            editor.remove(key)
+            // A shorter variant of the same key was written earlier in this
+            // pass and already holds the newest value; do not clobber it.
+            if (!prefs.all.keys.contains(canonical)) {
+                editor.putValue(canonical, value)
+            }
+            changed++
+        }
+
         if (changed > 0) editor.commit()
         return changed
     }
@@ -253,7 +273,13 @@ object Profiles {
     /** How many profiled keys profile [index] holds. For the reset confirmation. */
     fun profiledKeyCount(context: Context, index: Int): Int {
         val prefs = context.getSharedPreferences(SETTINGS_FILE, Context.MODE_PRIVATE)
-        return prefs.all.keys.count { key -> isProfiled(key) && stripProfile(key) != null }
+        // Must match this profile's own prefix only. Counting every prefixed key
+        // reports the total across all four profiles and makes the confirmation
+        // read "13 settings" for a profile that holds two.
+        val prefix = profiledKey(index, "")
+        return prefs.all.keys.count { key ->
+            isProfiled(key) && key.startsWith(prefix)
+        }
     }
 }
 
