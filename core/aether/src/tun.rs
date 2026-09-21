@@ -502,7 +502,6 @@ pub async fn bridge(
                                         let _ = write_packet(&tun, &resp_packet).await;
                                         continue; // Skip sending original query to tunnel
                                     }
-                                }
                             }
                         }
                     }
