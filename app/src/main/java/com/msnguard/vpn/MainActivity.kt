@@ -304,13 +304,10 @@ class MainActivity : Activity() {
     private var dnsPage: View? = null
     private var trafficSpeedValue: TextView? = null
     private var trafficSessionValue: TextView? = null
-    private var trafficMonthValue: TextView? = null
     private var trafficTx = 0L
     private var trafficRx = 0L
     private var trafficSpeedTx = 0L
     private var trafficSpeedRx = 0L
-    private var trafficMonthTx = 0L
-    private var trafficMonthRx = 0L
     @Volatile private var cachedUserApps: List<ApplicationInfo>? = null
     private var latencyRequest = 0
     @Volatile private var pingInFlight = false
@@ -443,8 +440,6 @@ class MainActivity : Activity() {
                 trafficRx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_RX, 0)
                 trafficSpeedTx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_SPEED_TX, 0)
                 trafficSpeedRx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_SPEED_RX, 0)
-                trafficMonthTx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_MONTH_TX, 0)
-                trafficMonthRx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_MONTH_RX, 0)
                 renderTrafficMonitor()
                 renderHomeMetrics()
                 return
@@ -5826,7 +5821,6 @@ class MainActivity : Activity() {
         ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
         trafficSpeedValue = addTrafficMetric(content, Strings.t("LIVE SPEED"))
         trafficSessionValue = addTrafficMetric(content, Strings.t("THIS SESSION"))
-        trafficMonthValue = addTrafficMetric(content, Strings.t("THIS MONTH"))
         scroll.addView(content)
         page.addView(scroll, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -5870,7 +5864,6 @@ class MainActivity : Activity() {
         trafficMonitorPage?.let { animatePageClose(it) { trafficMonitorPage = null } }
         trafficSpeedValue = null
         trafficSessionValue = null
-        trafficMonthValue = null
     }
 
     /**
@@ -6318,13 +6311,12 @@ class MainActivity : Activity() {
     private fun renderTrafficMonitor() {
         trafficSpeedValue?.text = "↓ ${formatTraffic(trafficSpeedRx)}/s   ↑ ${formatTraffic(trafficSpeedTx)}/s"
         trafficSessionValue?.text = "↓ ${formatTraffic(trafficRx)}   ↑ ${formatTraffic(trafficTx)}"
-        trafficMonthValue?.text = "↓ ${formatTraffic(trafficMonthRx)}   ↑ ${formatTraffic(trafficMonthTx)}"
     }
 
-    /** One-line month total, shown as the Traffic monitor row's value. */
+    /** One-line session total, shown as the Traffic monitor row's value. */
     private fun trafficHeadline(): String =
-        if (trafficMonthRx + trafficMonthTx == 0L) Strings.t("No data yet")
-        else "\u200E" + formatTraffic(trafficMonthRx + trafficMonthTx) + " " + Strings.t("this month")
+        if (trafficRx + trafficTx == 0L) Strings.t("No data yet")
+        else "\u200E" + formatTraffic(trafficRx + trafficTx) + " " + Strings.t("this session")
 
     private fun formatTraffic(bytes: Long): String = when {
         bytes < 1_024 -> "$bytes B"
@@ -7526,11 +7518,12 @@ class MainActivity : Activity() {
     /**
      * Persist whether the next connect chains the selected transport inside WARP.
      *
-     * Deliberately does NOT touch [CoreConfig.CHAIN_OUTER_PREF]. That key holds an
-     * index the service writes after an outer transport actually works, and it used
-     * to be written from here as a protocol *string* — reading it back with getInt
-     * would have thrown ClassCastException. Which transport carries the outer leg is
-     * discovered by trying them (MASQUE, then WireGuard, then WoW), not chosen here.
+     * Deliberately does NOT touch [CoreConfig.CHAIN_OUTER_PREF]. That key holds a
+     * transport name the service writes after an outer transport actually works,
+     * and it used to be written from here as a protocol *string* — reading it back
+     * with getInt would have thrown ClassCastException. Which transport carries
+     * the outer leg is discovered by trying them (WireGuard, then MASQUE, then
+     * WoW), not chosen here.
      */
     private fun setChainArmed(armed: Boolean, protocol: Protocol = selectedProtocol) {
         preferences().edit().putBoolean(chainPrefKey(protocol), armed).apply()

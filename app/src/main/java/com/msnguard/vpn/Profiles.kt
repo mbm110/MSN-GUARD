@@ -72,7 +72,7 @@ object Profiles {
         AppLanguage.PREF,
         AppLanguage.PREF_CHOSEN,
         // Traffic and usage counters: a record of what happened, not a choice.
-        "rx_total", "tx_total", "month_start", "traffic_stats",
+        "rx_total", "tx_total",
         // Learned state — see SettingsBackup.TRANSIENT_KEYS. Named in both
         // places deliberately: this list governs key routing, that one governs
         // what a backup may carry. Overlapping on purpose, not by accident.
@@ -83,7 +83,7 @@ object Profiles {
         "psiphon_available_regions",
         "psiphon_winning_strategy", "psiphon_winning_strategy_shape",
         "psiphon_winning_strategy_chained", "psiphon_winning_strategy_chained_shape",
-        "chain_outer_index", "plain_working_transport",
+        "chain_outer_transport", "plain_working_transport",
         "tor_winning_mode", "tor_winning_mode_chained",
         "auto_scan_done",
         // UI state, not a setting: which settings sections the user left open.

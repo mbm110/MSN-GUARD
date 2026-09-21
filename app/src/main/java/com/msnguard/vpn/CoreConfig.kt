@@ -27,13 +27,17 @@ object CoreConfig {
     const val CHAIN_SOCKS_PORT = 1820
 
     /**
-     * Which outer transport last carried the chain on this device.
+     * The name of the [CHAIN_OUTER_LADDER] entry that last carried the chain's
+     * outer leg. The next connect starts there instead of walking the whole
+     * ladder again, so a SIM that needs WireGuard pays the MASQUE timeout only
+     * once, ever.
      *
-     * An index into [CHAIN_OUTER_LADDER]. The next connect starts there instead of
-     * walking the whole ladder again, so a SIM that needs WireGuard pays the MASQUE
-     * timeout only once, ever.
+     * The value is a transport NAME, not an index: the ladder has been reordered
+     * in the past (MASQUE-first to WireGuard-first), and an index would silently
+     * mean a different transport after such a reorder. A name survives it, and
+     * one that is no longer in the ladder is ignored.
      */
-    const val CHAIN_OUTER_PREF = "chain_outer_index"
+    const val CHAIN_OUTER_PREF = "chain_outer_transport"
 
     /**
      * Which transport last carried a PLAIN (unchained) tunnel far enough to move
@@ -238,7 +242,16 @@ object CoreConfig {
      * The rung that works is remembered per device, so this ordering only decides
      * the very first attempt.
      */
-    val CHAIN_OUTER_LADDER = listOf("masque", "wireguard", "gool")
+    /**
+     * The order Auto tries the WARP transports in.
+     *
+     * WireGuard first: it is one tunnel instead of a nested pair, so on a network
+     * that allows it, it is the cheapest and the fastest option a carrier can
+     * reach. MASQUE is the fallback a WireGuard block forces, and WoW is the
+     * last resort for the most filtered networks, where a single tunnel cannot
+     * establish at all.
+     */
+    val CHAIN_OUTER_LADDER = listOf("wireguard", "masque", "gool")
 
     /**
      * Which transport the user pinned for the chain's outer leg, or "auto".
