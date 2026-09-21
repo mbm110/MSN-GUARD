@@ -190,6 +190,12 @@ fn host_of(urlish: &str) -> &str {
 }
 
 /// Smart DNS Split Engine
+///
+/// Clone is cheap: every field is an Arc, so cloning the engine shares the same
+/// sockets and the same resolver lists rather than duplicating them. The clone
+/// is what lets process_query() take the engine out of the global RwLock and
+/// hold it across an .await without keeping the lock locked.
+#[derive(Clone)]
 pub struct SmartDnsSplit {
     /// In-memory cache for responses (RAM only)
     cache: Arc<RwLock<HashMap<Vec<u8>, CachedResponse>>>,
@@ -693,7 +699,9 @@ pub async fn process_query(packet: &[u8], ihl: usize) -> Option<(Vec<u8>, bool)>
     // The engine's own fields are all Arc inside, so cloning the packet and
     // moving it into a 'static future is enough — no lock needs to be held
     // across the await.
-    let engine = SMART_DNS.read().clone()?;
+    // .as_ref() first: cloning the guard itself does not compile (the guard
+    // is !Clone), so dereference to the Option and clone the engine inside.
+    let engine = SMART_DNS.read().as_ref().cloned()?;
     engine.process_query(packet, ihl).await
 }
 
@@ -704,7 +712,8 @@ pub async fn process_query(packet: &[u8], ihl: usize) -> Option<(Vec<u8>, bool)>
 /// are spoken by the core alone. Mirrors RethinkDNS's updateTun: reconfigure
 /// without tearing the tunnel down.
 pub fn set_resolvers(resolvers: Vec<DnsEndpoint>) {
-    let engine = match SMART_DNS.read().clone() {
+    // Same as above: clone the Option's contents, never the guard.
+    let engine = match SMART_DNS.read().as_ref().cloned() {
         Some(e) => e,
         None => {
             log::warn!("[smart-dns] set_resolvers called before init_smart_dns — ignored");
