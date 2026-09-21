@@ -16,7 +16,9 @@ SUB_URL = ("https://raw.githubusercontent.com/patterniha/Serverless-for-Iran/"
 
 # Only the config(s) verified working in the field (محسن, 2026-09-12).
 # fragA probes dead on his carrier; until it is fixed upstream it is excluded.
-WORKING_PROFILES = {"Serverless-v50-fragB"}
+# Upstream renamed v50 -> v51 on 2026-09-20; the workflow hard-fails on any
+# name mismatch, so this must track upstream's remarks exactly.
+WORKING_PROFILES = {"Serverless-v51-fragB"}
 
 def extract(body_text):
     src = json.loads(body_text)
@@ -42,7 +44,18 @@ def extract(body_text):
                 raise ValueError("bad mask in %r" % name)
         profiles.append({"name": name, "masks": masks})
     if not profiles:
-        raise ValueError("no profiles survived the working-profile filter")
+        # Upstream renames its configs between versions (v50 -> v51 on
+        # 2026-09-20). A hard failure here takes Smart Split offline for every
+        # installed app until someone edits this file, which can be days.
+        # Falling back to the previous good mirror keeps the fleet served
+        # while the remarks list is updated; the sync is best-effort data, not
+        # a build step.
+        names = sorted({c.get("remarks", "") for c in src if isinstance(c, dict)})
+        raise ValueError(
+            "no profiles survived the working-profile filter. "
+            "Upstream remarks are now: %s. Update WORKING_PROFILES to match."
+            % names
+        )
     return {
         "version": 1,
         "updated": datetime.datetime.now(datetime.timezone.utc)
