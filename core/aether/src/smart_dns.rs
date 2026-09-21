@@ -205,6 +205,11 @@ pub struct SmartDnsSplit {
     anti_sanction_sockets: Arc<Vec<Arc<UdpSocket>>>,
     /// Default DNS sockets (pre-connected, plain UDP)
     default_sockets: Arc<Vec<Arc<UdpSocket>>>,
+
+    /// Protected copy of DEFAULT_DNS, used ONLY to resolve a DoT/DoH server's
+    /// own hostname (resolve_host_out_of_band). Riding the tunnel for that
+    /// lookup re-enters process_query() and deadlocks.
+    bootstrap_sockets: Arc<Vec<Arc<UdpSocket>>>,
     /// DoT/DoH endpoints. When non-empty, the encrypted path is preferred.
     encrypted_resolvers: Arc<RwLock<Vec<DnsEndpoint>>>,
     /// The user's own resolvers (any transport), set from `smart_dns_servers`.
@@ -250,7 +255,32 @@ impl SmartDnsSplit {
             sock.connect(addr).await.map_err(AetherError::Io)?;
             // Public resolvers must ride the tunnel: on Iranian carriers plain 53
             // to 1.1.1.1 is hijacked and poisoned. Not protected on purpose.
+            //
+            // resolve_host_out_of_band() must NOT use these — it needs the
+            // protected variants in bootstrap_sockets instead. See the comment
+            // there for the deadlock that the unprotected set causes.
             default_sockets.push(Arc::new(sock));
+        }
+
+        // A second, PROTECTED copy of the public resolvers, used only to resolve
+        // a DoT/DoH server's own hostname (see resolve_host_out_of_band). The
+        // main default_sockets above ride the tunnel on purpose so that plain 53
+        // escapes a hijacking carrier — but a bootstrap lookup that rides the
+        // tunnel re-enters process_query() and deadlocks.
+        let mut bootstrap_sockets = Vec::new();
+        for server in DEFAULT_DNS {
+            let addr: SocketAddr = format!("{server}:{DNS_PORT}").parse()
+                .map_err(|e| AetherError::Other(format!("Invalid bootstrap DNS {server}: {e}")))?;
+            let sock = UdpSocket::bind(if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }).await
+                .map_err(AetherError::Io)?;
+            sock.connect(addr).await.map_err(AetherError::Io)?;
+            #[cfg(target_os = "android")]
+            {
+                if let Err(e) = crate::platform::protect_socket(&sock) {
+                    log::warn!("[smart-dns] protect(bootstrap {server}) failed: {e}");
+                }
+            }
+            bootstrap_sockets.push(Arc::new(sock));
         }
 
         Ok(Self {
@@ -258,6 +288,7 @@ impl SmartDnsSplit {
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_QUERIES)),
             anti_sanction_sockets: anti_sanction_sockets.into(),
             default_sockets: default_sockets.into(),
+            bootstrap_sockets: bootstrap_sockets.into(),
             encrypted_resolvers: Arc::new(RwLock::new(Vec::new())),
             user_resolvers: Arc::new(RwLock::new(Vec::new())),
         })
@@ -430,14 +461,22 @@ impl SmartDnsSplit {
         // defaults, which work everywhere.
         for qtype in [1u16, 28u16] {
             let (query, new_id) = Self::build_query(host, qtype);
+            // Both stages use PROTECTED sockets. The anti-sanction set is
+            // Iran-only; bootstrap_sockets (1.1.1.1/8.8.8.8, protected) is the
+            // fallback. Neither may ride the tunnel: a bootstrap lookup that
+            // enters the TUN is captured by process_query(), which is the very
+            // future waiting on this call — deadlock. This was the 2.0.7
+            // regression: the fallback used default_sockets (unprotected, via
+            // the tunnel), and the field log showed the "trying public
+            // defaults" line fire 15 times and then silence.
             let resp = match self
                 .parallel_query(self.anti_sanction_sockets.clone(), query.clone(), new_id, host.to_string(), qtype)
                 .await
             {
                 Ok(r) => r,
                 Err(_) => {
-                    log::info!("[smart-dns] anti-sanction resolvers failed for {host}; trying public defaults");
-                    self.parallel_query(self.default_sockets.clone(), query, new_id, host.to_string(), qtype).await?
+                    log::info!("[smart-dns] anti-sanction resolvers failed for {host}; trying protected public defaults");
+                    self.parallel_query(self.bootstrap_sockets.clone(), query, new_id, host.to_string(), qtype).await?
                 }
             };
             out.extend(Self::parse_answers(&resp, qtype));
