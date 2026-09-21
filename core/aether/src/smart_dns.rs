@@ -705,11 +705,12 @@ impl SmartDnsSplit {
                 let eol = buf[pos..].iter().position(|&b| b == b'\n')
                     .map(|p| pos + p);
                 let Some(eol) = eol else { break };
-                let line = &buf[pos..eol].trim_ascii_end();
-                let size = usize::from_str_radix(
-                    line.split(|&b| b == b';').next().unwrap_or(b"").trim_ascii_start(),
-                    16
-                ).unwrap_or(0);
+                let line = &buf[pos..eol];
+                // Trim the trailing CR and split off any chunk extension.
+                let line = line.strip_suffix(b"\r").unwrap_or(line);
+                let hex = line.split(|&b| b == b';').next().unwrap_or(b"");
+                let hex = std::str::from_utf8(hex).unwrap_or("");
+                let size = usize::from_str_radix(hex.trim_start(), 16).unwrap_or(0);
                 pos = eol + 1;
                 if size == 0 { break }
                 let end = (pos + size).min(buf.len());
