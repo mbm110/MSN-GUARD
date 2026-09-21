@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "updated": "2026-09-20T15:46Z",
+  "updated": "2026-09-21T12:27Z",
   "source": "patterniha/Serverless-for-Iran",
   "profiles": [
     {
-      "name": "Serverless-v50-fragB",
+      "name": "Serverless-v51-fragB",
       "masks": [
         {
           "type": "fragment",
