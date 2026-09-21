@@ -14,11 +14,16 @@ import json, sys, urllib.request, datetime
 SUB_URL = ("https://raw.githubusercontent.com/patterniha/Serverless-for-Iran/"
            "refs/heads/main/Subscription/Serverless-for-Iran.json")
 
-# Only the config(s) verified working in the field (محسن, 2026-09-12).
-# fragA probes dead on his carrier; until it is fixed upstream it is excluded.
-# Upstream renamed v50 -> v51 on 2026-09-20; the workflow hard-fails on any
-# name mismatch, so this must track upstream's remarks exactly.
-WORKING_PROFILES = {"Serverless-v51-fragB"}
+# The field measured fragA dead on Iranian carriers (محسن, 2026-09-12), so only
+# fragB is mirrored. Upstream renames its configs between versions (v50 -> v51
+# on 2026-09-20), so matching a full name breaks the sync on every bump and
+# takes Smart Split offline for every installed app until someone edits this
+# file. Matching the fragB suffix instead tracks the version automatically.
+WORKING_PROFILE_SUFFIX = "fragB"
+
+def _is_frag_b(name):
+    # "Serverless-v51-fragB" -> keep; "Serverless-v51-fragA" -> drop.
+    return name.endswith(WORKING_PROFILE_SUFFIX)
 
 def extract(body_text):
     src = json.loads(body_text)
@@ -29,7 +34,7 @@ def extract(body_text):
         if not isinstance(cfg, dict):
             continue
         name = cfg.get("remarks", "")
-        if name not in WORKING_PROFILES:
+        if not _is_frag_b(name):
             continue
         masks = None
         for ob in cfg.get("outbounds", []):
