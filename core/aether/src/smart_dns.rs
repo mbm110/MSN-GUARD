@@ -405,6 +405,94 @@ impl SmartDnsSplit {
         self.parallel_query(Arc::new(socks), query, expected_id, name, qtype).await
     }
 
+    /// Resolve a hostname to IP addresses using the engine's OWN protected
+    /// plain-UDP sockets — never the tunnel, never the system resolver.
+    ///
+    /// This exists because encrypted_query() must not look up its own server's
+    /// hostname through the system: on Android the app's unprotected sockets
+    /// route into the TUN, so that lookup would re-enter process_query() and
+    /// recurse forever (the log shows 201 queries seen and zero answers, and
+    /// neither the success nor the failure line — the future never completed).
+    /// Resolving via the protected sockets breaks that loop.
+    async fn resolve_host_out_of_band(&self, host: &str) -> Result<Vec<std::net::IpAddr>> {
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            return Ok(vec![ip]);
+        }
+        let mut out = Vec::new();
+        // A and AAAA, in that order; IPv4 first because the tunnel path is
+        // v4-heavy and the carrier blocks nothing here — these sockets are
+        // outside the tunnel by construction.
+        //
+        // The anti-sanction resolvers (10.202.10.x / Shecan / Electro) are only
+        // reachable from inside Iran. Abroad they time out, and resolving the
+        // DoH server's own hostname would then fail for a reason that has
+        // nothing to do with the DoH server. Fall through to the public
+        // defaults, which work everywhere.
+        for qtype in [1u16, 28u16] {
+            let (query, new_id) = Self::build_query(host, qtype);
+            let resp = match self
+                .parallel_query(self.anti_sanction_sockets.clone(), query.clone(), new_id, host.to_string(), qtype)
+                .await
+            {
+                Ok(r) => r,
+                Err(_) => {
+                    log::info!("[smart-dns] anti-sanction resolvers failed for {host}; trying public defaults");
+                    self.parallel_query(self.default_sockets.clone(), query, new_id, host.to_string(), qtype).await?
+                }
+            };
+            out.extend(Self::parse_answers(&resp, qtype));
+        }
+        if out.is_empty() {
+            return Err(AetherError::Other(format!("no address for {host}")));
+        }
+        Ok(out)
+    }
+
+    /// Pull A/AAAA records out of a DNS response.
+    fn parse_answers(resp: &[u8], qtype: u16) -> Vec<std::net::IpAddr> {
+        if resp.len() < 12 { return vec![]; }
+        let ancount = u16::from_be_bytes([resp[6], resp[7]]) as usize;
+        // Skip the question section.
+        let mut pos = 12;
+        while pos < resp.len() {
+            let len = resp[pos];
+            if len == 0 { pos += 1; break; }
+            if len & 0xC0 == 0xC0 { pos += 2; break; }
+            pos += 1 + len as usize;
+        }
+        pos += 4; // qtype + qclass
+        let mut out = Vec::new();
+        for _ in 0..ancount {
+            if pos >= resp.len() { break; }
+            // Name: possibly a pointer back into the question.
+            if resp[pos] & 0xC0 == 0xC0 {
+                pos += 2;
+            } else {
+                while pos < resp.len() && resp[pos] != 0 { pos += 1 + resp[pos] as usize; }
+                pos += 1;
+            }
+            if pos + 10 > resp.len() { break; }
+            let rtype = u16::from_be_bytes([resp[pos], resp[pos + 1]]);
+            let rdlen = u16::from_be_bytes([resp[pos + 8], resp[pos + 9]]) as usize;
+            pos += 10;
+            if pos + rdlen > resp.len() { break; }
+            if rtype == qtype {
+                match (rtype, rdlen) {
+                    (1, 4) => out.push(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                        resp[pos], resp[pos + 1], resp[pos + 2], resp[pos + 3]))),
+                    (28, 16) => {
+                        let mut s = [0u8; 16];
+                        s.copy_from_slice(&resp[pos..pos + 16]);
+                        out.push(std::net::IpAddr::V6(std::net::Ipv6Addr::from(s)));
+                    }
+                    _ => {}
+                }
+            }
+            pos += rdlen;
+        }
+        out
+    }
+
     /// Resolve over DoT/DoH. Preferred over plain UDP when configured — it is the
     /// only path that survives a network which hijacks port 53.
     async fn encrypted_query(&self, domain: &str, qtype: u16) -> Result<Vec<u8>> {
@@ -452,8 +540,13 @@ impl SmartDnsSplit {
     async fn dot_query(&self, ep: &DnsEndpoint, query: &[u8]) -> Result<Vec<u8>> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let port = ep.explicit_port().unwrap_or(853);
-        let addr = format!("{}:{port}", ep.address);
-        let mut stream = tokio::net::TcpStream::connect(addr)
+        // Resolve out of band (see doh_query): tokio's TcpStream::connect would
+        // resolve the hostname via the system resolver, which on Android rides
+        // the TUN and re-enters process_query() for this same hostname.
+        let addrs = self.resolve_host_out_of_band(&ep.address).await?;
+        let addr = addrs.into_iter().next()
+            .ok_or_else(|| AetherError::Other(format!("dot: no address for {}", ep.address)))?;
+        let mut stream = tokio::net::TcpStream::connect((addr, port))
             .await
             .map_err(AetherError::Io)?;
         // Two-byte length prefix, per RFC 1035 §4.2.2.
@@ -477,8 +570,25 @@ impl SmartDnsSplit {
         } else {
             format!("https://{}/dns-query", ep.address)
         };
+        let parsed = reqwest::Url::parse(&url)
+            .map_err(|e| AetherError::Other(format!("doh url {url}: {e}")))?;
+        let host = parsed.host_str()
+            .ok_or_else(|| AetherError::Other(format!("doh url {url} has no host")))?;
+
+        // Resolve the DoH server's own hostname OUT OF BAND. reqwest would
+        // otherwise use the system resolver, which on Android routes into the
+        // TUN and re-enters process_query() for this very hostname — the
+        // recursion is why a configured DoH server produced zero answers in the
+        // field. ClientBuilder::resolve() overrides only the address lookup; it
+        // leaves the URL, the SNI and the Host header on the real hostname, so
+        // Cloudflare Workers still route correctly.
+        let addrs = self.resolve_host_out_of_band(host).await?;
+        let ip = addrs.into_iter().next()
+            .ok_or_else(|| AetherError::Other(format!("doh: no address for {host}")))?;
+
         let client = reqwest::Client::builder()
             .timeout(QUERY_TIMEOUT)
+            .resolve(host, ip)
             .build()
             .map_err(|e| AetherError::Other(format!("doh client: {e}")))?;
         let resp = client
