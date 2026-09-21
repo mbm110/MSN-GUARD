@@ -585,10 +585,15 @@ impl SmartDnsSplit {
         let addrs = self.resolve_host_out_of_band(host).await?;
         let ip = addrs.into_iter().next()
             .ok_or_else(|| AetherError::Other(format!("doh: no address for {host}")))?;
+        // ClientBuilder::resolve() takes a SocketAddr, not an IpAddr. The port
+        // is the one from the URL (443 unless the user overrode it).
+        let port = parsed.port_or_known_default()
+            .ok_or_else(|| AetherError::Other(format!("doh url {url} has no port")))?;
+        let sock_addr = std::net::SocketAddr::new(ip, port);
 
         let client = reqwest::Client::builder()
             .timeout(QUERY_TIMEOUT)
-            .resolve(host, ip)
+            .resolve(host, sock_addr)
             .build()
             .map_err(|e| AetherError::Other(format!("doh client: {e}")))?;
         let resp = client
