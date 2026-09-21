@@ -409,18 +409,11 @@ pub async fn bridge(
                     clamped_syns += 1;
                 }
                 
-                // SMART DNS SPLIT: only Gemini-domain queries are intercepted.
+                // SMART DNS SPLIT: intercept DNS so a configured DoT/DoH
+                // resolver can answer it.
                 // Every other query goes straight out the tunnel's normal path —
                 // the previous build broke every lookup on the device.
                 //
-                // The guard is NOT `if smart_dns`. That flag means AI Mode, and
-                // AI Mode is what makes the engine decide which queries to answer
-                // itself. The user's DoT/DoH resolvers are a separate feature that
-                // lives behind the same engine, and gating them on AI Mode meant a
-                // user who filled the DoH field and left AI Mode off had the list
-                // stored in the engine but never consulted: `smart_dns()` resolves,
-                // but this whole block — the only caller of process_query — never
-                // ran, and every query went out as plain UDP through the tunnel.
                 if crate::smart_dns::has_encrypted() {
                     // A DNS query can arrive as IPv4 or IPv6. Android gets both
                     // 1.1.1.1 and 2606:4700:4700::1111, and modern devices prefer

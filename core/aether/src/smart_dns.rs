@@ -9,16 +9,8 @@ use tokio::time::timeout;
 
 use crate::error::{AetherError, Result};
 
-/// Gemini domains that must route through anti-sanction DNS
-const GEMINI_DOMAINS: &[&str] = &[
-    "gemini.google.com",
-    "generativelanguage.googleapis.com",
-    "alkalinetransmit-pa.googleapis.com",
-    "bard.google.com",
-    "proactivity-pa.googleapis.com",
-];
-
-/// Anti-sanction DNS servers (Plain UDP, port 53)
+/// Anti-sanction resolvers reachable from inside Iran, used to resolve a
+/// configured DoT/DoH server's own hostname outside the tunnel.
 const ANTI_SANCTION_DNS: &[&str] = &[
     "10.202.10.202",   // 403.online
     "10.202.10.102",   // 403.online
@@ -28,7 +20,8 @@ const ANTI_SANCTION_DNS: &[&str] = &[
     "185.51.200.2",    // Shecan
 ];
 
-/// Default fast DNS (Cloudflare/Google) for non-Gemini traffic
+/// Default fast DNS (Cloudflare/Google), used as the fallback and for the
+/// DoT/DoH server's own hostname lookup (bootstrap_sockets).
 const DEFAULT_DNS: &[&str] = &[
     "1.1.1.1",
     "1.0.0.1",
@@ -213,7 +206,7 @@ pub struct SmartDnsSplit {
     /// DoT/DoH endpoints. When non-empty, the encrypted path is preferred.
     encrypted_resolvers: Arc<RwLock<Vec<DnsEndpoint>>>,
     /// The user's own resolvers (any transport), set from `smart_dns_servers`.
-    /// The engine prefers these for Gemini lookups — the whole point of the
+    /// The engine prefers these — the whole point of the
     /// Custom DNS setting.
     user_resolvers: Arc<RwLock<Vec<DnsEndpoint>>>,
 }
@@ -235,7 +228,7 @@ impl SmartDnsSplit {
             // 78.157.42.x). They are only routable from the carrier network, so
             // their queries must ride OUTSIDE the tunnel. Sending them through
             // the VPN exit — which is what removing protect() did in 8b4e76a —
-            // makes them unroutable and every Gemini lookup fails. Public
+            // makes them unroutable and the bootstrap lookup fails. Public
             // resolvers below take the tunnel instead, because plain 53 is
             // hijacked or poisoned on the carrier.
             #[cfg(target_os = "android")]
@@ -304,12 +297,6 @@ impl SmartDnsSplit {
 
     pub fn has_encrypted(&self) -> bool {
         !self.encrypted_resolvers.read().is_empty()
-    }
-
-    /// Check if a domain is a Gemini domain (exact or subdomain match)
-    fn is_gemini_domain(name: &str) -> bool {
-        let name = name.to_lowercase();
-        GEMINI_DOMAINS.iter().any(|d| name == *d || name.ends_with(&format!(".{d}")))
     }
 
     /// Build a DNS query packet
@@ -576,18 +563,44 @@ impl SmartDnsSplit {
         Err(AetherError::Other(format!("all encrypted resolvers failed: {last_err}")))
     }
 
+    /// Open a TCP connection that is PROTECTED (kept outside the tunnel) from
+    /// the very first packet. This is the only correct way to reach a DoT/DoH
+    /// server from inside the split engine: the engine intercepts the phone's
+    /// port-53 traffic, so a request that rides the tunnel is captured by
+    /// process_query() — which is the very future waiting on this request.
+    /// Deadlock. The same pattern as masque_h2::connect_tcp.
+    async fn connect_tcp_protected(addr: std::net::SocketAddr) -> Result<tokio::net::TcpStream> {
+        let socket = if addr.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()
+        } else {
+            tokio::net::TcpSocket::new_v6()
+        }
+        .map_err(AetherError::Io)?;
+        crate::platform::protect_socket(&socket).map_err(AetherError::Io)?;
+        // Bind unspecified so Android does not pick the VPN address as source.
+        let bind = if addr.is_ipv4() {
+            "0.0.0.0:0".parse().unwrap()
+        } else {
+            "[::]:0".parse().unwrap()
+        };
+        socket.bind(bind).map_err(AetherError::Io)?;
+        socket.connect(addr).await.map_err(AetherError::Io)
+    }
+
     async fn dot_query(&self, ep: &DnsEndpoint, query: &[u8]) -> Result<Vec<u8>> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let port = ep.explicit_port().unwrap_or(853);
-        // Resolve out of band (see doh_query): tokio's TcpStream::connect would
-        // resolve the hostname via the system resolver, which on Android rides
-        // the TUN and re-enters process_query() for this same hostname.
+        // Resolve the DoT server's own hostname outside the tunnel, then
+        // connect to the resulting address over a protected socket.
         let addrs = self.resolve_host_out_of_band(&ep.address).await?;
         let addr = addrs.into_iter().next()
             .ok_or_else(|| AetherError::Other(format!("dot: no address for {}", ep.address)))?;
-        let mut stream = tokio::net::TcpStream::connect((addr, port))
+        let sock_addr = std::net::SocketAddr::new(addr, port);
+
+        let plain = Self::connect_tcp_protected(sock_addr).await?;
+        let mut stream = tokio_boring::connect(Self::tls_connector()?, &ep.address, plain)
             .await
-            .map_err(AetherError::Io)?;
+            .map_err(|e| AetherError::Tls(format!("dot handshake {}: {e}", ep.address)))?;
         // Two-byte length prefix, per RFC 1035 §4.2.2.
         let len = u16::try_from(query.len())
             .map_err(|_| AetherError::Other("DoT query too long".to_string()))?;
@@ -601,9 +614,31 @@ impl SmartDnsSplit {
         Ok(buf)
     }
 
+    /// A permissive TLS config for a public DoT/DoH server: system roots, no
+    /// pinning. The encrypted DNS path must not inherit the tunnel's own
+    /// fingerprint settings — those exist to imitate a browser against a
+    /// censor, and a resolver does not need them.
+    fn tls_connector() -> Result<boring::ssl::ConnectConfiguration> {
+        let mut builder = boring::ssl::SslConnector::builder(boring::ssl::SslMethod::tls())
+            .map_err(|e| AetherError::Tls(format!("tls builder: {e}")))?;
+        builder.set_min_proto_version(Some(boring::ssl::SslVersion::TLS1_2))
+            .map_err(|e| AetherError::Tls(format!("tls min: {e}")))?;
+        builder.set_max_proto_version(Some(boring::ssl::SslVersion::TLS1_3))
+            .map_err(|e| AetherError::Tls(format!("tls max: {e}")))?;
+        builder.set_grease_enabled(true);
+        builder.build()
+            .configure()
+            .map_err(|e| AetherError::Tls(format!("tls configure: {e}")))
+    }
+
     async fn doh_query(&self, ep: &DnsEndpoint, query: &[u8]) -> Result<Vec<u8>> {
-        // DoH as an HTTP POST with application/dns-message. reqwest already
-        // speaks rustls, so no second TLS stack enters the binary.
+        // DoH over a PROTECTED connection. The previous implementation used
+        // reqwest, which opens its own socket — unprotected, so the POST rode
+        // the tunnel, was captured by process_query(), and deadlocked the very
+        // future waiting on its own answer. Field logs (2.0.6/2.0.7) showed the
+        // bootstrap lookup cycling every 6s and then silence: no answer, no
+        // error. This hand-rolled HTTP/1.1 POST over a protected TLS socket
+        // removes reqwest from the DNS path entirely.
         let url = if ep.address.starts_with("https://") {
             ep.address.clone()
         } else {
@@ -613,43 +648,97 @@ impl SmartDnsSplit {
             .map_err(|e| AetherError::Other(format!("doh url {url}: {e}")))?;
         let host = parsed.host_str()
             .ok_or_else(|| AetherError::Other(format!("doh url {url} has no host")))?;
+        let port = parsed.port_or_known_default()
+            .ok_or_else(|| AetherError::Other(format!("doh url {url} has no port")))?;
+        let path = parsed.path();
+        let path = if path.is_empty() { "/dns-query" } else { path };
 
-        // Resolve the DoH server's own hostname OUT OF BAND. reqwest would
-        // otherwise use the system resolver, which on Android routes into the
-        // TUN and re-enters process_query() for this very hostname — the
-        // recursion is why a configured DoH server produced zero answers in the
-        // field. ClientBuilder::resolve() overrides only the address lookup; it
-        // leaves the URL, the SNI and the Host header on the real hostname, so
-        // Cloudflare Workers still route correctly.
         let addrs = self.resolve_host_out_of_band(host).await?;
         let ip = addrs.into_iter().next()
             .ok_or_else(|| AetherError::Other(format!("doh: no address for {host}")))?;
-        // ClientBuilder::resolve() takes a SocketAddr, not an IpAddr. The port
-        // is the one from the URL (443 unless the user overrode it).
-        let port = parsed.port_or_known_default()
-            .ok_or_else(|| AetherError::Other(format!("doh url {url} has no port")))?;
         let sock_addr = std::net::SocketAddr::new(ip, port);
 
-        let client = reqwest::Client::builder()
-            .timeout(QUERY_TIMEOUT)
-            .resolve(host, sock_addr)
-            .build()
-            .map_err(|e| AetherError::Other(format!("doh client: {e}")))?;
-        let resp = client
-            .post(&url)
-            .header("content-type", "application/dns-message")
-            .body(query.to_vec())
-            .send()
+        let plain = Self::connect_tcp_protected(sock_addr).await?;
+        let mut tls = tokio_boring::connect(Self::tls_connector()?, host, plain)
             .await
-            .map_err(|e| AetherError::Other(format!("doh send: {e}")))?;
-        resp.bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|e| AetherError::Other(format!("doh body: {e}")))
+            .map_err(|e| AetherError::Tls(format!("doh handshake {host}: {e}")))?;
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let req = format!(
+            "POST {path} HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Content-Type: application/dns-message\r\n\
+             Content-Length: {len}\r\n\
+             Connection: close\r\n\
+             \r\n",
+            len = query.len()
+        );
+        tls.write_all(req.as_bytes()).await.map_err(AetherError::Io)?;
+        tls.write_all(query).await.map_err(AetherError::Io)?;
+        tls.flush().await.map_err(AetherError::Io)?;
+
+        // Read the full response: headers, then body.
+        let mut buf = Vec::new();
+        tls.read_to_end(&mut buf).await.map_err(AetherError::Io)?;
+        // Locate the blank line separating headers from body.
+        let mut split = None;
+        for i in 0..buf.len().saturating_sub(3) {
+            if &buf[i..i + 4] == b"\r\n\r\n" {
+                split = Some(i + 4);
+                break;
+            }
+        }
+        let body_start = split.ok_or_else(|| AetherError::Other("doh: no body separator".into()))?;
+
+        // Workers answers DoH with `Transfer-Encoding: chunked`. Leaving the
+        // chunk framing in the body corrupts the DNS message, so decode it.
+        let headers = &buf[..body_start - 4];
+        let is_chunked = headers
+            .windows(26)
+            .any(|w| w.eq_ignore_ascii_case(b"transfer-encoding: chunked"));
+
+        let body = if is_chunked {
+            let mut out = Vec::new();
+            let mut pos = body_start;
+            while pos < buf.len() {
+                // Read the hex size line up to CRLF.
+                let eol = buf[pos..].iter().position(|&b| b == b'\n')
+                    .map(|p| pos + p);
+                let Some(eol) = eol else { break };
+                let line = &buf[pos..eol].trim_ascii_end();
+                let size = usize::from_str_radix(
+                    line.split(|&b| b == b';').next().unwrap_or(b"").trim_ascii_start(),
+                    16
+                ).unwrap_or(0);
+                pos = eol + 1;
+                if size == 0 { break }
+                let end = (pos + size).min(buf.len());
+                out.extend_from_slice(&buf[pos..end]);
+                pos = end;
+                // Skip the trailing CRLF after the chunk.
+                if pos + 2 <= buf.len() && &buf[pos..pos+2] == b"\r\n" { pos += 2 }
+            }
+            out
+        } else {
+            // Content-Length is exact; honour it when present, else take the
+            // remainder (connection-close body).
+            let content_len = headers
+                .windows(16)
+                .find(|w| w.eq_ignore_ascii_case(b"content-length:"))
+                .and_then(|w| {
+                    let v = w[16..].split(|&b| b == b'\r').next().unwrap_or(b"");
+                    std::str::from_utf8(v).ok().and_then(|s| s.trim().parse::<usize>().ok())
+                });
+            match content_len {
+                Some(n) if body_start + n <= buf.len() => &buf[body_start..body_start + n],
+                _ => &buf[body_start..],
+            }.to_vec()
+        };
+        Ok(body)
     }
 
     /// Process a DNS query from the TUN.
-    /// Returns (response_data, is_gemini); None lets the query take the tunnel's
+    /// Returns response_data; None lets the query take the tunnel's
     /// normal path untouched.
     pub async fn process_query(&self, packet: &[u8], ihl: usize) -> Option<(Vec<u8>, bool)> {
         if packet.len() < ihl + 8 { return None; }
@@ -676,7 +765,6 @@ impl SmartDnsSplit {
         let qtype = u16::from_be_bytes([payload[pos], payload[pos + 1]]);
 
         let domain = labels.join(".");
-        let is_gemini = Self::is_gemini_domain(&domain);
         let has_encrypted = self.has_encrypted();
 
         // Diagnostic: without this the engine looks dead when it is merely
@@ -684,19 +772,15 @@ impl SmartDnsSplit {
         // per-query lines, which was indistinguishable from "queries never
         // arrive at the TUN" and "queries arrive but the parser rejects them".
         log::info!(
-            "[smart-dns] qtype={qtype} name={domain} gemini={is_gemini} encrypted={has_encrypted} len={}",
+            "[smart-dns] qtype={qtype} name={domain} encrypted={has_encrypted} len={}",
             payload.len()
         );
 
-        // v2.0.5: the old AI Mode gate is gone, but the engine still must not
-        // answer a query it has no reason to. tun::bridge only CALLS
-        // process_query when has_encrypted() is true, so reaching here means the
-        // user configured DoT/DoH. The two branches below preserve that: the
-        // encrypted path is preferred, and if it fails the plain fallbacks only
-        // run when the engine was actually answering this query for the user.
-        // A query that is neither Gemini nor has an encrypted resolver behind it
-        // returns None and takes the tunnel's own normal path.
-        if !has_encrypted && !is_gemini {
+        // The engine must not answer a query it has no reason to. tun::bridge
+        // only CALLS process_query when has_encrypted() is true, so reaching
+        // here means the user configured DoT/DoH. Without an encrypted resolver
+        // the query takes the tunnel's own normal path.
+        if !has_encrypted {
             return None;
         }
 
@@ -861,8 +945,8 @@ pub async fn process_query(packet: &[u8], ihl: usize) -> Option<(Vec<u8>, bool)>
 
 /// Replace the engine's resolver list at runtime. Called after
 /// init_smart_dns() once the user's `smart_dns_servers` string has been parsed.
-/// Plain-UDP entries are kept for the engine's own resolution path (Gemini
-/// lookups) AND are already handed to Android by applyDns(); encrypted entries
+/// Plain-UDP entries are kept for the engine's own resolution path (the
+/// bootstrap lookup) AND are already handed to Android by applyDns(); encrypted entries
 /// are spoken by the core alone. Mirrors RethinkDNS's updateTun: reconfigure
 /// without tearing the tunnel down.
 pub fn set_resolvers(resolvers: Vec<DnsEndpoint>) {
