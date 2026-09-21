@@ -1991,7 +1991,7 @@ async fn run_masque_tunnel(
         // smart_dns — left the engine absent, and the only caller of
         // process_query then never ran, so the DoT/DoH list was dead for
         // everyone who had AI Mode off, which is nearly everyone.
-        if let Err(e) = crate::smart_dns::init_smart_dns(options.smart_dns).await {
+        if let Err(e) = crate::smart_dns::init_smart_dns().await {
             log::warn!("[tun] Smart DNS init failed: {}", e);
         }
         // Pushed after the init, and from the DoT/DoH fields rather than from
@@ -2633,7 +2633,7 @@ async fn run_wireguard_tunnel(
         // set_resolvers() writes into SMART_DNS, and pushing into an engine that
         // was never stood up warns and returns while this log line still claims
         // success.
-        if let Err(e) = crate::smart_dns::init_smart_dns(options.smart_dns).await {
+        if let Err(e) = crate::smart_dns::init_smart_dns().await {
             log::warn!("[tun] Smart DNS init failed: {}", e);
         }
         push_encrypted_resolvers(options);
@@ -3017,7 +3017,7 @@ async fn run_warp_in_warp(
     // smart_dns()==None and silently forwards every query through the tunnel.
     // The init itself is unconditional for the same reason as everywhere else:
     // process_query only acts on Gemini domains with AI Mode on.
-    if let Err(e) = crate::smart_dns::init_smart_dns(options.smart_dns).await {
+    if let Err(e) = crate::smart_dns::init_smart_dns().await {
         log::warn!("[tun] Smart DNS init failed: {}", e);
     }
     // Same ordering fix as run_masque_tunnel: the push has to come after the

@@ -205,19 +205,11 @@ pub struct SmartDnsSplit {
     /// The engine prefers these for Gemini lookups — the whole point of the
     /// Custom DNS setting.
     user_resolvers: Arc<RwLock<Vec<DnsEndpoint>>>,
-    /// Whether AI Mode (the Gemini-only Smart DNS Split) is active for this
-    /// engine. process_query() consults this instead of the StartOptions that
-    /// started the tunnel.
-    ai_mode: bool,
 }
 
 impl SmartDnsSplit {
     /// Create a new Smart DNS Split engine.
-    ///
-    /// `ai_mode` is stored, not re-derived: process_query() reads it to decide
-    /// whether non-Gemini queries are intercepted, and the engine outlives the
-    /// StartOptions that created it.
-    pub async fn new(ai_mode: bool) -> Result<Self> {
+    pub async fn new() -> Result<Self> {
         let mut anti_sanction_sockets = Vec::new();
         let mut default_sockets = Vec::new();
 
@@ -262,7 +254,6 @@ impl SmartDnsSplit {
             default_sockets: default_sockets.into(),
             encrypted_resolvers: Arc::new(RwLock::new(Vec::new())),
             user_resolvers: Arc::new(RwLock::new(Vec::new())),
-            ai_mode,
         })
     }
 
@@ -526,26 +517,26 @@ impl SmartDnsSplit {
 
         let domain = labels.join(".");
         let is_gemini = Self::is_gemini_domain(&domain);
+        let has_encrypted = self.has_encrypted();
 
         // Diagnostic: without this the engine looks dead when it is merely
         // receiving nothing. The field log showed init + ready but zero
         // per-query lines, which was indistinguishable from "queries never
         // arrive at the TUN" and "queries arrive but the parser rejects them".
         log::info!(
-            "[smart-dns] qtype={qtype} name={domain} gemini={is_gemini} len={}",
+            "[smart-dns] qtype={qtype} name={domain} gemini={is_gemini} encrypted={has_encrypted} len={}",
             payload.len()
         );
 
-        // Only Gemini queries are intercepted when AI Mode is off. Everything
-        // else must flow through the tunnel's normal path — intercepting every
-        // query was the previous build's fatal flaw and broke all DNS on the
-        // device.
-        //
-        // The guard is a field on the engine, not a re-read of the option, so a
-        // user who turns AI Mode on mid-session does not have to reconnect for
-        // the split to start applying. Constructed from the option by
-        // init_smart_dns().
-        if !self.ai_mode && !is_gemini {
+        // v2.0.5: the old AI Mode gate is gone, but the engine still must not
+        // answer a query it has no reason to. tun::bridge only CALLS
+        // process_query when has_encrypted() is true, so reaching here means the
+        // user configured DoT/DoH. The two branches below preserve that: the
+        // encrypted path is preferred, and if it fails the plain fallbacks only
+        // run when the engine was actually answering this query for the user.
+        // A query that is neither Gemini nor has an encrypted resolver behind it
+        // returns None and takes the tunnel's own normal path.
+        if !has_encrypted && !is_gemini {
             return None;
         }
 
@@ -669,18 +660,18 @@ impl SmartDnsSplit {
 ///
 /// A RwLock, not a OnceCell: a OnceCell keeps the FIRST engine ever built, so a
 /// user who connects MASQUE and then WireGuard would be stuck with the first
-/// session's `ai_mode` and its protect()-bound UDP sockets. The Option inside
-/// keeps the "not yet initialised" state the OnceCell expressed, and writing a
-/// new engine drops the old one, which is what every transport switch needs.
+/// session's resolvers and its protect()-bound sockets. The Option inside keeps
+/// the "not yet initialised" state the OnceCell expressed, and writing a new
+/// engine drops the old one, which is what every transport switch needs.
 static SMART_DNS: parking_lot::RwLock<Option<SmartDnsSplit>> = parking_lot::RwLock::new(None);
 
 /// Initialize the global Smart DNS engine
-pub async fn init_smart_dns(ai_mode: bool) -> Result<()> {
+pub async fn init_smart_dns() -> Result<()> {
     log::info!(
-        "[smart-dns] standing up Smart DNS Split (ai_mode={ai_mode}, Gemini-only when off, {} anti-sanction UDP + DoT/DoH)",
+        "[smart-dns] standing up Smart DNS Split ({} anti-sanction UDP + DoT/DoH)",
         ANTI_SANCTION_DNS.len()
     );
-    let engine = SmartDnsSplit::new(ai_mode).await?;
+    let engine = SmartDnsSplit::new().await?;
     *SMART_DNS.write() = Some(engine);
     log::info!("[smart-dns] engine ready: plain-UDP sockets up, DoT/DoH on demand");
     Ok(())
