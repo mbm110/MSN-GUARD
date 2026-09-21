@@ -4974,6 +4974,45 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     /**
+     * Clears everything that describes the *current session's* traffic.
+     *
+     * Called at the start of every tunnel. The core's counters are locals inside
+     * `tun::bridge`, so each new tunnel restarts them at zero; every mirror of
+     * them here has to restart too.
+     *
+     * This is what the connect/disconnect/connect failure came down to. The
+     * activity's verification gate takes `rxAtStart = trafficRx` when the
+     * transport reports CONNECTED and then waits for `trafficRx` to reach
+     * `rxAtStart + VERIFY_MIN_RX_BYTES`. `trafficRx` is fed straight from
+     * `currentRx` here, and neither was ever reset, so on the second connect of
+     * a process the gate demanded that a counter starting from zero exceed the
+     * *previous* session's final total. It never could, so verification always
+     * timed out after 18s and the UI reported "handshake succeeded but nothing
+     * passes" for a tunnel that was working. Force-stopping the app made the
+     * first connect succeed again because fresh fields start at zero — which is
+     * exactly the workaround that was being used.
+     */
+    private fun resetSessionTraffic() {
+        currentTx = 0
+        currentRx = 0
+        prevTx = 0
+        prevRx = 0
+        currentSpeedTx = 0
+        currentSpeedRx = 0
+        accountedTx = 0
+        accountedRx = 0
+        // Zeroed, not set to `now`: these are throttle stamps, and a fresh
+        // session should publish its first sample immediately rather than wait
+        // out a throttle window inherited from the session that just ended.
+        lastTrafficSampleMs = 0
+        prevSpeedSampleMs = 0
+        // The transport-recorded latch is per-session too, so a session that
+        // never moves enough bytes to record it cannot stop the next one from
+        // recording its own.
+        plainTransportRecorded = false
+    }
+
+    /**
      * Broadcasts the core-measured exit address to the UI.
      *
      * Address only. The country is a geolocation question, which the UI answers
