@@ -203,13 +203,21 @@ pub struct SmartDnsSplit {
     encrypted_resolvers: Arc<RwLock<Vec<DnsEndpoint>>>,
     /// The user's own resolvers (any transport), set from `smart_dns_servers`.
     /// The engine prefers these for Gemini lookups — the whole point of the
-    /// Custom DNS setting. Empty until set_resolvers() runs.
+    /// Custom DNS setting.
     user_resolvers: Arc<RwLock<Vec<DnsEndpoint>>>,
+    /// Whether AI Mode (the Gemini-only Smart DNS Split) is active for this
+    /// engine. process_query() consults this instead of the StartOptions that
+    /// started the tunnel.
+    ai_mode: bool,
 }
 
 impl SmartDnsSplit {
-    /// Create a new Smart DNS Split engine
-    pub async fn new() -> Result<Self> {
+    /// Create a new Smart DNS Split engine.
+    ///
+    /// `ai_mode` is stored, not re-derived: process_query() reads it to decide
+    /// whether non-Gemini queries are intercepted, and the engine outlives the
+    /// StartOptions that created it.
+    pub async fn new(ai_mode: bool) -> Result<Self> {
         let mut anti_sanction_sockets = Vec::new();
         let mut default_sockets = Vec::new();
 
@@ -254,6 +262,7 @@ impl SmartDnsSplit {
             default_sockets: default_sockets.into(),
             encrypted_resolvers: Arc::new(RwLock::new(Vec::new())),
             user_resolvers: Arc::new(RwLock::new(Vec::new())),
+            ai_mode,
         })
     }
 
@@ -527,10 +536,16 @@ impl SmartDnsSplit {
             payload.len()
         );
 
-        // Only Gemini queries are intercepted. Everything else must flow through
-        // the tunnel's normal path — intercepting every query was the previous
-        // build's fatal flaw and broke all DNS on the device.
-        if !is_gemini {
+        // Only Gemini queries are intercepted when AI Mode is off. Everything
+        // else must flow through the tunnel's normal path — intercepting every
+        // query was the previous build's fatal flaw and broke all DNS on the
+        // device.
+        //
+        // The guard is a field on the engine, not a re-read of the option, so a
+        // user who turns AI Mode on mid-session does not have to reconnect for
+        // the split to start applying. Constructed from the option by
+        // init_smart_dns().
+        if !self.ai_mode && !is_gemini {
             return None;
         }
 
@@ -650,21 +665,45 @@ impl SmartDnsSplit {
     }
 }
 
-/// Global instance holder
-static SMART_DNS: once_cell::sync::OnceCell<SmartDnsSplit> = once_cell::sync::OnceCell::new();
+/// Global instance holder.
+///
+/// A RwLock, not a OnceCell: a OnceCell keeps the FIRST engine ever built, so a
+/// user who connects MASQUE and then WireGuard would be stuck with the first
+/// session's `ai_mode` and its protect()-bound UDP sockets. The Option inside
+/// keeps the "not yet initialised" state the OnceCell expressed, and writing a
+/// new engine drops the old one, which is what every transport switch needs.
+static SMART_DNS: parking_lot::RwLock<Option<SmartDnsSplit>> = parking_lot::RwLock::new(None);
 
 /// Initialize the global Smart DNS engine
-pub async fn init_smart_dns() -> Result<()> {
-    log::info!("[smart-dns] AI Mode ON — standing up Smart DNS Split (Gemini-only, {} anti-sanction UDP + DoT/DoH)", ANTI_SANCTION_DNS.len());
-    let engine = SmartDnsSplit::new().await?;
-    SMART_DNS.set(engine).map_err(|_| AetherError::Other("Smart DNS already initialized".into()))?;
+pub async fn init_smart_dns(ai_mode: bool) -> Result<()> {
+    log::info!(
+        "[smart-dns] standing up Smart DNS Split (ai_mode={ai_mode}, Gemini-only when off, {} anti-sanction UDP + DoT/DoH)",
+        ANTI_SANCTION_DNS.len()
+    );
+    let engine = SmartDnsSplit::new(ai_mode).await?;
+    *SMART_DNS.write() = Some(engine);
     log::info!("[smart-dns] engine ready: plain-UDP sockets up, DoT/DoH on demand");
     Ok(())
 }
 
-/// Get the global Smart DNS engine
-pub fn smart_dns() -> Option<&'static SmartDnsSplit> {
-    SMART_DNS.get()
+/// Run [f] with the current engine, if there is one. Holds the read lock for
+/// the call, so the engine cannot be replaced underneath [f].
+fn with_engine<R>(f: impl FnOnce(&SmartDnsSplit) -> R) -> Option<R> {
+    SMART_DNS.read().as_ref().map(f)
+}
+
+/// Get whether the engine is up and has encrypted resolvers configured.
+pub fn has_encrypted() -> bool {
+    with_engine(|e| e.has_encrypted()).unwrap_or(false)
+}
+
+/// Hand a DNS packet to the engine. Returns the engine's answer, if it has one.
+pub async fn process_query(packet: &[u8], ihl: usize) -> Option<(Vec<u8>, bool)> {
+    // The engine's own fields are all Arc inside, so cloning the packet and
+    // moving it into a 'static future is enough — no lock needs to be held
+    // across the await.
+    let engine = SMART_DNS.read().clone()?;
+    engine.process_query(packet, ihl).await
 }
 
 /// Replace the engine's resolver list at runtime. Called after
@@ -674,13 +713,31 @@ pub fn smart_dns() -> Option<&'static SmartDnsSplit> {
 /// are spoken by the core alone. Mirrors RethinkDNS's updateTun: reconfigure
 /// without tearing the tunnel down.
 pub fn set_resolvers(resolvers: Vec<DnsEndpoint>) {
-    if let Some(engine) = SMART_DNS.get() {
-        let count = resolvers.len();
-        let mut guard = engine.user_resolvers.write();
-        guard.clear();
-        guard.extend(resolvers);
-        log::info!("[smart-dns] resolvers updated: {count} endpoint(s) from user list");
-    } else {
-        log::warn!("[smart-dns] set_resolvers called before init_smart_dns — ignored");
+    let engine = match SMART_DNS.read().clone() {
+        Some(e) => e,
+        None => {
+            log::warn!("[smart-dns] set_resolvers called before init_smart_dns — ignored");
+            return;
+        }
+    };
+    // code paths. encrypted_resolvers is what encrypted_query() reads and
+    // what has_encrypted() gates on — the "prefer DoT/DoH when configured"
+    // branch above. Storing everything in user_resolvers alone leaves that
+    // gate permanently false, so a user who filled the DoH field would
+    // still be answered by plain UDP, silently.
+    let encrypted: Vec<_> = resolvers
+        .iter()
+        .filter(|e| e.transport != DnsTransport::Plain)
+        .cloned()
+        .collect();
+    {
+        let mut enc = engine.encrypted_resolvers.write();
+        enc.clear();
+        enc.extend(encrypted);
     }
+    let count = resolvers.len();
+    let mut guard = engine.user_resolvers.write();
+    guard.clear();
+    guard.extend(resolvers);
+    log::info!("[smart-dns] resolvers updated: {count} endpoint(s) from user list");
 }

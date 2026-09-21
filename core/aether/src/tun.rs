@@ -412,7 +412,16 @@ pub async fn bridge(
                 // SMART DNS SPLIT: only Gemini-domain queries are intercepted.
                 // Every other query goes straight out the tunnel's normal path —
                 // the previous build broke every lookup on the device.
-                if smart_dns {
+                //
+                // The guard is NOT `if smart_dns`. That flag means AI Mode, and
+                // AI Mode is what makes the engine decide which queries to answer
+                // itself. The user's DoT/DoH resolvers are a separate feature that
+                // lives behind the same engine, and gating them on AI Mode meant a
+                // user who filled the DoH field and left AI Mode off had the list
+                // stored in the engine but never consulted: `smart_dns()` resolves,
+                // but this whole block — the only caller of process_query — never
+                // ran, and every query went out as plain UDP through the tunnel.
+                if crate::smart_dns::has_encrypted() {
                     // A DNS query can arrive as IPv4 or IPv6. Android gets both
                     // 1.1.1.1 and 2606:4700:4700::1111, and modern devices prefer
                     // v6 — so a v4-only interceptor sees nothing at all, which is
@@ -435,13 +444,7 @@ pub async fn bridge(
                                     "[smart-dns] TUN saw UDP/53 v{ipver} hdr={hdr_len} dport={dst_port} len={}",
                                     outbound.len()
                                 );
-                                if let Some(smart_dns) = crate::smart_dns::smart_dns() {
-                                    // process_query returns a bare DNS payload, not a
-                                    // full IP packet. Rebuild the IP+UDP headers around
-                                    // it; the old code treated the payload as a whole
-                                    // packet and wrote into it at IP-header offsets,
-                                    // corrupting every intercepted reply.
-                                    if let Some((payload, _is_gemini)) = smart_dns.process_query(&outbound, hdr_len).await {
+                                if let Some((payload, _is_gemini)) = crate::smart_dns::process_query(&outbound, hdr_len).await {
                                         let src_ip = &outbound[12..16];
                                         let dst_ip = &outbound[16..20];
                                         let src_port = u16::from_be_bytes([udp[0], udp[1]]);
