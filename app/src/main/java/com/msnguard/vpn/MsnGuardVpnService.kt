@@ -2169,6 +2169,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             sendStatus(STATUS_FAILED, detail)
         }
         connected.set(false)
+        // A pause is neither a drop nor a failure, and the chain's bare
+        // outer-leg thread reaches here when the rung it was running is torn
+        // down by the pause itself. Left to fall through, this method ends the
+        // service — which is the whole behaviour a pause must not have.
+        if (paused.get()) {
+            ConnectionLog.record("Paused; the chain's outer-leg failure is ignored")
+            return
+        }
         // Keeping the service alive is a precondition of the seal: stopSelf()
         // releases the blocking TUN's fd and the OS restores carrier networking,
         // which is the leak the switch exists to prevent.
@@ -3448,6 +3456,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * gap so the reconnect does not have to re-prompt the user.
      */
     private fun onTunnelLost(reason: String) {
+        // A pause is not a drop: the tunnel came down because the user asked for it,
+        // and a watchdog firing during the teardown is the expected consequence, not
+        // a reason to reconnect. Every branch below either reconnects or seals the
+        // device, both of which would fight the pause.
+        if (paused.get()) {
+            ConnectionLog.record("Tunnel ended for a pause; no reconnect, no kill switch")
+            return
+        }
         // A quick reconnect tears the old tunnel down on purpose, and on Psiphon the
         // controller's own `onExiting` arrives a moment later — after the restart has
         // cleared stopRequested, so the usual guard no longer covers it. Treating
@@ -4593,6 +4609,19 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // does not need a fresh VPN consent dialog.
                     nativeExitWasUnexpected = false
                     scheduleAutoReconnect("the tunnel dropped")
+                } else if (paused.get()) {
+                    // The user paused from the notification. The tunnel is being torn
+                    // down deliberately and the foreground service is meant to
+                    // survive it, but this thread's own teardown cannot tell that
+                    // from a real failure: stopTunnel(notify=false,
+                    // teardownService=false) leaves no trace on any latch the
+                    // branches above read (stopRequested is a per-session flag that
+                    // startTunnel clears, and reconnectRequested is false because a
+                    // pause is not a retry). Without this branch the final else
+                    // stopForeground()+stopSelf() would run and take the
+                    // notification with it — exactly what a pause must not do.
+                    nativeExitWasUnexpected = false
+                    ConnectionLog.record("Core exited for a pause; notification kept")
                 } else {
                     nativeExitWasUnexpected = false
                     stopForeground(STOP_FOREGROUND_REMOVE)
