@@ -102,6 +102,14 @@ android {
                     ?: envProps.getProperty("keyAlias")
                 keyPassword = System.getenv("AETHERY_KEY_PASSWORD")
                     ?: envProps.getProperty("keyPassword")
+                // Anti-malware engines (Avast in particular) unpack an APK as a
+                // JAR to scan it, and a JAR without a v1 signature cannot be
+                // verified at all — that surfaces to the user as "Suspicious".
+                // v2 alone is valid for an Android install, so this only ever
+                // mattered to scanners. Sign with both: v1 for the JAR view,
+                // v2 for Android's own install integrity check.
+                enableV1Signing = true
+                enableV2Signing = true
             }
         }
         buildTypes.named("release") {
@@ -109,13 +117,6 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
             isDebuggable = false
-            // Anti-malware engines (Avast in particular) unpack an APK as a JAR
-            // to scan it, and a JAR without a v1 signature cannot be verified at
-            // all — that surfaces to the user as "Suspicious". v2 alone is valid
-            // for Android install, so this only ever mattered to scanners.
-            // Enable both schemes: v1 for the JAR view, v2 for Android itself.
-            signingConfig.enableV1Signing = true
-            signingConfig.enableV2Signing = true
         }
     }
 }
