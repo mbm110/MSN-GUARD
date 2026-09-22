@@ -47,7 +47,7 @@ fn push_encrypted_resolvers(options: &StartOptions) {
     let mut parsed = parsed;
     for ep in parsed.iter_mut() {
         let host = ep.name.clone().unwrap_or_default();
-        if let Some(ip) = pinned.iter().find(|(h, _)| h.eq_ignore_ascii_case(host)).map(|(_, ip)| *ip) {
+        if let Some(ip) = pinned.iter().find(|(h, _)| h.eq_ignore_ascii_case(&host)).map(|(_, ip)| *ip) {
             ep.with_ips(vec![ip]);
             log::debug!("[dns] pinned {} -> {}", host, ip);
         }
@@ -141,10 +141,10 @@ pub struct StartOptions {
     /// though the code to serve it was already here. Carried in the config now, and
     /// the environment variable is still honoured as a fallback for the CLI.
     pub http_proxy: Option<SocketAddr>,
-    /// Smart DNS Split engine enable flag (kept for the FFI contract; the
-    /// engine initialises unconditionally now).
+    /// Smart DNS Split engine enable flag.
+    ///
     /// Kept for the FFI contract. The engine is initialised unconditionally
-    /// now; this flag no longer gates anything.
+    /// now; this flag no longer gates anything. See [push_encrypted_resolvers].
     pub smart_dns: bool,
     /// User resolver list for the Smart DNS Split engine (see ffi.rs).
     pub smart_dns_servers: Option<String>,

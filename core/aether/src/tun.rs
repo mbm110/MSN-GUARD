@@ -329,13 +329,16 @@ fn recompute_tcp_checksum(packet: &mut [u8], ip_header_len: usize, version: u8) 
 ///
 /// `local_ipv4` is the tunnel's own inner address, used as the source of the
 /// exit-IP probes. Pass [Ipv4Addr::UNSPECIFIED] to disable that measurement.
+///
+/// `smart_dns` is retained for ABI compatibility with the Kotlin caller; the
+/// DoT/DoH decision is now made inside [crate::smart_dns] from the resolver list.
 #[cfg(unix)]
 pub async fn bridge(
     tun_fd: i32,
     local_ipv4: std::net::Ipv4Addr,
     mut inbound_rx: mpsc::Receiver<Vec<u8>>,
     outbound_tx: mpsc::Sender<Vec<u8>>,
-    smart_dns: bool,
+    #[allow(unused_variables)] smart_dns: bool,
 ) -> Result<()> {
     // Duplicate fd: Java owns original ParcelFileDescriptor lifetime.
     let fd = unsafe { libc::dup(tun_fd) };
