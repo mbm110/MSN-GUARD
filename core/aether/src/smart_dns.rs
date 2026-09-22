@@ -1,7 +1,5 @@
 use std::collections::HashMap;
-use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use parking_lot::RwLock;
@@ -154,55 +152,51 @@ impl DnsEndpoint {
         }
     }
 
-    /// Dial the endpoint's pinned IPs in order, returning the first that
-    /// completes a TCP connect.
-    ///
-    /// v2.0.13: `ips.first()` — the 2.0.10 design — pins exactly one IP and
-    /// dies with it. Cloudflare Workers resolve to a rotating set of anycast
-    /// addresses and Iranian carriers withdraw reachability to individual ones
-    /// without warning, so a single pin has no redundancy: the first stale
-    /// address takes the whole DoH/DoT path down with no retry. Intra
-    /// (Jigsaw) iterates `ips.GetAll()` per query and Rethink's firestack
-    /// iterates a reordered IPSet, promoting whichever address actually
-    /// connected. This mirrors that: try each pinned IP, prefer v4, and only
-    /// report failure when none of them answers.
-    fn connect_pinned(
-        &self,
-        ep: &DnsEndpoint,
-        port: u16,
-        host: &str,
-        proto: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<tokio::net::TcpStream>> + Send + Sync + '_>> {
-        Box::pin(async move {
-            if ep.ips.is_empty() {
-                return Err(AetherError::Other(format!(
-                    "{proto}: {host} has no pinned IP"
-                )));
-            }
-            // Prefer IPv4: some Iranian carriers break v6 to Cloudflare while
-            // v4 still works (same preference as CoreConfig.resolveHostsToIps).
-            let mut ordered: Vec<_> = ep.ips.iter().collect();
-            ordered.sort_by_key(|ip| ip.is_ipv6());
-
-            let mut last: Option<AetherError> = None;
-            for ip in ordered {
-                log::debug!("{proto}: trying pinned IP for {host}: {ip}");
-                match Self::connect_tcp_resolver(std::net::SocketAddr::new(*ip, port)).await {
-                    Ok(s) => {
-                        log::debug!("{proto}: connected to {host} via {ip}");
-                        return Ok(s);
-                    }
-                    Err(e) => {
-                        log::warn!("{proto}: pinned IP {ip} for {host} failed: {e:?}");
-                        last = Some(e);
-                    }
-                }
-            }
-            Err(last.unwrap_or_else(|| AetherError::Other(format!(
-                "{proto}: {host}: every pinned IP failed"
-            ))))
-        })
+/// Dial an endpoint's pinned IPs in order, returning the first that completes
+/// a TCP connect.
+///
+/// v2.0.13: `ips.first()` — the 2.0.10 design — pins exactly one IP and dies
+/// with it. Cloudflare Workers resolve to a rotating set of anycast addresses
+/// and Iranian carriers withdraw reachability to individual ones without
+/// warning, so a single pin has no redundancy: the first stale address takes
+/// the whole DoH/DoT path down with no retry. Intra (Jigsaw) iterates
+/// `ips.GetAll()` per query and Rethink's firestack iterates a reordered IPSet,
+/// promoting whichever address actually connected. This mirrors that: try each
+/// pinned IP, prefer v4, and only report failure when none of them answers.
+async fn connect_pinned(
+    ep: &DnsEndpoint,
+    port: u16,
+    host: &str,
+    proto: &str,
+) -> Result<tokio::net::TcpStream> {
+    if ep.ips.is_empty() {
+        return Err(AetherError::Other(format!(
+            "{proto}: {host} has no pinned IP"
+        )));
     }
+    // Prefer IPv4: some Iranian carriers break v6 to Cloudflare while v4 still
+    // works (same preference as CoreConfig.resolveHostsToIps).
+    let mut ordered: Vec<_> = ep.ips.iter().collect();
+    ordered.sort_by_key(|ip| ip.is_ipv6());
+
+    let mut last: Option<AetherError> = None;
+    for ip in ordered {
+        log::debug!("{proto}: trying pinned IP for {host}: {ip}");
+        match SmartDnsSplit::connect_tcp_resolver(std::net::SocketAddr::new(*ip, port)).await {
+            Ok(s) => {
+                log::debug!("{proto}: connected to {host} via {ip}");
+                return Ok(s);
+            }
+            Err(e) => {
+                log::warn!("{proto}: pinned IP {ip} for {host} failed: {e:?}");
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| AetherError::Other(format!(
+        "{proto}: {host}: every pinned IP failed"
+    ))))
+}
 
     /// A pinned IP to dial for this endpoint, if the app gave us one.
     pub fn pinned_ip(&self) -> Option<std::net::IpAddr> {
@@ -660,7 +654,7 @@ impl SmartDnsSplit {
         let host = ep.address.split("://").nth(1).unwrap_or(&ep.address);
         let host = host.split('/').next().unwrap_or(host);
         let host = host.split(':').next().unwrap_or(host);
-        let plain = self.connect_pinned(ep, port, host, "dot").await?;
+        let plain = connect_pinned(ep, port, host, "dot").await?;
         // The TLS handshake needs its own bound: on Iranian carriers a TCP
         // connect to a Cloudflare IP can succeed while the handshake's first
         // flight is blackholed, and tokio_boring has no timeout of its own.
@@ -722,7 +716,7 @@ impl SmartDnsSplit {
         let path = parsed.path();
         let path = if path.is_empty() { "/dns-query" } else { path };
 
-        let plain = self.connect_pinned(ep, port, host, "doh").await?;
+        let plain = connect_pinned(ep, port, host, "doh").await?;
         // Same bound as dot_query: the handshake can blackhole after a
         // successful TCP connect on a censored carrier.
         let mut tls = match timeout(CONNECT_TIMEOUT, tokio_boring::connect(Self::tls_connector()?, host, plain)).await {
