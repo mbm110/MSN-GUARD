@@ -376,6 +376,109 @@ pub async fn bridge(
     probe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut probing = true;
 
+    // SMART DNS SPLIT: intercept DNS so a configured DoT/DoH resolver can
+    // answer it. Every other query goes straight out the tunnel's normal path.
+    //
+    // The query is NOT awaited inline. process_query performs a full DoT/DoH
+    // round trip, and this loop is the tunnel's only data path — awaiting it
+    // here made one slow resolver answer block every packet the device sent,
+    // which is the stall the field log showed as 20-27s gaps in DNS traffic
+    // followed by a burst of cached answers. Queries are handed to a dedicated
+    // task; replies are injected into the tunnel from there, so a resolver that
+    // takes 20s to answer delays only the queries behind it, never a download.
+    let (dns_tx, dns_rx) = mpsc::channel::<Vec<u8>>(crate::sysprofile::channel_capacity() + 16);
+    let (dns_reply_tx, mut dns_reply_rx) = mpsc::channel::<Vec<u8>>(crate::sysprofile::channel_capacity() + 16);
+    {
+    // SmartDnsSplit is a process-wide singleton behind a global, so the task
+    // needs no handle passed in — it reaches the same resolvers, cache and
+    // pins the inline path used.
+    tokio::spawn(async move {
+        while let Some(packet) = dns_rx.recv().await {
+        // A DNS query can arrive as IPv4 or IPv6. Android gets both
+        // 1.1.1.1 and 2606:4700:4700::1111, and modern devices prefer v6
+        // — so a v4-only interceptor sees nothing at all, which is
+        // exactly what the field log showed: engine ready, zero queries.
+        let parsed = if let Some(ihl) = parse_ipv4_header(&packet) {
+        Some((ihl, 4u8))
+        } else {
+        parse_ipv6_header(&packet).map(|off| (off, 6u8))
+        };
+        let Some((hdr_len, ipver)) = parsed else { continue };
+        if packet.len() < hdr_len + 8 { continue }
+        let udp = &packet[hdr_len..];
+        if u16::from_be_bytes([udp[2], udp[3]]) != 53 || udp.len() <= 8 { continue }
+
+        // Count every DNS query the TUN sees, even before parsing. The
+        // field log proved init works but no query was ever seen; this
+        // line separates "queries never arrive" from "the parser drops
+        // them".
+        log::info!(
+        "[smart-dns] TUN saw UDP/53 v{ipver} hdr={hdr_len} dport=53 len={}",
+        packet.len()
+        );
+        let Some((payload, _)) =
+        crate::smart_dns::process_query(&packet, hdr_len).await
+        else { continue };
+
+        let src_ip = &packet[12..16];
+        let dst_ip = &packet[16..20];
+        let src_port = u16::from_be_bytes([udp[0], udp[1]]);
+        let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+
+        // Rebuild the reply with the same IP version the query used. A
+        // v4 reply to a v6 query (or the reverse) is dropped by the kernel.
+        let mut resp_packet = Vec::new();
+        let udp_len = 8 + payload.len();
+        if ipver == 6 {
+        // Fixed 40-byte v6 header, no ext headers.
+        resp_packet.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+        resp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
+        resp_packet.extend_from_slice(&[17u8, 64]); // next=UDP, hop 64
+        // src = original dst, dst = original src
+        resp_packet.extend_from_slice(&packet[24..40]);
+        resp_packet.extend_from_slice(&packet[8..24]);
+        } else {
+        let total_len = 20 + udp_len;
+        resp_packet.extend_from_slice(&[0x45, 0x00]);
+        resp_packet.extend_from_slice(&(total_len as u16).to_be_bytes());
+        resp_packet.extend_from_slice(&[0x00, 0x00, 0x40, 0x00, 0x40, 0x11]);
+        resp_packet.extend_from_slice(&[0x00, 0x00]); // checksum, fixed below
+        resp_packet.extend_from_slice(dst_ip); // src = original dst
+        resp_packet.extend_from_slice(src_ip); // dst = original src
+        let ip_csum = fold_checksum(ones_complement_sum(&resp_packet[0..20], 0));
+        resp_packet[10..12].copy_from_slice(&ip_csum.to_be_bytes());
+    }
+    // UDP header: swapped ports, len, checksum computed last.
+    resp_packet.extend_from_slice(&dst_port.to_be_bytes());
+    resp_packet.extend_from_slice(&src_port.to_be_bytes());
+    resp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
+    resp_packet.extend_from_slice(&[0x00, 0x00]);
+    resp_packet.extend_from_slice(&payload);
+
+    let udp_start = if ipver == 6 { 40 } else { 20 };
+    let mut sum = 0u32;
+    if ipver == 6 {
+        // v6 pseudo-header: src, dst, UDP length, next header.
+        sum = ones_complement_sum(&resp_packet[8..24], sum);
+        sum = ones_complement_sum(&resp_packet[24..40], sum);
+        sum += udp_len as u32;
+        sum += 17u32;
+    } else {
+        sum = ones_complement_sum(&resp_packet[12..20], sum);
+        sum += 17u32;
+        sum += udp_len as u32;
+    }
+    sum = ones_complement_sum(&resp_packet[udp_start..], sum);
+    let mut udp_csum = fold_checksum(sum);
+    if udp_csum == 0 { udp_csum = 0xffff; }
+    resp_packet[udp_start + 6..udp_start + 8].copy_from_slice(&udp_csum.to_be_bytes());
+
+    // Hand the reply back to the loop, which owns the TUN fd. The
+    // loop is the only writer, so this cannot race with itself.
+    let _ = dns_reply_tx.send(resp_packet).await;
+    }
+    });
+    }
     loop {
         tokio::select! {
             tunnel_packet = inbound_rx.recv() => match tunnel_packet {
@@ -412,109 +515,6 @@ pub async fn bridge(
                     clamped_syns += 1;
                 }
                 
-    // SMART DNS SPLIT: intercept DNS so a configured DoT/DoH resolver can
-    // answer it. Every other query goes straight out the tunnel's normal path.
-    //
-    // The query is NOT awaited inline. process_query performs a full DoT/DoH
-    // round trip, and this loop is the tunnel's only data path — awaiting it
-    // here made one slow resolver answer block every packet the device sent,
-    // which is the stall the field log showed as 20-27s gaps in DNS traffic
-    // followed by a burst of cached answers. Queries are handed to a dedicated
-    // task; replies are injected into the tunnel from there, so a resolver that
-    // takes 20s to answer delays only the queries behind it, never a download.
-    let (dns_tx, _dns_rx) = mpsc::channel::<Vec<u8>>(crate::sysprofile::channel_capacity() + 16);
-    let (dns_reply_tx, mut dns_reply_rx) = mpsc::channel::<Vec<u8>>(crate::sysprofile::channel_capacity() + 16);
-    {
-        // SmartDnsSplit is a process-wide singleton behind a global, so the task
-        // needs no handle passed in — it reaches the same resolvers, cache and
-        // pins the inline path used.
-        tokio::spawn(async move {
-            while let Some(packet) = dns_tx.recv().await {
-                // A DNS query can arrive as IPv4 or IPv6. Android gets both
-                // 1.1.1.1 and 2606:4700:4700::1111, and modern devices prefer v6
-                // — so a v4-only interceptor sees nothing at all, which is
-                // exactly what the field log showed: engine ready, zero queries.
-                let parsed = if let Some(ihl) = parse_ipv4_header(&packet) {
-                    Some((ihl, 4u8))
-                } else {
-                    parse_ipv6_header(&packet).map(|off| (off, 6u8))
-                };
-                let Some((hdr_len, ipver)) = parsed else { continue };
-                if packet.len() < hdr_len + 8 { continue }
-                let udp = &packet[hdr_len..];
-                if u16::from_be_bytes([udp[2], udp[3]]) != 53 || udp.len() <= 8 { continue }
-
-                // Count every DNS query the TUN sees, even before parsing. The
-                // field log proved init works but no query was ever seen; this
-                // line separates "queries never arrive" from "the parser drops
-                // them".
-                log::info!(
-                    "[smart-dns] TUN saw UDP/53 v{ipver} hdr={hdr_len} dport=53 len={}",
-                    packet.len()
-                );
-                let Some((payload, _)) =
-                    crate::smart_dns::process_query(&packet, hdr_len).await
-                else { continue };
-
-                let src_ip = &packet[12..16];
-                let dst_ip = &packet[16..20];
-                let src_port = u16::from_be_bytes([udp[0], udp[1]]);
-                let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
-
-                // Rebuild the reply with the same IP version the query used. A
-                // v4 reply to a v6 query (or the reverse) is dropped by the kernel.
-                let mut resp_packet = Vec::new();
-                let udp_len = 8 + payload.len();
-                if ipver == 6 {
-                    // Fixed 40-byte v6 header, no ext headers.
-                    resp_packet.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
-                    resp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
-                    resp_packet.extend_from_slice(&[17u8, 64]); // next=UDP, hop 64
-                    // src = original dst, dst = original src
-                    resp_packet.extend_from_slice(&packet[24..40]);
-                    resp_packet.extend_from_slice(&packet[8..24]);
-                } else {
-                    let total_len = 20 + udp_len;
-                    resp_packet.extend_from_slice(&[0x45, 0x00]);
-                    resp_packet.extend_from_slice(&(total_len as u16).to_be_bytes());
-                    resp_packet.extend_from_slice(&[0x00, 0x00, 0x40, 0x00, 0x40, 0x11]);
-                    resp_packet.extend_from_slice(&[0x00, 0x00]); // checksum, fixed below
-                    resp_packet.extend_from_slice(dst_ip); // src = original dst
-                    resp_packet.extend_from_slice(src_ip); // dst = original src
-                    let ip_csum = fold_checksum(ones_complement_sum(&resp_packet[0..20], 0));
-                    resp_packet[10..12].copy_from_slice(&ip_csum.to_be_bytes());
-                }
-                // UDP header: swapped ports, len, checksum computed last.
-                resp_packet.extend_from_slice(&dst_port.to_be_bytes());
-                resp_packet.extend_from_slice(&src_port.to_be_bytes());
-                resp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
-                resp_packet.extend_from_slice(&[0x00, 0x00]);
-                resp_packet.extend_from_slice(&payload);
-
-                let udp_start = if ipver == 6 { 40 } else { 20 };
-                let mut sum = 0u32;
-                if ipver == 6 {
-                    // v6 pseudo-header: src, dst, UDP length, next header.
-                    sum = ones_complement_sum(&resp_packet[8..24], sum);
-                    sum = ones_complement_sum(&resp_packet[24..40], sum);
-                    sum += udp_len as u32;
-                    sum += 17u32;
-                } else {
-                    sum = ones_complement_sum(&resp_packet[12..20], sum);
-                    sum += 17u32;
-                    sum += udp_len as u32;
-                }
-                sum = ones_complement_sum(&resp_packet[udp_start..], sum);
-                let mut udp_csum = fold_checksum(sum);
-                if udp_csum == 0 { udp_csum = 0xffff; }
-                resp_packet[udp_start + 6..udp_start + 8].copy_from_slice(&udp_csum.to_be_bytes());
-
-                // Hand the reply back to the loop, which owns the TUN fd. The
-                // loop is the only writer, so this cannot race with itself.
-                let _ = dns_reply_tx.send(resp_packet).await;
-            }
-        });
-    }
 
                 // Only hand a query to the DNS engine when the user configured
                 // an encrypted resolver; without one, process_query forwards to
