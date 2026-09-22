@@ -39,6 +39,9 @@ object CoreConfig {
      */
     const val CHAIN_OUTER_PREF = "chain_outer_transport"
 
+    /** Log tag for the DNS bootstrap/pinning path in this file. */
+    private const val TAG_DNS = "msn-dns"
+
     /**
      * Which transport last carried a PLAIN (unchained) tunnel far enough to move
      * real bytes, as a `CHAIN_OUTER_LADDER` entry — or absent if none ever has.
@@ -203,7 +206,94 @@ object CoreConfig {
             put("dns_servers", prefs.getString("dns_servers_udp", null))
             putOpt("dns_servers_dot", prefs.getString("dns_servers_dot", null)?.ifBlank { null })
             putOpt("dns_servers_doh", prefs.getString("dns_servers_doh", null)?.ifBlank { null })
+            // v2.0.10: pin the DoT/DoH servers' own hostnames to IP addresses,
+            // resolved right here while the tunnel is still DOWN. RethinkDNS
+            // does the same (celzero/rethink-app + celzero/firestack) and it is
+            // the only design that works from inside a VPN's own split DNS:
+            // the core must not resolve its own resolver, or the lookup
+            // re-enters the DNS engine it is trying to fill and deadlocks.
+            // Everything was deadlocked before this — 2.0.5 through 2.0.9.
+            putOpt("dns_pinned_ips", resolveResolverIps(prefs))
         }.toString()
+    }
+
+    /**
+     * Resolve the hostnames of the configured DoT/DoH resolvers using the
+     * phone's own (untunneled) resolver, while the tunnel is still down.
+     * Returns "host=ip,host=ip" or null when there is nothing to pin.
+     *
+     * Never throws: an unresolvable server is simply left unpinned, and the
+     * core falls back to its own resolution path.
+     */
+    private fun resolveResolverIps(prefs: SharedPreferences): String? {
+        val lists = listOf("dns_servers_dot", "dns_servers_doh")
+        val hosts = LinkedHashSet<String>()
+        lists.forEach { key ->
+            val raw = prefs.getString(key, null) ?: return@forEach
+            raw.split(',', ';', ' ', '\n', '\r').forEach { entry ->
+                extractHost(entry.trim())?.let { if (it.isNotEmpty()) hosts.add(it) }
+            }
+        }
+        if (hosts.isEmpty()) return null
+
+        // InetAddress.getAllByName is a blocking network call. configJson() is
+        // called on the connect path and must not stall the UI thread, so do
+        // the lookups off-thread and join with a hard cap — a slow carrier DNS
+        // must not be able to delay the connect itself.
+        val out = StringBuilder()
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(
+            hosts.size.coerceAtMost(8)
+        )
+        try {
+            val futures = hosts.map { host ->
+                executor.submit<Pair<String, String>?> {
+                    try {
+                        // System resolver — runs on the carrier's network, not
+                        // the tunnel, exactly what we want for a bootstrap.
+                        val addrs = java.net.InetAddress.getAllByName(host)
+                        // Prefer IPv4: some Iranian carriers still break v6 to
+                        // Cloudflare while v4 works.
+                        val v4 = addrs.firstOrNull { it is java.net.Inet4Address }
+                        val picked = v4 ?: addrs.firstOrNull() ?: return@submit null
+                        host to picked.hostAddress
+                    } catch (e: Exception) {
+                        android.util.Log.w(TAG_DNS, "could not pre-resolve $host: ${e.message}")
+                        null
+                    }
+                }
+            }
+            futures.forEach { f ->
+                try { f.get(4, java.util.concurrent.TimeUnit.SECONDS)?.let { (h, ip) ->
+                    if (out.isNotEmpty()) out.append(',')
+                    out.append(h).append('=').append(ip)
+                } } catch (e: Exception) {
+                    android.util.Log.w(TAG_DNS, "pre-resolve timed out or failed: ${e.message}")
+                }
+            }
+        } finally {
+            executor.shutdownNow()
+        }
+        return out.toString().ifBlank { null }
+    }
+
+    /**
+     * The hostname of one DNS entry: "https://h/dns-query" or "dot://h" -> "h";
+     * a bare "1.2.3.4" has no host to pin and yields null.
+     */
+    private fun extractHost(entry: String): String? {
+        if (entry.isEmpty()) return null
+        var s = entry
+        arrayOf("https://", "http://", "dot://", "tls://", "doh://").forEach {
+            if (s.startsWith(it, ignoreCase = true)) s = s.substring(it.length)
+        }
+        s = s.substringBefore('/')
+        s = s.substringBefore('?')
+        // strip the port and any [bracketing] on v6 literals
+        s = s.substringBeforeLast(':')
+        if (s.startsWith('[') && s.endsWith(']')) s = s.substring(1, s.length - 1)
+        // A literal IP has no hostname to pin.
+        if (s.matches(Regex("^[0-9a-fA-F:.]+$"))) return null
+        return s
     }
 
     /**

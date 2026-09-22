@@ -63,6 +63,18 @@ pub struct DnsEndpoint {
     pub transport: DnsTransport,
     /// TLS SNI / authority for DoT and DoH.
     pub name: Option<String>,
+    /// Pinned IP addresses for the resolver's own hostname, when the app
+    /// resolved them ahead of time. Set from the Android side with
+    /// [DnsEndpoint::with_ips] before the endpoint reaches the engine.
+    ///
+    /// This is the RethinkDNS design and it is the only thing that makes a
+    /// custom DoH server work from inside a VPN's own split DNS: the engine
+    /// must not resolve the DoH server's hostname, because that lookup is
+    /// itself a DNS query which the engine would have to intercept — a
+    /// catch-22 that hung every query in 2.0.5-2.0.9 (bootstrap.go in
+    /// celzero/firestack spells the same refusal out for their Go engine).
+    /// With the IPs pinned there is nothing to resolve.
+    pub ips: Vec<std::net::IpAddr>,
 }
 
 impl DnsEndpoint {
@@ -84,6 +96,7 @@ impl DnsEndpoint {
                 address: format!("https://{rest}"),
                 transport: DnsTransport::Doh,
                 name: Some(host.to_string()),
+                ips: vec![],
             });
         }
         if let Some(rest) = lower.strip_prefix("tls://").or_else(|| lower.strip_prefix("dot://")) {
@@ -92,6 +105,7 @@ impl DnsEndpoint {
                 address: host.to_string(),
                 transport: DnsTransport::Dot,
                 name: Some(host.to_string()),
+                ips: vec![],
             });
         }
         if let Some(rest) = lower.strip_prefix("doh:") {
@@ -100,6 +114,7 @@ impl DnsEndpoint {
                 address: format!("https://{host}/dns-query"),
                 transport: DnsTransport::Doh,
                 name: Some(host.to_string()),
+                ips: vec![],
             });
         }
         if let Some(rest) = lower.strip_prefix("dot:") {
@@ -108,6 +123,7 @@ impl DnsEndpoint {
                 address: host.to_string(),
                 transport: DnsTransport::Dot,
                 name: Some(host.to_string()),
+                ips: vec![],
             });
         }
         // Plain UDP, with or without a port. Reject anything URL-ish.
@@ -119,7 +135,22 @@ impl DnsEndpoint {
             address: host.to_string(),
             transport: DnsTransport::Plain,
             name: None,
+            ips: vec![],
         })
+    }
+
+    /// Attach IP addresses resolved for the resolver's own hostname by the
+    /// app, before the tunnel came up. See the field docs: with these pinned
+    /// the engine never has to resolve its own resolver.
+    pub fn with_ips(&mut self, ips: Vec<std::net::IpAddr>) {
+        if !ips.is_empty() {
+            self.ips = ips;
+        }
+    }
+
+    /// A pinned IP to dial for this endpoint, if the app gave us one.
+    pub fn pinned_ip(&self) -> Option<std::net::IpAddr> {
+        self.ips.first().copied()
     }
 
     /// Port the user wrote into `address`, if any.
@@ -598,11 +629,21 @@ impl SmartDnsSplit {
     async fn dot_query(&self, ep: &DnsEndpoint, query: &[u8]) -> Result<Vec<u8>> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let port = ep.explicit_port().unwrap_or(853);
-        // Resolve the DoT server's own hostname outside the tunnel, then
-        // connect to the resulting address over a protected socket.
-        let addrs = self.resolve_host_out_of_band(&ep.address).await?;
-        let addr = addrs.into_iter().next()
-            .ok_or_else(|| AetherError::Other(format!("dot: no address for {}", ep.address)))?;
+        // Pinned IP from the app wins; only fall back to a lookup when the app
+        // gave us nothing. A lookup here is the bootstrap catch-22 that hung
+        // every query in 2.0.5-2.0.9, so the pin must be the normal path.
+        let addr = match ep.pinned_ip() {
+            Some(ip) => {
+                log::debug!("dot: using pinned IP for {}: {}", ep.address, ip);
+                ip
+            }
+            None => {
+                log::debug!("dot: no pinned IP for {}, falling back to out-of-band resolve", ep.address);
+                self.resolve_host_out_of_band(&ep.address).await?
+                    .into_iter().next()
+                    .ok_or_else(|| AetherError::Other(format!("dot: no address for {}", ep.address)))?
+            }
+        };
         let sock_addr = std::net::SocketAddr::new(addr, port);
 
         let plain = Self::connect_tcp_protected(sock_addr).await?;
@@ -661,7 +702,13 @@ impl SmartDnsSplit {
         let path = parsed.path();
         let path = if path.is_empty() { "/dns-query" } else { path };
 
-        let addrs = self.resolve_host_out_of_band(host).await?;
+        let addrs = if let Some(ip) = ep.pinned_ip() {
+            log::debug!("doh: using pinned IP for {host}: {ip}");
+            vec![ip]
+        } else {
+            log::debug!("doh: no pinned IP for {host}, falling back to out-of-band resolve");
+            self.resolve_host_out_of_band(host).await?
+        };
         let ip = addrs.into_iter().next()
             .ok_or_else(|| AetherError::Other(format!("doh: no address for {host}")))?;
         let sock_addr = std::net::SocketAddr::new(ip, port);

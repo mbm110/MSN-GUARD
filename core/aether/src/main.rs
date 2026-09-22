@@ -42,8 +42,41 @@ fn push_encrypted_resolvers(options: &StartOptions) {
         log::warn!("[dns] none of the user's DoT/DoH entries parsed");
         return;
     }
+    let pinned: Vec<(&str, std::net::IpAddr)> = options.dns_pinned_ips.as_deref()
+        .map(parse_pinned_ips).unwrap_or_default();
+    let mut parsed = parsed;
+    for ep in parsed.iter_mut() {
+        let host = ep.name.as_deref().unwrap_or("");
+        if let Some(&ip) = pinned.iter().find(|(h, _)| h.eq_ignore_ascii_case(host)) {
+            ep.with_ips(vec![ip]);
+            log::debug!("[dns] pinned {} -> {}", host, ip);
+        }
+    }
     crate::smart_dns::set_resolvers(parsed.clone());
     log::info!("[dns] {} DoT/DoH resolver(s) pushed to the engine", parsed.len());
+}
+
+/// Parse the app's pinned-IP map: "host=ip,host=ip" -> host/IP pairs.
+/// Malformed entries are skipped, never fatal — the engine simply falls back
+/// to resolving that host the hard way.
+fn parse_pinned_ips(raw: &str) -> Vec<(&str, std::net::IpAddr)> {
+    let mut out = Vec::new();
+    for part in raw.split([',', ';', ' ', '\n', '\r']) {
+        let part = part.trim();
+        let Some((host, ip)) = part.split_once('=') else { continue };
+        let host = host.trim();
+        let ip = match ip.trim().parse::<std::net::IpAddr>() {
+            Ok(ip) => ip,
+            Err(_) => {
+                log::warn!("[dns] bad pinned IP for {host}: {}", ip.trim());
+                continue;
+            }
+        };
+        if !host.is_empty() {
+            out.push((host, ip));
+        }
+    }
+    out
 }
 
 fn parse_local_v4(s: &str) -> Ipv4Addr {
@@ -118,6 +151,10 @@ pub struct StartOptions {
     /// v2.0.0: per-transport lists from the DNS screen.
     pub dns_servers_dot: Option<String>,
     pub dns_servers_doh: Option<String>,
+    /// v2.0.10: IPs the app resolved for the DoT/DoH servers' own hostnames
+    /// while the tunnel was still down, so the engine never has to. Format:
+    /// "doh.example.com=1.2.3.4,other.example=9.9.9.9". Order-independent.
+    pub dns_pinned_ips: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +259,7 @@ impl StartOptions {
             smart_dns_servers: None,
             dns_servers_dot: None,
             dns_servers_doh: None,
+            dns_pinned_ips: None,
         }
     }
 
