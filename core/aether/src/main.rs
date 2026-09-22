@@ -3080,7 +3080,7 @@ async fn run_warp_in_warp(
                 }
             }
         } else {
-            for seed in wireguard::wg_seeds_v6() {
+            for seed in wireguard::WG_SEEDS_V6 {
                 let candidate = format!("{seed}:{}", outer.port());
                 if let Ok(addr) = candidate.parse::<SocketAddr>() {
                     if addr != outer {
