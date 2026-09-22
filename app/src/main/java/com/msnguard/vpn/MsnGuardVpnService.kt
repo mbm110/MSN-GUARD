@@ -532,6 +532,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var chainMode = false
 
     /**
+     * True only for a chain whose inner leg is Psiphon — the one chain shape that
+     * reports its own bytes via [onBytesTransferred].
+     *
+     * [chainMode] is also set for WoW/WireGuard chains, which have no inner
+     * counter at all. Treating those the same way froze the UI's traffic counter
+     * at zero for the whole session, so the verification gate reported "Tunnel
+     * moved no bytes" and tore down tunnels that were passing data. See the
+     * "traffic" handler below.
+     */
+    private var psiphonChained = false
+
+    /**
      * True once an outer transport has been accepted and Psiphon started on it.
      *
      * Distinguishes "this rung failed, try the next" from "the transport carrying a
@@ -2497,7 +2509,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // inner leg is the one carrying the user's data, and it is what
                     // plain Psiphon mode already reports, so the outer leg's
                     // counters are dropped for consistency.
-                    if (chainMode) return
+                    //
+                    // But that reasoning only holds when there IS an inner counter.
+                    // Only a Psiphon chain has one. A WoW/WireGuard chain has no
+                    // Psiphon leg at all — onBytesTransferred never fires — and
+                    // dropping the core's counters here left the UI with no source
+                    // whatsoever: trafficRx stayed at zero for the whole session,
+                    // so the 18s verification gate saw "Tunnel moved no bytes" on
+                    // every connect and tore down a tunnel that was passing data
+                    // (log 31: hundreds of DoH answers in the same window). Drop
+                    // the outer counters only when Psiphon is the inner leg.
+                    if (chainMode && psiphonChained) return
                     currentTx = tx
                     currentRx = rx
                     updateTrafficNotification(tx, rx)
@@ -2579,6 +2601,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private fun startChainTunnel() {
         chainMode = true
+        psiphonChained = true   // this is the PSIPHON-OVER-WARP path
         chainOuterCommitted = false
         // FALSE in SOCKS mode, and this single line is the difference between the
         // two shapes of a chained run:
@@ -2668,6 +2691,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             } catch (e: Exception) {
                 ConnectionLog.record("Chain start failed: ${e.message}")
                 chainMode = false
+        psiphonChained = false
                 failAndStop(e.message ?: "Chain start failed")
             }
         }
@@ -2845,6 +2869,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // connect fail with "already running".
                 if (chained) stopOuterLeg()
                 chainMode = false
+        psiphonChained = false
                 failAndStop(e.message ?: "Tor start failed")
             }
         }
@@ -4203,6 +4228,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // "plain" for recordWorkingPlainTransport(). The branches below set them
         // again for the Psiphon and chained paths.
         chainMode = false
+        psiphonChained = false
         psiphonVpnMode = false
         startAsForeground()
 
@@ -4686,6 +4712,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // a listener that no longer exists.
             NativeCore.detach()
             chainMode = false
+        psiphonChained = false
             chainOuterCommitted = false
             vpnModeActive.set(false)
             // Cleared with the rest of the per-session Psiphon state. It used to be
@@ -4745,6 +4772,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // connect starts with a core still bound to a dead service.
                 NativeCore.detach()
                 chainMode = false
+        psiphonChained = false
                 chainOuterCommitted = false
             }
             vpnModeActive.set(false)
