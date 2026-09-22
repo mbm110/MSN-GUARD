@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -47,7 +47,7 @@ fn push_encrypted_resolvers(options: &StartOptions) {
     let mut parsed = parsed;
     for ep in parsed.iter_mut() {
         let host = ep.name.as_deref().unwrap_or("");
-        if let Some(&ip) = pinned.iter().find(|(h, _)| h.eq_ignore_ascii_case(host)) {
+        if let Some(ip) = pinned.iter().find(|(h, _)| h.eq_ignore_ascii_case(host)).map(|(_, ip)| *ip) {
             ep.with_ips(vec![ip]);
             log::debug!("[dns] pinned {} -> {}", host, ip);
         }
