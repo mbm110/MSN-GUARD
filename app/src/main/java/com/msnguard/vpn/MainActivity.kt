@@ -6288,6 +6288,11 @@ class MainActivity : Activity() {
             // entries are parsed by the core, never handed to Android.
             putOrRemove(CUSTOM_DNS, udp)
         }.apply()
+        // Pre-resolve the DoT/DoH hostnames NOW, while nothing is connected and
+        // the lookup can ride the phone's own resolver. configJson() later does
+        // this again, but it runs on the connect path and would block the UI
+        // thread — which is what made the CC button look dead in 2.0.10.
+        CoreConfig.precomputePinnedIps(this)
         val parts = listOfNotNull(
             udp.takeIf { it.isNotEmpty() }?.let { "UDP ${it.size}" },
             dot.takeIf { it.isNotEmpty() }?.let { "DoT ${it.size}" },

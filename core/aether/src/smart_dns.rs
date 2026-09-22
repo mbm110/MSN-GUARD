@@ -20,8 +20,9 @@ const ANTI_SANCTION_DNS: &[&str] = &[
     "185.51.200.2",    // Shecan
 ];
 
-/// Default fast DNS (Cloudflare/Google), the fallback for plain lookups and
-/// for resolving a DoT/DoH server's own hostname (via resolve_host_out_of_band).
+/// Default fast DNS (Cloudflare/Google), the fallback for plain lookups.
+/// The DoT/DoH servers' own hostnames are pinned by the app instead — see
+/// DnsEndpoint::pinned_ip and CoreConfig.precomputePinnedIps.
 const DEFAULT_DNS: &[&str] = &[
     "1.1.1.1",
     "1.0.0.1",
@@ -31,6 +32,9 @@ const DEFAULT_DNS: &[&str] = &[
 
 const DNS_PORT: u16 = 53;
 const QUERY_TIMEOUT: Duration = Duration::from_millis(1500);
+/// DoT/DoH connect + TLS handshake. The 2.0.10 hang was a connect() with no
+/// bound at all; a blocked path must fail in seconds, not sit forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 const MAX_CONCURRENT_QUERIES: usize = 32;
 
@@ -463,56 +467,6 @@ impl SmartDnsSplit {
         self.parallel_query(Arc::new(socks), query, expected_id, name, qtype).await
     }
 
-    /// Resolve a hostname to IP addresses using the engine's OWN protected
-    /// plain-UDP sockets — never the tunnel, never the system resolver.
-    ///
-    /// This exists because encrypted_query() must not look up its own server's
-    /// hostname through the system: on Android the app's unprotected sockets
-    /// route into the TUN, so that lookup would re-enter process_query() and
-    /// recurse forever (the log shows 201 queries seen and zero answers, and
-    /// neither the success nor the failure line — the future never completed).
-    /// Resolving via the protected sockets breaks that loop.
-    async fn resolve_host_out_of_band(&self, host: &str) -> Result<Vec<std::net::IpAddr>> {
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            return Ok(vec![ip]);
-        }
-        let mut out = Vec::new();
-        // A and AAAA, in that order; IPv4 first because the tunnel path is
-        // v4-heavy and the carrier blocks nothing here — these sockets are
-        // outside the tunnel by construction.
-        //
-        // The anti-sanction resolvers (10.202.10.x / Shecan / Electro) are only
-        // reachable from inside Iran. Abroad they time out, and resolving the
-        // DoH server's own hostname would then fail for a reason that has
-        // nothing to do with the DoH server. Fall through to the public
-        // defaults, which work everywhere.
-        for qtype in [1u16, 28u16] {
-            let (query, new_id) = Self::build_query(host, qtype);
-            // Now that the resolver's own hostname is EXCLUDED from
-            // process_query(), this lookup can ride the tunnel safely: it can
-            // no longer re-enter the interceptor and deadlock. Riding the
-            // tunnel is exactly what makes it work in Iran — plain 53 to
-            // 1.1.1.1 on the physical carrier network is hijacked or dropped
-            // there, which is why the 2.0.7/2.0.8 protected bootstrap timed
-            // out. Through the exit node nothing is hijacked.
-            let resp = match self
-                .parallel_query(self.anti_sanction_sockets.clone(), query.clone(), new_id, host.to_string(), qtype)
-                .await
-            {
-                Ok(r) => r,
-                Err(_) => {
-                    log::info!("[smart-dns] anti-sanction resolvers failed for {host}; trying public defaults");
-                    self.parallel_query(self.default_sockets.clone(), query, new_id, host.to_string(), qtype).await?
-                }
-            };
-            out.extend(Self::parse_answers(&resp, qtype));
-        }
-        if out.is_empty() {
-            return Err(AetherError::Other(format!("no address for {host}")));
-        }
-        Ok(out)
-    }
-
     /// Pull A/AAAA records out of a DNS response.
     fn parse_answers(resp: &[u8], qtype: u16) -> Vec<std::net::IpAddr> {
         if resp.len() < 12 { return vec![]; }
@@ -602,51 +556,57 @@ impl SmartDnsSplit {
         Err(AetherError::Other(format!("all encrypted resolvers failed: {last_err}")))
     }
 
-    /// Open a TCP connection that is PROTECTED (kept outside the tunnel) from
-    /// the very first packet. This is the only correct way to reach a DoT/DoH
-    /// server from inside the split engine: the engine intercepts the phone's
-    /// port-53 traffic, so a request that rides the tunnel is captured by
-    /// process_query() — which is the very future waiting on this request.
-    /// Deadlock. The same pattern as masque_h2::connect_tcp.
-    async fn connect_tcp_protected(addr: std::net::SocketAddr) -> Result<tokio::net::TcpStream> {
+    /// Open a TCP connection to the DoT/DoH server.
+    ///
+    /// v2.0.11: rides the TUNNEL (not protected) and carries a hard connect
+    /// timeout. The 2.0.8-2.0.10 design protected this socket, sending it
+    /// outside the tunnel — but every DoH server the user configures here is a
+    /// Cloudflare Worker, and direct TCP/443 to Cloudflare IPs is blocked on
+    /// Iranian carriers. The packet left the phone and never came back, so
+    /// `socket.connect()` hung forever with no timeout and no error, which is
+    /// exactly what the field logs showed: ten intercepted queries, zero
+    /// answered, zero "failed", zero "excluded".
+    ///
+    /// The tunnel is the one place the lookup is safe now that the resolver's
+    /// own hostname is excluded from interception (2.0.9) and pinned by the
+    /// app (2.0.10): no lookup happens at connect time, so nothing can
+    /// re-enter the interceptor.
+    async fn connect_tcp_resolver(addr: std::net::SocketAddr) -> Result<tokio::net::TcpStream> {
         let socket = if addr.is_ipv4() {
             tokio::net::TcpSocket::new_v4()
         } else {
             tokio::net::TcpSocket::new_v6()
         }
         .map_err(AetherError::Io)?;
-        crate::platform::protect_socket(&socket).map_err(AetherError::Io)?;
-        // Bind unspecified so Android does not pick the VPN address as source.
+        // NOT protected: this must ride the tunnel to reach Cloudflare in Iran.
         let bind = if addr.is_ipv4() {
             "0.0.0.0:0".parse().unwrap()
         } else {
             "[::]:0".parse().unwrap()
         };
         socket.bind(bind).map_err(AetherError::Io)?;
-        socket.connect(addr).await.map_err(AetherError::Io)
+        // A dead or blocked path must fail fast, not hang the query forever.
+        let connect = timeout(CONNECT_TIMEOUT, socket.connect(addr));
+        connect.await
+            .map_err(|_| AetherError::Other(format!("connect to {addr} timed out")))?
+            .map_err(AetherError::Io)
     }
 
     async fn dot_query(&self, ep: &DnsEndpoint, query: &[u8]) -> Result<Vec<u8>> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let port = ep.explicit_port().unwrap_or(853);
-        // Pinned IP from the app wins; only fall back to a lookup when the app
-        // gave us nothing. A lookup here is the bootstrap catch-22 that hung
-        // every query in 2.0.5-2.0.9, so the pin must be the normal path.
-        let addr = match ep.pinned_ip() {
-            Some(ip) => {
-                log::debug!("dot: using pinned IP for {}: {}", ep.address, ip);
-                ip
-            }
-            None => {
-                log::debug!("dot: no pinned IP for {}, falling back to out-of-band resolve", ep.address);
-                self.resolve_host_out_of_band(&ep.address).await?
-                    .into_iter().next()
-                    .ok_or_else(|| AetherError::Other(format!("dot: no address for {}", ep.address)))?
-            }
-        };
+        // The app pins the resolver's own IP at connect time (CoreConfig,
+        // 2.0.10) precisely so this path never has to do a lookup. Without a
+        // pin there is no safe option: resolving through the tunnel re-enters
+        // this engine and deadlocks (2.0.5-2.0.9), and the protected path
+        // times out on Iranian carriers. Fail fast instead and let the caller
+        // fall back to plain UDP, which keeps the device online.
+        let addr = ep.pinned_ip()
+            .ok_or_else(|| AetherError::Other(format!("dot: {} has no pinned IP", ep.address)))?;
+        log::debug!("dot: using pinned IP for {}: {}", ep.address, addr);
         let sock_addr = std::net::SocketAddr::new(addr, port);
 
-        let plain = Self::connect_tcp_protected(sock_addr).await?;
+        let plain = Self::connect_tcp_resolver(sock_addr).await?;
         let mut stream = tokio_boring::connect(Self::tls_connector()?, &ep.address, plain)
             .await
             .map_err(|e| AetherError::Tls(format!("dot handshake {}: {e}", ep.address)))?;
@@ -702,18 +662,12 @@ impl SmartDnsSplit {
         let path = parsed.path();
         let path = if path.is_empty() { "/dns-query" } else { path };
 
-        let addrs = if let Some(ip) = ep.pinned_ip() {
-            log::debug!("doh: using pinned IP for {host}: {ip}");
-            vec![ip]
-        } else {
-            log::debug!("doh: no pinned IP for {host}, falling back to out-of-band resolve");
-            self.resolve_host_out_of_band(host).await?
-        };
-        let ip = addrs.into_iter().next()
-            .ok_or_else(|| AetherError::Other(format!("doh: no address for {host}")))?;
+        let ip = ep.pinned_ip()
+            .ok_or_else(|| AetherError::Other(format!("doh: {} has no pinned IP", host)))?;
+        log::debug!("doh: using pinned IP for {host}: {ip}");
         let sock_addr = std::net::SocketAddr::new(ip, port);
 
-        let plain = Self::connect_tcp_protected(sock_addr).await?;
+        let plain = Self::connect_tcp_resolver(sock_addr).await?;
         let mut tls = tokio_boring::connect(Self::tls_connector()?, host, plain)
             .await
             .map_err(|e| AetherError::Tls(format!("doh handshake {host}: {e}")))?;
