@@ -152,6 +152,20 @@ impl DnsEndpoint {
         }
     }
 
+/// A pinned IP to dial for this endpoint, if the app gave us one.
+    pub fn pinned_ip(&self) -> Option<std::net::IpAddr> {
+        self.ips.first().copied()
+    }
+
+    /// Port the user wrote into `address`, if any.
+    fn explicit_port(&self) -> Option<u16> {
+        match self.transport {
+            DnsTransport::Plain | DnsTransport::Dot => host_port(&self.address),
+            DnsTransport::Doh => url_port(&self.address),
+        }
+    }
+}
+
 /// Dial an endpoint's pinned IPs in order, returning the first that completes
 /// a TCP connect.
 ///
@@ -196,20 +210,6 @@ async fn connect_pinned(
     Err(last.unwrap_or_else(|| AetherError::Other(format!(
         "{proto}: {host}: every pinned IP failed"
     ))))
-}
-
-    /// A pinned IP to dial for this endpoint, if the app gave us one.
-    pub fn pinned_ip(&self) -> Option<std::net::IpAddr> {
-        self.ips.first().copied()
-    }
-
-    /// Port the user wrote into `address`, if any.
-    fn explicit_port(&self) -> Option<u16> {
-        match self.transport {
-            DnsTransport::Plain | DnsTransport::Dot => host_port(&self.address),
-            DnsTransport::Doh => url_port(&self.address),
-        }
-    }
 }
 
 /// Split "host" / "host:port", defaulting the port when absent.
