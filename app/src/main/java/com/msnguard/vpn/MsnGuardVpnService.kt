@@ -2960,7 +2960,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // serving the tunnel: xray on 1824 or the anytls sidecar on
                 // 1826. ShardManager exposes one accessor so this call site
                 // does not have to know the engine split.
-                if (!ShardSocksFront.start(ShardManager.liveSocksPort)) {
+                if (!ShardSocksFront.start(ShardManager.liveSocksPort, DnsUpstreams.list(this))) {
                     error("Could not start the UDP front-end")
                 }
                 activeSocksPort = ShardSocksFront.LISTEN_PORT

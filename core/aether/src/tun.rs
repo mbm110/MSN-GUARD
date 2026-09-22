@@ -412,101 +412,136 @@ pub async fn bridge(
                     clamped_syns += 1;
                 }
                 
-                // SMART DNS SPLIT: intercept DNS so a configured DoT/DoH
-                // resolver can answer it.
-                // Every other query goes straight out the tunnel's normal path —
-                // the previous build broke every lookup on the device.
-                //
+    // SMART DNS SPLIT: intercept DNS so a configured DoT/DoH resolver can
+    // answer it. Every other query goes straight out the tunnel's normal path.
+    //
+    // The query is NOT awaited inline. process_query performs a full DoT/DoH
+    // round trip, and this loop is the tunnel's only data path — awaiting it
+    // here made one slow resolver answer block every packet the device sent,
+    // which is the stall the field log showed as 20-27s gaps in DNS traffic
+    // followed by a burst of cached answers. Queries are handed to a dedicated
+    // task; replies are injected into the tunnel from there, so a resolver that
+    // takes 20s to answer delays only the queries behind it, never a download.
+    let (dns_tx, _dns_rx) = mpsc::channel::<Vec<u8>>(sysprofile::channel_capacity());
+    let (dns_reply_tx, mut dns_reply_rx) = mpsc::channel::<Vec<u8>>(sysprofile::channel_capacity());
+    {
+        // SmartDnsSplit is a process-wide singleton behind a global, so the task
+        // needs no handle passed in — it reaches the same resolvers, cache and
+        // pins the inline path used.
+        tokio::spawn(async move {
+            while let Some(packet) = dns_tx.recv().await {
+                // A DNS query can arrive as IPv4 or IPv6. Android gets both
+                // 1.1.1.1 and 2606:4700:4700::1111, and modern devices prefer v6
+                // — so a v4-only interceptor sees nothing at all, which is
+                // exactly what the field log showed: engine ready, zero queries.
+                let parsed = if let Some(ihl) = parse_ipv4_header(&packet) {
+                    Some((ihl, 4u8))
+                } else {
+                    parse_ipv6_header(&packet).map(|off| (off, 6u8))
+                };
+                let Some((hdr_len, ipver)) = parsed else { continue };
+                if packet.len() < hdr_len + 8 { continue }
+                let udp = &packet[hdr_len..];
+                if u16::from_be_bytes([udp[2], udp[3]]) != 53 || udp.len() <= 8 { continue }
+
+                // Count every DNS query the TUN sees, even before parsing. The
+                // field log proved init works but no query was ever seen; this
+                // line separates "queries never arrive" from "the parser drops
+                // them".
+                log::info!(
+                    "[smart-dns] TUN saw UDP/53 v{ipver} hdr={hdr_len} dport=53 len={}",
+                    packet.len()
+                );
+                let Some((payload, _)) =
+                    crate::smart_dns::process_query(&packet, hdr_len).await
+                else { continue };
+
+                let src_ip = &packet[12..16];
+                let dst_ip = &packet[16..20];
+                let src_port = u16::from_be_bytes([udp[0], udp[1]]);
+                let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+
+                // Rebuild the reply with the same IP version the query used. A
+                // v4 reply to a v6 query (or the reverse) is dropped by the kernel.
+                let mut resp_packet = Vec::new();
+                let udp_len = 8 + payload.len();
+                if ipver == 6 {
+                    // Fixed 40-byte v6 header, no ext headers.
+                    resp_packet.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+                    resp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
+                    resp_packet.extend_from_slice(&[17u8, 64]); // next=UDP, hop 64
+                    // src = original dst, dst = original src
+                    resp_packet.extend_from_slice(&packet[24..40]);
+                    resp_packet.extend_from_slice(&packet[8..24]);
+                } else {
+                    let total_len = 20 + udp_len;
+                    resp_packet.extend_from_slice(&[0x45, 0x00]);
+                    resp_packet.extend_from_slice(&(total_len as u16).to_be_bytes());
+                    resp_packet.extend_from_slice(&[0x00, 0x00, 0x40, 0x00, 0x40, 0x11]);
+                    resp_packet.extend_from_slice(&[0x00, 0x00]); // checksum, fixed below
+                    resp_packet.extend_from_slice(dst_ip); // src = original dst
+                    resp_packet.extend_from_slice(src_ip); // dst = original src
+                    let ip_csum = fold_checksum(ones_complement_sum(&resp_packet[0..20], 0));
+                    resp_packet[10..12].copy_from_slice(&ip_csum.to_be_bytes());
+                }
+                // UDP header: swapped ports, len, checksum computed last.
+                resp_packet.extend_from_slice(&dst_port.to_be_bytes());
+                resp_packet.extend_from_slice(&src_port.to_be_bytes());
+                resp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
+                resp_packet.extend_from_slice(&[0x00, 0x00]);
+                resp_packet.extend_from_slice(&payload);
+
+                let udp_start = if ipver == 6 { 40 } else { 20 };
+                let mut sum = 0u32;
+                if ipver == 6 {
+                    // v6 pseudo-header: src, dst, UDP length, next header.
+                    sum = ones_complement_sum(&resp_packet[8..24], sum);
+                    sum = ones_complement_sum(&resp_packet[24..40], sum);
+                    sum += udp_len as u32;
+                    sum += 17u32;
+                } else {
+                    sum = ones_complement_sum(&resp_packet[12..20], sum);
+                    sum += 17u32;
+                    sum += udp_len as u32;
+                }
+                sum = ones_complement_sum(&resp_packet[udp_start..], sum);
+                let mut udp_csum = fold_checksum(sum);
+                if udp_csum == 0 { udp_csum = 0xffff; }
+                resp_packet[udp_start + 6..udp_start + 8].copy_from_slice(&udp_csum.to_be_bytes());
+
+                // Hand the reply back to the loop, which owns the TUN fd. The
+                // loop is the only writer, so this cannot race with itself.
+                let _ = dns_reply_tx.send(resp_packet).await;
+            }
+        });
+    }
+
+                // Only hand a query to the DNS engine when the user configured
+                // an encrypted resolver; without one, process_query forwards to
+                // the tunnel's own resolvers and there is nothing to intercept.
+                // The channel is bounded, so a resolver that has stopped
+                // consuming cannot grow an unbounded queue behind the loop.
                 if crate::smart_dns::has_encrypted() {
-                    // A DNS query can arrive as IPv4 or IPv6. Android gets both
-                    // 1.1.1.1 and 2606:4700:4700::1111, and modern devices prefer
-                    // v6 — so a v4-only interceptor sees nothing at all, which is
-                    // exactly what the field log showed: engine ready, zero queries.
-                    let parsed = if let Some(ihl) = parse_ipv4_header(&outbound) {
-                        Some((ihl, 4u8))
+                    if dns_tx.try_send(outbound.clone()).is_err() {
+                        log::debug!("[smart-dns] query backlog — forwarding over the tunnel");
                     } else {
-                        parse_ipv6_header(&outbound).map(|off| (off, 6u8))
-                    };
-                    if let Some((hdr_len, ipver)) = parsed {
-                        if outbound.len() >= hdr_len + 8 {
-                            let udp = &outbound[hdr_len..];
-                            let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
-                            if dst_port == 53 && udp.len() > 8 {
-                                // Count every DNS query the TUN sees, even before
-                                // parsing. The field log proved init works but no
-                                // query was ever seen; this line separates "queries
-                                // never arrive" from "the parser drops them".
-                                log::info!(
-                                    "[smart-dns] TUN saw UDP/53 v{ipver} hdr={hdr_len} dport={dst_port} len={}",
-                                    outbound.len()
-                                );
-                                if let Some((payload, _is_gemini)) = crate::smart_dns::process_query(&outbound, hdr_len).await {
-                                        let src_ip = &outbound[12..16];
-                                        let dst_ip = &outbound[16..20];
-                                        let src_port = u16::from_be_bytes([udp[0], udp[1]]);
-                                        let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
-
-                                        // Rebuild the reply with the same IP version
-                                        // the query used. A v4 reply to a v6 query
-                                        // (or the reverse) is dropped by the kernel.
-                                        let mut resp_packet = Vec::new();
-                                        let udp_len = 8 + payload.len();
-                                        if ipver == 6 {
-                                            // Fixed 40-byte v6 header, no ext headers.
-                                            resp_packet.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
-                                            resp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
-                                            resp_packet.extend_from_slice(&[17u8, 64]); // next=UDP, hop 64
-                                            // src = original dst, dst = original src
-                                            resp_packet.extend_from_slice(&outbound[24..40]);
-                                            resp_packet.extend_from_slice(&outbound[8..24]);
-                                        } else {
-                                            let total_len = 20 + udp_len;
-                                            resp_packet.extend_from_slice(&[0x45, 0x00]);
-                                            resp_packet.extend_from_slice(&(total_len as u16).to_be_bytes());
-                                            resp_packet.extend_from_slice(&[0x00, 0x00, 0x40, 0x00, 0x40, 0x11]);
-                                            resp_packet.extend_from_slice(&[0x00, 0x00]); // checksum, fixed below
-                                            resp_packet.extend_from_slice(dst_ip); // src = original dst
-                                            resp_packet.extend_from_slice(src_ip); // dst = original src
-                                            let ip_csum = fold_checksum(ones_complement_sum(&resp_packet[0..20], 0));
-                                            resp_packet[10..12].copy_from_slice(&ip_csum.to_be_bytes());
-                                        }
-                                        // UDP header: swapped ports, len, checksum computed last.
-                                        resp_packet.extend_from_slice(&dst_port.to_be_bytes());
-                                        resp_packet.extend_from_slice(&src_port.to_be_bytes());
-                                        resp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
-                                        resp_packet.extend_from_slice(&[0x00, 0x00]);
-                                        resp_packet.extend_from_slice(&payload);
-
-                                        let udp_start = if ipver == 6 { 40 } else { 20 };
-                                        let mut sum = 0u32;
-                                        if ipver == 6 {
-                                            // v6 pseudo-header: src, dst, UDP length, next header.
-                                            sum = ones_complement_sum(&resp_packet[8..24], sum);
-                                            sum = ones_complement_sum(&resp_packet[24..40], sum);
-                                            sum += udp_len as u32;
-                                            sum += 17u32;
-                                        } else {
-                                            sum = ones_complement_sum(&resp_packet[12..20], sum);
-                                            sum += 17u32;
-                                            sum += udp_len as u32;
-                                        }
-                                        sum = ones_complement_sum(&resp_packet[udp_start..], sum);
-                                        let mut udp_csum = fold_checksum(sum);
-                                        if udp_csum == 0 { udp_csum = 0xffff; }
-                                        resp_packet[udp_start + 6..udp_start + 8].copy_from_slice(&udp_csum.to_be_bytes());
-
-                                        let _ = write_packet(&tun, &resp_packet).await;
-                                        continue; // Skip sending original query to tunnel
-                                    }
-                            }
-                        }
+                        continue; // the DNS task answers it; do not send it out
                     }
                 }
-                
+
                 outbound_tx.send(outbound).await
                     .map_err(|_| AetherError::Other("tunnel outbound channel closed".into()))?;
             },
             _ = probe_tick.tick(), if probing => {},
+            // DNS replies from the dedicated task. This arm can never block the
+            // loop's other arms, so a slow resolver stalls only the queries
+            // queued behind it instead of the whole tunnel.
+            r = dns_reply_rx.recv(), if !dns_reply_rx.is_empty() => {
+                if let Some(resp) = r {
+                    rx_total += resp.len() as u64;
+                    let _ = write_packet(&tun, &resp).await;
+                }
+            },
         }
 
         // Sent outside the select! arms so it happens on every wake-up, whichever
