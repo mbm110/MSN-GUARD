@@ -386,7 +386,7 @@ pub async fn bridge(
     // followed by a burst of cached answers. Queries are handed to a dedicated
     // task; replies are injected into the tunnel from there, so a resolver that
     // takes 20s to answer delays only the queries behind it, never a download.
-    let (dns_tx, dns_rx) = mpsc::channel::<Vec<u8>>(crate::sysprofile::channel_capacity() + 16);
+    let (dns_tx, mut dns_rx) = mpsc::channel::<Vec<u8>>(crate::sysprofile::channel_capacity() + 16);
     let (dns_reply_tx, mut dns_reply_rx) = mpsc::channel::<Vec<u8>>(crate::sysprofile::channel_capacity() + 16);
     {
     // SmartDnsSplit is a process-wide singleton behind a global, so the task
