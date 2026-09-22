@@ -559,6 +559,13 @@ class MainActivity : Activity() {
         )
 
         appUpdater = AppUpdater(this)
+        // v2.0.12: the DoT/DoH pins must exist before the first connect, not
+        // only after the user re-saves their DNS. An upgrade from 2.0.10 or
+        // earlier, or just opening the app and tapping CC without visiting the
+        // DNS screen, left dns_pinned_ips absent — the engine then had no
+        // pinned IP and every encrypted query failed instantly. Idempotent and
+        // off-thread: it only writes when the preference is missing.
+        CoreConfig.ensurePinnedIps(this)
         // Registers the periodic SHARD list refresh. Idempotent, so calling it on
         // every launch is how the job gets re-registered after an app update — a
         // package replace clears JobScheduler's registrations for the app.

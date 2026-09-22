@@ -221,6 +221,20 @@ object CoreConfig {
     }
 
     /**
+     * Computed pins on launch when absent. See [precomputePinnedIps].
+     */
+    fun ensurePinnedIps(context: Context) {
+        val prefs = context.profiled()
+        val lists = listOf("dns_servers_dot", "dns_servers_doh")
+        val hasEncrypted = lists.any { key ->
+            prefs.getString(key, null)?.ifBlank { null } != null
+        }
+        if (!hasEncrypted) return
+        if (prefs.getString(DNS_PINNED_IPS_PREF, null) != null) return
+        precomputePinnedIps(context)
+    }
+
+    /**
      * Resolve the DoT/DoH hostnames once, off the UI thread, and cache the
      * result. Called from [MainActivity.saveDnsLists] the moment the user
      * saves their DNS — never from the connect path, which must stay instant.

@@ -49,7 +49,9 @@ fn push_encrypted_resolvers(options: &StartOptions) {
         let host = ep.name.clone().unwrap_or_default();
         if let Some(ip) = pinned.iter().find(|(h, _)| h.eq_ignore_ascii_case(&host)).map(|(_, ip)| *ip) {
             ep.with_ips(vec![ip]);
-            log::debug!("[dns] pinned {} -> {}", host, ip);
+            log::info!("[dns] pinned {} -> {}", host, ip);
+        } else {
+            log::warn!("[dns] no pinned IP for {} — DoT/DoH will fail until the DNS screen is saved again", host);
         }
     }
     crate::smart_dns::set_resolvers(parsed.clone());
@@ -537,12 +539,20 @@ pub fn initialize() {
         struct UiLog;
         impl log::Log for UiLog {
             fn enabled(&self, metadata: &log::Metadata) -> bool {
-                // Only our own crate's info lines go to the UI. smoltcp/quiche/
-                // hickory are chatty at info and would flood the app log — they
-                // stay on stdout (logcat) instead, which is where a developer
-                // looks for them anyway.
-                metadata.level() == log::Level::Info
-                    && metadata.target().starts_with("aether")
+                // Warnings and errors from our own crate MUST reach the UI: the
+                // smart-dns engine's only failure reporting is log::warn!
+                // ("encrypted query failed; falling back to UDP"). Filtering
+                // those out made every DoT/DoH failure silent on-device — the
+                // field logs showed queries arriving and vanishing with zero
+                // diagnostics, which sent 2.0.5-2.0.11 looking for the wrong
+                // root cause. smoltcp/quiche/hickory stay on stdout: they are
+                // chatty at info and a developer reads them in logcat.
+                let level_ok = match metadata.level() {
+                    log::Level::Error | log::Level::Warn => true,
+                    log::Level::Info => true,
+                    _ => false,
+                };
+                level_ok && metadata.target().starts_with("aether")
             }
             fn log(&self, record: &log::Record) {
                 if !self.enabled(record.metadata()) {

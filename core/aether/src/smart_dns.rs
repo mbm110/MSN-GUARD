@@ -607,9 +607,15 @@ impl SmartDnsSplit {
         let sock_addr = std::net::SocketAddr::new(addr, port);
 
         let plain = Self::connect_tcp_resolver(sock_addr).await?;
-        let mut stream = tokio_boring::connect(Self::tls_connector()?, &ep.address, plain)
-            .await
-            .map_err(|e| AetherError::Tls(format!("dot handshake {}: {e}", ep.address)))?;
+        // The TLS handshake needs its own bound: on Iranian carriers a TCP
+        // connect to a Cloudflare IP can succeed while the handshake's first
+        // flight is blackholed, and tokio_boring has no timeout of its own.
+        // Without this the query hangs forever with no error — the exact
+        // signature of the 2.0.11 field logs.
+        let mut stream = match timeout(CONNECT_TIMEOUT, tokio_boring::connect(Self::tls_connector()?, &ep.address, plain)).await {
+            Ok(s) => s.map_err(|e| AetherError::Tls(format!("dot handshake {}: {e}", ep.address)))?,
+            Err(_) => return Err(AetherError::Other(format!("dot handshake {} timed out", ep.address))),
+        };
         // Two-byte length prefix, per RFC 1035 §4.2.2.
         let len = u16::try_from(query.len())
             .map_err(|_| AetherError::Other("DoT query too long".to_string()))?;
@@ -668,9 +674,12 @@ impl SmartDnsSplit {
         let sock_addr = std::net::SocketAddr::new(ip, port);
 
         let plain = Self::connect_tcp_resolver(sock_addr).await?;
-        let mut tls = tokio_boring::connect(Self::tls_connector()?, host, plain)
-            .await
-            .map_err(|e| AetherError::Tls(format!("doh handshake {host}: {e}")))?;
+        // Same bound as dot_query: the handshake can blackhole after a
+        // successful TCP connect on a censored carrier.
+        let mut tls = match timeout(CONNECT_TIMEOUT, tokio_boring::connect(Self::tls_connector()?, host, plain)).await {
+            Ok(t) => t.map_err(|e| AetherError::Tls(format!("doh handshake {host}: {e}")))?,
+            Err(_) => return Err(AetherError::Other(format!("doh handshake {host} timed out"))),
+        };
 
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let req = format!(
