@@ -1,6 +1,7 @@
 package com.msnguard.vpn
 
 import android.content.Context
+import android.content.SharedPreferences
 import org.json.JSONObject
 import java.io.File
 import com.msnguard.vpn.profiled
