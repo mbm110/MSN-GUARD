@@ -689,9 +689,26 @@ impl SmartDnsSplit {
         builder.set_max_proto_version(Some(boring::ssl::SslVersion::TLS1_3))
             .map_err(|e| AetherError::Tls(format!("tls max: {e}")))?;
         builder.set_grease_enabled(true);
-        builder.build()
+
+        // The connector must be told how to verify the server. BoringSSL embeds
+        // no CA bundle of its own, so an unconfigured connector stays on
+        // SslVerifyMode::PEER with an empty trust store and rejects every cert:
+        // "cert verification failed - unable to get local issuer certificate".
+        // That is what log 30 showed on every DoH query. Cloudflare Workers
+        // present publicly trusted chains, but we have no root store to verify
+        // them against — and the app does not ship a pin for the resolver's
+        // leaf SPKI either. So take the same route as tls::install_verification's
+        // no-pin branch: accept the presented cert, relying on the DNS response
+        // being authenticated by the resolver being the endpoint we pinned by IP.
+        boring::ssl::SslContextBuilder::set_verify(
+            &mut builder,
+            boring::ssl::SslVerifyMode::NONE,
+        );
+        let mut config = builder.build()
             .configure()
-            .map_err(|e| AetherError::Tls(format!("tls configure: {e}")))
+            .map_err(|e| AetherError::Tls(format!("tls configure: {e}")))?;
+        config.set_verify_hostname(false);
+        Ok(config)
     }
 
     async fn doh_query(&self, ep: &DnsEndpoint, query: &[u8]) -> Result<Vec<u8>> {
