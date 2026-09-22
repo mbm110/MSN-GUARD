@@ -20,8 +20,8 @@ const ANTI_SANCTION_DNS: &[&str] = &[
     "185.51.200.2",    // Shecan
 ];
 
-/// Default fast DNS (Cloudflare/Google), used as the fallback and for the
-/// DoT/DoH server's own hostname lookup (bootstrap_sockets).
+/// Default fast DNS (Cloudflare/Google), the fallback for plain lookups and
+/// for resolving a DoT/DoH server's own hostname (via resolve_host_out_of_band).
 const DEFAULT_DNS: &[&str] = &[
     "1.1.1.1",
     "1.0.0.1",
@@ -198,11 +198,6 @@ pub struct SmartDnsSplit {
     anti_sanction_sockets: Arc<Vec<Arc<UdpSocket>>>,
     /// Default DNS sockets (pre-connected, plain UDP)
     default_sockets: Arc<Vec<Arc<UdpSocket>>>,
-
-    /// Protected copy of DEFAULT_DNS, used ONLY to resolve a DoT/DoH server's
-    /// own hostname (resolve_host_out_of_band). Riding the tunnel for that
-    /// lookup re-enters process_query() and deadlocks.
-    bootstrap_sockets: Arc<Vec<Arc<UdpSocket>>>,
     /// DoT/DoH endpoints. When non-empty, the encrypted path is preferred.
     encrypted_resolvers: Arc<RwLock<Vec<DnsEndpoint>>>,
     /// The user's own resolvers (any transport), set from `smart_dns_servers`.
@@ -249,31 +244,8 @@ impl SmartDnsSplit {
             // Public resolvers must ride the tunnel: on Iranian carriers plain 53
             // to 1.1.1.1 is hijacked and poisoned. Not protected on purpose.
             //
-            // resolve_host_out_of_band() must NOT use these — it needs the
-            // protected variants in bootstrap_sockets instead. See the comment
-            // there for the deadlock that the unprotected set causes.
-            default_sockets.push(Arc::new(sock));
-        }
 
-        // A second, PROTECTED copy of the public resolvers, used only to resolve
-        // a DoT/DoH server's own hostname (see resolve_host_out_of_band). The
-        // main default_sockets above ride the tunnel on purpose so that plain 53
-        // escapes a hijacking carrier — but a bootstrap lookup that rides the
-        // tunnel re-enters process_query() and deadlocks.
-        let mut bootstrap_sockets = Vec::new();
-        for server in DEFAULT_DNS {
-            let addr: SocketAddr = format!("{server}:{DNS_PORT}").parse()
-                .map_err(|e| AetherError::Other(format!("Invalid bootstrap DNS {server}: {e}")))?;
-            let sock = UdpSocket::bind(if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }).await
-                .map_err(AetherError::Io)?;
-            sock.connect(addr).await.map_err(AetherError::Io)?;
-            #[cfg(target_os = "android")]
-            {
-                if let Err(e) = crate::platform::protect_socket(&sock) {
-                    log::warn!("[smart-dns] protect(bootstrap {server}) failed: {e}");
-                }
-            }
-            bootstrap_sockets.push(Arc::new(sock));
+            default_sockets.push(Arc::new(sock));
         }
 
         Ok(Self {
@@ -281,7 +253,6 @@ impl SmartDnsSplit {
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_QUERIES)),
             anti_sanction_sockets: anti_sanction_sockets.into(),
             default_sockets: default_sockets.into(),
-            bootstrap_sockets: bootstrap_sockets.into(),
             encrypted_resolvers: Arc::new(RwLock::new(Vec::new())),
             user_resolvers: Arc::new(RwLock::new(Vec::new())),
         })
@@ -297,6 +268,44 @@ impl SmartDnsSplit {
 
     pub fn has_encrypted(&self) -> bool {
         !self.encrypted_resolvers.read().is_empty()
+    }
+
+    /// The hostnames and addresses of the configured DoT/DoH servers.
+    ///
+    /// These are EXCLUDED from interception. This is the fix for the bootstrap
+    /// deadlock that failed across 2.0.6-2.0.8:
+    ///
+    /// the engine intercepts every port-53 query the device makes. Answering a
+    /// query for domain X means asking the DoH server, which means resolving
+    /// the DoH server's own hostname. That lookup is itself a port-53 query.
+    /// Whichever socket carried it — protected (physical carrier network, where
+    /// Iranian operators hijack and drop plain 53) or unprotected (through the
+    /// tunnel, whose DNS path IS this function) — failed. The protected path
+    /// timed out on the carrier; the unprotected path re-entered this function
+    /// and deadlocked the future waiting on it. Field logs: the bootstrap line
+    /// cycling at a steady 6s with no answer, no error, nothing after it.
+    ///
+    /// Exclusion breaks the loop: a query for the resolver's own name returns
+    /// None and takes the tunnel's own DNS path, which resolves it through the
+    /// exit node where nothing is hijacked. The answer comes back without ever
+    /// entering the interceptor. Then the DoH request can be sent over either
+    /// path, because it can no longer re-enter this function.
+    fn resolver_hosts(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for ep in self.encrypted_resolvers.read().iter() {
+            if let Some(name) = &ep.name {
+                out.push(name.to_ascii_lowercase());
+            } else if !ep.address.starts_with("http") {
+                out.push(ep.address.to_ascii_lowercase());
+            }
+        }
+        out
+    }
+
+    /// True when the query must NOT be intercepted — the resolver's own name.
+    fn is_resolver_hostname(&self, domain: &str) -> bool {
+        let domain = domain.to_ascii_lowercase();
+        self.resolver_hosts().iter().any(|h| domain == *h || domain.ends_with(&format!(".{h}")))
     }
 
     /// Build a DNS query packet
@@ -448,22 +457,21 @@ impl SmartDnsSplit {
         // defaults, which work everywhere.
         for qtype in [1u16, 28u16] {
             let (query, new_id) = Self::build_query(host, qtype);
-            // Both stages use PROTECTED sockets. The anti-sanction set is
-            // Iran-only; bootstrap_sockets (1.1.1.1/8.8.8.8, protected) is the
-            // fallback. Neither may ride the tunnel: a bootstrap lookup that
-            // enters the TUN is captured by process_query(), which is the very
-            // future waiting on this call — deadlock. This was the 2.0.7
-            // regression: the fallback used default_sockets (unprotected, via
-            // the tunnel), and the field log showed the "trying public
-            // defaults" line fire 15 times and then silence.
+            // Now that the resolver's own hostname is EXCLUDED from
+            // process_query(), this lookup can ride the tunnel safely: it can
+            // no longer re-enter the interceptor and deadlock. Riding the
+            // tunnel is exactly what makes it work in Iran — plain 53 to
+            // 1.1.1.1 on the physical carrier network is hijacked or dropped
+            // there, which is why the 2.0.7/2.0.8 protected bootstrap timed
+            // out. Through the exit node nothing is hijacked.
             let resp = match self
                 .parallel_query(self.anti_sanction_sockets.clone(), query.clone(), new_id, host.to_string(), qtype)
                 .await
             {
                 Ok(r) => r,
                 Err(_) => {
-                    log::info!("[smart-dns] anti-sanction resolvers failed for {host}; trying protected public defaults");
-                    self.parallel_query(self.bootstrap_sockets.clone(), query, new_id, host.to_string(), qtype).await?
+                    log::info!("[smart-dns] anti-sanction resolvers failed for {host}; trying public defaults");
+                    self.parallel_query(self.default_sockets.clone(), query, new_id, host.to_string(), qtype).await?
                 }
             };
             out.extend(Self::parse_answers(&resp, qtype));
@@ -782,6 +790,16 @@ impl SmartDnsSplit {
         // here means the user configured DoT/DoH. Without an encrypted resolver
         // the query takes the tunnel's own normal path.
         if !has_encrypted {
+            return None;
+        }
+
+        // THE BOOTSTRAP EXCLUSION. Resolving the DoH server's own hostname is
+        // what deadlocked every previous version: this function intercepts that
+        // query, and answering it needs that very lookup. Letting it fall
+        // through to the tunnel's own DNS path resolves it through the exit
+        // node instead. See resolver_hosts().
+        if self.is_resolver_hostname(&domain) {
+            log::info!("[smart-dns] resolver-host query {domain} -> tunnel path (excluded)");
             return None;
         }
 
