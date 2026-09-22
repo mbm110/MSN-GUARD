@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use quiche::h3;
 use quiche::h3::NameValue;
-use rand::{RngExt, Rng};
+use rand::Rng;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 

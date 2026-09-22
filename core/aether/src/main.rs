@@ -46,7 +46,7 @@ fn push_encrypted_resolvers(options: &StartOptions) {
         .map(parse_pinned_ips).unwrap_or_default();
     let mut parsed = parsed;
     for ep in parsed.iter_mut() {
-        let host = ep.name.as_deref().unwrap_or("");
+        let host = ep.name.clone().unwrap_or_default();
         if let Some(ip) = pinned.iter().find(|(h, _)| h.eq_ignore_ascii_case(host)).map(|(_, ip)| *ip) {
             ep.with_ips(vec![ip]);
             log::debug!("[dns] pinned {} -> {}", host, ip);
@@ -526,7 +526,7 @@ pub fn initialize() {
                 )
             })
             .unwrap_or_else(|| "info".to_string());
-        let filter = format!("info,aether={level}");
+        let _filter = format!("info,aether={level}");
 
         // Bridge the `log` crate into the UI-visible record_log() channel.
         // 80 call sites use log::info!, but only record_log() reaches the app's
@@ -3768,7 +3768,7 @@ async fn run_masque_in_masque(
     // above skips the winner's own branch, so every await below belongs to a
     // handle select! left pending, which is its first poll. abort() first is
     // what makes a still-running task resolve instead of hanging teardown.
-    async fn settle_join(handle: &mut Option<tokio::task::JoinHandle<Result<()>>>, name: &str) {
+    async fn settle_join(handle: &mut Option<tokio::task::JoinHandle<Result<()>>>, _name: &str) {
         let Some(handle) = handle.take() else { return };
         handle.abort();
         match handle.await {

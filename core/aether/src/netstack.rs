@@ -546,7 +546,7 @@ async fn run(
                         // When accept mode is on, create a listening socket for the SYN's
                         // destination, then feed the packet so smoltcp can accept it.
                         if s.accept_tx.is_some() && is_tcp_syn(&pkt) {
-                            if let Some((dst_ip, dst_port, src_ip, src_port)) = parse_tcp_syn(&pkt) {
+                            if let Some((dst_ip, dst_port, _src_ip, _src_port)) = parse_tcp_syn(&pkt) {
                                 // Create a listening socket for this destination
                                 let rx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_rx_buf()]);
                                 let tx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_tx_buf()]);
@@ -898,7 +898,7 @@ fn is_tcp_syn(pkt: &[u8]) -> bool {
     (flags & 0x02) != 0 && (flags & 0x10) == 0
 }
 
-/// Parse a TCP SYN packet and return (dst_ip, dst_port, src_ip, src_port).
+/// Parse a TCP SYN packet and return (dst_ip, dst_port, _src_ip, _src_port).
 fn parse_tcp_syn(pkt: &[u8]) -> Option<(IpAddr, u16, IpAddr, u16)> {
     if pkt.len() < 40 { return None; }
     let version = pkt[0] >> 4;
@@ -910,7 +910,7 @@ fn parse_tcp_syn(pkt: &[u8]) -> Option<(IpAddr, u16, IpAddr, u16)> {
     let tcp = &pkt[ihl..];
     let src_port = u16::from_be_bytes([tcp[0], tcp[1]]);
     let dst_port = u16::from_be_bytes([tcp[2], tcp[3]]);
-    Some((dst_ip, dst_port, src_ip, src_port))
+    Some((dst_ip, dst_port, _src_ip, _src_port))
 }
 
 fn service_udp(s: &mut NetStack) -> bool {
