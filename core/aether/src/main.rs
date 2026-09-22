@@ -3058,11 +3058,43 @@ async fn run_warp_in_warp(
 
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
-    // The inner hop may be a DIFFERENT edge than the outer one. Defaulting to
-    // `peer` here is what made "pin one endpoint" mean "pin both hops to it" on
-    // WoW — the nested tunnel never got a second edge, which is the only reason
-    // nesting exists.
-    let inner_peer = options.forced_inner_peer.unwrap_or(peer);
+    // The inner hop must be a DIFFERENT edge than the outer one. Defaulting to
+    // `peer` here made "pin one endpoint" mean "pin both hops to it" on WoW: the
+    // inner handshake was sent through the outer tunnel to the outer edge's own
+    // address, which is a routing loop — Cloudflare drops it, and the inner leg
+    // times out with "verify timeout" on every connect while the outer leg
+    // validates fine. That is exactly the failure in the 2.0.15 log.
+    //
+    // When the user has not pinned an inner endpoint manually, pick a distinct
+    // seed automatically. Any other seed will do; the requirement is only that it
+    // differs from the outer edge so the inner handshake lands on a real edge
+    // rather than looping back to the one that carries it.
+    fn distinct_inner_peer(outer: SocketAddr) -> SocketAddr {
+        if outer.is_ipv4() {
+            for seed in wireguard::wg_seeds_v4() {
+                let candidate = format!("{seed}:{}", outer.port());
+                if let Ok(addr) = candidate.parse::<SocketAddr>() {
+                    if addr != outer {
+                        return addr;
+                    }
+                }
+            }
+        } else {
+            for seed in wireguard::wg_seeds_v6() {
+                let candidate = format!("{seed}:{}", outer.port());
+                if let Ok(addr) = candidate.parse::<SocketAddr>() {
+                    if addr != outer {
+                        return addr;
+                    }
+                }
+            }
+        }
+        outer
+    }
+
+    let inner_peer = options
+        .forced_inner_peer
+        .unwrap_or_else(|| distinct_inner_peer(peer));
     let (forwarder, _forwarder_guard) = spawn_udp_forwarder(&outer_stack, inner_peer).await?;
     if inner_peer != peer {
         log::info!("[+] inner hop pinned to {inner_peer}, outer to {peer}");
