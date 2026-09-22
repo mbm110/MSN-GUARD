@@ -6830,6 +6830,28 @@ class MainActivity : Activity() {
         // Decided BEFORE the consent dialog, because the answer depends on the
         // selection and the user is about to be able to change nothing else.
         if (shouldAutoScan()) beginAutoScan()
+        refreshDnsPinsAndConnect()
+    }
+
+    /**
+     * Refresh the DoT/DoH pins and build the connect config, in that order.
+     *
+     * v2.0.13: the pins are the addresses the engine dials for the resolver's
+     * own hostname. Cloudflare Workers resolve to a rotating anycast set and
+     * Iranian carriers withdraw reachability to individual addresses without
+     * warning, so a pin computed once at launch (2.0.12) can be stale for
+     * weeks and the engine then dials a black hole. Refreshing here — before
+     * configJson() — is what puts the fresh set into the config the engine
+     * actually receives.
+     *
+     * The lookup rides the phone's own untunneled resolver: the app excludes
+     * its own package from the VPN once a TUN exists, but this runs before
+     * establishVpn(), so nothing is in the way yet. It blocks the caller for
+     * at most [PIN_REFRESH_TIMEOUT_MS]; a slow or dead carrier link leaves the
+     * previous pin in place rather than stalling the connect.
+     */
+    private fun refreshDnsPinsAndConnect() {
+        CoreConfig.refreshPinnedIpsBlocking(this)
         val config = configJson()
         // Proxy mode needs no VPN consent at all — no TUN is created, so asking for
         // it would put a system dialog in front of a feature that does not use the
@@ -6863,6 +6885,16 @@ class MainActivity : Activity() {
         trafficSpeedTx = 0
         trafficSpeedRx = 0
         showConnecting()
+        // v2.0.13: refresh the DoT/DoH pins on every connect, not just at launch.
+        // The pins are the addresses the engine dials for the resolver's own
+        // hostname, and Cloudflare Workers serve from a rotating anycast set that
+        // Iranian carriers withdraw reachability to without warning. A pin
+        // computed once can be stale for weeks.
+        //
+        // configJson() was already called by the time we get here, so this write
+        // can only help the NEXT connect — unless we make the caller wait. Both
+        // caller sites refresh before building the config instead (see
+        // refreshDnsPinsAndConnect), so the engine receives the fresh set.
         // Every rung gets its own deadline, armed here so it covers the paths that
         // never report anything back — see [armAutoScanWatchdog]. A no-op when no
         // scan is running.
@@ -6972,6 +7004,11 @@ class MainActivity : Activity() {
             // token on; this attempt is stale.
             if (token != autoScanToken || autoScanIndex != next) return@postDelayed
             autoScanSettling = false
+            // v2.0.13: refresh the DoT/DoH pins before building the config for
+            // this rung — same reason as the manual connect path. Auto Scan
+            // walks several transports and each one deserves a fresh pin set
+            // rather than inheriting one computed when the ladder started.
+            CoreConfig.refreshPinnedIpsBlocking(this)
             connect(configJson())
         }, AUTO_SCAN_HANDOVER_MS)
         return true

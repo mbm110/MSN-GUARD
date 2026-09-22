@@ -47,34 +47,44 @@ fn push_encrypted_resolvers(options: &StartOptions) {
     let mut parsed = parsed;
     for ep in parsed.iter_mut() {
         let host = ep.name.clone().unwrap_or_default();
-        if let Some(ip) = pinned.iter().find(|(h, _)| h.eq_ignore_ascii_case(&host)).map(|(_, ip)| *ip) {
-            ep.with_ips(vec![ip]);
-            log::info!("[dns] pinned {} -> {}", host, ip);
+        let ips: Vec<_> = pinned.iter()
+            .filter(|(h, _)| h.eq_ignore_ascii_case(&host))
+            .map(|(_, ip)| *ip).collect();
+        if !ips.is_empty() {
+            ep.with_ips(ips.clone());
+            log::info!("[dns] pinned {} -> {} address(es)", host, ips.len());
         } else {
-            log::warn!("[dns] no pinned IP for {} — DoT/DoH will fail until the DNS screen is saved again", host);
+            log::warn!("[dns] no pinned IP for {host} — DoT/DoH will fail until the DNS screen is saved again", );
         }
     }
     crate::smart_dns::set_resolvers(parsed.clone());
     log::info!("[dns] {} DoT/DoH resolver(s) pushed to the engine", parsed.len());
 }
 
-/// Parse the app's pinned-IP map: "host=ip,host=ip" -> host/IP pairs.
+/// Parse the app's pinned-IP map: "host=ip,host=ip1+ip2" -> host/IP pairs,
+/// one pair per address. The v2.0.13 Kotlin side pins every address a
+/// Cloudflare Worker resolves to (separated by '+'), because Iranian carriers
+/// withdraw reachability to individual anycast addresses without warning and
+/// a single pin has no redundancy. Splitting here keeps `with_ips` receiving
+/// the whole set for one host.
 /// Malformed entries are skipped, never fatal — the engine simply falls back
 /// to resolving that host the hard way.
 fn parse_pinned_ips(raw: &str) -> Vec<(&str, std::net::IpAddr)> {
     let mut out = Vec::new();
     for part in raw.split([',', ';', ' ', '\n', '\r']) {
         let part = part.trim();
-        let Some((host, ip)) = part.split_once('=') else { continue };
+        let Some((host, ips)) = part.split_once('=') else { continue };
         let host = host.trim();
-        let ip = match ip.trim().parse::<std::net::IpAddr>() {
-            Ok(ip) => ip,
-            Err(_) => {
-                log::warn!("[dns] bad pinned IP for {host}: {}", ip.trim());
-                continue;
-            }
-        };
-        if !host.is_empty() {
+        if host.is_empty() { continue }
+        for ip_str in ips.split('+') {
+            let ip_str = ip_str.trim();
+            let ip = match ip_str.parse::<std::net::IpAddr>() {
+                Ok(ip) => ip,
+                Err(_) => {
+                    log::warn!("[dns] bad pinned IP for {host}: {ip_str}");
+                    continue;
+                }
+            };
             out.push((host, ip));
         }
     }

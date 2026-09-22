@@ -5681,9 +5681,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             return this
         }
         if (mode == SplitTunnelSettings.Mode.INCLUDE) {
-            // INCLUDE (whitelist): only listed apps go through VPN.
-            // Do NOT add our own packageName — it's excluded by default.
-            // Do NOT use addDisallowedApplication here (mixing with addAllowedApplication crashes).
+            // INCLUDE (whitelist): only listed apps go through VPN. Any app not
+            // in addAllowedApplication() — including ours — is outside the VPN
+            // by construction, so no explicit self-exclusion is needed here.
+            // The empty-list case is rejected by the check below.
         }
         if (packages.isEmpty()) {
             check(mode != SplitTunnelSettings.Mode.INCLUDE) {

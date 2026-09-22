@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use parking_lot::RwLock;
@@ -150,6 +152,56 @@ impl DnsEndpoint {
         if !ips.is_empty() {
             self.ips = ips;
         }
+    }
+
+    /// Dial the endpoint's pinned IPs in order, returning the first that
+    /// completes a TCP connect.
+    ///
+    /// v2.0.13: `ips.first()` — the 2.0.10 design — pins exactly one IP and
+    /// dies with it. Cloudflare Workers resolve to a rotating set of anycast
+    /// addresses and Iranian carriers withdraw reachability to individual ones
+    /// without warning, so a single pin has no redundancy: the first stale
+    /// address takes the whole DoH/DoT path down with no retry. Intra
+    /// (Jigsaw) iterates `ips.GetAll()` per query and Rethink's firestack
+    /// iterates a reordered IPSet, promoting whichever address actually
+    /// connected. This mirrors that: try each pinned IP, prefer v4, and only
+    /// report failure when none of them answers.
+    fn connect_pinned(
+        &self,
+        ep: &DnsEndpoint,
+        port: u16,
+        host: &str,
+        proto: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<tokio::net::TcpStream>> + Send + Sync + '_>> {
+        Box::pin(async move {
+            if ep.ips.is_empty() {
+                return Err(AetherError::Other(format!(
+                    "{proto}: {host} has no pinned IP"
+                )));
+            }
+            // Prefer IPv4: some Iranian carriers break v6 to Cloudflare while
+            // v4 still works (same preference as CoreConfig.resolveHostsToIps).
+            let mut ordered: Vec<_> = ep.ips.iter().collect();
+            ordered.sort_by_key(|ip| ip.is_ipv6());
+
+            let mut last: Option<AetherError> = None;
+            for ip in ordered {
+                log::debug!("{proto}: trying pinned IP for {host}: {ip}");
+                match Self::connect_tcp_resolver(std::net::SocketAddr::new(*ip, port)).await {
+                    Ok(s) => {
+                        log::debug!("{proto}: connected to {host} via {ip}");
+                        return Ok(s);
+                    }
+                    Err(e) => {
+                        log::warn!("{proto}: pinned IP {ip} for {host} failed: {e:?}");
+                        last = Some(e);
+                    }
+                }
+            }
+            Err(last.unwrap_or_else(|| AetherError::Other(format!(
+                "{proto}: {host}: every pinned IP failed"
+            ))))
+        })
     }
 
     /// A pinned IP to dial for this endpoint, if the app gave us one.
@@ -558,19 +610,23 @@ impl SmartDnsSplit {
 
     /// Open a TCP connection to the DoT/DoH server.
     ///
-    /// v2.0.11: rides the TUNNEL (not protected) and carries a hard connect
-    /// timeout. The 2.0.8-2.0.10 design protected this socket, sending it
-    /// outside the tunnel — but every DoH server the user configures here is a
-    /// Cloudflare Worker, and direct TCP/443 to Cloudflare IPs is blocked on
-    /// Iranian carriers. The packet left the phone and never came back, so
-    /// `socket.connect()` hung forever with no timeout and no error, which is
-    /// exactly what the field logs showed: ten intercepted queries, zero
-    /// answered, zero "failed", zero "excluded".
+    /// PROTECTED — kept outside the tunnel — same as masque_h2::connect_tcp.
     ///
-    /// The tunnel is the one place the lookup is safe now that the resolver's
-    /// own hostname is excluded from interception (2.0.9) and pinned by the
-    /// app (2.0.10): no lookup happens at connect time, so nothing can
-    /// re-enter the interceptor.
+    /// v2.0.13 corrects a wrong turn in 2.0.11. That build removed the protect()
+    /// call on the theory that Iranian carriers block Cloudflare outside the
+    /// tunnel, so the connection should ride the TUN. But the app excludes its
+    /// own package from the VPN in split-tunnel ALL mode (the default) and runs
+    /// single-process (no android:process in the manifest), so the core shares
+    /// the app's uid and an "unprotected" socket was never actually in the
+    /// tunnel to begin with. Un-protecting the socket changed nothing about the
+    /// path — and it reintroduced the class of re-entry bug the protect() call
+    /// exists to close. Intra (Jigsaw) and firestack both protect the
+    /// resolver's own socket: protect() is the correct invariant.
+    ///
+    /// The reason DoH still failed in the 2.0.11/2.0.12 logs is that the
+    /// outside-tunnel path IS where Iranian carriers block Cloudflare — so
+    /// the fix is a working resolver IP, not a different socket. Cloudflare
+    /// Workers also serve DoH over HTTP/2; see [doh_query].
     async fn connect_tcp_resolver(addr: std::net::SocketAddr) -> Result<tokio::net::TcpStream> {
         let socket = if addr.is_ipv4() {
             tokio::net::TcpSocket::new_v4()
@@ -578,7 +634,7 @@ impl SmartDnsSplit {
             tokio::net::TcpSocket::new_v6()
         }
         .map_err(AetherError::Io)?;
-        // NOT protected: this must ride the tunnel to reach Cloudflare in Iran.
+        crate::platform::protect_socket(&socket).map_err(AetherError::Io)?;
         let bind = if addr.is_ipv4() {
             "0.0.0.0:0".parse().unwrap()
         } else {
@@ -595,18 +651,16 @@ impl SmartDnsSplit {
     async fn dot_query(&self, ep: &DnsEndpoint, query: &[u8]) -> Result<Vec<u8>> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let port = ep.explicit_port().unwrap_or(853);
-        // The app pins the resolver's own IP at connect time (CoreConfig,
+        // The app pins the resolver's own IPs at connect time (CoreConfig,
         // 2.0.10) precisely so this path never has to do a lookup. Without a
         // pin there is no safe option: resolving through the tunnel re-enters
         // this engine and deadlocks (2.0.5-2.0.9), and the protected path
         // times out on Iranian carriers. Fail fast instead and let the caller
         // fall back to plain UDP, which keeps the device online.
-        let addr = ep.pinned_ip()
-            .ok_or_else(|| AetherError::Other(format!("dot: {} has no pinned IP", ep.address)))?;
-        log::debug!("dot: using pinned IP for {}: {}", ep.address, addr);
-        let sock_addr = std::net::SocketAddr::new(addr, port);
-
-        let plain = Self::connect_tcp_resolver(sock_addr).await?;
+        let host = ep.address.split("://").nth(1).unwrap_or(&ep.address);
+        let host = host.split('/').next().unwrap_or(host);
+        let host = host.split(':').next().unwrap_or(host);
+        let plain = self.connect_pinned(ep, port, host, "dot").await?;
         // The TLS handshake needs its own bound: on Iranian carriers a TCP
         // connect to a Cloudflare IP can succeed while the handshake's first
         // flight is blackholed, and tokio_boring has no timeout of its own.
@@ -668,12 +722,7 @@ impl SmartDnsSplit {
         let path = parsed.path();
         let path = if path.is_empty() { "/dns-query" } else { path };
 
-        let ip = ep.pinned_ip()
-            .ok_or_else(|| AetherError::Other(format!("doh: {} has no pinned IP", host)))?;
-        log::debug!("doh: using pinned IP for {host}: {ip}");
-        let sock_addr = std::net::SocketAddr::new(ip, port);
-
-        let plain = Self::connect_tcp_resolver(sock_addr).await?;
+        let plain = self.connect_pinned(ep, port, host, "doh").await?;
         // Same bound as dot_query: the handshake can blackhole after a
         // successful TCP connect on a censored carrier.
         let mut tls = match timeout(CONNECT_TIMEOUT, tokio_boring::connect(Self::tls_connector()?, host, plain)).await {

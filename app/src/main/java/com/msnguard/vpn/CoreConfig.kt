@@ -47,6 +47,14 @@ object CoreConfig {
     private const val DNS_PINNED_IPS_PREF = "dns_pinned_ips"
 
     /**
+     * How long [refreshPinnedIpsBlocking] may hold the connect path. Carrier
+     * lookups for a Cloudflare Workers domain are usually sub-second; the cap
+     * exists so a carrier that silently drops the query cannot stall the
+     * connect, leaving the previous pin in place instead.
+     */
+    private const val PIN_REFRESH_TIMEOUT_MS = 1500L
+
+    /**
      * Which transport last carried a PLAIN (unchained) tunnel far enough to move
      * real bytes, as a `CHAIN_OUTER_LADDER` entry — or absent if none ever has.
      *
@@ -235,6 +243,53 @@ object CoreConfig {
     }
 
     /**
+     * Refresh the pins on the connect path and block until they land.
+     *
+     * v2.0.13. The pins are the addresses the Rust engine dials for the DoT/DoH
+     * resolver's own hostname; a stale one means the engine dials a black hole
+     * and every encrypted query fails. Cloudflare Workers resolve to a rotating
+     * anycast set and Iranian carriers withdraw reachability to individual
+     * addresses without warning, so a pin computed once can go stale for weeks.
+     *
+     * This runs before the TUN exists, so the lookup rides the phone's own
+     * untunneled resolver. The cap matters more than the speed: a carrier that
+     * silently drops the lookup must not hang the connect, so we fall back to
+     * whatever pin was already stored.
+     */
+    fun refreshPinnedIpsBlocking(context: Context, timeoutMs: Long = PIN_REFRESH_TIMEOUT_MS) {
+        val prefs = context.profiled()
+        val lists = listOf("dns_servers_dot", "dns_servers_doh")
+        val hosts = LinkedHashSet<String>()
+        lists.forEach { key ->
+            val raw = prefs.getString(key, null) ?: return@forEach
+            raw.split(',', ';', ' ', '\n', '\r').forEach { entry ->
+                extractHost(entry.trim())?.let { if (it.isNotEmpty()) hosts.add(it) }
+            }
+        }
+        if (hosts.isEmpty()) {
+            prefs.edit().remove(DNS_PINNED_IPS_PREF).apply()
+            return
+        }
+        // Never block the UI thread: this is called from the connect path, but
+        // the caller already moved off it where it mattered. Guard anyway.
+        val latch = java.util.concurrent.CountDownLatch(1)
+        Thread({
+            try {
+                val pinned = resolveHostsToIps(hosts)
+                if (pinned.isEmpty()) {
+                    prefs.edit().remove(DNS_PINNED_IPS_PREF).apply()
+                } else {
+                    prefs.edit().putString(DNS_PINNED_IPS_PREF, pinned).apply()
+                    android.util.Log.i(TAG_DNS, "refreshed ${pinned.split(',').size} resolver pin(s)")
+                }
+            } finally {
+                latch.countDown()
+            }
+        }, "dns-pin-refresh").start()
+        latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
+
+    /**
      * Resolve the DoT/DoH hostnames once, off the UI thread, and cache the
      * result. Called from [MainActivity.saveDnsLists] the moment the user
      * saves their DNS — never from the connect path, which must stay instant.
@@ -277,20 +332,29 @@ object CoreConfig {
      * core falls back to its own resolution path.
      */
     /**
-     * The resolver hostnames -> "host=ip,host=ip", or "" when none resolved.
-     * Runs on a background thread (never the UI thread) and caps each lookup.
+     * The resolver hostnames -> "host=ip1+ip2,host=ip", or "" when none
+     * resolved. Runs on a background thread (never the UI thread).
+     *
+     * v2.0.13 pins *every* address, not just the first. Cloudflare Workers
+     * resolve to a rotating anycast set and Iranian carriers withdraw
+     * reachability to individual addresses without warning; a single pin has
+     * no redundancy, so the engine now receives the whole set and dials them
+     * in order (see smart_dns connect_pinned). Intra (Jigsaw) and Rethink
+     * (firestack) do exactly this — `ips.GetAll()` / a reordered IPSet.
+     * v4 is written first so the engine's v4 preference is preserved.
      */
     private fun resolveHostsToIps(hosts: LinkedHashSet<String>): String {
         val out = StringBuilder()
         hosts.forEach { host ->
             try {
                 val addrs = java.net.InetAddress.getAllByName(host)
-                // Prefer IPv4: some Iranian carriers still break v6 to
-                // Cloudflare while v4 works.
-                val v4 = addrs.firstOrNull { it is java.net.Inet4Address }
-                val picked = v4 ?: addrs.firstOrNull() ?: return@forEach
+                // v4 first, then v6: some Iranian carriers break v6 to
+                // Cloudflare while v4 still works.
+                val ordered = addrs.sortedBy { it is java.net.Inet6Address }
+                val ips = ordered.map { it.hostAddress }
+                if (ips.isEmpty()) return@forEach
                 if (out.isNotEmpty()) out.append(',')
-                out.append(host).append('=').append(picked.hostAddress)
+                out.append(host).append('=').append(ips.joinToString("+"))
             } catch (e: Exception) {
                 android.util.Log.w(TAG_DNS, "could not pre-resolve $host: ${e.message}")
             }
