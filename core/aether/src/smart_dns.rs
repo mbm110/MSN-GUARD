@@ -645,7 +645,17 @@ impl SmartDnsSplit {
             tokio::net::TcpSocket::new_v6()
         }
         .map_err(AetherError::Io)?;
-        crate::platform::protect_socket(&socket).map_err(AetherError::Io)?;
+        // Tunnel-routed: the DoT/DoH resolver's own TCP connection rides INSIDE
+        // the tunnel. Cloudflare Workers are anycast, so the colo that answers
+        // is chosen by where the connection enters the network. An
+        // out-of-tunnel (protected) connection from Iran lands in Frankfurt, so
+        // the Worker resolves there and every answer appears German (2.0.20 and
+        // earlier). Riding the tunnel makes the Worker answer from the exit
+        // node's location, matching what RethinkDNS reports. Safe from the
+        // 2.0.6/2.0.7 bootstrap deadlock: connect_pinned() dials a pinned IP,
+        // so this socket never triggers a DNS lookup of its own.
+        // DO NOT add protect_socket() back here: it pushes the socket onto the
+        // physical carrier and reintroduces the German egress.
         let bind = if addr.is_ipv4() {
             "0.0.0.0:0".parse().unwrap()
         } else {
