@@ -533,22 +533,18 @@ impl SmartDnsSplit {
             match UdpSocket::bind(bind_addr).await {
                 Ok(sock) => {
                     let sock = Arc::new(sock);
-                    // Only private resolvers (e.g. the Iranian 10.202.10.x /
-                    // 78.157.42.x ranges) must be kept outside the tunnel — they
-                    // are unroutable through it. Public resolvers must stay
-                    // inside, otherwise the local network blocks them outright.
-                    let is_private = ep.address
-                        .parse::<std::net::IpAddr>()
-                        .map(|ip| match ip {
-                            std::net::IpAddr::V4(v4) => v4.is_private(),
-                            std::net::IpAddr::V6(v6) => {
-                                let seg = v6.segments();
-                                (seg[0] & 0xfe00) == 0xfc00 // unique-local fd00::/8
-                            }
-                        })
-                        .unwrap_or(false);
-                    if is_private {
-                        crate::platform::protect_socket(&sock);
+                    // v2.0.25: the user's OWN resolver ALWAYS rides the carrier.
+                    // Android routes an unprotected socket through our own VPN,
+                    // which exits in Germany, where an Iranian resolver is
+                    // unreachable — the log for 2.0.24 showed every single
+                    // user-resolver query fail with "All DNS queries failed" the
+                    // moment the VPN route table was populated, then fall back to
+                    // anti-sanction resolvers that answered from Germany, which
+                    // is what produced the Iran-only 403 on refresh. protect()
+                    // asks the OS to keep this socket on the physical network,
+                    // which is exactly what a plain UDP resolver needs.
+                    if let Err(e) = crate::platform::protect_socket(&sock) {
+                        log::warn!("[smart-dns] could not protect user-resolver socket: {e} — it may route through the tunnel");
                     }
                     if let Err(e) = sock.connect(addr).await {
                         log::warn!("[smart-dns] user resolver {} unreachable: {e}", ep.address);
