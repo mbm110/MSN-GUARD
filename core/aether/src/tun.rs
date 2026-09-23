@@ -282,6 +282,38 @@ fn parse_ipv4_header(packet: &[u8]) -> Option<usize> {
     Some(ihl)
 }
 
+/// Returns the UDP payload offset only for a genuine UDP datagram whose
+/// destination port is 53 — i.e. something the DNS engine is entitled to
+/// answer. Everything else (TCP, QUIC, any other UDP port) is not DNS and
+/// must take the tunnel's normal path.
+fn dns_payload_offset(packet: &[u8]) -> Option<usize> {
+    let hdr_len = if let Some(ihl) = parse_ipv4_header(packet) {
+        ihl
+    } else {
+        parse_ipv6_header(packet)?
+    };
+    if packet.len() < hdr_len + 8 {
+        return None;
+    }
+    let proto = if packet[0] >> 4 == 4 {
+        packet[9]
+    } else {
+        // parse_ipv6_header only returns when its extension-header walk
+        // terminated on next-header 17, so UDP is guaranteed here — reading
+        // packet[6] would be the fixed header's next header, which is wrong
+        // once any extension header precedes the UDP one.
+        17
+    };
+    if proto != 17 {
+        return None;
+    }
+    let udp = &packet[hdr_len..];
+    if u16::from_be_bytes([udp[2], udp[3]]) != 53 || udp.len() <= 8 {
+        return None;
+    }
+    Some(hdr_len)
+}
+
 /// Parse an IPv6 header and return the payload offset. Fixed 40-byte header;
 /// extension headers are skipped via the Next Header chain (the ones that can
 /// appear before UDP in practice: Hop-by-Hop, Routing, Fragment, Destination
@@ -394,27 +426,20 @@ pub async fn bridge(
     // pins the inline path used.
     tokio::spawn(async move {
         while let Some(packet) = dns_rx.recv().await {
-        // A DNS query can arrive as IPv4 or IPv6. Android gets both
-        // 1.1.1.1 and 2606:4700:4700::1111, and modern devices prefer v6
-        // — so a v4-only interceptor sees nothing at all, which is
-        // exactly what the field log showed: engine ready, zero queries.
-        let parsed = if let Some(ihl) = parse_ipv4_header(&packet) {
-        Some((ihl, 4u8))
-        } else {
-        parse_ipv6_header(&packet).map(|off| (off, 6u8))
-        };
-        let Some((hdr_len, ipver)) = parsed else { continue };
-        if packet.len() < hdr_len + 8 { continue }
+        // Only a genuine UDP/53 datagram reaches here: the loop already
+        // filtered with dns_payload_offset(), so this parse cannot fail and the
+        // task never has to handle a non-DNS packet.
+        let Some(hdr_len) = dns_payload_offset(&packet) else { continue };
+        let ipver = if packet[0] >> 4 == 4 { 4u8 } else { 6u8 };
         let udp = &packet[hdr_len..];
-        if u16::from_be_bytes([udp[2], udp[3]]) != 53 || udp.len() <= 8 { continue }
 
         // Count every DNS query the TUN sees, even before parsing. The
         // field log proved init works but no query was ever seen; this
         // line separates "queries never arrive" from "the parser drops
         // them".
         log::info!(
-        "[smart-dns] TUN saw UDP/53 v{ipver} hdr={hdr_len} dport=53 len={}",
-        packet.len()
+            "[smart-dns] TUN saw UDP/53 v{ipver} hdr={hdr_len} dport=53 len={}",
+            packet.len()
         );
         let Some((payload, _)) =
         crate::smart_dns::process_query(&packet, hdr_len).await
@@ -516,12 +541,15 @@ pub async fn bridge(
                 }
                 
 
-                // Only hand a query to the DNS engine when the user configured
-                // an encrypted resolver; without one, process_query forwards to
-                // the tunnel's own resolvers and there is nothing to intercept.
-                // The channel is bounded, so a resolver that has stopped
-                // consuming cannot grow an unbounded queue behind the loop.
-                if crate::smart_dns::has_encrypted() {
+                // Only a genuine UDP/53 datagram is DNS. Handing anything else
+                // to the DNS engine (QUIC, TCP, UDP on other ports) swallowed it:
+                // the engine is not a packet router, so the tunnel carried no
+                // data and every site timed out. The check is per-packet, not a
+                // global flag — has_encrypted() only says a resolver is
+                // configured, not that this packet is a query.
+                let is_dns = dns_payload_offset(&outbound).is_some()
+                    && crate::smart_dns::has_encrypted();
+                if is_dns {
                     if dns_tx.try_send(outbound.clone()).is_err() {
                         log::debug!("[smart-dns] query backlog — forwarding over the tunnel");
                     } else {
@@ -865,3 +893,38 @@ mod tests {
         }
     }
 }
+
+    // The 2.0.17 regression: every outbound packet was handed to the DNS task
+    // whenever an encrypted resolver was configured, so TCP and QUIC never
+    // reached the wire and sites timed out. dns_payload_offset() is the guard
+    // that stops that; these three packets are exactly the shapes it must
+    // reject, and the UDP/53 pair are the shapes it must accept.
+    fn udp_v4(port: u16) -> Vec<u8> {
+        let mut pkt = vec![0u8; 20 + 8 + 20];
+        pkt[0] = 0x45;
+        pkt[9] = 17; // UDP
+        pkt[12..16].copy_from_slice(&[10, 0, 0, 2]);
+        pkt[16..20].copy_from_slice(&[1, 1, 1, 1]);
+        pkt[20..22].copy_from_slice(&40000u16.to_be_bytes());
+        pkt[22..24].copy_from_slice(&port.to_be_bytes());
+        pkt
+    }
+
+    #[test]
+    fn a_tcp_packet_is_not_dns() {
+        let mut pkt = syn_with_mss(1460);
+        pkt[16..20].copy_from_slice(&[1, 1, 1, 1]); // aimed at 1.1.1.1
+        assert!(dns_payload_offset(&pkt).is_none(), "TCP must not be DNS");
+    }
+
+    #[test]
+    fn a_udp_packet_to_a_non_53_port_is_not_dns() {
+        let pkt = udp_v4(443);
+        assert!(dns_payload_offset(&pkt).is_none(), "UDP/443 must not be DNS");
+    }
+
+    #[test]
+    fn a_udp_packet_to_port_53_is_dns() {
+        let pkt = udp_v4(53);
+        assert_eq!(dns_payload_offset(&pkt), Some(20));
+    }
