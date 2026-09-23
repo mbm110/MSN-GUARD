@@ -93,9 +93,22 @@ impl DnsEndpoint {
         if raw.is_empty() {
             return None;
         }
+        // Only the SCHEME is matched case-insensitively. The rest is kept as the
+        // user typed it: a DoH path is part of the URL and HTTP paths are
+        // case-sensitive. Lowercasing the whole string here rewrote
+        // /dns-query/PLJhQthhMfwAKilJ into /dns-query/pljhqthhmfwakilj, a
+        // different URL that the Worker answered with 500 — so every DoH server
+        // whose path carries an uppercase token silently failed and the engine
+        // fell back to plain UDP. Hostnames ARE case-insensitive, so the DNS
+        // label comparison and the TLS SNI are lowercased separately (host_of
+        // is only used for resolver-host matching, never for the URL itself).
         let lower = raw.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("https://").or_else(|| lower.strip_prefix("doh://")) {
-            let host = host_of(rest);
+        if lower.starts_with("https://") || lower.starts_with("doh://") {
+            // "https://" is 8 bytes, "doh://" is 6 — slicing by a hardcoded
+            // length silently ate the first letter of every doh:// hostname.
+            let scheme_len = if lower.starts_with("https://") { 8 } else { 6 };
+            let rest = &raw[scheme_len..];
+            let host = host_of(&lower[scheme_len..]);
             return Some(DnsEndpoint {
                 address: format!("https://{rest}"),
                 transport: DnsTransport::Doh,
@@ -103,8 +116,10 @@ impl DnsEndpoint {
                 ips: vec![],
             });
         }
-        if let Some(rest) = lower.strip_prefix("tls://").or_else(|| lower.strip_prefix("dot://")) {
-            let (host, _port) = split_host_port(rest, 853);
+        if lower.starts_with("tls://") || lower.starts_with("dot://") {
+            // Both prefixes are 6 bytes. A DoT address is a bare hostname (no
+            // path), so lowercasing it is a normalisation, not a corruption.
+            let (host, _port) = split_host_port(&lower[6..], 853);
             return Some(DnsEndpoint {
                 address: host.to_string(),
                 transport: DnsTransport::Dot,
@@ -112,8 +127,10 @@ impl DnsEndpoint {
                 ips: vec![],
             });
         }
-        if let Some(rest) = lower.strip_prefix("doh:") {
-            let (host, _port) = split_host_port(rest, 443);
+        if lower.starts_with("doh:") {
+            // No path to preserve: the /dns-query this form builds is a
+            // constant, so only the scheme needed case-insensitive matching.
+            let (host, _port) = split_host_port(&raw[4..], 443);
             return Some(DnsEndpoint {
                 address: format!("https://{host}/dns-query"),
                 transport: DnsTransport::Doh,
@@ -121,8 +138,8 @@ impl DnsEndpoint {
                 ips: vec![],
             });
         }
-        if let Some(rest) = lower.strip_prefix("dot:") {
-            let (host, _port) = split_host_port(rest, 853);
+        if lower.starts_with("dot:") {
+            let (host, _port) = split_host_port(&lower[4..], 853);
             return Some(DnsEndpoint {
                 address: host.to_string(),
                 transport: DnsTransport::Dot,
@@ -1067,4 +1084,74 @@ pub fn set_resolvers(resolvers: Vec<DnsEndpoint>) {
     guard.clear();
     guard.extend(resolvers);
     log::info!("[smart-dns] resolvers updated: {count} endpoint(s) from user list");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A DoH URL's path must survive parsing untouched. HTTP paths are
+    /// case-sensitive, and a DoH server that authenticates by a token in the
+    /// path — e.g. `https://x.workers.dev/dns-query/PLJhQthhMfwAKilJ` — answers
+    /// the lowercased copy with 500. The engine then treats the DoH resolver as
+    /// dead, falls back to plain UDP, and the user sees the exit node's own
+    /// resolver instead of the one they configured.
+    #[test]
+    fn doh_path_case_is_preserved() {
+        let ep = DnsEndpoint::parse("https://benjamin.mohamadxx.workers.dev/dns-query/PLJhQthhMfwAKilJ")
+            .expect("a https:// DoH URL must parse");
+        assert_eq!(ep.transport, DnsTransport::Doh);
+        assert_eq!(
+            ep.address,
+            "https://benjamin.mohamadxx.workers.dev/dns-query/PLJhQthhMfwAKilJ"
+        );
+        assert_eq!(ep.name.as_deref(), Some("benjamin.mohamadxx.workers.dev"));
+    }
+
+    /// The scheme alone is what the user may type in any casing; the host below
+    /// it is a hostname and case-insensitive, so it is normalised.
+    #[test]
+    fn doh_scheme_is_case_insensitive_path_is_not() {
+        let ep = DnsEndpoint::parse("HTTPS://Benjamin.Mohamadxx.Workers.dev/dns-query/PLJhQthhMfwAKilJ")
+            .expect("an uppercase scheme is still a DoH URL");
+        assert_eq!(ep.transport, DnsTransport::Doh);
+        assert_eq!(
+            ep.address,
+            "https://Benjamin.Mohamadxx.Workers.dev/dns-query/PLJhQthhMfwAKilJ"
+        );
+        // resolver-host matching must still see the hostname, and lowercase it.
+        assert_eq!(ep.name.as_deref(), Some("benjamin.mohamadxx.workers.dev"));
+    }
+
+    /// The short `doh://` scheme is one byte shorter than `https://`. The two
+    /// were length-sliced together once, which ate the first letter of every
+    /// `doh://` hostname and produced a URL for a host that does not exist.
+    #[test]
+    fn doh_short_scheme_does_not_eat_the_first_letter() {
+        let ep = DnsEndpoint::parse("doh://cloudflare-dns.com/dns-query")
+            .expect("doh:// is the short DoH scheme");
+        assert_eq!(ep.transport, DnsTransport::Doh);
+        assert_eq!(ep.address, "https://cloudflare-dns.com/dns-query");
+        assert_eq!(ep.name.as_deref(), Some("cloudflare-dns.com"));
+    }
+
+    /// The plain-UDP and DoT branches never carried a path, so the regression
+    /// was DoH-only. Pin them so a future "normalise the entry" refactor cannot
+    /// re-introduce it there.
+    #[test]
+    fn dot_and_plain_entries_still_parse() {
+        let dot = DnsEndpoint::parse("tls://dns.google").expect("tls:// is DoT");
+        assert_eq!(dot.transport, DnsTransport::Dot);
+        assert_eq!(dot.address, "dns.google");
+
+        let dot_doh_scheme = DnsEndpoint::parse("doh:dns.quad9.net").expect("doh: is DoH");
+        assert_eq!(dot_doh_scheme.transport, DnsTransport::Doh);
+        assert_eq!(dot_doh_scheme.address, "https://dns.quad9.net/dns-query");
+
+        let plain = DnsEndpoint::parse("1.1.1.1:53").expect("bare ip:port is plain UDP");
+        assert_eq!(plain.transport, DnsTransport::Plain);
+        assert_eq!(plain.address, "1.1.1.1");
+
+        assert!(DnsEndpoint::parse("  ").is_none(), "whitespace is not an entry");
+    }
 }
