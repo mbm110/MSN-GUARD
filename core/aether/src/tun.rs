@@ -563,13 +563,21 @@ pub async fn bridge(
                 // global flag — has_encrypted() only says a resolver is
                 // configured, not that this packet is a query.
                 //
-                // v2.0.24: the gate is has_resolver(), not has_encrypted(). A
-                // user who configured ONLY a plain-UDP server had no encrypted
-                // resolver, so this was false, the packet was never diverted and
-                // the engine never got to answer with the user's resolver — the
-                // custom UDP server was silently dead on every transport.
+                // v2.0.25: gate interception on ENCRYPTED resolvers only.
+                // A plain-UDP resolver must ride the tunnel untouched.
+                //
+                // 2.0.0 worked because addDnsServer() put the resolver on the
+                // TUN and the UDP/53 datagram simply rode the WARP tunnel to
+                // the exit, which can reach the resolver. 2.0.24/2.0.25 broke
+                // it by intercepting the datagram and re-issuing it from the
+                // engine's own socket: that socket can only ride the carrier,
+                // and the Iranian carrier blocks plain UDP/53 to external
+                // resolvers — which is the very reason the user configured a
+                // custom DNS. Protected or not, the re-issued query times out,
+                // every one, and the anti-sanction fallback answers from
+                // Germany, producing the Iran-only 403.
                 let is_dns = dns_payload_offset(&outbound).is_some()
-                    && crate::smart_dns::has_resolver();
+                    && crate::smart_dns::has_encrypted();
                 if is_dns {
                     if dns_tx.try_send(outbound.clone()).is_err() {
                         log::debug!("[smart-dns] query backlog — forwarding over the tunnel");
