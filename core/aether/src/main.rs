@@ -25,7 +25,7 @@ static INITIALIZED: std::sync::Once = std::sync::Once::new();
 /// screen. Anything [DnsEndpoint::parse]
 /// rejects is logged rather than silently dropped, so a typo in the field is
 /// visible instead of turning into "my DoH server never answers".
-fn push_encrypted_resolvers(options: &StartOptions) {
+fn parse_encrypted_resolvers(options: &StartOptions) -> Vec<crate::smart_dns::DnsEndpoint> {
     let raw: Vec<String> = [options.dns_servers_dot.as_deref(), options.dns_servers_doh.as_deref()]
         .into_iter()
         .flatten()
@@ -35,16 +35,15 @@ fn push_encrypted_resolvers(options: &StartOptions) {
         .map(str::to_owned)
         .collect();
     if raw.is_empty() {
-        return;
+        return vec![];
     }
-    let parsed: Vec<_> = raw.iter().filter_map(|s| crate::smart_dns::DnsEndpoint::parse(s)).collect();
+    let mut parsed: Vec<_> = raw.iter().filter_map(|s| crate::smart_dns::DnsEndpoint::parse(s)).collect();
     if parsed.is_empty() {
         log::warn!("[dns] none of the user's DoT/DoH entries parsed");
-        return;
+        return vec![];
     }
     let pinned: Vec<(&str, std::net::IpAddr)> = options.dns_pinned_ips.as_deref()
         .map(parse_pinned_ips).unwrap_or_default();
-    let mut parsed = parsed;
     for ep in parsed.iter_mut() {
         let host = ep.name.clone().unwrap_or_default();
         let ips: Vec<_> = pinned.iter()
@@ -57,8 +56,45 @@ fn push_encrypted_resolvers(options: &StartOptions) {
             log::warn!("[dns] no pinned IP for {host} — DoT/DoH will fail until the DNS screen is saved again", );
         }
     }
+    parsed
+}
+
+fn push_encrypted_resolvers(options: &StartOptions) {
+    let parsed = parse_encrypted_resolvers(options);
+    if parsed.is_empty() {
+        return;
+    }
     crate::smart_dns::set_resolvers(parsed.clone());
     log::info!("[dns] {} DoT/DoH resolver(s) pushed to the engine", parsed.len());
+}
+
+/// Push the user's full resolver set — plain UDP AND DoT/DoH — in ONE call.
+///
+/// v2.0.19: this replaces the two separate push sites, which each called
+/// set_resolvers() and each call CLEARS both lists first. A user with a custom
+/// UDP resolver AND a DoH server lost one of them depending on call order:
+/// the DoT/DoH push wiped user_resolvers, and the UDP push wiped
+/// encrypted_resolvers. Merging here means set_resolvers() sees one list
+/// containing both transports, so has_encrypted() and the UDP fallback both
+/// stay live at once. This is also the ONLY path that hands the plain-UDP
+/// list to the engine at all — applyDns() puts it on the Android resolver, but
+/// the engine answers UDP/53 itself and never consults that list.
+fn push_user_resolvers(options: &StartOptions) {
+    let mut all = parse_encrypted_resolvers(options);
+    if let Some(list) = options.smart_dns_servers.as_deref() {
+        let plain: Vec<_> = list
+            .split([',', ';', ' ', '\n', '\r'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(crate::smart_dns::DnsEndpoint::parse)
+            .collect();
+        all.extend(plain);
+    }
+    if all.is_empty() {
+        return;
+    }
+    crate::smart_dns::set_resolvers(all.clone());
+    log::info!("[smart-dns] {} resolver(s) pushed to engine (plain+encrypted)", all.len());
 }
 
 /// Parse the app's pinned-IP map: "host=ip,host=ip1+ip2" -> host/IP pairs,
@@ -2057,25 +2093,8 @@ async fn run_masque_tunnel(
         // Pushed after the init, and from the DoT/DoH fields rather than from
         // smart_dns_servers: both paths land in the same engine, and a user who
         // leaves encrypted resolvers off still gets them wired this way.
-        push_encrypted_resolvers(&options);
-        if options.smart_dns {
-            if let Some(list) = options.smart_dns_servers.as_deref() {
-                // Push the user's DoT/DoH entries into the engine. Plain-UDP
-                // entries are ignored here — Android already has them via
-                // applyDns() — and anything DnsEndpoint::parse rejects is logged
-                // rather than silently dropped.
-                let parsed: Vec<_> = list
-                    .split([',', ';', ' ', '\n', '\r'])
-                    .filter_map(crate::smart_dns::DnsEndpoint::parse)
-                    .collect();
-                // All parsed endpoints (plain + encrypted) go to the engine: it
-                // needs the user's plain resolvers for its own bootstrap lookups too,
-                // not just the DoT/DoH ones.
-                crate::smart_dns::set_resolvers(parsed);
-                log::info!("[smart-dns] resolvers pushed to engine (plain+encrypted)");
-            }
-        }
-        
+        push_user_resolvers(&options);
+
         tokio::spawn(tun::bridge(
             fd,
             parse_local_v4(&identity.ipv4),
@@ -3111,28 +3130,11 @@ async fn run_warp_in_warp(
     }
     // Same ordering fix as run_masque_tunnel: the push has to come after the
     // init, or the resolver list is handed to an engine that does not exist yet.
-    push_encrypted_resolvers(&options);
-    if options.smart_dns {
-        if let Some(list) = options.smart_dns_servers.as_deref() {
-            let parsed: Vec<_> = list
-                .split([',', ';', ' ', '\n', '\r'])
-                .filter_map(crate::smart_dns::DnsEndpoint::parse)
-                .collect();
-            let resolvers: Vec<_> = parsed.clone();
-            if resolvers.is_empty() {
-                log::info!("[smart-dns] no resolvers in user list");
-            } else {
-                let n = resolvers.len();
-                crate::smart_dns::set_resolvers(resolvers);
-                log::info!("[smart-dns] {n} resolver(s) from user list pushed to engine");
-            }
-        }
-        log::info!(
-            "[smart-dns] WoW path: encrypted resolvers active (smart_dns={} encrypted={})",
-            options.smart_dns,
-            crate::smart_dns::has_encrypted() as u8
-        );
-    }
+    push_user_resolvers(&options);
+    log::info!(
+        "[smart-dns] WoW path: resolvers active (encrypted={})",
+        crate::smart_dns::has_encrypted() as u8
+    );
     let mut http_task = None;
     let (mut inner_exit, mut local_task): (TunnelExit, TunnelExit) = if let Some(fd) =
         options.tun_fd
@@ -4330,6 +4332,25 @@ fn spawn_masque_cache_refresh(probe: prober::MasqueProbe, cache_path: Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // v2.0.19: the plain-UDP list was never handed to the DNS engine, so a
+    // custom resolver was silently ignored. This is the shape that must parse.
+    #[test]
+    fn a_plain_ipv4_resolver_parses_as_plain() {
+        let ep = crate::smart_dns::DnsEndpoint::parse("111.88.96.51").unwrap();
+        assert_eq!(ep.address, "111.88.96.51");
+        assert_eq!(ep.transport, crate::smart_dns::DnsTransport::Plain);
+    }
+
+    // A user with BOTH a UDP resolver and a DoH server must keep both: the two
+    // old push sites each called set_resolvers(), which clears both lists, so
+    // one of the two was always discarded.
+    #[test]
+    fn encrypted_and_plain_resolvers_coexist() {
+        let doh = crate::smart_dns::DnsEndpoint::parse("https://doh.example.com/dns-query").unwrap();
+        let plain = crate::smart_dns::DnsEndpoint::parse("111.88.96.51").unwrap();
+        assert_ne!(doh.transport, plain.transport);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn settle_after_select_never_re_polls_the_resolved_handle() {

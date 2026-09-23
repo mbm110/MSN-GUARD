@@ -218,6 +218,16 @@ object CoreConfig {
             put("dns_servers", prefs.getString("dns_servers_udp", null))
             putOpt("dns_servers_dot", prefs.getString("dns_servers_dot", null)?.ifBlank { null })
             putOpt("dns_servers_doh", prefs.getString("dns_servers_doh", null)?.ifBlank { null })
+            // v2.0.19: the plain-UDP list ALSO goes to the core's own engine.
+            // Before this the core never received it: applyDns() puts it on the
+            // Android resolver list, but the Smart DNS Split engine answers the
+            // device's UDP/53 traffic itself and reads only its own
+            // user_resolvers — so a custom resolver like 111.88.96.51 was
+            // ignored by the engine and the query fell through to the built-in
+            // anti-sanction list. smart_dns_servers is the key the core parses
+            // for that list; smart_dns is the gate that makes it parse it.
+            put("smart_dns", true)
+            put("smart_dns_servers", prefs.getString("dns_servers_udp", null))
             // v2.0.11: the pins are pre-computed in
             // [precomputePinnedIps] when the user SAVES their DNS, so this read
             // is instant and never touches the network — configJson() runs on
