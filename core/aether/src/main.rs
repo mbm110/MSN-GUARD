@@ -2715,7 +2715,15 @@ async fn run_wireguard_tunnel(
         if let Err(e) = crate::smart_dns::init_smart_dns().await {
             log::warn!("[tun] Smart DNS init failed: {}", e);
         }
-        push_encrypted_resolvers(options);
+        // v2.0.23: this path used push_encrypted_resolvers(), which only parses
+        // the DoT/DoH fields. The user's plain-UDP list (smart_dns_servers) was
+        // never handed to the engine here, so on WireGuard a custom UDP resolver
+        // was silently ignored — the engine fell through to the built-in
+        // anti-sanction list. push_user_resolvers() parses BOTH lists in one
+        // set_resolvers() call, which is also the only way the plain list reaches
+        // the engine at all on this transport. The other two call sites already
+        // use it.
+        push_user_resolvers(options);
         tokio::spawn(tun::bridge(fd, ipv4, inbound_rx, outbound_tx, options.smart_dns))
     } else {
         let stack = netstack::spawn(

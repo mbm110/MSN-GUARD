@@ -664,17 +664,21 @@ impl SmartDnsSplit {
             tokio::net::TcpSocket::new_v6()
         }
         .map_err(AetherError::Io)?;
-        // Tunnel-routed: the DoT/DoH resolver's own TCP connection rides INSIDE
-        // the tunnel. Cloudflare Workers are anycast, so the colo that answers
-        // is chosen by where the connection enters the network. An
-        // out-of-tunnel (protected) connection from Iran lands in Frankfurt, so
-        // the Worker resolves there and every answer appears German (2.0.20 and
-        // earlier). Riding the tunnel makes the Worker answer from the exit
-        // node's location, matching what RethinkDNS reports. Safe from the
-        // 2.0.6/2.0.7 bootstrap deadlock: connect_pinned() dials a pinned IP,
-        // so this socket never triggers a DNS lookup of its own.
-        // DO NOT add protect_socket() back here: it pushes the socket onto the
-        // physical carrier and reintroduces the German egress.
+
+        // v2.0.23: the socket is tunnel-routed by default (no protect()) so an
+        // anycast Worker answers from the tunnel's exit, not from Frankfurt —
+        // the fix for the German DNS leak. But when the tunnel is itself a
+        // Cloudflare WARP tunnel and the resolver IS Cloudflare, tunnel-routing
+        // the connection hairpins it: WARP's egress back into Cloudflare's own
+        // DoT/DoH edge is dropped by the edge, and every query times out at
+        // CONNECT_TIMEOUT (5s) and falls back to plain UDP — which is why
+        // tls://family.cloudflare-dns.com silently stopped filtering in 2.0.21.
+        // Keeping those connections OUT of the tunnel is also the only way they
+        // work at all on this transport.
+        if crate::smart_dns::is_cloudflare_resolver_addr(&addr) {
+            crate::platform::protect_socket(&socket).map_err(AetherError::Io)?;
+        }
+
         let bind = if addr.is_ipv4() {
             "0.0.0.0:0".parse().unwrap()
         } else {
@@ -1062,6 +1066,31 @@ fn with_engine<R>(f: impl FnOnce(&SmartDnsSplit) -> R) -> Option<R> {
     SMART_DNS.read().as_ref().map(f)
 }
 
+/// True when the address belongs to Cloudflare. The WARP tunnel IS Cloudflare,
+/// so a resolver-to-Cloudflare connection that rides the WARP tunnel hairpins:
+/// the egress dials back into Cloudflare's own edge and the edge drops it. The
+/// DoT/DoH socket for such a resolver must stay OUT of the tunnel.
+///
+/// Covers 1.1.1.0/24, 1.0.0.0/24 (public resolvers and the family/adult
+/// variants 1.1.1.2/.3 and 1.0.0.2/.3) and 2606:4700:4700::/48 (the v6 pair).
+pub(crate) fn is_cloudflare_resolver_addr(addr: &std::net::SocketAddr) -> bool {
+    match addr.ip() {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            // 1.1.1.x and 1.0.0.x — Cloudflare's public resolver range,
+            // including the family (1.1.1.3 / 1.0.0.3) and adult (1.1.1.2)
+            // variants the user may configure for filtering.
+            o[0] == 1 && (o[1] == 1 || o[1] == 0)
+        }
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            // 2606:4700:4700::/48 — Cloudflare's v6 resolver pair and the
+            // family/adult variants (::1111, ::1112, ::1113, ::1003 ...).
+            s[0] == 0x2606 && s[1] == 0x4700 && s[2] == 0x4700
+        }
+    }
+}
+
 /// Get whether the engine is up and has encrypted resolvers configured.
 pub fn has_encrypted() -> bool {
     with_engine(|e| e.has_encrypted()).unwrap_or(false)
@@ -1118,6 +1147,29 @@ pub fn set_resolvers(resolvers: Vec<DnsEndpoint>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cloudflare resolvers must be recognised so their socket is kept out of
+    /// the WARP tunnel — see [is_cloudflare_resolver_addr]. A miss here means
+    /// the connection hairpins and every DoT/DoH query to 1.1.1.x times out.
+    #[test]
+    fn cloudflare_resolver_range_is_detected() {
+        let cf = |ip: &str, port| {
+            std::net::SocketAddr::new(ip.parse().unwrap(), port)
+        };
+        // Public, family and adult variants — all Cloudflare.
+        assert!(is_cloudflare_resolver_addr(&cf("1.1.1.1", 853)));
+        assert!(is_cloudflare_resolver_addr(&cf("1.1.1.2", 853)));
+        assert!(is_cloudflare_resolver_addr(&cf("1.1.1.3", 853)));
+        assert!(is_cloudflare_resolver_addr(&cf("1.0.0.3", 443)));
+        assert!(is_cloudflare_resolver_addr(&cf("1.0.0.1", 443)));
+        assert!(is_cloudflare_resolver_addr(&cf("[2606:4700:4700::1111]", 853)));
+        assert!(is_cloudflare_resolver_addr(&cf("[2606:4700:4700::1003]", 853)));
+        // Non-Cloudflare resolvers must NOT match — those ride the tunnel so
+        // the anycast Worker answers from the exit, not from Frankfurt.
+        assert!(!is_cloudflare_resolver_addr(&cf("9.9.9.9", 853)));
+        assert!(!is_cloudflare_resolver_addr(&cf("8.8.8.8", 853)));
+        assert!(!is_cloudflare_resolver_addr(&cf("94.140.14.14", 443)));
+    }
 
     /// A DoH URL's path must survive parsing untouched. HTTP paths are
     /// case-sensitive, and a DoH server that authenticates by a token in the
