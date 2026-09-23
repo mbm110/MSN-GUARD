@@ -222,7 +222,7 @@ async fn connect_pinned(
     // back to plain UDP, so the device stays online.
     let mut racers = Vec::new();
     for ip in &ordered {
-        let addr = std::net::SocketAddr::new(*ip, port);
+        let addr = std::net::SocketAddr::new(**ip, port);
         racers.push(tokio::spawn(async move {
             SmartDnsSplit::connect_tcp_resolver(addr).await
         }));
