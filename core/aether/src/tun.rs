@@ -423,7 +423,11 @@ pub async fn bridge(
     {
     // SmartDnsSplit is a process-wide singleton behind a global, so the task
     // needs no handle passed in — it reaches the same resolvers, cache and
-    // pins the inline path used.
+    // pins the inline path used. It DOES need the tunnel's outbound sender:
+    // v2.0.24 forwards a query the engine cannot answer back to the tunnel
+    // instead of dropping it, which is what v2.0.0 did for every non-Gemini
+    // domain. Cloned here so the main loop keeps its own sender.
+    let outbound_tx = outbound_tx.clone();
     tokio::spawn(async move {
         while let Some(packet) = dns_rx.recv().await {
         // Only a genuine UDP/53 datagram reaches here: the loop already
@@ -441,9 +445,20 @@ pub async fn bridge(
             "[smart-dns] TUN saw UDP/53 v{ipver} hdr={hdr_len} dport=53 len={}",
             packet.len()
         );
+        // If the engine has no answer for this query it must still reach the
+        // resolver the packet was addressed to. The pre-2.0.24 code did
+        // `else { continue }`, which SILENTLY DROPPED the datagram: the DNS task
+        // had already `continue`d the main loop when it diverted the packet
+        // (tun.rs:554), so nothing was left to send it. A user whose custom
+        // resolver the engine could not reach got no answer at all — the query
+        // vanished. Forwarding it to the tunnel restores the v2.0.0 behaviour,
+        // where a query the engine does not answer simply rides the tunnel.
         let Some((payload, _)) =
         crate::smart_dns::process_query(&packet, hdr_len).await
-        else { continue };
+        else {
+            let _ = outbound_tx.send(packet).await;
+            continue;
+        };
 
         let src_ip = &packet[12..16];
         let dst_ip = &packet[16..20];
@@ -547,8 +562,14 @@ pub async fn bridge(
                 // data and every site timed out. The check is per-packet, not a
                 // global flag — has_encrypted() only says a resolver is
                 // configured, not that this packet is a query.
+                //
+                // v2.0.24: the gate is has_resolver(), not has_encrypted(). A
+                // user who configured ONLY a plain-UDP server had no encrypted
+                // resolver, so this was false, the packet was never diverted and
+                // the engine never got to answer with the user's resolver — the
+                // custom UDP server was silently dead on every transport.
                 let is_dns = dns_payload_offset(&outbound).is_some()
-                    && crate::smart_dns::has_encrypted();
+                    && crate::smart_dns::has_resolver();
                 if is_dns {
                     if dns_tx.try_send(outbound.clone()).is_err() {
                         log::debug!("[smart-dns] query backlog — forwarding over the tunnel");

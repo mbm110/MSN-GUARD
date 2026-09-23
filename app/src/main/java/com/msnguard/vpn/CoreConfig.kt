@@ -356,6 +356,18 @@ object CoreConfig {
     private fun resolveHostsToIps(hosts: LinkedHashSet<String>): String {
         val out = StringBuilder()
         hosts.forEach { host ->
+            // v2.0.24: a literal IP is its own pin. Skipped until now, an IP
+            // entry like https://8.8.8.8/dns-query never got a pin and the
+            // engine failed every query with "has no pinned IP" — the
+            // third-party report that the same server works in karing/intra
+            // but not here. getAllByName("8.8.8.8") does echo the literal, but
+            // relying on a DNS lookup for a host the user already typed as an
+            // address is exactly the waste this pre-resolve exists to remove.
+            if (host.matches(Regex("^[0-9a-fA-F:.]+$"))) {
+                if (out.isNotEmpty()) out.append(',')
+                out.append(host).append('=').append(host)
+                return@forEach
+            }
             try {
                 val addrs = java.net.InetAddress.getAllByName(host)
                 // v4 first, then v6: some Iranian carriers break v6 to
@@ -387,8 +399,11 @@ object CoreConfig {
         // strip the port and any [bracketing] on v6 literals
         s = s.substringBeforeLast(':')
         if (s.startsWith('[') && s.endsWith(']')) s = s.substring(1, s.length - 1)
-        // A literal IP has no hostname to pin.
-        if (s.matches(Regex("^[0-9a-fA-F:.]+$"))) return null
+        // A literal IP has no hostname to pin. The pin for it is the address
+        // itself — resolveHostsToIps handles it — but extractHost must still
+        // RETURN it so the entry reaches that list at all.
+        // (kept for the no-host case: a malformed entry with no usable name)
+        if (s.isEmpty()) return null
         return s
     }
 

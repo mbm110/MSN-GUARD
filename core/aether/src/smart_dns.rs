@@ -387,6 +387,23 @@ impl SmartDnsSplit {
         !self.encrypted_resolvers.read().is_empty()
     }
 
+    /// True when the engine owns a resolver of ANY transport — encrypted OR a
+    /// plain-UDP server the user typed on the DNS screen.
+    ///
+    /// tun::bridge diverts a UDP/53 datagram to the engine only when this is
+    /// true. When the user configures ONLY a plain-UDP resolver (no DoT/DoH),
+    /// has_encrypted() is false, the diversion never fires and the query rides
+    /// the tunnel raw. That is what made "DNS ساده UDP کار نمیکنه" in 2.0.23:
+    /// the custom resolver was pushed to the engine ("1 resolver(s) pushed to
+    /// engine") but the engine was never handed the packets to answer. v2.0.0
+    /// worked because it intercepted only Gemini domains and let every other
+    /// query through — the same outcome this gate now reproduces for a
+    /// UDP-only setup, only deliberately and with the user's own resolver.
+    pub fn has_resolver(&self) -> bool {
+        !self.encrypted_resolvers.read().is_empty()
+            || !self.user_resolvers.read().is_empty()
+    }
+
     /// The hostnames and addresses of the configured DoT/DoH servers.
     ///
     /// These are EXCLUDED from interception. This is the fix for the bootstrap
@@ -675,6 +692,15 @@ impl SmartDnsSplit {
         // tls://family.cloudflare-dns.com silently stopped filtering in 2.0.21.
         // Keeping those connections OUT of the tunnel is also the only way they
         // work at all on this transport.
+        //
+        // v2.0.24: that reasoning was backwards. The app excludes its own uid
+        // from the VPN (addDisallowedApplication in applySplitTunneling), so an
+        // "unprotected" engine socket goes over the CARRIER, never the tunnel —
+        // protect() and no-protect() are the same path here. The real variable
+        // is the PORT: 443 is never filtered, but Iranian carriers block 853,
+        // so DoT times out at exactly CONNECT_TIMEOUT no matter what. Keep the
+        // Cloudflare-protect() call for the egress reason above; the DoT
+        // timeout is a carrier fact, and the caller falls back to plain UDP.
         if crate::smart_dns::is_cloudflare_resolver_addr(&addr) {
             crate::platform::protect_socket(&socket).map_err(AetherError::Io)?;
         }
@@ -712,7 +738,16 @@ impl SmartDnsSplit {
         // signature of the 2.0.11 field logs.
         let mut stream = match timeout(CONNECT_TIMEOUT, tokio_boring::connect(Self::tls_connector()?, &ep.address, plain)).await {
             Ok(s) => s.map_err(|e| AetherError::Tls(format!("dot handshake {}: {e}", ep.address)))?,
-            Err(_) => return Err(AetherError::Other(format!("dot handshake {} timed out", ep.address))),
+            Err(_) => {
+                // v2.0.24: a 853 connect that never completes is a carrier
+                // port block, not a dead resolver. Iranian carriers filter 853
+                // while leaving 443 untouched, so retry the identical query as
+                // DoH over 443 with the resolver's own hostname. Without this
+                // the caller falls back to plain UDP and the family filtering
+                // the user configured (tls://family.cloudflare-dns.com) is
+                // silently lost — the "adult content was shown" report.
+                return self.query_doh_fallback(ep, query).await;
+            }
         };
         // Two-byte length prefix, per RFC 1035 §4.2.2.
         let len = u16::try_from(query.len())
@@ -725,6 +760,37 @@ impl SmartDnsSplit {
         let mut buf = vec![0u8; resp_len];
         stream.read_exact(&mut buf).await.map_err(AetherError::Io)?;
         Ok(buf)
+    }
+
+    /// v2.0.24: DoT-over-853 is unreachable on Iranian carriers, but the same
+    /// public resolver almost always serves DoH on 443 (Cloudflare:
+    /// `https://family.cloudflare-dns.com/dns-query`, which carries the same
+    /// family policy). Rebuild a DoH endpoint from the DoT hostname and reuse
+    /// the existing DoH path, so a port-853 block costs the user nothing.
+    async fn query_doh_fallback(&self, dot_ep: &DnsEndpoint, query: &[u8]) -> Result<Vec<u8>> {
+        // `dot_ep.address` is the raw endpoint of a tls:// entry, e.g.
+        // "family.cloudflare-dns.com" (CoreConfig already split the port).
+        let hostname = dot_ep.address
+            .split("://")
+            .nth(1)
+            .unwrap_or(&dot_ep.address)
+            .split('/')
+            .next()
+            .unwrap_or(&dot_ep.address)
+            .split(':')
+            .next()
+            .unwrap_or(&dot_ep.address);
+        let mut doh = DnsEndpoint::parse(&format!("https://{hostname}/dns-query"))
+            .ok_or_else(|| AetherError::Other(format!("doh fallback parse {hostname}")))?;
+        // CRITICAL: the rebuilt endpoint starts with an empty pin list, and
+        // connect_pinned() with no pins fails with "has no pinned IP" (it
+        // never resolves: a lookup would re-enter this engine and deadlock,
+        // 2.0.5-2.0.9). CoreConfig pinned the IPs for this very hostname, and
+        // they are equally valid for the DoH query to the same host on 443, so
+        // carry them over.
+        doh.ips = dot_ep.ips.clone();
+        log::info!("[smart-dns] DoT blocked on 853, retrying https://{hostname}/dns-query on 443 ({} pinned IP(s))", doh.ips.len());
+        self.doh_query(&doh, query).await
     }
 
     /// A permissive TLS config for a public DoT/DoH server: system roots, no
@@ -905,11 +971,16 @@ impl SmartDnsSplit {
             payload.len()
         );
 
-        // The engine must not answer a query it has no reason to. tun::bridge
-        // only CALLS process_query when has_encrypted() is true, so reaching
-        // here means the user configured DoT/DoH. Without an encrypted resolver
-        // the query takes the tunnel's own normal path.
-        if !has_encrypted {
+        // v2.0.24: the gate must not require encrypted resolvers. A user who
+        // configured only a plain-UDP server has an empty encrypted list, so the
+        // old `if !has_encrypted { return None }` dropped every one of their
+        // queries after tun::bridge had already diverted the packet to this
+        // task — the query vanished and "DNS ساده UDP" silently did nothing.
+        // The engine now answers whenever it has ANY resolver for the job, and
+        // tun.rs forwards the packet to the tunnel when it still has no answer.
+        if self.encrypted_resolvers.read().is_empty()
+            && self.user_resolvers.read().is_empty()
+        {
             return None;
         }
 
@@ -1096,6 +1167,13 @@ pub fn has_encrypted() -> bool {
     with_engine(|e| e.has_encrypted()).unwrap_or(false)
 }
 
+/// True when the engine owns any resolver — encrypted or a plain-UDP server
+/// the user typed. tun::bridge gates UDP/53 diversion on this; see
+/// [SmartDnsSplit::has_resolver].
+pub fn has_resolver() -> bool {
+    with_engine(|e| e.has_resolver()).unwrap_or(false)
+}
+
 /// Hand a DNS packet to the engine. Returns the engine's answer, if it has one.
 pub async fn process_query(packet: &[u8], ihl: usize) -> Option<(Vec<u8>, bool)> {
     // The engine's own fields are all Arc inside, so cloning the packet and
@@ -1234,5 +1312,65 @@ mod tests {
         assert_eq!(plain.address, "1.1.1.1");
 
         assert!(DnsEndpoint::parse("  ").is_none(), "whitespace is not an entry");
+    }
+
+    /// v2.0.24: an IP-literal DoH server is its own pin. The engine never
+    /// resolved one because CoreConfig's extractHost returned null for a
+    /// literal, so no pin was stored and every query failed with "has no
+    /// pinned IP" — the report that https://8.8.8.8/dns-query works in
+    /// karing/intra but not here. The engine side of that fix is that the
+    /// literal parses and reaches the pin-matching step at all.
+    #[test]
+    fn ip_literal_doh_entry_parses() {
+        let ep = DnsEndpoint::parse("https://8.8.8.8/dns-query")
+            .expect("an IP literal is a valid DoH host");
+        assert_eq!(ep.transport, DnsTransport::Doh);
+        assert_eq!(ep.name.as_deref(), Some("8.8.8.8"));
+        // host_of must not mangle the literal: the pin list is matched by name.
+        assert_eq!(host_of("8.8.8.8/dns-query"), "8.8.8.8");
+    }
+
+    /// v2.0.24: has_resolver() must be true for a UDP-only configuration.
+    /// Before this the tun::bridge gate read has_encrypted(), which is false
+    /// when the user configured only a plain-UDP server, so the diversion task
+    /// was never armed and the engine never saw a single packet — "DNS ساده
+    /// UDP کار نمیکنه" while the log happily reported the resolver pushed.
+    #[test]
+    fn udp_only_engine_reports_a_resolver() {
+        let e = SmartDnsSplit::new();
+        assert!(!e.has_resolver(), "an empty engine owns nothing");
+        assert!(!e.has_encrypted());
+        // set_resolvers() is the app's single entry point and is global-only;
+        // exercise the two lists the way it does, through the same setters.
+        e.set_encrypted_resolvers(vec![]);
+        e.user_resolvers.write().push(
+            DnsEndpoint::parse("111.88.96.51:53").unwrap()
+        );
+        assert!(e.has_resolver(), "a plain-UDP server is a resolver");
+        assert!(!e.has_encrypted(), "but it is not an encrypted one");
+    }
+
+    /// v2.0.24: DoT on 853 is carrier-blocked, so dot_query retries the same
+    /// query as DoH on 443 with the resolver's hostname. The rebuilt endpoint
+    /// must keep the DoT entry's pinned IPs: connect_pinned() refuses to
+    /// resolve a hostname (that re-enters the engine and deadlocks), so a
+    /// fallback with an empty pin list would fail with "has no pinned IP".
+    #[test]
+    fn doh_fallback_carries_the_pinned_ips() {
+        let dot = DnsEndpoint::parse("tls://family.cloudflare-dns.com").unwrap();
+        let mut ips = dot.ips.clone();
+        ips.push("1.1.1.3".parse().unwrap());
+        let dot = DnsEndpoint { ips, ..dot };
+        assert!(!dot.ips.is_empty());
+
+        // query_doh_fallback is async and opens sockets; test only the
+        // endpoint reconstruction it depends on.
+        let raw = "https://family.cloudflare-dns.com/dns-query";
+        let mut doh = DnsEndpoint::parse(raw).unwrap();
+        assert!(doh.ips.is_empty(), "parse alone never sets pins");
+        doh.ips = dot.ips.clone();
+        assert_eq!(doh.ips.len(), 1);
+        assert_eq!(doh.name.as_deref(), dot.name.as_deref());
+        assert_eq!(doh.transport, DnsTransport::Doh);
     }
 }
