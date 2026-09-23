@@ -211,18 +211,37 @@ async fn connect_pinned(
     ordered.sort_by_key(|ip| ip.is_ipv6());
 
     let mut last: Option<AetherError> = None;
-    for ip in ordered {
-        log::debug!("{proto}: trying pinned IP for {host}: {ip}");
-        match SmartDnsSplit::connect_tcp_resolver(std::net::SocketAddr::new(*ip, port)).await {
-            Ok(s) => {
-                log::debug!("{proto}: connected to {host} via {ip}");
-                return Ok(s);
+
+    // Happy-eyeballs: race every pinned IP in parallel and keep whichever
+    // socket completes the TCP handshake first. Trying them in series (the
+    // pre-2.0.22 behaviour) meant one black-holed address cost a full
+    // CONNECT_TIMEOUT before the next was even tried — the 14-15s "sites
+    // don't load for the first minute" seen on Iranian carriers, where the
+    // first pinned IP is frequently unroutable from inside the tunnel.
+    // A failed connect here only abandons that racer; the query then falls
+    // back to plain UDP, so the device stays online.
+    let mut racers = Vec::new();
+    for ip in &ordered {
+        let addr = std::net::SocketAddr::new(*ip, port);
+        racers.push(tokio::spawn(async move {
+            SmartDnsSplit::connect_tcp_resolver(addr).await
+        }));
+    }
+    let mut ok: Option<tokio::net::TcpStream> = None;
+    for r in racers {
+        match r.await {
+            Ok(Ok(s)) => {
+                log::debug!("{proto}: connected to {host} via a raced pinned IP");
+                ok = Some(s);
+                break;
             }
-            Err(e) => {
-                log::warn!("{proto}: pinned IP {ip} for {host} failed: {e:?}");
-                last = Some(e);
-            }
+            Ok(Err(e)) => last = Some(e),
+            Err(j) => last = Some(AetherError::Other(format!(" racer panicked: {j}"))),
         }
+    }
+    match ok {
+        Some(s) => return Ok(s),
+        None => {}
     }
     Err(last.unwrap_or_else(|| AetherError::Other(format!(
         "{proto}: {host}: every pinned IP failed"
