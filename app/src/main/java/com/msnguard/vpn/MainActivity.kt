@@ -7028,11 +7028,37 @@ class MainActivity : Activity() {
      * starts at the connect and the gate runs after the handshake.
      */
     private fun autoScanBudgetMs(protocol: Protocol): Long = when (protocol) {
-        Protocol.WIREGUARD -> 32_000L
+        // v2.0.29: a fresh install has no saved registration, so the core has to
+        // provision one before it can handshake at all. On an Iranian carrier the
+        // direct route to the account API is poisoned, so every attempt climbs the
+        // retry ladder and then falls through to the camouflaged route — the two
+        // together take far longer than the 32s this rung used to allow, and the
+        // watchdog cut WireGuard down mid-registration ("did not carry traffic in
+        // 32s") every single time. An update keeps the old identity, so this only
+        // bites new users. The extra room is only spent when there is nothing
+        // saved to load; a returning install still connects as fast as before.
+        Protocol.WIREGUARD -> if (warpIdentityExists()) 32_000L else 120_000L
         Protocol.MASQUE -> if (CoreConfig.mimArmed(this)) 75_000L else 48_000L
         Protocol.WARP_IN_WARP -> 55_000L
         else -> 45_000L
     }
+
+    /**
+     * Whether the core will find a saved WARP registration to load on connect.
+     *
+     * Mirrors the file `warp_config_path` points the core at in main.rs — plain
+     * `aether.toml` — plus the WoW inner identity the core provisions into a
+     * sibling file. `First-run` marks a fresh install, which has neither; that is
+     * the one case where WireGuard's scan budget has to grow, because the core
+     * must register a device over a poisoned carrier before it can handshake.
+     *
+     * Both files are listed deliberately: the outer identity is what plain
+     * WireGuard loads, and checking only that one would under-report for a WoW
+     * user who lost the outer file but kept the inner one.
+     */
+    private fun warpIdentityExists(): Boolean =
+        File(filesDir, "aether.toml").exists() ||
+            File(filesDir, "aether-secondary.toml").exists()
 
     /**
      * Per-rung deadline. Armed by [connect] for every attempt while a scan is running.

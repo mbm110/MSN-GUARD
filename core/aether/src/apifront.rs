@@ -17,6 +17,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BODY: usize = 512 * 1024;
+const ROUTE_BUDGET: Duration = Duration::from_secs(45);
 
 const LEGACY_CIPHERS: &str = "ECDHE-ECDSA-CHACHA20-POLY1305:\
 ECDHE-ECDSA-AES128-GCM-SHA256:\
@@ -150,7 +151,16 @@ async fn candidates(host: &str) -> Vec<SocketAddr> {
         }
     }
 
-    if let Ok(resolved) = tokio::net::lookup_host((host, 443)).await {
+    // v2.0.29: the lookup is only a bonus — the random edges above already give
+    // us a path to the API. When no tunnel is up yet the device's resolver has
+    // nowhere to go on an Iranian carrier, and tokio::net::lookup_host has no
+    // deadline of its own, so this single call pinned the whole camouflaged
+    // route forever — the log announced "retrying over a camouflaged route" and
+    // then never said another line. Capped here, a slow or dead lookup costs at
+    // most two seconds instead of the entire connect.
+    let lookup = tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host((host, 443)))
+        .await;
+    if let Ok(Ok(resolved)) = lookup {
         for address in resolved
             .filter(|entry| entry.is_ipv4())
             .take(RESOLVED_SAMPLES)
@@ -320,8 +330,18 @@ pub async fn fetch(request: &ApiRequest) -> Result<ApiResponse> {
     let mut rejection: Option<ApiResponse> = None;
     let mut failure: Option<AetherError> = None;
 
+    // v2.0.29: a total budget over the whole route. Three fingerprints over
+    // five addresses is fifteen handshakes; on a carrier that blocks the edge
+    // each one burns its full connect timeout, and the sum (over seven minutes)
+    // eats the entire connect and then some. The route is a fallback, not a
+    // career — cut it off and report what it learned.
+    let deadline = std::time::Instant::now() + ROUTE_BUDGET;
+
     for fingerprint in Fingerprint::all() {
         for address in &addresses {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
             match exchange(request, *address, fingerprint).await {
                 Ok(response) if (200..300).contains(&response.status) => {
                     return Ok(response);
