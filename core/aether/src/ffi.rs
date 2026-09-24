@@ -233,6 +233,7 @@ impl Default for NativeStartOptions {
             smart_dns_servers: None,
             dns_servers_dot: None,
             dns_servers_doh: None,
+            socks_proxy: None,
         }
     }
 }
