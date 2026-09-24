@@ -218,15 +218,29 @@ object CoreConfig {
             put("dns_servers", prefs.getString("dns_servers_udp", null))
             putOpt("dns_servers_dot", prefs.getString("dns_servers_dot", null)?.ifBlank { null })
             putOpt("dns_servers_doh", prefs.getString("dns_servers_doh", null)?.ifBlank { null })
-            // v2.0.19: the plain-UDP list ALSO goes to the core's own engine.
-            // Before this the core never received it: applyDns() puts it on the
-            // Android resolver list, but the Smart DNS Split engine answers the
-            // device's UDP/53 traffic itself and reads only its own
-            // user_resolvers — so a custom resolver like 111.88.96.51 was
-            // ignored by the engine and the query fell through to the built-in
-            // anti-sanction list. smart_dns_servers is the key the core parses
-            // for that list; smart_dns is the gate that makes it parse it.
-            put("smart_dns", true)
+            // v2.0.28: the Smart DNS Split engine must stand up ONLY when the
+            // user configured an ENCRYPTED resolver (DoT/DoH). Those are the
+            // only ones Android's own resolver cannot speak, so they are the
+            // only ones that need the engine to intercept UDP/53.
+            //
+            // For a plain-UDP-only setup the engine must stay DOWN: 2.0.0's
+            // field log proves the working path is Android's addDnsServer(),
+            // which puts the resolver on the TUN, so the app's UDP/53 rides
+            // the WARP tunnel natively to the exit and reaches the resolver.
+            // Turning the engine on (2.0.19's `put("smart_dns", true)`
+            // replaced that with a re-issued query from the engine's own
+            // socket, which has no working path to the resolver: the engine's
+            // UID is excluded from the VPN, so its socket rides the carrier,
+            // and the carrier is exactly the network that poisons plain 53.
+            // Every query then died with "All DNS queries failed" and the
+            // anti-sanction fallback answered from Germany (Iran-only 403).
+            //
+            // The engine still needs the plain list when it IS up, so the key
+            // is kept — the gate above is what decides whether it stands up.
+            val hasEncrypted = listOf("dns_servers_dot", "dns_servers_doh").any {
+                prefs.getString(it, null)?.ifBlank { null } != null
+            }
+            put("smart_dns", hasEncrypted)
             put("smart_dns_servers", prefs.getString("dns_servers_udp", null))
             // v2.0.11: the pins are pre-computed in
             // [precomputePinnedIps] when the user SAVES their DNS, so this read

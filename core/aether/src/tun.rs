@@ -563,17 +563,13 @@ pub async fn bridge(
                 // global flag — has_encrypted() only says a resolver is
                 // configured, not that this packet is a query.
                 //
-                // v2.0.26: gate interception on ENCRYPTED resolvers OR a plain-UDP
-                // user resolver. A query the engine answers itself never reaches
-                // the resolver the packet was addressed to, so intercepting only
-                // makes sense when the engine actually has one.
-                //
-                // 2.0.0 worked by intercepting ONLY gemini.google.com and letting
-                // everything else ride the tunnel. 2.0.24 broke the device by
-                // intercepting every query and re-issuing it from a socket that
-                // had no working path to the resolver. 2.0.26's fix is the socket
-                // path: the user-resolver socket is no longer protect()ed, so it
-                // rides our own TUN to the WARP exit, which can reach it.
+                // v2.0.28: interception fires only when the engine is up. For a
+                // plain-UDP-only setup CoreConfig now leaves smart_dns false, so
+                // the engine never stands up and this gate is false — the
+                // UDP/53 datagram rides the tunnel natively to the WARP exit,
+                // exactly as 2.0.0 did. The engine's own UID is excluded from
+                // the VPN, so a re-issued query from its socket has no path to
+                // the resolver; intercepting would only destroy the working path.
                 let is_dns = dns_payload_offset(&outbound).is_some()
                     && crate::smart_dns::has_resolver();
                 if is_dns {
