@@ -1,7 +1,6 @@
 package com.msnguard.vpn
 
 import android.content.Context
-import android.content.SharedPreferences
 import org.json.JSONObject
 import java.io.File
 import com.msnguard.vpn.profiled
@@ -28,31 +27,13 @@ object CoreConfig {
     const val CHAIN_SOCKS_PORT = 1820
 
     /**
-     * The name of the [CHAIN_OUTER_LADDER] entry that last carried the chain's
-     * outer leg. The next connect starts there instead of walking the whole
-     * ladder again, so a SIM that needs WireGuard pays the MASQUE timeout only
-     * once, ever.
+     * Which outer transport last carried the chain on this device.
      *
-     * The value is a transport NAME, not an index: the ladder has been reordered
-     * in the past (MASQUE-first to WireGuard-first), and an index would silently
-     * mean a different transport after such a reorder. A name survives it, and
-     * one that is no longer in the ladder is ignored.
+     * An index into [CHAIN_OUTER_LADDER]. The next connect starts there instead of
+     * walking the whole ladder again, so a SIM that needs WireGuard pays the MASQUE
+     * timeout only once, ever.
      */
-    const val CHAIN_OUTER_PREF = "chain_outer_transport"
-
-    /** Log tag for the DNS bootstrap/pinning path in this file. */
-    private const val TAG_DNS = "msn-dns"
-
-    /** Cached "host=ip,host=ip" for the DoT/DoH servers' own hostnames. */
-    private const val DNS_PINNED_IPS_PREF = "dns_pinned_ips"
-
-    /**
-     * How long [refreshPinnedIpsBlocking] may hold the connect path. Carrier
-     * lookups for a Cloudflare Workers domain are usually sub-second; the cap
-     * exists so a carrier that silently drops the query cannot stall the
-     * connect, leaving the previous pin in place instead.
-     */
-    private const val PIN_REFRESH_TIMEOUT_MS = 1500L
+    const val CHAIN_OUTER_PREF = "chain_outer_index"
 
     /**
      * Which transport last carried a PLAIN (unchained) tunnel far enough to move
@@ -218,207 +199,7 @@ object CoreConfig {
             put("dns_servers", prefs.getString("dns_servers_udp", null))
             putOpt("dns_servers_dot", prefs.getString("dns_servers_dot", null)?.ifBlank { null })
             putOpt("dns_servers_doh", prefs.getString("dns_servers_doh", null)?.ifBlank { null })
-            // v2.0.28: the Smart DNS Split engine must stand up ONLY when the
-            // user configured an ENCRYPTED resolver (DoT/DoH). Those are the
-            // only ones Android's own resolver cannot speak, so they are the
-            // only ones that need the engine to intercept UDP/53.
-            //
-            // For a plain-UDP-only setup the engine must stay DOWN: 2.0.0's
-            // field log proves the working path is Android's addDnsServer(),
-            // which puts the resolver on the TUN, so the app's UDP/53 rides
-            // the WARP tunnel natively to the exit and reaches the resolver.
-            // Turning the engine on (2.0.19's `put("smart_dns", true)`
-            // replaced that with a re-issued query from the engine's own
-            // socket, which has no working path to the resolver: the engine's
-            // UID is excluded from the VPN, so its socket rides the carrier,
-            // and the carrier is exactly the network that poisons plain 53.
-            // Every query then died with "All DNS queries failed" and the
-            // anti-sanction fallback answered from Germany (Iran-only 403).
-            //
-            // The engine still needs the plain list when it IS up, so the key
-            // is kept — the gate above is what decides whether it stands up.
-            val hasEncrypted = listOf("dns_servers_dot", "dns_servers_doh").any {
-                prefs.getString(it, null)?.ifBlank { null } != null
-            }
-            put("smart_dns", hasEncrypted)
-            put("smart_dns_servers", prefs.getString("dns_servers_udp", null))
-            // v2.0.11: the pins are pre-computed in
-            // [precomputePinnedIps] when the user SAVES their DNS, so this read
-            // is instant and never touches the network — configJson() runs on
-            // the connect path and cannot block. When the pins are absent
-            // (cleared settings, first install) the core gets no pins and falls
-            // back to plain UDP, which keeps the device online.
-            putOpt("dns_pinned_ips", prefs.getString(DNS_PINNED_IPS_PREF, null)?.ifBlank { null })
         }.toString()
-    }
-
-    /**
-     * Computed pins on launch when absent. See [precomputePinnedIps].
-     */
-    fun ensurePinnedIps(context: Context) {
-        val prefs = context.profiled()
-        val lists = listOf("dns_servers_dot", "dns_servers_doh")
-        val hasEncrypted = lists.any { key ->
-            prefs.getString(key, null)?.ifBlank { null } != null
-        }
-        if (!hasEncrypted) return
-        if (prefs.getString(DNS_PINNED_IPS_PREF, null) != null) return
-        precomputePinnedIps(context)
-    }
-
-    /**
-     * Refresh the pins on the connect path and block until they land.
-     *
-     * v2.0.13. The pins are the addresses the Rust engine dials for the DoT/DoH
-     * resolver's own hostname; a stale one means the engine dials a black hole
-     * and every encrypted query fails. Cloudflare Workers resolve to a rotating
-     * anycast set and Iranian carriers withdraw reachability to individual
-     * addresses without warning, so a pin computed once can go stale for weeks.
-     *
-     * This runs before the TUN exists, so the lookup rides the phone's own
-     * untunneled resolver. The cap matters more than the speed: a carrier that
-     * silently drops the lookup must not hang the connect, so we fall back to
-     * whatever pin was already stored.
-     */
-    fun refreshPinnedIpsBlocking(context: Context, timeoutMs: Long = PIN_REFRESH_TIMEOUT_MS) {
-        val prefs = context.profiled()
-        val lists = listOf("dns_servers_dot", "dns_servers_doh")
-        val hosts = LinkedHashSet<String>()
-        lists.forEach { key ->
-            val raw = prefs.getString(key, null) ?: return@forEach
-            raw.split(',', ';', ' ', '\n', '\r').forEach { entry ->
-                extractHost(entry.trim())?.let { if (it.isNotEmpty()) hosts.add(it) }
-            }
-        }
-        if (hosts.isEmpty()) {
-            prefs.edit().remove(DNS_PINNED_IPS_PREF).apply()
-            return
-        }
-        // Never block the UI thread: this is called from the connect path, but
-        // the caller already moved off it where it mattered. Guard anyway.
-        val latch = java.util.concurrent.CountDownLatch(1)
-        Thread({
-            try {
-                val pinned = resolveHostsToIps(hosts)
-                if (pinned.isEmpty()) {
-                    prefs.edit().remove(DNS_PINNED_IPS_PREF).apply()
-                } else {
-                    prefs.edit().putString(DNS_PINNED_IPS_PREF, pinned).apply()
-                    android.util.Log.i(TAG_DNS, "refreshed ${pinned.split(',').size} resolver pin(s)")
-                }
-            } finally {
-                latch.countDown()
-            }
-        }, "dns-pin-refresh").start()
-        latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
-    }
-
-    /**
-     * Resolve the DoT/DoH hostnames once, off the UI thread, and cache the
-     * result. Called from [MainActivity.saveDnsLists] the moment the user
-     * saves their DNS — never from the connect path, which must stay instant.
-     *
-     * The pin survives until the DNS settings change. A pin going stale later
-     * is harmless: the connect fails, the engine falls back to plain UDP, and
-     * the user re-saves to refresh it.
-     */
-    fun precomputePinnedIps(context: Context) {
-        val prefs = context.profiled()
-        val lists = listOf("dns_servers_dot", "dns_servers_doh")
-        val hosts = LinkedHashSet<String>()
-        lists.forEach { key ->
-            val raw = prefs.getString(key, null) ?: return@forEach
-            raw.split(',', ';', ' ', '\n', '\r').forEach { entry ->
-                extractHost(entry.trim())?.let { if (it.isNotEmpty()) hosts.add(it) }
-            }
-        }
-        if (hosts.isEmpty()) {
-            prefs.edit().remove(DNS_PINNED_IPS_PREF).apply()
-            return
-        }
-        Thread({
-            val pinned = resolveHostsToIps(hosts)
-            if (pinned.isEmpty()) {
-                prefs.edit().remove(DNS_PINNED_IPS_PREF).apply()
-            } else {
-                prefs.edit().putString(DNS_PINNED_IPS_PREF, pinned).apply()
-                android.util.Log.i(TAG_DNS, "pre-resolved ${pinned.split(',').size} resolver IP(s)")
-            }
-        }, "dns-pin").start()
-    }
-
-    /**
-     * Resolve the hostnames of the configured DoT/DoH resolvers using the
-     * phone's own (untunneled) resolver, while the tunnel is still down.
-     * Returns "host=ip,host=ip" or null when there is nothing to pin.
-     *
-     * Never throws: an unresolvable server is simply left unpinned, and the
-     * core falls back to its own resolution path.
-     */
-    /**
-     * The resolver hostnames -> "host=ip1+ip2,host=ip", or "" when none
-     * resolved. Runs on a background thread (never the UI thread).
-     *
-     * v2.0.13 pins *every* address, not just the first. Cloudflare Workers
-     * resolve to a rotating anycast set and Iranian carriers withdraw
-     * reachability to individual addresses without warning; a single pin has
-     * no redundancy, so the engine now receives the whole set and dials them
-     * in order (see smart_dns connect_pinned). Intra (Jigsaw) and Rethink
-     * (firestack) do exactly this — `ips.GetAll()` / a reordered IPSet.
-     * v4 is written first so the engine's v4 preference is preserved.
-     */
-    private fun resolveHostsToIps(hosts: LinkedHashSet<String>): String {
-        val out = StringBuilder()
-        hosts.forEach { host ->
-            // v2.0.24: a literal IP is its own pin. Skipped until now, an IP
-            // entry like https://8.8.8.8/dns-query never got a pin and the
-            // engine failed every query with "has no pinned IP" — the
-            // third-party report that the same server works in karing/intra
-            // but not here. getAllByName("8.8.8.8") does echo the literal, but
-            // relying on a DNS lookup for a host the user already typed as an
-            // address is exactly the waste this pre-resolve exists to remove.
-            if (host.matches(Regex("^[0-9a-fA-F:.]+$"))) {
-                if (out.isNotEmpty()) out.append(',')
-                out.append(host).append('=').append(host)
-                return@forEach
-            }
-            try {
-                val addrs = java.net.InetAddress.getAllByName(host)
-                // v4 first, then v6: some Iranian carriers break v6 to
-                // Cloudflare while v4 still works.
-                val ordered = addrs.sortedBy { it is java.net.Inet6Address }
-                val ips = ordered.map { it.hostAddress }
-                if (ips.isEmpty()) return@forEach
-                if (out.isNotEmpty()) out.append(',')
-                out.append(host).append('=').append(ips.joinToString("+"))
-            } catch (e: Exception) {
-                android.util.Log.w(TAG_DNS, "could not pre-resolve $host: ${e.message}")
-            }
-        }
-        return out.toString()
-    }
-
-    /**
-     * The hostname of one DNS entry: "https://h/dns-query" or "dot://h" -> "h";
-     * a bare "1.2.3.4" has no host to pin and yields null.
-     */
-    private fun extractHost(entry: String): String? {
-        if (entry.isEmpty()) return null
-        var s = entry
-        arrayOf("https://", "http://", "dot://", "tls://", "doh://").forEach {
-            if (s.startsWith(it, ignoreCase = true)) s = s.substring(it.length)
-        }
-        s = s.substringBefore('/')
-        s = s.substringBefore('?')
-        // strip the port and any [bracketing] on v6 literals
-        s = s.substringBeforeLast(':')
-        if (s.startsWith('[') && s.endsWith(']')) s = s.substring(1, s.length - 1)
-        // A literal IP has no hostname to pin. The pin for it is the address
-        // itself — resolveHostsToIps handles it — but extractHost must still
-        // RETURN it so the entry reaches that list at all.
-        // (kept for the no-host case: a malformed entry with no usable name)
-        if (s.isEmpty()) return null
-        return s
     }
 
     /**
@@ -457,16 +238,7 @@ object CoreConfig {
      * The rung that works is remembered per device, so this ordering only decides
      * the very first attempt.
      */
-    /**
-     * The order Auto tries the WARP transports in.
-     *
-     * WireGuard first: it is one tunnel instead of a nested pair, so on a network
-     * that allows it, it is the cheapest and the fastest option a carrier can
-     * reach. MASQUE is the fallback a WireGuard block forces, and WoW is the
-     * last resort for the most filtered networks, where a single tunnel cannot
-     * establish at all.
-     */
-    val CHAIN_OUTER_LADDER = listOf("wireguard", "masque", "gool")
+    val CHAIN_OUTER_LADDER = listOf("masque", "wireguard", "gool")
 
     /**
      * Which transport the user pinned for the chain's outer leg, or "auto".

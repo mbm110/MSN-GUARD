@@ -172,8 +172,8 @@ struct NativeStartOptions {
     /// already loaded and running, so LAN sharing on the WARP transports had no way
     /// to ask for the HTTP listener at all before this field existed.
     http_proxy: Option<String>,
-    /// Smart DNS Split engine flag. Kept for the FFI contract — the engine
-    /// initialises unconditionally, so this no longer gates anything.
+    /// AI Mode: enable the Smart DNS Split engine inside the TUN bridge.
+    /// Default false; honoured on MASQUE/WireGuard/WoW only.
     smart_dns: bool,
     /// User-supplied resolver list for the Smart DNS Split engine. Plain UDP
     /// entries are handled by Android; anything with a tls:// / https:// / doh:
@@ -184,9 +184,6 @@ struct NativeStartOptions {
     /// engine's encrypted resolver list at startup, independent of smart_dns.
     dns_servers_dot: Option<String>,
     dns_servers_doh: Option<String>,
-    /// v2.0.10: pre-resolved IPs for the DoT/DoH servers' own hostnames:
-    /// "doh.example.com=1.2.3.4,other.example=9.9.9.9".
-    dns_pinned_ips: Option<String>,
 }
 
 impl Default for NativeStartOptions {
@@ -229,7 +226,6 @@ impl Default for NativeStartOptions {
             smart_dns_servers: None,
             dns_servers_dot: None,
             dns_servers_doh: None,
-            dns_pinned_ips: None,
         }
     }
 }
@@ -293,12 +289,14 @@ impl TryFrom<NativeStartOptions> for StartOptions {
             None | Some("") => None,
             Some(raw) => Some(parse_address("http_proxy", raw)?),
         };
-        // Smart DNS Split engine flag (FFI contract).
+        // AI Mode: the core's TUN bridge reads this to decide whether to stand
+        // up the Smart DNS Split engine. Transports that never take that bridge
+        // (Psiphon, Tor, SHARD) ignore it, which is exactly the "symbolic only"
+        // behaviour the UI promises for those protocols.
         options.smart_dns = value.smart_dns;
         options.smart_dns_servers = value.smart_dns_servers.clone();
         options.dns_servers_dot = value.dns_servers_dot.clone();
         options.dns_servers_doh = value.dns_servers_doh.clone();
-        options.dns_pinned_ips = value.dns_pinned_ips.clone();
         Ok(options)
     }
 }

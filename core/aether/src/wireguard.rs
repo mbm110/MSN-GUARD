@@ -379,7 +379,7 @@ fn wg_stale_timeout() -> Duration {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(30);
+        .unwrap_or(10);
     Duration::from_secs(secs)
 }
 

@@ -236,27 +236,6 @@ fn http_client() -> Result<reqwest::Client> {
         .map_err(|e| AetherError::Api(e.to_string()))
 }
 
-/// v2.0.29: a client that dials the account API at a pinned IP, not by hostname.
-///
-/// `http_client` resolves `api.cloudflareclient.com` through the device's own
-/// resolver, which is poisoned on Iranian carriers — the lookup either never
-/// answers or returns an address that is not Cloudflare, so the registration
-/// dies in `error sending request for url` before a single byte of TLS is sent.
-///
-/// `resolve` is the whole fix: it maps the hostname to the pinned address for
-/// the TCP connection while leaving the URL untouched, so SNI, the Host header
-/// and certificate verification all still use the real name. Rewriting the URL
-/// by hand would have broken SNI (rustls takes it from the URL) and would have
-/// needed a separate Host header to name the vhost.
-fn pinned_client(pin: std::net::Ipv4Addr) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .user_agent(consts::UA_REGISTER)
-        .timeout(std::time::Duration::from_secs(20))
-        .resolve(consts::API_HOST, std::net::SocketAddr::from((pin, 443)))
-        .build()
-        .map_err(|e| AetherError::Api(e.to_string()))
-}
-
 const API_ATTEMPTS: u32 = 5;
 const API_BACKOFF_BASE_MS: u64 = 900;
 const API_BACKOFF_CAP_MS: u64 = 15_000;
@@ -568,38 +547,6 @@ pub async fn register(
     let encoded =
         serde_json::to_vec(&body).map_err(|e| AetherError::Api(format!("encode: {e}")))?;
 
-    // v2.0.29: try the pinned addresses BEFORE the hostname.
-    //
-    // On an Iranian carrier the hostname lookup is the thing that fails, and it
-    // fails inside reqwest's resolver with a connection error that looks
-    // identical to a dead server — so the retry ladder spends all five attempts
-    // on a lookup that can never succeed and only then falls through. Going to
-    // the pins first means a poisoned resolver costs nothing at all: a
-    // reachable edge answers on the first attempt, and the hostname route is
-    // still there as a last resort if every pin is down.
-    //
-    // One attempt per pin, not the full five-attempt ladder: the pins are
-    // advisory and the routes below retry properly, so stacking the ladder on
-    // each pin would multiply the worst case by three for a stale pin.
-    let mut last_pin_error: Option<AetherError> = None;
-    for pin in consts::API_PINS {
-        match send_with_retry("registration", || {
-            let mut req = pinned_client(pin)?
-                .post(&url)
-                .headers(base_headers())
-                .json(&body);
-            if let Some(jwt) = jwt {
-                req = req.header("CF-Access-Jwt-Assertion", jwt);
-            }
-            Ok(req)
-        })
-        .await
-        {
-            Ok(account) => return Ok((account, wg_private)),
-            Err(error) => last_pin_error = Some(error),
-        }
-    }
-
     let direct = send_with_retry("registration", || {
         let mut req = http_client()?
             .post(&url)
@@ -620,10 +567,7 @@ pub async fn register(
                 Ok(account) => account,
                 Err(secondary) => {
                     return Err(AetherError::Api(format!(
-                        "registration: direct route -> {primary}; camouflaged route -> {secondary}{}",
-                        last_pin_error
-                            .map(|e| format!("; pinned route -> {e}"))
-                            .unwrap_or_default()
+                        "registration: direct route -> {primary}; camouflaged route -> {secondary}"
                     )));
                 }
             }

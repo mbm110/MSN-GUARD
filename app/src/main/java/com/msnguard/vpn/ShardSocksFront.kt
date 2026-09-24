@@ -97,15 +97,6 @@ object ShardSocksFront {
      */
     private val DNS_UPSTREAMS = listOf("1.1.1.1", "8.8.8.8")
 
-    /**
-     * The resolver list [dnsUpstream] actually reads. Set from [start] from the
-     * user's plain-UDP preference; [DEFAULT] until then, which is what a session
-     * that never went through [start] (a reconnect reusing the running
-     * front-end) still sees.
-     */
-    @Volatile
-    private var dnsUpstreams: List<String> = DNS_UPSTREAMS
-
     private const val SOCKS_VERSION = 5
     private const val CMD_CONNECT = 1
     private const val CMD_UDP_ASSOCIATE = 3
@@ -307,19 +298,10 @@ object ShardSocksFront {
      * @param socksPort xray's SOCKS listener, i.e. [ShardManager.SOCKS_PORT].
      */
     @Synchronized
-    fun start(socksPort: Int, dnsUpstreams: List<String> = emptyList()): Boolean {
+    fun start(socksPort: Int): Boolean {
         if (running.get()) {
             ConnectionLog.record("$TAG already running")
             return true
-        }
-        // v2.0.17: the user's plain-UDP resolver list now drives SHARD. This was
-        // hardcoded to 1.1.1.1/8.8.8.8, so a custom resolver set on the DNS
-        // screen applied to WireGuard/MASQUE/WoW and was silently ignored here —
-        // the exact inconsistency a user reported as "plain UDP DNS only works
-        // on WireGuard". Reject anything that is not a bare IP: these front-ends
-        // have no TLS stack, so a DoT/DoH URL is a no-op rather than a resolver.
-        if (dnsUpstreams.isNotEmpty()) {
-            this.dnsUpstreams = dnsUpstreams
         }
         upstreamPort = socksPort
 
@@ -622,7 +604,7 @@ object ShardSocksFront {
      * one of them is having a bad minute at the exit.
      */
     private fun dnsUpstream(index: Int): InetAddress =
-        InetAddress.getByName(dnsUpstreams[index % dnsUpstreams.size])
+        InetAddress.getByName(DNS_UPSTREAMS[index % DNS_UPSTREAMS.size])
 
     // -------------------------------------------------------------- DNS channel
 

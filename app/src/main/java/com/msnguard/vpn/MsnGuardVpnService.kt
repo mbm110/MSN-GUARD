@@ -208,14 +208,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private val connected = AtomicBoolean(false)
     private val stopRequested = AtomicBoolean(false)
     private val vpnModeActive = AtomicBoolean(false)
-    /**
-     * The user paused the tunnel from the notification instead of disconnecting:
-     * the session has been torn down, but the service stays alive with a
-     * Reconnect action waiting for the next tap. Kept distinct from
-     * [userInitiatedStop], which means "stay off" and therefore forbids
-     * reconnect — a pause is defined by the fact that reconnect is still wanted.
-     */
-    private val paused = AtomicBoolean(false)
     private var tun: ParcelFileDescriptor? = null
     private var lastTrafficSampleMs = 0L
     private var currentTx = 0L
@@ -227,6 +219,23 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var currentSpeedRx = 0L
     private var accountedTx = 0L
     private var accountedRx = 0L
+    /**
+     * Monthly totals held in memory, flushed to disk on a timer.
+     *
+     * These used to be written through to SharedPreferences on every traffic
+     * sample, i.e. roughly once a second for the whole life of a tunnel. That is
+     * thousands of `apply()` calls an hour, each one a disk write behind the
+     * scenes — expensive on flash and on battery, to persist a counter nobody
+     * reads until the traffic screen is opened.
+     *
+     * Now the counters live here and reach disk every [TRAFFIC_FLUSH_MS] and on
+     * teardown. Worst case a hard process kill loses the last few seconds of
+     * accounting, which is not a number anything depends on being exact.
+     */
+    private var monthKey: String? = null
+    private var monthTxTotal = 0L
+    private var monthRxTotal = 0L
+    private var lastTrafficFlushMs = 0L
 
     /**
      * Whether this session has already recorded its transport as working.
@@ -532,18 +541,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var chainMode = false
 
     /**
-     * True only for a chain whose inner leg is Psiphon — the one chain shape that
-     * reports its own bytes via [onBytesTransferred].
-     *
-     * [chainMode] is also set for WoW/WireGuard chains, which have no inner
-     * counter at all. Treating those the same way froze the UI's traffic counter
-     * at zero for the whole session, so the verification gate reported "Tunnel
-     * moved no bytes" and tore down tunnels that were passing data. See the
-     * "traffic" handler below.
-     */
-    private var psiphonChained = false
-
-    /**
      * True once an outer transport has been accepted and Psiphon started on it.
      *
      * Distinguishes "this rung failed, try the next" from "the transport carrying a
@@ -831,7 +828,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
         const val ACTION_CONNECT = "com.msnguard.vpn.CONNECT"
         const val ACTION_DISCONNECT = "com.msnguard.vpn.DISCONNECT"
-        const val ACTION_PAUSE = "com.msnguard.vpn.PAUSE"
         const val ACTION_RECONNECT = "com.msnguard.vpn.RECONNECT"
         const val ACTION_NOTIFICATION_HEALTH = "com.msnguard.vpn.NOTIFICATION_HEALTH"
         const val ACTION_RESET_IDENTITIES = "com.msnguard.vpn.RESET_IDENTITIES"
@@ -843,6 +839,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val EXTRA_TRAFFIC_RX = "traffic_rx"
         const val EXTRA_TRAFFIC_SPEED_TX = "traffic_speed_tx"
         const val EXTRA_TRAFFIC_SPEED_RX = "traffic_speed_rx"
+        const val EXTRA_TRAFFIC_MONTH_TX = "traffic_month_tx"
+        const val EXTRA_TRAFFIC_MONTH_RX = "traffic_month_rx"
         const val EXTRA_NOTIFICATION_IP = "notification_ip"
         const val EXTRA_NOTIFICATION_PING = "notification_ping"
 
@@ -1058,6 +1056,26 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         private const val REGION_PHASE_TIMEOUT_SECONDS = 25
 
         const val NOTIFICATION_ID = 1
+        const val TRAFFIC_PREFS = "traffic_stats"
+        const val TRAFFIC_MONTH = "month"
+        const val TRAFFIC_TX = "tx"
+        const val TRAFFIC_RX = "rx"
+
+        /**
+         * Schema version of [TRAFFIC_PREFS], bumped when stored totals become
+         * untrustworthy and have to be discarded rather than migrated.
+         *
+         * 1 = totals written before the monthly-inflation fix.
+         */
+        const val TRAFFIC_SCHEMA = "schema"
+        const val TRAFFIC_SCHEMA_VERSION = 1
+
+        /**
+         * How often the monthly traffic counters are written to disk while a
+         * tunnel is up. Teardown always flushes, so this only bounds what a hard
+         * process kill can lose.
+         */
+        private const val TRAFFIC_FLUSH_MS = 60_000L
 
         /**
          * In-tunnel RX bytes that count as "this transport really works".
@@ -1258,10 +1276,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         psiphonVpnActivated = true
         ConnectionLog.record("Whole-device routing active via tun2socks → $socksProxy")
         connected.set(true)
-        // A session coming back from a pause must clear the latch here as well as
-        // in ACTION_RECONNECT, or the notification would keep offering Reconnect on
-        // a row that is already live.
-        paused.set(false)
         // Replace the placeholder "Connecting..." notification immediately. It used
         // to be overwritten by the first traffic sample from the Rust core; with
         // tun2socks the first sample can be seconds away, so the notification
@@ -2181,14 +2195,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             sendStatus(STATUS_FAILED, detail)
         }
         connected.set(false)
-        // A pause is neither a drop nor a failure, and the chain's bare
-        // outer-leg thread reaches here when the rung it was running is torn
-        // down by the pause itself. Left to fall through, this method ends the
-        // service — which is the whole behaviour a pause must not have.
-        if (paused.get()) {
-            ConnectionLog.record("Paused; the chain's outer-leg failure is ignored")
-            return
-        }
         // Keeping the service alive is a precondition of the seal: stopSelf()
         // releases the blocking TUN's fd and the OS restores carrier networking,
         // which is the leak the switch exists to prevent.
@@ -2286,9 +2292,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // off" latch and the backoff counter, so a manual retry always
                 // starts from the first, shortest delay.
                 userInitiatedStop.set(false)
-                // And the pause latch: a connect is a connect, and a stale pause
-                // would leave the notification showing Reconnect on a live session.
-                paused.set(false)
                 // The seal is over too: this connect either replaces the blocking TUN
                 // with a working tunnel or fails on its own terms. Left set, a failed
                 // manual retry would be treated as "still sealed from the old drop".
@@ -2300,10 +2303,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // The one place that means "the user wants this off". Auto-reconnect
                 // reads this latch and stays out of the way.
                 userInitiatedStop.set(true)
-                // A disconnect from the notification is the end of the session, so
-                // the paused state cannot survive it: otherwise a later auto- or
-                // manual reconnect would find a stale latch.
-                paused.set(false)
                 // Clears the reconnect latch too, or a Reconnect that never came back
                 // up would leave the service un-stoppable: every teardown path reads
                 // the latch and declines to end the service while it is set.
@@ -2321,48 +2320,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 cancelAutoReconnect()
                 stopTunnel()
             }
-            ACTION_PAUSE -> {
-                // The user asked for the tunnel to go down while keeping the
-                // notification alive — so this is deliberately NOT
-                // [userInitiatedStop], whose latch means "stay off" and would
-                // block the Reconnect the user is about to be offered. A pause
-                // is instead marked here, so [willAutoReconnect] and the
-                // foreground state both know reconnect is still wanted.
-                paused.set(true)
-                ConnectionLog.record("Pause requested — tunnel down, notification kept")
-                // teardownService = false is the whole point of a pause: the
-                // service stays in the foreground so the notification row is not
-                // removed, and the Reconnect action in it remains tappable.
-                // notify = false so the DISCONNECTED status does not repaint the
-                // row before we re-post it ourselves with the Reconnect button.
-                stopTunnel(notify = false, teardownService = false)
-                // The notification's Reconnect action is only correct while the
-                // session is actually paused.
-                repostNotification()
-            }
             ACTION_RECONNECT -> {
                 val config = storedConfig
-                if (config != null && (connected.get() || paused.get())) {
-                    // Clearing the pause latch here, not in stopTunnel: this is
-                    // the only path that exits the paused state. Left set, the
-                    // notification would go on showing Reconnect while the
-                    // session was already up.
-                    paused.set(false)
-                    ConnectionLog.record(
-                        if (connected.get()) "Quick reconnect requested"
-                        else "Reconnect requested after pause"
-                    )
-                    if (connected.get()) {
-                        requestQuickReconnect("user")
-                    } else {
-                        // A paused session had already torn the tunnel down, so
-                        // there is nothing to wait for: start it again from the
-                        // last config the user connected with.
-                        userInitiatedStop.set(false)
-                        killSwitchSealed.set(false)
-                        reconnectAttempts = 0
-                        startTunnel(config)
-                    }
+                if (config != null && connected.get()) {
+                    ConnectionLog.record("Quick reconnect requested")
+                    requestQuickReconnect("user")
                 }
             }
             ACTION_NOTIFICATION_HEALTH -> {
@@ -2424,9 +2386,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // Same reason as ACTION_DISCONNECT: the consent this reconnect would restart
         // into is exactly what was just taken away, so the latch must not survive.
         reconnectRequested.set(false)
-        // And a pause cannot outlive the consent its reconnect needs: the
-        // notification would offer Reconnect into a session that cannot come back.
-        paused.set(false)
         // Nor the seal — the permission it would be rebuilt on is gone, so a rebuild
         // could only fail, and failing there stops the service anyway.
         killSwitchSealed.set(false)
@@ -2509,17 +2468,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // inner leg is the one carrying the user's data, and it is what
                     // plain Psiphon mode already reports, so the outer leg's
                     // counters are dropped for consistency.
-                    //
-                    // But that reasoning only holds when there IS an inner counter.
-                    // Only a Psiphon chain has one. A WoW/WireGuard chain has no
-                    // Psiphon leg at all — onBytesTransferred never fires — and
-                    // dropping the core's counters here left the UI with no source
-                    // whatsoever: trafficRx stayed at zero for the whole session,
-                    // so the 18s verification gate saw "Tunnel moved no bytes" on
-                    // every connect and tore down a tunnel that was passing data
-                    // (log 31: hundreds of DoH answers in the same window). Drop
-                    // the outer counters only when Psiphon is the inner leg.
-                    if (chainMode && psiphonChained) return
+                    if (chainMode) return
                     currentTx = tx
                     currentRx = rx
                     updateTrafficNotification(tx, rx)
@@ -2593,7 +2542,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * are protected via the JNI protector, so the WARP leg leaves over the carrier
      * link rather than looping back into our own TUN.
      *
-     * The outer leg walks [CoreConfig.CHAIN_OUTER_LADDER] — WireGuard, then MASQUE,
+     * The outer leg walks [CoreConfig.CHAIN_OUTER_LADDER] — MASQUE, then WireGuard,
      * then WoW — until one comes up, because which of them a carrier allows varies:
      * Hamrah-e-Aval has never carried WireGuard, while other SIMs connect on it
      * instantly. The winning rung is remembered per device, so the cost of finding
@@ -2601,7 +2550,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private fun startChainTunnel() {
         chainMode = true
-        psiphonChained = true   // this is the PSIPHON-OVER-WARP path
         chainOuterCommitted = false
         // FALSE in SOCKS mode, and this single line is the difference between the
         // two shapes of a chained run:
@@ -2691,7 +2639,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             } catch (e: Exception) {
                 ConnectionLog.record("Chain start failed: ${e.message}")
                 chainMode = false
-        psiphonChained = false
                 failAndStop(e.message ?: "Chain start failed")
             }
         }
@@ -2869,7 +2816,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // connect fail with "already running".
                 if (chained) stopOuterLeg()
                 chainMode = false
-        psiphonChained = false
                 failAndStop(e.message ?: "Tor start failed")
             }
         }
@@ -2960,7 +2906,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // serving the tunnel: xray on 1824 or the anytls sidecar on
                 // 1826. ShardManager exposes one accessor so this call site
                 // does not have to know the engine split.
-                if (!ShardSocksFront.start(ShardManager.liveSocksPort, DnsUpstreams.list(this))) {
+                if (!ShardSocksFront.start(ShardManager.liveSocksPort)) {
                     error("Could not start the UDP front-end")
                 }
                 activeSocksPort = ShardSocksFront.LISTEN_PORT
@@ -3481,14 +3427,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * gap so the reconnect does not have to re-prompt the user.
      */
     private fun onTunnelLost(reason: String) {
-        // A pause is not a drop: the tunnel came down because the user asked for it,
-        // and a watchdog firing during the teardown is the expected consequence, not
-        // a reason to reconnect. Every branch below either reconnects or seals the
-        // device, both of which would fight the pause.
-        if (paused.get()) {
-            ConnectionLog.record("Tunnel ended for a pause; no reconnect, no kill switch")
-            return
-        }
         // A quick reconnect tears the old tunnel down on purpose, and on Psiphon the
         // controller's own `onExiting` arrives a moment later — after the restart has
         // cleared stopRequested, so the usual guard no longer covers it. Treating
@@ -3740,7 +3678,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * failure (red dial, session over) or as a reconnect in progress.
      */
     private fun willAutoReconnect(): Boolean =
-        autoReconnectEnabled() && !userInitiatedStop.get() && storedConfig != null && !paused.get()
+        autoReconnectEnabled() && !userInitiatedStop.get() && storedConfig != null
 
     /**
      * Records that the current PLAIN transport reached the internet on this network.
@@ -3820,12 +3758,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         val auto = ladder.size > 1
         val prefs = profiled()
         // -1, not 0: absent must be distinguishable from "rung 0 worked", or a fresh
-        // install would look like it had already proven WireGuard and the
-        // plain-history hint below would never be consulted. The value is a
-        // transport NAME so it survives ladder reorders.
-        val chainMemory = prefs.getString(CoreConfig.CHAIN_OUTER_PREF, null)
-            ?.let { ladder.indexOf(it) }
-            ?.takeIf { it >= 0 } ?: -1
+        // install would look like it had already proven MASQUE and the plain-history
+        // hint below would never be consulted.
+        val chainMemory = prefs.getInt(CoreConfig.CHAIN_OUTER_PREF, -1)
         val plainHint = prefs.getString(CoreConfig.PLAIN_WORKING_TRANSPORT_PREF, null)
             ?.let { ladder.indexOf(it) }
             ?.takeIf { it >= 0 }
@@ -3849,14 +3784,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 "Chain: no chained history yet — starting with " +
                     "${CoreConfig.chainOuterLabel(ladder[plainHint])}, which last carried " +
                     "real traffic on its own"
-            )
-        } else if (chainMemory !in ladder.indices) {
-            // The static ladder order itself changed (MASQUE-first to
-            // WireGuard-first), so a log that never names the starting rung
-            // cannot tell the old order from the new one.
-            ConnectionLog.record(
-                "Chain: no history yet — starting at the top of the ladder: " +
-                    CoreConfig.chainOuterLabel(ladder[0])
             )
         }
 
@@ -3939,10 +3866,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             if (awaitOuterProxy(budget)) {
                 // Remember what worked, so the next automatic connect starts here.
                 // Only meaningful for the full ladder: with a pin there is one entry
-                // and the name would refer to a rung the user did not choose.
+                // and the index would refer to the wrong transport later.
                 if (auto) {
                     profiled().edit()
-                        .putString(CoreConfig.CHAIN_OUTER_PREF, ladder[index]).apply()
+                        .putInt(CoreConfig.CHAIN_OUTER_PREF, index).apply()
                 }
                 chainOuterCommitted = true
                 ConnectionLog.record("Chain: $label is carrying the outer leg")
@@ -4228,7 +4155,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // "plain" for recordWorkingPlainTransport(). The branches below set them
         // again for the Psiphon and chained paths.
         chainMode = false
-        psiphonChained = false
         psiphonVpnMode = false
         startAsForeground()
 
@@ -4594,8 +4520,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 TunnelStatus.isProxyMode = false
                 // The native tunnel can end without stopTunnel() ever running —
                 // the core exiting on its own, or the kill-switch branch below,
-                // both land here instead. Without this the traffic counters would
-                // keep describing a tunnel that no longer exists.
+                // both land here instead. stopTunnel() is where the monthly
+                // counters are normally persisted, so without this the traffic
+                // since the last 60-second flush was lost on exactly the paths
+                // that end a session unexpectedly.
+                flushMonthlyTraffic()
                 // The kill switch is a VPN-mode concept: it works by establishing a
                 // TUN with no routes so nothing can leave the device. In SOCKS mode no
                 // TUN was ever created and nothing is routed implicitly, so there is
@@ -4635,19 +4564,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     // does not need a fresh VPN consent dialog.
                     nativeExitWasUnexpected = false
                     scheduleAutoReconnect("the tunnel dropped")
-                } else if (paused.get()) {
-                    // The user paused from the notification. The tunnel is being torn
-                    // down deliberately and the foreground service is meant to
-                    // survive it, but this thread's own teardown cannot tell that
-                    // from a real failure: stopTunnel(notify=false,
-                    // teardownService=false) leaves no trace on any latch the
-                    // branches above read (stopRequested is a per-session flag that
-                    // startTunnel clears, and reconnectRequested is false because a
-                    // pause is not a retry). Without this branch the final else
-                    // stopForeground()+stopSelf() would run and take the
-                    // notification with it — exactly what a pause must not do.
-                    nativeExitWasUnexpected = false
-                    ConnectionLog.record("Core exited for a pause; notification kept")
                 } else {
                     nativeExitWasUnexpected = false
                     stopForeground(STOP_FOREGROUND_REMOVE)
@@ -4665,6 +4581,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // make it fire on the wreckage of a session that is deliberately ending.
         stopWatchdog()
         stopTorProgressPolling()
+        // The traffic counters are only flushed to disk on a slow timer while
+        // running, so an ordinary disconnect must persist the remainder here or
+        // the last minute of the session would be lost from the monthly total.
+        flushMonthlyTraffic()
         // Clear the session stamp here, not in sendStatus: the reconnect path and
         // onDestroy both call stopTunnel(notify = false), so relying on the
         // DISCONNECTED broadcast left connectedSince set and the next session's
@@ -4712,7 +4632,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // a listener that no longer exists.
             NativeCore.detach()
             chainMode = false
-        psiphonChained = false
             chainOuterCommitted = false
             vpnModeActive.set(false)
             // Cleared with the rest of the per-session Psiphon state. It used to be
@@ -4772,7 +4691,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // connect starts with a core still bound to a dead service.
                 NativeCore.detach()
                 chainMode = false
-        psiphonChained = false
                 chainOuterCommitted = false
             }
             vpnModeActive.set(false)
@@ -4995,13 +4913,19 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     " (sample tx=$tx rx=$rx, accounted tx=$accountedTx rx=$accountedRx)"
             )
         }
+        val (monthTx, monthRx) = recordMonthlyTraffic(deltaTx, deltaRx)
         accountedTx = tx
         accountedRx = rx
         // A plain tunnel that has moved real bytes is evidence about this carrier
         // that the chain can reuse later. Cheap: a single boolean check on the
         // common path.
         recordWorkingPlainTransport(rx)
-        sendTraffic(tx, rx)
+        sendTraffic(tx, rx, monthTx, monthRx)
+
+        if (now - lastTrafficFlushMs >= TRAFFIC_FLUSH_MS) {
+            flushMonthlyTraffic()
+            lastTrafficFlushMs = now
+        }
 
         // The notification is NOT reposted here any more.
         //
@@ -5021,13 +4945,72 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         lastTrafficSampleMs = now
     }
 
-    private fun sendTraffic(tx: Long, rx: Long) {
-        sendBroadcast(Intent(ACTION_STATUS)
-            .setPackage(packageName)
-            .putExtra(EXTRA_TRAFFIC_TX, tx)
-            .putExtra(EXTRA_TRAFFIC_RX, rx)
-            .putExtra(EXTRA_TRAFFIC_SPEED_TX, currentSpeedTx)
-            .putExtra(EXTRA_TRAFFIC_SPEED_RX, currentSpeedRx))
+    /**
+     * Adds this sample to the monthly totals, in memory.
+     *
+     * The disk write is deliberately not here — see [flushMonthlyTraffic] and the
+     * fields it persists. The date is also only formatted when the month is not
+     * already known, because building a SimpleDateFormat once a second to
+     * re-derive the same string is waste in its own right.
+     */
+    private fun recordMonthlyTraffic(tx: Long, rx: Long): Pair<Long, Long> {
+        // First sample of this process, or the month rolled over mid-session.
+        loadMonthlyTotals()
+        monthTxTotal += tx
+        monthRxTotal += rx
+        return monthTxTotal to monthRxTotal
+    }
+
+    private fun currentMonthKey(): String =
+        java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.US).format(java.util.Date())
+
+    /** Loads the persisted monthly totals into memory, once per month key. */
+    private fun loadMonthlyTotals() {
+        val month = currentMonthKey()
+        if (monthKey == month) return
+        // The month just rolled over mid-session: persist what the old month
+        // accumulated before its key is replaced. Without this, everything since
+        // the last 60-second flush was silently dropped from the month that ended,
+        // because `monthKey` is what flushMonthlyTraffic() writes under.
+        if (monthKey != null) flushMonthlyTraffic()
+        val prefs = getSharedPreferences(TRAFFIC_PREFS, MODE_PRIVATE)
+        // Discard totals written by a build that had the inflation bug.
+        //
+        // Fixing the accounting does not fix the number already on disk: it was
+        // overstated by roughly the number of throttled backwards samples, which
+        // varies per device, so there is no honest factor to divide by. Zeroing
+        // once is the only truthful option — the month restarts from a correct
+        // baseline instead of carrying a figure nobody can interpret.
+        //
+        // Gated on a stored schema version, not on the app version, so it happens
+        // exactly once ever rather than on every update from here on.
+        if (prefs.getInt(TRAFFIC_SCHEMA, 0) < TRAFFIC_SCHEMA_VERSION) {
+            // Was there actually anything to throw away? On a fresh install there
+            // is not, and announcing "your total was miscounted" to someone who
+            // has never had a total is both false and alarming — the line showed
+            // up on the first line of every field log for that reason.
+            val hadTotals = prefs.contains(TRAFFIC_TX) || prefs.contains(TRAFFIC_RX)
+            prefs.edit()
+                .putInt(TRAFFIC_SCHEMA, TRAFFIC_SCHEMA_VERSION)
+                .remove(TRAFFIC_MONTH)
+                .remove(TRAFFIC_TX)
+                .remove(TRAFFIC_RX)
+                // commit(), not apply(): this must be on disk before anything
+                // else, because if the write is lost the discard runs again on the
+                // next launch and the month restarts from zero a second time.
+                .commit()
+            monthTxTotal = 0
+            monthRxTotal = 0
+            monthKey = month
+            if (hadTotals) {
+                ConnectionLog.record("Monthly traffic counter reset — previous total was miscounted")
+            }
+            return
+        }
+        val stored = prefs.getString(TRAFFIC_MONTH, null)
+        monthTxTotal = if (stored == month) prefs.getLong(TRAFFIC_TX, 0) else 0
+        monthRxTotal = if (stored == month) prefs.getLong(TRAFFIC_RX, 0) else 0
+        monthKey = month
     }
 
     /**
@@ -5048,8 +5031,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * passes" for a tunnel that was working. Force-stopping the app made the
      * first connect succeed again because fresh fields start at zero — which is
      * exactly the workaround that was being used.
+     *
+     * The monthly totals are deliberately NOT cleared: they are cumulative
+     * across sessions. Only the per-session deltas reset, and `accountedTx/Rx`
+     * going to zero is what keeps the monthly accounting correct — the next
+     * sample's delta is measured from zero, matching the core's fresh counter.
      */
     private fun resetSessionTraffic() {
+        // The month totals are read lazily on the first sample; make sure they are
+        // loaded before broadcasting, or a reset before any traffic would tell the
+        // UI the month total is zero and the traffic screen would blank out.
+        loadMonthlyTotals()
         currentTx = 0
         currentRx = 0
         prevTx = 0
@@ -5060,13 +5052,45 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         accountedRx = 0
         // Zeroed, not set to `now`: these are throttle stamps, and a fresh
         // session should publish its first sample immediately rather than wait
-        // out a throttle window inherited from the session that just ended.
-        lastTrafficSampleMs = 0
+        // out a window inherited from the tunnel that just died.
         prevSpeedSampleMs = 0
-        // The transport-recorded latch is per-session too, so a session that
-        // never moves enough bytes to record it cannot stop the next one from
-        // recording its own.
+        lastTrafficSampleMs = 0
+        // Per-session latch: each tunnel gets one chance to prove its transport
+        // works. Without this reset the flag would stay set for the life of the
+        // process, so a later session on a different transport (or a different
+        // network) would never record what actually worked.
         plainTransportRecorded = false
+        // The UI keeps its own mirrors, and it cannot know the core restarted
+        // counting unless it is told. Without this broadcast the activity would
+        // hold the old totals until the first traffic sample of the new session,
+        // and the verification baseline is taken before that arrives.
+        sendTraffic(0, 0, monthTxTotal, monthRxTotal)
+    }
+
+    /**
+     * Writes the in-memory monthly totals to disk.
+     *
+     * Called on a slow timer from the traffic path and unconditionally on
+     * teardown, so an ordinary disconnect always persists an exact figure.
+     */
+    private fun flushMonthlyTraffic() {
+        val month = monthKey ?: return
+        getSharedPreferences(TRAFFIC_PREFS, MODE_PRIVATE).edit()
+            .putString(TRAFFIC_MONTH, month)
+            .putLong(TRAFFIC_TX, monthTxTotal)
+            .putLong(TRAFFIC_RX, monthRxTotal)
+            .apply()
+    }
+
+    private fun sendTraffic(tx: Long, rx: Long, monthTx: Long, monthRx: Long) {
+        sendBroadcast(Intent(ACTION_STATUS)
+            .setPackage(packageName)
+            .putExtra(EXTRA_TRAFFIC_TX, tx)
+            .putExtra(EXTRA_TRAFFIC_RX, rx)
+            .putExtra(EXTRA_TRAFFIC_SPEED_TX, currentSpeedTx)
+            .putExtra(EXTRA_TRAFFIC_SPEED_RX, currentSpeedRx)
+            .putExtra(EXTRA_TRAFFIC_MONTH_TX, monthTx)
+            .putExtra(EXTRA_TRAFFIC_MONTH_RX, monthRx))
     }
 
     /**
@@ -5522,20 +5546,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             this, 2, reconnectIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // Pause is the third action and the one that changes shape. While the
-        // tunnel is up the button offers Pause, which tears the session down but
-        // leaves the service in the foreground so this row survives; while it is
-        // paused the same slot offers Reconnect, which restarts the session from
-        // the config the user last connected with. Same physical row, opposite
-        // verb, so the user's muscle memory stays on one button.
-        val isPaused = paused.get()
-        val pauseIntent = Intent(this, MsnGuardVpnService::class.java).apply {
-            action = if (isPaused) ACTION_RECONNECT else ACTION_PAUSE
-        }
-        val pausePendingIntent = PendingIntent.getService(
-            this, 3, pauseIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
         // Second line: what is carrying the traffic and where it comes out.
         // Byte counters and speed are deliberately gone from here — see
         // [updateTrafficNotification] for why they were the cause of the
@@ -5584,16 +5594,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // content — the exact case the user is complaining about.
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOnlyAlertOnce(true)
-            .addAction(android.R.drawable.ic_media_pause,
-                if (isPaused) Strings.t("Reconnect") else Strings.t("Pause"),
-                pausePendingIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, Strings.t("Disconnect"), disconnectPendingIntent)
-
-        // While the tunnel is paused the Reconnect entry point is the Pause slot
-        // itself, so the separate Reconnect action is hidden rather than duplicated.
-        if (!isPaused) {
-            builder.addAction(android.R.drawable.ic_menu_revert, Strings.t("Reconnect"), reconnectPendingIntent)
-        }
+            .addAction(android.R.drawable.ic_menu_revert, Strings.t("Reconnect"), reconnectPendingIntent)
 
         // The session timer, ticked by the system rather than by us.
         //
@@ -5709,10 +5711,9 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             return this
         }
         if (mode == SplitTunnelSettings.Mode.INCLUDE) {
-            // INCLUDE (whitelist): only listed apps go through VPN. Any app not
-            // in addAllowedApplication() — including ours — is outside the VPN
-            // by construction, so no explicit self-exclusion is needed here.
-            // The empty-list case is rejected by the check below.
+            // INCLUDE (whitelist): only listed apps go through VPN.
+            // Do NOT add our own packageName — it's excluded by default.
+            // Do NOT use addDisallowedApplication here (mixing with addAllowedApplication crashes).
         }
         if (packages.isEmpty()) {
             check(mode != SplitTunnelSettings.Mode.INCLUDE) {

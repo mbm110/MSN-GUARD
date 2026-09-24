@@ -304,10 +304,13 @@ class MainActivity : Activity() {
     private var dnsPage: View? = null
     private var trafficSpeedValue: TextView? = null
     private var trafficSessionValue: TextView? = null
+    private var trafficMonthValue: TextView? = null
     private var trafficTx = 0L
     private var trafficRx = 0L
     private var trafficSpeedTx = 0L
     private var trafficSpeedRx = 0L
+    private var trafficMonthTx = 0L
+    private var trafficMonthRx = 0L
     @Volatile private var cachedUserApps: List<ApplicationInfo>? = null
     private var latencyRequest = 0
     @Volatile private var pingInFlight = false
@@ -440,6 +443,8 @@ class MainActivity : Activity() {
                 trafficRx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_RX, 0)
                 trafficSpeedTx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_SPEED_TX, 0)
                 trafficSpeedRx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_SPEED_RX, 0)
+                trafficMonthTx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_MONTH_TX, 0)
+                trafficMonthRx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_MONTH_RX, 0)
                 renderTrafficMonitor()
                 renderHomeMetrics()
                 return
@@ -559,13 +564,6 @@ class MainActivity : Activity() {
         )
 
         appUpdater = AppUpdater(this)
-        // v2.0.12: the DoT/DoH pins must exist before the first connect, not
-        // only after the user re-saves their DNS. An upgrade from 2.0.10 or
-        // earlier, or just opening the app and tapping CC without visiting the
-        // DNS screen, left dns_pinned_ips absent — the engine then had no
-        // pinned IP and every encrypted query failed instantly. Idempotent and
-        // off-thread: it only writes when the preference is missing.
-        CoreConfig.ensurePinnedIps(this)
         // Registers the periodic SHARD list refresh. Idempotent, so calling it on
         // every launch is how the job gets re-registered after an app update — a
         // package replace clears JobScheduler's registrations for the app.
@@ -5828,6 +5826,7 @@ class MainActivity : Activity() {
         ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
         trafficSpeedValue = addTrafficMetric(content, Strings.t("LIVE SPEED"))
         trafficSessionValue = addTrafficMetric(content, Strings.t("THIS SESSION"))
+        trafficMonthValue = addTrafficMetric(content, Strings.t("THIS MONTH"))
         scroll.addView(content)
         page.addView(scroll, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -5871,6 +5870,7 @@ class MainActivity : Activity() {
         trafficMonitorPage?.let { animatePageClose(it) { trafficMonitorPage = null } }
         trafficSpeedValue = null
         trafficSessionValue = null
+        trafficMonthValue = null
     }
 
     /**
@@ -6295,11 +6295,6 @@ class MainActivity : Activity() {
             // entries are parsed by the core, never handed to Android.
             putOrRemove(CUSTOM_DNS, udp)
         }.apply()
-        // Pre-resolve the DoT/DoH hostnames NOW, while nothing is connected and
-        // the lookup can ride the phone's own resolver. configJson() later does
-        // this again, but it runs on the connect path and would block the UI
-        // thread — which is what made the CC button look dead in 2.0.10.
-        CoreConfig.precomputePinnedIps(this)
         val parts = listOfNotNull(
             udp.takeIf { it.isNotEmpty() }?.let { "UDP ${it.size}" },
             dot.takeIf { it.isNotEmpty() }?.let { "DoT ${it.size}" },
@@ -6323,12 +6318,13 @@ class MainActivity : Activity() {
     private fun renderTrafficMonitor() {
         trafficSpeedValue?.text = "↓ ${formatTraffic(trafficSpeedRx)}/s   ↑ ${formatTraffic(trafficSpeedTx)}/s"
         trafficSessionValue?.text = "↓ ${formatTraffic(trafficRx)}   ↑ ${formatTraffic(trafficTx)}"
+        trafficMonthValue?.text = "↓ ${formatTraffic(trafficMonthRx)}   ↑ ${formatTraffic(trafficMonthTx)}"
     }
 
-    /** One-line session total, shown as the Traffic monitor row's value. */
+    /** One-line month total, shown as the Traffic monitor row's value. */
     private fun trafficHeadline(): String =
-        if (trafficRx + trafficTx == 0L) Strings.t("No data yet")
-        else "\u200E" + formatTraffic(trafficRx + trafficTx) + " " + Strings.t("this session")
+        if (trafficMonthRx + trafficMonthTx == 0L) Strings.t("No data yet")
+        else "\u200E" + formatTraffic(trafficMonthRx + trafficMonthTx) + " " + Strings.t("this month")
 
     private fun formatTraffic(bytes: Long): String = when {
         bytes < 1_024 -> "$bytes B"
@@ -6830,28 +6826,6 @@ class MainActivity : Activity() {
         // Decided BEFORE the consent dialog, because the answer depends on the
         // selection and the user is about to be able to change nothing else.
         if (shouldAutoScan()) beginAutoScan()
-        refreshDnsPinsAndConnect()
-    }
-
-    /**
-     * Refresh the DoT/DoH pins and build the connect config, in that order.
-     *
-     * v2.0.13: the pins are the addresses the engine dials for the resolver's
-     * own hostname. Cloudflare Workers resolve to a rotating anycast set and
-     * Iranian carriers withdraw reachability to individual addresses without
-     * warning, so a pin computed once at launch (2.0.12) can be stale for
-     * weeks and the engine then dials a black hole. Refreshing here — before
-     * configJson() — is what puts the fresh set into the config the engine
-     * actually receives.
-     *
-     * The lookup rides the phone's own untunneled resolver: the app excludes
-     * its own package from the VPN once a TUN exists, but this runs before
-     * establishVpn(), so nothing is in the way yet. It blocks the caller for
-     * at most [PIN_REFRESH_TIMEOUT_MS]; a slow or dead carrier link leaves the
-     * previous pin in place rather than stalling the connect.
-     */
-    private fun refreshDnsPinsAndConnect() {
-        CoreConfig.refreshPinnedIpsBlocking(this)
         val config = configJson()
         // Proxy mode needs no VPN consent at all — no TUN is created, so asking for
         // it would put a system dialog in front of a feature that does not use the
@@ -6885,16 +6859,6 @@ class MainActivity : Activity() {
         trafficSpeedTx = 0
         trafficSpeedRx = 0
         showConnecting()
-        // v2.0.13: refresh the DoT/DoH pins on every connect, not just at launch.
-        // The pins are the addresses the engine dials for the resolver's own
-        // hostname, and Cloudflare Workers serve from a rotating anycast set that
-        // Iranian carriers withdraw reachability to without warning. A pin
-        // computed once can be stale for weeks.
-        //
-        // configJson() was already called by the time we get here, so this write
-        // can only help the NEXT connect — unless we make the caller wait. Both
-        // caller sites refresh before building the config instead (see
-        // refreshDnsPinsAndConnect), so the engine receives the fresh set.
         // Every rung gets its own deadline, armed here so it covers the paths that
         // never report anything back — see [armAutoScanWatchdog]. A no-op when no
         // scan is running.
@@ -7004,11 +6968,6 @@ class MainActivity : Activity() {
             // token on; this attempt is stale.
             if (token != autoScanToken || autoScanIndex != next) return@postDelayed
             autoScanSettling = false
-            // v2.0.13: refresh the DoT/DoH pins before building the config for
-            // this rung — same reason as the manual connect path. Auto Scan
-            // walks several transports and each one deserves a fresh pin set
-            // rather than inheriting one computed when the ladder started.
-            CoreConfig.refreshPinnedIpsBlocking(this)
             connect(configJson())
         }, AUTO_SCAN_HANDOVER_MS)
         return true
@@ -7028,37 +6987,11 @@ class MainActivity : Activity() {
      * starts at the connect and the gate runs after the handshake.
      */
     private fun autoScanBudgetMs(protocol: Protocol): Long = when (protocol) {
-        // v2.0.29: a fresh install has no saved registration, so the core has to
-        // provision one before it can handshake at all. On an Iranian carrier the
-        // direct route to the account API is poisoned, so every attempt climbs the
-        // retry ladder and then falls through to the camouflaged route — the two
-        // together take far longer than the 32s this rung used to allow, and the
-        // watchdog cut WireGuard down mid-registration ("did not carry traffic in
-        // 32s") every single time. An update keeps the old identity, so this only
-        // bites new users. The extra room is only spent when there is nothing
-        // saved to load; a returning install still connects as fast as before.
-        Protocol.WIREGUARD -> if (warpIdentityExists()) 32_000L else 120_000L
+        Protocol.WIREGUARD -> 32_000L
         Protocol.MASQUE -> if (CoreConfig.mimArmed(this)) 75_000L else 48_000L
         Protocol.WARP_IN_WARP -> 55_000L
         else -> 45_000L
     }
-
-    /**
-     * Whether the core will find a saved WARP registration to load on connect.
-     *
-     * Mirrors the file `warp_config_path` points the core at in main.rs — plain
-     * `aether.toml` — plus the WoW inner identity the core provisions into a
-     * sibling file. `First-run` marks a fresh install, which has neither; that is
-     * the one case where WireGuard's scan budget has to grow, because the core
-     * must register a device over a poisoned carrier before it can handshake.
-     *
-     * Both files are listed deliberately: the outer identity is what plain
-     * WireGuard loads, and checking only that one would under-report for a WoW
-     * user who lost the outer file but kept the inner one.
-     */
-    private fun warpIdentityExists(): Boolean =
-        File(filesDir, "aether.toml").exists() ||
-            File(filesDir, "aether-secondary.toml").exists()
 
     /**
      * Per-rung deadline. Armed by [connect] for every attempt while a scan is running.
@@ -7593,12 +7526,11 @@ class MainActivity : Activity() {
     /**
      * Persist whether the next connect chains the selected transport inside WARP.
      *
-     * Deliberately does NOT touch [CoreConfig.CHAIN_OUTER_PREF]. That key holds a
-     * transport name the service writes after an outer transport actually works,
-     * and it used to be written from here as a protocol *string* — reading it back
-     * with getInt would have thrown ClassCastException. Which transport carries
-     * the outer leg is discovered by trying them (WireGuard, then MASQUE, then
-     * WoW), not chosen here.
+     * Deliberately does NOT touch [CoreConfig.CHAIN_OUTER_PREF]. That key holds an
+     * index the service writes after an outer transport actually works, and it used
+     * to be written from here as a protocol *string* — reading it back with getInt
+     * would have thrown ClassCastException. Which transport carries the outer leg is
+     * discovered by trying them (MASQUE, then WireGuard, then WoW), not chosen here.
      */
     private fun setChainArmed(armed: Boolean, protocol: Protocol = selectedProtocol) {
         preferences().edit().putBoolean(chainPrefKey(protocol), armed).apply()

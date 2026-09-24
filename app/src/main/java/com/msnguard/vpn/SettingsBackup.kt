@@ -112,7 +112,7 @@ object SettingsBackup {
         "psiphon_winning_strategy_shape",
         "psiphon_winning_strategy_chained",
         "psiphon_winning_strategy_chained_shape",
-        "chain_outer_transport",
+        "chain_outer_index",
         "plain_working_transport",
         "tor_winning_mode",
         "tor_winning_mode_chained",

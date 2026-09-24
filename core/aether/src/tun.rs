@@ -282,38 +282,6 @@ fn parse_ipv4_header(packet: &[u8]) -> Option<usize> {
     Some(ihl)
 }
 
-/// Returns the UDP payload offset only for a genuine UDP datagram whose
-/// destination port is 53 — i.e. something the DNS engine is entitled to
-/// answer. Everything else (TCP, QUIC, any other UDP port) is not DNS and
-/// must take the tunnel's normal path.
-fn dns_payload_offset(packet: &[u8]) -> Option<usize> {
-    let hdr_len = if let Some(ihl) = parse_ipv4_header(packet) {
-        ihl
-    } else {
-        parse_ipv6_header(packet)?
-    };
-    if packet.len() < hdr_len + 8 {
-        return None;
-    }
-    let proto = if packet[0] >> 4 == 4 {
-        packet[9]
-    } else {
-        // parse_ipv6_header only returns when its extension-header walk
-        // terminated on next-header 17, so UDP is guaranteed here — reading
-        // packet[6] would be the fixed header's next header, which is wrong
-        // once any extension header precedes the UDP one.
-        17
-    };
-    if proto != 17 {
-        return None;
-    }
-    let udp = &packet[hdr_len..];
-    if u16::from_be_bytes([udp[2], udp[3]]) != 53 || udp.len() <= 8 {
-        return None;
-    }
-    Some(hdr_len)
-}
-
 /// Parse an IPv6 header and return the payload offset. Fixed 40-byte header;
 /// extension headers are skipped via the Next Header chain (the ones that can
 /// appear before UDP in practice: Hop-by-Hop, Routing, Fragment, Destination
@@ -361,16 +329,13 @@ fn recompute_tcp_checksum(packet: &mut [u8], ip_header_len: usize, version: u8) 
 ///
 /// `local_ipv4` is the tunnel's own inner address, used as the source of the
 /// exit-IP probes. Pass [Ipv4Addr::UNSPECIFIED] to disable that measurement.
-///
-/// `smart_dns` is retained for ABI compatibility with the Kotlin caller; the
-/// DoT/DoH decision is now made inside [crate::smart_dns] from the resolver list.
 #[cfg(unix)]
 pub async fn bridge(
     tun_fd: i32,
     local_ipv4: std::net::Ipv4Addr,
     mut inbound_rx: mpsc::Receiver<Vec<u8>>,
     outbound_tx: mpsc::Sender<Vec<u8>>,
-    #[allow(unused_variables)] smart_dns: bool,
+    smart_dns: bool,
 ) -> Result<()> {
     // Duplicate fd: Java owns original ParcelFileDescriptor lifetime.
     let fd = unsafe { libc::dup(tun_fd) };
@@ -408,117 +373,6 @@ pub async fn bridge(
     probe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut probing = true;
 
-    // SMART DNS SPLIT: intercept DNS so a configured DoT/DoH resolver can
-    // answer it. Every other query goes straight out the tunnel's normal path.
-    //
-    // The query is NOT awaited inline. process_query performs a full DoT/DoH
-    // round trip, and this loop is the tunnel's only data path — awaiting it
-    // here made one slow resolver answer block every packet the device sent,
-    // which is the stall the field log showed as 20-27s gaps in DNS traffic
-    // followed by a burst of cached answers. Queries are handed to a dedicated
-    // task; replies are injected into the tunnel from there, so a resolver that
-    // takes 20s to answer delays only the queries behind it, never a download.
-    let (dns_tx, mut dns_rx) = mpsc::channel::<Vec<u8>>(crate::sysprofile::channel_capacity() + 16);
-    let (dns_reply_tx, mut dns_reply_rx) = mpsc::channel::<Vec<u8>>(crate::sysprofile::channel_capacity() + 16);
-    {
-    // SmartDnsSplit is a process-wide singleton behind a global, so the task
-    // needs no handle passed in — it reaches the same resolvers, cache and
-    // pins the inline path used. It DOES need the tunnel's outbound sender:
-    // v2.0.24 forwards a query the engine cannot answer back to the tunnel
-    // instead of dropping it, which is what v2.0.0 did for every non-Gemini
-    // domain. Cloned here so the main loop keeps its own sender.
-    let outbound_tx = outbound_tx.clone();
-    tokio::spawn(async move {
-        while let Some(packet) = dns_rx.recv().await {
-        // Only a genuine UDP/53 datagram reaches here: the loop already
-        // filtered with dns_payload_offset(), so this parse cannot fail and the
-        // task never has to handle a non-DNS packet.
-        let Some(hdr_len) = dns_payload_offset(&packet) else { continue };
-        let ipver = if packet[0] >> 4 == 4 { 4u8 } else { 6u8 };
-        let udp = &packet[hdr_len..];
-
-        // Count every DNS query the TUN sees, even before parsing. The
-        // field log proved init works but no query was ever seen; this
-        // line separates "queries never arrive" from "the parser drops
-        // them".
-        log::info!(
-            "[smart-dns] TUN saw UDP/53 v{ipver} hdr={hdr_len} dport=53 len={}",
-            packet.len()
-        );
-        // If the engine has no answer for this query it must still reach the
-        // resolver the packet was addressed to. The pre-2.0.24 code did
-        // `else { continue }`, which SILENTLY DROPPED the datagram: the DNS task
-        // had already `continue`d the main loop when it diverted the packet
-        // (tun.rs:554), so nothing was left to send it. A user whose custom
-        // resolver the engine could not reach got no answer at all — the query
-        // vanished. Forwarding it to the tunnel restores the v2.0.0 behaviour,
-        // where a query the engine does not answer simply rides the tunnel.
-        let Some((payload, _)) =
-        crate::smart_dns::process_query(&packet, hdr_len).await
-        else {
-            let _ = outbound_tx.send(packet).await;
-            continue;
-        };
-
-        let src_ip = &packet[12..16];
-        let dst_ip = &packet[16..20];
-        let src_port = u16::from_be_bytes([udp[0], udp[1]]);
-        let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
-
-        // Rebuild the reply with the same IP version the query used. A
-        // v4 reply to a v6 query (or the reverse) is dropped by the kernel.
-        let mut resp_packet = Vec::new();
-        let udp_len = 8 + payload.len();
-        if ipver == 6 {
-        // Fixed 40-byte v6 header, no ext headers.
-        resp_packet.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
-        resp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
-        resp_packet.extend_from_slice(&[17u8, 64]); // next=UDP, hop 64
-        // src = original dst, dst = original src
-        resp_packet.extend_from_slice(&packet[24..40]);
-        resp_packet.extend_from_slice(&packet[8..24]);
-        } else {
-        let total_len = 20 + udp_len;
-        resp_packet.extend_from_slice(&[0x45, 0x00]);
-        resp_packet.extend_from_slice(&(total_len as u16).to_be_bytes());
-        resp_packet.extend_from_slice(&[0x00, 0x00, 0x40, 0x00, 0x40, 0x11]);
-        resp_packet.extend_from_slice(&[0x00, 0x00]); // checksum, fixed below
-        resp_packet.extend_from_slice(dst_ip); // src = original dst
-        resp_packet.extend_from_slice(src_ip); // dst = original src
-        let ip_csum = fold_checksum(ones_complement_sum(&resp_packet[0..20], 0));
-        resp_packet[10..12].copy_from_slice(&ip_csum.to_be_bytes());
-    }
-    // UDP header: swapped ports, len, checksum computed last.
-    resp_packet.extend_from_slice(&dst_port.to_be_bytes());
-    resp_packet.extend_from_slice(&src_port.to_be_bytes());
-    resp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
-    resp_packet.extend_from_slice(&[0x00, 0x00]);
-    resp_packet.extend_from_slice(&payload);
-
-    let udp_start = if ipver == 6 { 40 } else { 20 };
-    let mut sum = 0u32;
-    if ipver == 6 {
-        // v6 pseudo-header: src, dst, UDP length, next header.
-        sum = ones_complement_sum(&resp_packet[8..24], sum);
-        sum = ones_complement_sum(&resp_packet[24..40], sum);
-        sum += udp_len as u32;
-        sum += 17u32;
-    } else {
-        sum = ones_complement_sum(&resp_packet[12..20], sum);
-        sum += 17u32;
-        sum += udp_len as u32;
-    }
-    sum = ones_complement_sum(&resp_packet[udp_start..], sum);
-    let mut udp_csum = fold_checksum(sum);
-    if udp_csum == 0 { udp_csum = 0xffff; }
-    resp_packet[udp_start + 6..udp_start + 8].copy_from_slice(&udp_csum.to_be_bytes());
-
-    // Hand the reply back to the loop, which owns the TUN fd. The
-    // loop is the only writer, so this cannot race with itself.
-    let _ = dns_reply_tx.send(resp_packet).await;
-    }
-    });
-    }
     loop {
         tokio::select! {
             tunnel_packet = inbound_rx.recv() => match tunnel_packet {
@@ -555,44 +409,106 @@ pub async fn bridge(
                     clamped_syns += 1;
                 }
                 
-
-                // Only a genuine UDP/53 datagram is DNS. Handing anything else
-                // to the DNS engine (QUIC, TCP, UDP on other ports) swallowed it:
-                // the engine is not a packet router, so the tunnel carried no
-                // data and every site timed out. The check is per-packet, not a
-                // global flag — has_encrypted() only says a resolver is
-                // configured, not that this packet is a query.
-                //
-                // v2.0.28: interception fires only when the engine is up. For a
-                // plain-UDP-only setup CoreConfig now leaves smart_dns false, so
-                // the engine never stands up and this gate is false — the
-                // UDP/53 datagram rides the tunnel natively to the WARP exit,
-                // exactly as 2.0.0 did. The engine's own UID is excluded from
-                // the VPN, so a re-issued query from its socket has no path to
-                // the resolver; intercepting would only destroy the working path.
-                let is_dns = dns_payload_offset(&outbound).is_some()
-                    && crate::smart_dns::has_resolver();
-                if is_dns {
-                    if dns_tx.try_send(outbound.clone()).is_err() {
-                        log::debug!("[smart-dns] query backlog — forwarding over the tunnel");
+                // SMART DNS SPLIT: only Gemini-domain queries are intercepted.
+                // Every other query goes straight out the tunnel's normal path —
+                // the previous build broke every lookup on the device.
+                if smart_dns {
+                    // A DNS query can arrive as IPv4 or IPv6. Android gets both
+                    // 1.1.1.1 and 2606:4700:4700::1111, and modern devices prefer
+                    // v6 — so a v4-only interceptor sees nothing at all, which is
+                    // exactly what the field log showed: engine ready, zero queries.
+                    let parsed = if let Some(ihl) = parse_ipv4_header(&outbound) {
+                        Some((ihl, 4u8))
                     } else {
-                        continue; // the DNS task answers it; do not send it out
+                        parse_ipv6_header(&outbound).map(|off| (off, 6u8))
+                    };
+                    if let Some((hdr_len, ipver)) = parsed {
+                        if outbound.len() >= hdr_len + 8 {
+                            let udp = &outbound[hdr_len..];
+                            let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+                            if dst_port == 53 && udp.len() > 8 {
+                                // Count every DNS query the TUN sees, even before
+                                // parsing. The field log proved init works but no
+                                // query was ever seen; this line separates "queries
+                                // never arrive" from "the parser drops them".
+                                log::info!(
+                                    "[smart-dns] TUN saw UDP/53 v{ipver} hdr={hdr_len} dport={dst_port} len={}",
+                                    outbound.len()
+                                );
+                                if let Some(smart_dns) = crate::smart_dns::smart_dns() {
+                                    // process_query returns a bare DNS payload, not a
+                                    // full IP packet. Rebuild the IP+UDP headers around
+                                    // it; the old code treated the payload as a whole
+                                    // packet and wrote into it at IP-header offsets,
+                                    // corrupting every intercepted reply.
+                                    if let Some((payload, _is_gemini)) = smart_dns.process_query(&outbound, hdr_len).await {
+                                        let src_ip = &outbound[12..16];
+                                        let dst_ip = &outbound[16..20];
+                                        let src_port = u16::from_be_bytes([udp[0], udp[1]]);
+                                        let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+
+                                        // Rebuild the reply with the same IP version
+                                        // the query used. A v4 reply to a v6 query
+                                        // (or the reverse) is dropped by the kernel.
+                                        let mut resp_packet = Vec::new();
+                                        let udp_len = 8 + payload.len();
+                                        if ipver == 6 {
+                                            // Fixed 40-byte v6 header, no ext headers.
+                                            resp_packet.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+                                            resp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
+                                            resp_packet.extend_from_slice(&[17u8, 64]); // next=UDP, hop 64
+                                            // src = original dst, dst = original src
+                                            resp_packet.extend_from_slice(&outbound[24..40]);
+                                            resp_packet.extend_from_slice(&outbound[8..24]);
+                                        } else {
+                                            let total_len = 20 + udp_len;
+                                            resp_packet.extend_from_slice(&[0x45, 0x00]);
+                                            resp_packet.extend_from_slice(&(total_len as u16).to_be_bytes());
+                                            resp_packet.extend_from_slice(&[0x00, 0x00, 0x40, 0x00, 0x40, 0x11]);
+                                            resp_packet.extend_from_slice(&[0x00, 0x00]); // checksum, fixed below
+                                            resp_packet.extend_from_slice(dst_ip); // src = original dst
+                                            resp_packet.extend_from_slice(src_ip); // dst = original src
+                                            let ip_csum = fold_checksum(ones_complement_sum(&resp_packet[0..20], 0));
+                                            resp_packet[10..12].copy_from_slice(&ip_csum.to_be_bytes());
+                                        }
+                                        // UDP header: swapped ports, len, checksum computed last.
+                                        resp_packet.extend_from_slice(&dst_port.to_be_bytes());
+                                        resp_packet.extend_from_slice(&src_port.to_be_bytes());
+                                        resp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
+                                        resp_packet.extend_from_slice(&[0x00, 0x00]);
+                                        resp_packet.extend_from_slice(&payload);
+
+                                        let udp_start = if ipver == 6 { 40 } else { 20 };
+                                        let mut sum = 0u32;
+                                        if ipver == 6 {
+                                            // v6 pseudo-header: src, dst, UDP length, next header.
+                                            sum = ones_complement_sum(&resp_packet[8..24], sum);
+                                            sum = ones_complement_sum(&resp_packet[24..40], sum);
+                                            sum += udp_len as u32;
+                                            sum += 17u32;
+                                        } else {
+                                            sum = ones_complement_sum(&resp_packet[12..20], sum);
+                                            sum += 17u32;
+                                            sum += udp_len as u32;
+                                        }
+                                        sum = ones_complement_sum(&resp_packet[udp_start..], sum);
+                                        let mut udp_csum = fold_checksum(sum);
+                                        if udp_csum == 0 { udp_csum = 0xffff; }
+                                        resp_packet[udp_start + 6..udp_start + 8].copy_from_slice(&udp_csum.to_be_bytes());
+
+                                        let _ = write_packet(&tun, &resp_packet).await;
+                                        continue; // Skip sending original query to tunnel
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-
+                
                 outbound_tx.send(outbound).await
                     .map_err(|_| AetherError::Other("tunnel outbound channel closed".into()))?;
             },
             _ = probe_tick.tick(), if probing => {},
-            // DNS replies from the dedicated task. This arm can never block the
-            // loop's other arms, so a slow resolver stalls only the queries
-            // queued behind it instead of the whole tunnel.
-            r = dns_reply_rx.recv(), if !dns_reply_rx.is_empty() => {
-                if let Some(resp) = r {
-                    rx_total += resp.len() as u64;
-                    let _ = write_packet(&tun, &resp).await;
-                }
-            },
         }
 
         // Sent outside the select! arms so it happens on every wake-up, whichever
@@ -916,38 +832,3 @@ mod tests {
         }
     }
 }
-
-    // The 2.0.17 regression: every outbound packet was handed to the DNS task
-    // whenever an encrypted resolver was configured, so TCP and QUIC never
-    // reached the wire and sites timed out. dns_payload_offset() is the guard
-    // that stops that; these three packets are exactly the shapes it must
-    // reject, and the UDP/53 pair are the shapes it must accept.
-    fn udp_v4(port: u16) -> Vec<u8> {
-        let mut pkt = vec![0u8; 20 + 8 + 20];
-        pkt[0] = 0x45;
-        pkt[9] = 17; // UDP
-        pkt[12..16].copy_from_slice(&[10, 0, 0, 2]);
-        pkt[16..20].copy_from_slice(&[1, 1, 1, 1]);
-        pkt[20..22].copy_from_slice(&40000u16.to_be_bytes());
-        pkt[22..24].copy_from_slice(&port.to_be_bytes());
-        pkt
-    }
-
-    #[test]
-    fn a_tcp_packet_is_not_dns() {
-        let mut pkt = syn_with_mss(1460);
-        pkt[16..20].copy_from_slice(&[1, 1, 1, 1]); // aimed at 1.1.1.1
-        assert!(dns_payload_offset(&pkt).is_none(), "TCP must not be DNS");
-    }
-
-    #[test]
-    fn a_udp_packet_to_a_non_53_port_is_not_dns() {
-        let pkt = udp_v4(443);
-        assert!(dns_payload_offset(&pkt).is_none(), "UDP/443 must not be DNS");
-    }
-
-    #[test]
-    fn a_udp_packet_to_port_53_is_dns() {
-        let pkt = udp_v4(53);
-        assert_eq!(dns_payload_offset(&pkt), Some(20));
-    }

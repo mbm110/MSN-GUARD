@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -22,10 +22,10 @@ static INITIALIZED: std::sync::Once = std::sync::Once::new();
 /// v2.0.0: push the user's DoT/DoH resolver lists into the Smart DNS engine.
 ///
 /// Called once per TUN start, unconditionally — these lists come from the DNS
-/// screen. Anything [DnsEndpoint::parse]
+/// screen and are independent of AI Mode. Anything [DnsEndpoint::parse]
 /// rejects is logged rather than silently dropped, so a typo in the field is
 /// visible instead of turning into "my DoH server never answers".
-fn parse_encrypted_resolvers(options: &StartOptions) -> Vec<crate::smart_dns::DnsEndpoint> {
+fn push_encrypted_resolvers(options: &StartOptions) {
     let raw: Vec<String> = [options.dns_servers_dot.as_deref(), options.dns_servers_doh.as_deref()]
         .into_iter()
         .flatten()
@@ -35,96 +35,15 @@ fn parse_encrypted_resolvers(options: &StartOptions) -> Vec<crate::smart_dns::Dn
         .map(str::to_owned)
         .collect();
     if raw.is_empty() {
-        return vec![];
+        return;
     }
-    let mut parsed: Vec<_> = raw.iter().filter_map(|s| crate::smart_dns::DnsEndpoint::parse(s)).collect();
+    let parsed: Vec<_> = raw.iter().filter_map(|s| crate::smart_dns::DnsEndpoint::parse(s)).collect();
     if parsed.is_empty() {
         log::warn!("[dns] none of the user's DoT/DoH entries parsed");
-        return vec![];
-    }
-    let pinned: Vec<(&str, std::net::IpAddr)> = options.dns_pinned_ips.as_deref()
-        .map(parse_pinned_ips).unwrap_or_default();
-    for ep in parsed.iter_mut() {
-        let host = ep.name.clone().unwrap_or_default();
-        let ips: Vec<_> = pinned.iter()
-            .filter(|(h, _)| h.eq_ignore_ascii_case(&host))
-            .map(|(_, ip)| *ip).collect();
-        if !ips.is_empty() {
-            ep.with_ips(ips.clone());
-            log::info!("[dns] pinned {} -> {} address(es)", host, ips.len());
-        } else {
-            log::warn!("[dns] no pinned IP for {host} — DoT/DoH will fail until the DNS screen is saved again", );
-        }
-    }
-    parsed
-}
-
-fn push_encrypted_resolvers(options: &StartOptions) {
-    let parsed = parse_encrypted_resolvers(options);
-    if parsed.is_empty() {
         return;
     }
     crate::smart_dns::set_resolvers(parsed.clone());
     log::info!("[dns] {} DoT/DoH resolver(s) pushed to the engine", parsed.len());
-}
-
-/// Push the user's full resolver set — plain UDP AND DoT/DoH — in ONE call.
-///
-/// v2.0.19: this replaces the two separate push sites, which each called
-/// set_resolvers() and each call CLEARS both lists first. A user with a custom
-/// UDP resolver AND a DoH server lost one of them depending on call order:
-/// the DoT/DoH push wiped user_resolvers, and the UDP push wiped
-/// encrypted_resolvers. Merging here means set_resolvers() sees one list
-/// containing both transports, so has_encrypted() and the UDP fallback both
-/// stay live at once. This is also the ONLY path that hands the plain-UDP
-/// list to the engine at all — applyDns() puts it on the Android resolver, but
-/// the engine answers UDP/53 itself and never consults that list.
-fn push_user_resolvers(options: &StartOptions) {
-    let mut all = parse_encrypted_resolvers(options);
-    if let Some(list) = options.smart_dns_servers.as_deref() {
-        let plain: Vec<_> = list
-            .split([',', ';', ' ', '\n', '\r'])
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .filter_map(crate::smart_dns::DnsEndpoint::parse)
-            .collect();
-        all.extend(plain);
-    }
-    if all.is_empty() {
-        return;
-    }
-    crate::smart_dns::set_resolvers(all.clone());
-    log::info!("[smart-dns] {} resolver(s) pushed to engine (plain+encrypted)", all.len());
-}
-
-/// Parse the app's pinned-IP map: "host=ip,host=ip1+ip2" -> host/IP pairs,
-/// one pair per address. The v2.0.13 Kotlin side pins every address a
-/// Cloudflare Worker resolves to (separated by '+'), because Iranian carriers
-/// withdraw reachability to individual anycast addresses without warning and
-/// a single pin has no redundancy. Splitting here keeps `with_ips` receiving
-/// the whole set for one host.
-/// Malformed entries are skipped, never fatal — the engine simply falls back
-/// to resolving that host the hard way.
-fn parse_pinned_ips(raw: &str) -> Vec<(&str, std::net::IpAddr)> {
-    let mut out = Vec::new();
-    for part in raw.split([',', ';', ' ', '\n', '\r']) {
-        let part = part.trim();
-        let Some((host, ips)) = part.split_once('=') else { continue };
-        let host = host.trim();
-        if host.is_empty() { continue }
-        for ip_str in ips.split('+') {
-            let ip_str = ip_str.trim();
-            let ip = match ip_str.parse::<std::net::IpAddr>() {
-                Ok(ip) => ip,
-                Err(_) => {
-                    log::warn!("[dns] bad pinned IP for {host}: {ip_str}");
-                    continue;
-                }
-            };
-            out.push((host, ip));
-        }
-    }
-    out
 }
 
 fn parse_local_v4(s: &str) -> Ipv4Addr {
@@ -189,20 +108,13 @@ pub struct StartOptions {
     /// though the code to serve it was already here. Carried in the config now, and
     /// the environment variable is still honoured as a fallback for the CLI.
     pub http_proxy: Option<SocketAddr>,
-    /// Smart DNS Split engine enable flag.
-    ///
-    /// Kept for the FFI contract. The engine is initialised unconditionally
-    /// now; this flag no longer gates anything. See [push_encrypted_resolvers].
+    /// AI Mode: run the Smart DNS Split engine inside the TUN bridge.
     pub smart_dns: bool,
     /// User resolver list for the Smart DNS Split engine (see ffi.rs).
     pub smart_dns_servers: Option<String>,
     /// v2.0.0: per-transport lists from the DNS screen.
     pub dns_servers_dot: Option<String>,
     pub dns_servers_doh: Option<String>,
-    /// v2.0.10: IPs the app resolved for the DoT/DoH servers' own hostnames
-    /// while the tunnel was still down, so the engine never has to. Format:
-    /// "doh.example.com=1.2.3.4,other.example=9.9.9.9". Order-independent.
-    pub dns_pinned_ips: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,7 +219,6 @@ impl StartOptions {
             smart_dns_servers: None,
             dns_servers_dot: None,
             dns_servers_doh: None,
-            dns_pinned_ips: None,
         }
     }
 
@@ -574,7 +485,7 @@ pub fn initialize() {
                 )
             })
             .unwrap_or_else(|| "info".to_string());
-        let _filter = format!("info,aether={level}");
+        let filter = format!("info,aether={level}");
 
         // Bridge the `log` crate into the UI-visible record_log() channel.
         // 80 call sites use log::info!, but only record_log() reaches the app's
@@ -585,20 +496,12 @@ pub fn initialize() {
         struct UiLog;
         impl log::Log for UiLog {
             fn enabled(&self, metadata: &log::Metadata) -> bool {
-                // Warnings and errors from our own crate MUST reach the UI: the
-                // smart-dns engine's only failure reporting is log::warn!
-                // ("encrypted query failed; falling back to UDP"). Filtering
-                // those out made every DoT/DoH failure silent on-device — the
-                // field logs showed queries arriving and vanishing with zero
-                // diagnostics, which sent 2.0.5-2.0.11 looking for the wrong
-                // root cause. smoltcp/quiche/hickory stay on stdout: they are
-                // chatty at info and a developer reads them in logcat.
-                let level_ok = match metadata.level() {
-                    log::Level::Error | log::Level::Warn => true,
-                    log::Level::Info => true,
-                    _ => false,
-                };
-                level_ok && metadata.target().starts_with("aether")
+                // Only our own crate's info lines go to the UI. smoltcp/quiche/
+                // hickory are chatty at info and would flood the app log — they
+                // stay on stdout (logcat) instead, which is where a developer
+                // looks for them anyway.
+                metadata.level() == log::Level::Info
+                    && metadata.target().starts_with("aether")
             }
             fn log(&self, record: &log::Record) {
                 if !self.enabled(record.metadata()) {
@@ -2072,29 +1975,38 @@ async fn run_masque_tunnel(
         
         // v2.0.0: the user's DoT/DoH lists are pushed unconditionally. The
         // engine speaks them itself; Android's own resolver list cannot, so if
-        // these were only wired under the old gate the DNS screen's encrypted fields
+        // these were only wired under AI Mode the DNS screen's encrypted fields
         // would be silently dead for every transport.
-        //
-        // Order matters: push_encrypted_resolvers() ends in set_resolvers(),
-        // which writes into the engine SMART_DNS holds. Calling it before the
-        // init below leaves the list nowhere to live — set_resolvers() warns
-        // and returns, while THIS log line still said "pushed", so the DNS
-        // screen looked healthy for a resolver the engine never received.
-        //
-        // Unconditional: standing the engine up for a user who only wants
-        // DoT/DoH costs nothing and changes nothing for their traffic. The
-        // reverse — gating the init on smart_dns — left the engine absent, and
-        // the only caller of process_query then never ran, so the DoT/DoH list
-        // was dead for
-        // everyone, since the engine no longer has a mode to be off.
-        if let Err(e) = crate::smart_dns::init_smart_dns().await {
-            log::warn!("[tun] Smart DNS init failed: {}", e);
-        }
-        // Pushed after the init, and from the DoT/DoH fields rather than from
-        // smart_dns_servers: both paths land in the same engine, and a user who
-        // leaves encrypted resolvers off still gets them wired this way.
-        push_user_resolvers(&options);
+        push_encrypted_resolvers(&options);
 
+        // Smart DNS Split: stands up only when AI Mode was requested. The engine
+        // is inert for every non-Gemini query (see process_query), so a tunnel
+        // with it off never touches this.
+        if options.smart_dns {
+            if let Err(e) = crate::smart_dns::init_smart_dns().await {
+                log::warn!("[tun] Smart DNS init failed: {}", e);
+            } else if let Some(list) = options.smart_dns_servers.as_deref() {
+                // Push the user's DoT/DoH entries into the engine. Plain-UDP
+                // entries are ignored here — Android already has them via
+                // applyDns() — and anything DnsEndpoint::parse rejects is logged
+                // rather than silently dropped.
+                let parsed: Vec<_> = list
+                    .split([',', ';', ' ', '\n', '\r'])
+                    .filter_map(crate::smart_dns::DnsEndpoint::parse)
+                    .collect();
+                let encrypted: Vec<_> = parsed
+                    .iter()
+                    .filter(|e| e.transport != crate::smart_dns::DnsTransport::Plain)
+                    .cloned()
+                    .collect();
+                // All parsed endpoints (plain + encrypted) go to the engine: it
+                // needs the user's plain resolvers for its own Gemini lookups too,
+                // not just the DoT/DoH ones.
+                crate::smart_dns::set_resolvers(parsed);
+                log::info!("[smart-dns] resolvers pushed to engine (plain+encrypted)");
+            }
+        }
+        
         tokio::spawn(tun::bridge(
             fd,
             parse_local_v4(&identity.ipv4),
@@ -2707,23 +2619,7 @@ async fn run_wireguard_tunnel(
         // ever handed them to the engine, so a WireGuard user's encrypted DNS
         // never answered. Both fields ride the same smart_dns engine, so the
         // call site mirrors the MASQUE one exactly.
-        //
-        // The init comes first for the same reason as the other two transports:
-        // set_resolvers() writes into SMART_DNS, and pushing into an engine that
-        // was never stood up warns and returns while this log line still claims
-        // success.
-        if let Err(e) = crate::smart_dns::init_smart_dns().await {
-            log::warn!("[tun] Smart DNS init failed: {}", e);
-        }
-        // v2.0.23: this path used push_encrypted_resolvers(), which only parses
-        // the DoT/DoH fields. The user's plain-UDP list (smart_dns_servers) was
-        // never handed to the engine here, so on WireGuard a custom UDP resolver
-        // was silently ignored — the engine fell through to the built-in
-        // anti-sanction list. push_user_resolvers() parses BOTH lists in one
-        // set_resolvers() call, which is also the only way the plain list reaches
-        // the engine at all on this transport. The other two call sites already
-        // use it.
-        push_user_resolvers(options);
+        push_encrypted_resolvers(options);
         tokio::spawn(tun::bridge(fd, ipv4, inbound_rx, outbound_tx, options.smart_dns))
     } else {
         let stack = netstack::spawn(
@@ -3085,43 +2981,11 @@ async fn run_warp_in_warp(
 
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
-    // The inner hop must be a DIFFERENT edge than the outer one. Defaulting to
-    // `peer` here made "pin one endpoint" mean "pin both hops to it" on WoW: the
-    // inner handshake was sent through the outer tunnel to the outer edge's own
-    // address, which is a routing loop — Cloudflare drops it, and the inner leg
-    // times out with "verify timeout" on every connect while the outer leg
-    // validates fine. That is exactly the failure in the 2.0.15 log.
-    //
-    // When the user has not pinned an inner endpoint manually, pick a distinct
-    // seed automatically. Any other seed will do; the requirement is only that it
-    // differs from the outer edge so the inner handshake lands on a real edge
-    // rather than looping back to the one that carries it.
-    fn distinct_inner_peer(outer: SocketAddr) -> SocketAddr {
-        if outer.is_ipv4() {
-            for seed in wireguard::wg_seeds_v4() {
-                let candidate = format!("{seed}:{}", outer.port());
-                if let Ok(addr) = candidate.parse::<SocketAddr>() {
-                    if addr != outer {
-                        return addr;
-                    }
-                }
-            }
-        } else {
-            for seed in wireguard::WG_SEEDS_V6 {
-                let candidate = format!("{seed}:{}", outer.port());
-                if let Ok(addr) = candidate.parse::<SocketAddr>() {
-                    if addr != outer {
-                        return addr;
-                    }
-                }
-            }
-        }
-        outer
-    }
-
-    let inner_peer = options
-        .forced_inner_peer
-        .unwrap_or_else(|| distinct_inner_peer(peer));
+    // The inner hop may be a DIFFERENT edge than the outer one. Defaulting to
+    // `peer` here is what made "pin one endpoint" mean "pin both hops to it" on
+    // WoW — the nested tunnel never got a second edge, which is the only reason
+    // nesting exists.
+    let inner_peer = options.forced_inner_peer.unwrap_or(peer);
     let (forwarder, _forwarder_guard) = spawn_udp_forwarder(&outer_stack, inner_peer).await?;
     if inner_peer != peer {
         log::info!("[+] inner hop pinned to {inner_peer}, outer to {peer}");
@@ -3129,20 +2993,35 @@ async fn run_warp_in_warp(
     log::info!("[+] inner endpoint tunneled through outer warp via {forwarder}");
 
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
-    // The user's DoT/DoH lists ride every transport. run_masque_tunnel's init
-    // site is never reached on this WoW path, so the Smart DNS Split engine
-    // has to be standing up *here* — without it tun::bridge sees
+    // The user's DoT/DoH lists ride every transport, not just AI Mode.
+    push_encrypted_resolvers(&options);
+    // WoW is the one transport AI Mode is actually enabled for, so the Smart
+    // DNS Split engine has to be standing up *here* — run_masque_tunnel's init
+    // site is never reached on this path, and without it tun::bridge sees
     // smart_dns()==None and silently forwards every query through the tunnel.
-    if let Err(e) = crate::smart_dns::init_smart_dns().await {
-        log::warn!("[tun] Smart DNS init failed: {}", e);
+    if options.smart_dns {
+        if let Err(e) = crate::smart_dns::init_smart_dns().await {
+            log::warn!("[tun] Smart DNS init failed: {}", e);
+        } else if let Some(list) = options.smart_dns_servers.as_deref() {
+            let parsed: Vec<_> = list
+                .split([',', ';', ' ', '\n', '\r'])
+                .filter_map(crate::smart_dns::DnsEndpoint::parse)
+                .collect();
+            let resolvers: Vec<_> = parsed.clone();
+            if resolvers.is_empty() {
+                log::info!("[smart-dns] no resolvers in user list");
+            } else {
+                let n = resolvers.len();
+                crate::smart_dns::set_resolvers(resolvers);
+                log::info!("[smart-dns] {n} resolver(s) from user list pushed to engine");
+            }
+        }
+        log::info!(
+            "[smart-dns] AI Mode ON for WoW (smart_dns={} encrypted={})",
+            options.smart_dns,
+            crate::smart_dns::smart_dns().map_or(0, |e| if e.has_encrypted() { 1 } else { 0 })
+        );
     }
-    // Same ordering fix as run_masque_tunnel: the push has to come after the
-    // init, or the resolver list is handed to an engine that does not exist yet.
-    push_user_resolvers(&options);
-    log::info!(
-        "[smart-dns] WoW path: resolvers active (encrypted={})",
-        crate::smart_dns::has_encrypted() as u8
-    );
     let mut http_task = None;
     let (mut inner_exit, mut local_task): (TunnelExit, TunnelExit) = if let Some(fd) =
         options.tun_fd
@@ -3830,7 +3709,7 @@ async fn run_masque_in_masque(
     // above skips the winner's own branch, so every await below belongs to a
     // handle select! left pending, which is its first poll. abort() first is
     // what makes a still-running task resolve instead of hanging teardown.
-    async fn settle_join(handle: &mut Option<tokio::task::JoinHandle<Result<()>>>, _name: &str) {
+    async fn settle_join(handle: &mut Option<tokio::task::JoinHandle<Result<()>>>, name: &str) {
         let Some(handle) = handle.take() else { return };
         handle.abort();
         match handle.await {
@@ -4340,25 +4219,6 @@ fn spawn_masque_cache_refresh(probe: prober::MasqueProbe, cache_path: Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // v2.0.19: the plain-UDP list was never handed to the DNS engine, so a
-    // custom resolver was silently ignored. This is the shape that must parse.
-    #[test]
-    fn a_plain_ipv4_resolver_parses_as_plain() {
-        let ep = crate::smart_dns::DnsEndpoint::parse("111.88.96.51").unwrap();
-        assert_eq!(ep.address, "111.88.96.51");
-        assert_eq!(ep.transport, crate::smart_dns::DnsTransport::Plain);
-    }
-
-    // A user with BOTH a UDP resolver and a DoH server must keep both: the two
-    // old push sites each called set_resolvers(), which clears both lists, so
-    // one of the two was always discarded.
-    #[test]
-    fn encrypted_and_plain_resolvers_coexist() {
-        let doh = crate::smart_dns::DnsEndpoint::parse("https://doh.example.com/dns-query").unwrap();
-        let plain = crate::smart_dns::DnsEndpoint::parse("111.88.96.51").unwrap();
-        assert_ne!(doh.transport, plain.transport);
-    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn settle_after_select_never_re_polls_the_resolved_handle() {

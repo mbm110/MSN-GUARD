@@ -1,17 +1,5 @@
 pub const API_URL: &str = "https://api.cloudflareclient.com";
 pub const API_VERSION: &str = "v0a4471";
-pub const API_HOST: &str = "api.cloudflareclient.com";
-
-/// v2.0.29: the real addresses behind [API_HOST].
-///
-/// The account API's own DNS is poisoned on Iranian carriers, so resolving the
-/// hostname as written never reaches Cloudflare and the registration dies before
-/// it is even attempted. These two are the addresses the domain actually
-/// publishes (104.16.192.82 and 104.16.24.84, verified against the live API) and
-/// they are anycast Cloudflare edge space, so either one serves the endpoint.
-/// Dialling an IP directly and setting the Host/SNI from [API_HOST] removes the
-/// resolver from the path entirely — the same idea as the DoH/DoT pins.
-pub const API_PINS: [std::net::Ipv4Addr; 2] = [std::net::Ipv4Addr::new(104, 16, 192, 82), std::net::Ipv4Addr::new(104, 16, 24, 84)];
 
 pub const CONNECT_SNI: &str = "consumer-masque.cloudflareclient.com";
 pub const L4_CONNECT_SNI: &str = "consumer-masque-proxy.cloudflareclient.com";
