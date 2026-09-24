@@ -8,6 +8,7 @@ import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Provisions a WARP identity for a fresh install on a carrier that has blocked
@@ -154,16 +155,16 @@ object IdentityProvisioner {
         // On a worker thread: start() races the node pool and blocks until a
         // listener accepts, which can take the full race budget.
         // Written by the starter thread, read by this one.
-        @Volatile var started = false
+        val started = AtomicBoolean(false)
         Thread({
-            started = try {
+            started.set(try {
                 ShardManager.start(context)
             } catch (e: Exception) {
                 Log.w(TAG, "SHARD would not start for provisioning: ${e.message}")
                 ConnectionLog.record("Identity: SHARD start failed — ${e.message}")
                 false
-            }
-            if (!started) {
+            })
+            if (!started.get()) {
                 ConnectionLog.record(
                     "Identity: SHARD start failed — " +
                         "${ShardManager.lastError.ifBlank { "no node answered" }}"
@@ -173,11 +174,14 @@ object IdentityProvisioner {
         // Wait for that thread's result: the caller is already on a worker
         // thread (startTunnel), so blocking here costs nothing.
         val deadline = System.currentTimeMillis() + START_BUDGET_MS
+        // A stale error from a previous session would break the wait before the
+        // starter thread has even attempted, so snapshot the error boundary.
+        val startOfErrors = ShardManager.lastError.length
         while (System.currentTimeMillis() < deadline) {
-            if (ShardManager.isRunning) {
+            if (started.get() || ShardManager.isRunning) {
                 return "127.0.0.1:${ShardManager.liveSocksPort}"
             }
-            if (!started && ShardManager.lastError.isNotEmpty()) break
+            if (ShardManager.lastError.length > startOfErrors) break
             try {
                 Thread.sleep(200)
             } catch (_: InterruptedException) {
