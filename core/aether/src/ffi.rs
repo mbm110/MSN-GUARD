@@ -184,6 +184,13 @@ struct NativeStartOptions {
     /// engine's encrypted resolver list at startup, independent of smart_dns.
     dns_servers_dot: Option<String>,
     dns_servers_doh: Option<String>,
+    /// `ip:port` of a SOCKS5 listener to route the account API through.
+    ///
+    /// Android-only channel for what the CLI would set as `AETHER_SOCKS_PROXY`.
+    /// A fresh install on a filtered carrier cannot reach
+    /// api.cloudflareclient.com from its own link, so SHARD is brought up first
+    /// and the registration rides its listener. See [crate::account::socks_proxy_addr].
+    socks_proxy: Option<String>,
 }
 
 impl Default for NativeStartOptions {
@@ -289,6 +296,23 @@ impl TryFrom<NativeStartOptions> for StartOptions {
             None | Some("") => None,
             Some(raw) => Some(parse_address("http_proxy", raw)?),
         };
+        // The account API proxy is read as an environment variable by the
+        // registration path, which runs before any tunnel exists and therefore
+        // cannot be handed a StartOptions field. Setting it here is the only
+        // bridge between the Android config and account::register.
+        if let Some(raw) = value.socks_proxy.as_deref().map(str::trim) {
+            if !raw.is_empty() {
+                // SAFETY: this runs once per start, before any registration
+                // attempt, on the same thread that will make the call. The
+                // registration path reads it immediately and the value is
+                // cleared by the caller's next start without it.
+                std::env::set_var("AETHER_SOCKS_PROXY", raw);
+            } else {
+                std::env::set_var("AETHER_SOCKS_PROXY", "");
+            }
+        } else {
+            std::env::set_var("AETHER_SOCKS_PROXY", "");
+        }
         // AI Mode: the core's TUN bridge reads this to decide whether to stand
         // up the Smart DNS Split engine. Transports that never take that bridge
         // (Psiphon, Tor, SHARD) ignore it, which is exactly the "symbolic only"

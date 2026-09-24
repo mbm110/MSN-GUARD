@@ -4046,6 +4046,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         } else {
             null
         }
+        // A fresh install on a filtered carrier cannot register a device against
+        // the Cloudflare account API, so no WARP transport can handshake. When
+        // that is the situation and SHARD is already carrying traffic, route the
+        // registration through its SOCKS listener for this one connect. Absent
+        // on every later connect: the identity file exists by then and the core
+        // loads it instead of registering.
+        //
+        // Only the WARP transports need this — Psiphon, Tor and SHARD have no
+        // account API at all, and the chain's own outer leg handles its own
+        // registration separately.
+        val needsIdentityProxy = if (currentProtocol.contains("wireguard") ||
+            currentProtocol.contains("masque") ||
+            currentProtocol.contains("gool") ||
+            currentProtocol.contains("warp")
+        ) {
+            provisionIdentityThroughShard(currentProtocol)
+        } else {
+            null
+        }
         if (sessionExitCountry != null &&
             exitPinPeer == null &&
             !config.contains(CHAIN_PROTOCOL_MARKER) &&
@@ -4068,10 +4087,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 )
             }
         }
-        val effectiveConfig = if (exitPinPeer != null) {
+        val effectiveConfig = if (exitPinPeer != null || needsIdentityProxy != null) {
             runCatching {
                 val json = JSONObject(config)
-                json.put("forced_peer", exitPinPeer)
+                exitPinPeer?.let { json.put("forced_peer", it) }
+                needsIdentityProxy?.let { json.put("socks_proxy", it) }
                 json.toString()
             }.getOrElse { config }
         } else {
@@ -5133,6 +5153,48 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         }
         return File(filesDir, "$name-$suffix.$ext")
     }
+
+    /**
+     * Give a fresh install a WARP identity on a carrier that blocked
+     * api.cloudflareclient.com.
+     *
+     * The user's chosen transport needs a registered device before it can
+     * handshake, and registering means calling the Cloudflare account API. On a
+     * filtered carrier that call never completes, so this brings SHARD up first
+     * — the one transport with no dependency on that API — and lets the core
+     * register through xray's SOCKS listener.
+     *
+     * Returns the SOCKS address the core should route the account API through,
+     * or null when provisioning is not needed or could not be arranged. The
+     * caller passes the result into [CoreConfig.json] for this one connect and
+     * never again: once the identity file exists the core loads it and the
+     * proxy is gone from the config.
+     *
+     * Deliberately tries to disturb nothing. It does not stop a running tunnel,
+     * does not change the user's selected protocol, and leaves the SHARD session
+     * as it found it. When SHARD is already up its listener is reused; when it
+     * is not, nothing is started here and the caller reports its own failure —
+     * starting a tunnel on the user's behalf would be a surprise on a screen
+     * that says "WireGuard".
+     */
+    private fun provisionIdentityThroughShard(protocol: String): String? {
+        // Already have an identity: nothing to do. This is the case for every
+        // phone that has connected once, and it is why this whole path is
+        // invisible to returning users.
+        if (IdentityProvisioner.hasIdentity(this, protocol)) return null
+        // The API answers from this link: not filtered, so the registration will
+        // succeed on its own and there is no reason to involve SHARD at all.
+        // A phone with no data at all also lands here and reports its own error.
+        if (IdentityProvisioner.accountApiReachable(this)) return null
+        // Only SHARD can get us out. Reuse its listener when one is already up.
+        val listener = IdentityProvisioner.ensureShardListener(this) ?: run {
+            ConnectionLog.record("Identity: account API blocked and SHARD is not running")
+            return null
+        }
+        ConnectionLog.record("Identity: account API blocked — provisioning through SHARD")
+        return listener
+    }
+
 
     /**
      * Reads the endpoint of the running session's transport, as the core

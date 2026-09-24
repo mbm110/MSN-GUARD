@@ -218,6 +218,82 @@ fn parse_response(raw: &[u8]) -> Result<(u16, String)> {
     Ok((status, body))
 }
 
+/// Open the TCP connection to [address], or tunnel it through the SHARD SOCKS
+/// proxy when one is configured.
+///
+/// The direct dial is what this route exists for — a raw TLS client hello to a
+/// Cloudflare edge, no DNS, no hostname. But when the carrier blocks the edge
+/// itself there is nothing to dial, and this path has to ride a tunnel that is
+/// already up. SOCKS5 CONNECT is the whole protocol needed: one connect, no
+/// authentication, and the remote port is known. `socks5h`-style resolution is
+/// not needed here because [address] is already resolved to an IP.
+async fn connect(address: SocketAddr) -> Result<TcpStream> {
+    let Some(proxy) = crate::account::socks_proxy_addr() else {
+        return tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address))
+            .await
+            .map_err(|_| AetherError::Api(format!("connect to {address} timed out")))?
+            .map_err(|e| AetherError::Api(format!("connect to {address}: {e}")));
+    };
+    log::info!("[*] camouflaged route tunnelling through the SHARD SOCKS proxy at {proxy}");
+    let mut proxy_stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&*proxy))
+        .await
+        .map_err(|_| AetherError::Api(format!("connect to socks {proxy} timed out")))?
+        .map_err(|e| AetherError::Api(format!("connect to socks {proxy}: {e}")))?;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // No-auth greet: VER 5, one method, no authentication.
+    proxy_stream.write_all(&[0x05, 0x01, 0x00]).await?;
+    let mut greet = [0u8; 2];
+    proxy_stream.read_exact(&mut greet).await?;
+    if greet[0] != 0x05 || greet[1] != 0x00 {
+        return Err(AetherError::Api(format!(
+            "socks greeting rejected: {greet:?}"
+        )));
+    }
+    let ip = match address.ip() {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            vec![0x01, o[0], o[1], o[2], o[3]]
+        }
+        std::net::IpAddr::V6(v6) => {
+            let mut out = vec![0x04];
+            out.extend_from_slice(&v6.octets());
+            out
+        }
+    };
+    let mut request = vec![0x05, 0x01, 0x00];
+    request.extend(ip);
+    request.extend_from_slice(&address.port().to_be_bytes());
+    proxy_stream.write_all(&request).await?;
+    let mut head = [0u8; 4];
+    proxy_stream.read_exact(&mut head).await?;
+    if head[0] != 0x05 || head[1] != 0x00 {
+        return Err(AetherError::Api(format!(
+            "socks CONNECT rejected: {:?}",
+            &head[..2]
+        )));
+    }
+    // Skip the bound address: IPv4 4+2, IPv6 16+2, hostname 1+len+2.
+    match head[3] {
+        0x01 => {
+            let mut rest = [0u8; 6];
+            proxy_stream.read_exact(&mut rest).await?;
+        }
+        0x04 => {
+            let mut rest = [0u8; 18];
+            proxy_stream.read_exact(&mut rest).await?;
+        }
+        0x03 => {
+            let mut len = [0u8; 1];
+            proxy_stream.read_exact(&mut len).await?;
+            let mut rest = vec![0u8; len[0] as usize + 2];
+            proxy_stream.read_exact(&mut rest).await?;
+        }
+        other => return Err(AetherError::Api(format!("socks unknown bound type {other}"))),
+    }
+    proxy_stream.set_nodelay(true).ok();
+    Ok(proxy_stream)
+}
+
 fn dechunk(body: &str) -> String {
     let mut out = String::new();
     let mut cursor = 0usize;
@@ -253,10 +329,7 @@ async fn exchange(
     address: SocketAddr,
     fingerprint: Fingerprint,
 ) -> Result<ApiResponse> {
-    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address))
-        .await
-        .map_err(|_| AetherError::Api(format!("connect to {address} timed out")))?
-        .map_err(|e| AetherError::Api(format!("connect to {address}: {e}")))?;
+    let tcp = connect(address).await?;
     tcp.set_nodelay(true).ok();
 
     let config = fingerprint.configure()?;

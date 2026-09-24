@@ -84,14 +84,22 @@ object CoreConfig {
             .getBoolean(MIM_ARMED_PREF, MIM_ARMED_DEFAULT)
 
     fun json(context: Context, protocol: String? = null): String =
-        json(context, protocol, listenOverride = null)
+        json(context, protocol, listenOverride = null, socksProxyForCore = "")
 
     /**
      * @param listenOverride binds the core's SOCKS listener somewhere other than
      *   [SOCKS_PORT]. Only the outer leg of Psiphon-over-WARP uses this: Psiphon
      *   owns [SOCKS_PORT] in that mode, so the core has to move aside.
+     * @param socksProxyForCore route the account API through a SOCKS5 listener,
+     *   so a fresh install can register an identity on a carrier that blocked
+     *   api.cloudflareclient.com. See [IdentityProvisioner].
      */
-    fun json(context: Context, protocol: String?, listenOverride: Int?): String {
+    fun json(
+        context: Context,
+        protocol: String?,
+        listenOverride: Int?,
+        socksProxyForCore: String = "",
+    ): String {
         val prefs = context.profiled()
         fun text(key: String, fallback: String = "") =
             prefs.getString(key, fallback)?.trim().orEmpty()
@@ -105,6 +113,13 @@ object CoreConfig {
 
         return JSONObject().apply {
             put("config_path", File(context.filesDir, "aether.toml").absolutePath)
+            // Identity provisioning through SHARD. When the carrier has blocked
+            // the account API, this points the core's registration at a SOCKS
+            // listener that is already on the open internet, so a fresh install
+            // can obtain an identity it could not get from its own link.
+            // Written by MsnGuardVpnService during the SHARD provision step and
+            // cleared again once it has an identity; absent on a normal connect.
+            takeIf { socksProxyForCore.isNotBlank() }?.put("socks_proxy", socksProxyForCore)
             // Fallback must match MainActivity's `savedProtocol()` and the tile's
             // default. This is the value used before the user has ever picked
             // anything, i.e. on a first connect — and WireGuard now leads the rail,

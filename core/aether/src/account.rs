@@ -229,11 +229,43 @@ pub fn generate_masque_keypair() -> Result<MasqueKeyPair> {
 }
 
 fn http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .user_agent(consts::UA_REGISTER)
-        .timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(20));
+    if let Some(proxy) = socks_proxy_from_env() {
+        log::info!("[*] account API going through the SHARD SOCKS proxy at {proxy}");
+        builder = builder
+            .proxy(reqwest::Proxy::all(format!("socks5h://{proxy}")).map_err(|e| {
+                AetherError::Api(format!("socks proxy: {e}"))
+            })?);
+    }
+    builder
         .build()
         .map_err(|e| AetherError::Api(e.to_string()))
+}
+
+/// The SOCKS5 listener a transport publishes for the core to reach the open
+/// internet through, when the device's own link cannot reach the account API.
+///
+/// This is the SHARD path: xray's SOCKS inbound on port 1824. Registration is
+/// the one call a fresh install must make and cannot make on a filtered carrier,
+/// so when this is set the registration rides the working tunnel instead of the
+/// poisoned link. `socks5h` so the hostname is resolved at the proxy — the
+/// device's own resolver is the thing that is broken, and resolving locally
+/// would hand the proxy an address that is not the real one.
+fn socks_proxy_from_env() -> Option<String> {
+    let raw = std::env::var("AETHER_SOCKS_PROXY").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// The parsed listener, for the camouflaged route in [crate::apifront], which
+/// builds its own TCP connection and cannot use reqwest's proxy support.
+pub fn socks_proxy_addr() -> Option<String> {
+    socks_proxy_from_env()
 }
 
 const API_ATTEMPTS: u32 = 5;
