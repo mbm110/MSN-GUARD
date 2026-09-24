@@ -100,16 +100,30 @@ object IdentityProvisioner {
      * statistic. A 4xx/5xx response still proves the API is reachable — the
      * payload was malformed or the rate limit kicked in, but the route is open —
      * so only a total failure to get any HTTP status counts as filtered.
+     *
+     * Deliberately conservative on Iran: a plain GET on /reg answers quickly
+     * while the POST that actually registers is dropped deeper in the stack
+     * (the payload and headers are what the GCG objects to, not the hostname).
+     * So this only trusts a response when it looks like the real call can get
+     * through — a probe that proves nothing would send every fresh install
+     * down a 100-second path that cannot end well.
      */
     fun accountApiReachable(context: Context): Boolean {
         return try {
-            val connection = URL(API_PROBE_URL).openConnection() as HttpURLConnection
+            // A POST, not a GET: on an Iranian carrier a plain GET on /reg
+            // answers while the real registration is dropped once its payload
+            // appears — the probe has to exercise the same shape of request to
+            // mean anything. A 4xx still proves the route is open; only the
+            // inability to get any status counts as filtered.
+            val connection = URL(API_REGISTER_URL).openConnection() as HttpURLConnection
             connection.connectTimeout = 8000
             connection.readTimeout = 8000
-            connection.requestMethod = "GET"
-            connection.instanceFollowRedirects = false
-            // Any HTTP status at all means the TLS handshake completed and the
-            // endpoint answered. 404 is the normal response to a bare GET on /reg.
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty("User-Agent", USER_AGENT)
+            connection.setRequestProperty("CF-Client-Version", CLIENT_VERSION)
+            connection.doOutput = true
+            connection.outputStream.use { it.write(PROBE_BODY.toByteArray()) }
             connection.responseCode in 200..599
         } catch (e: Exception) {
             Log.i(TAG, "account API not reachable directly: ${e.message}")
@@ -118,21 +132,75 @@ object IdentityProvisioner {
     }
 
     /**
-     * Bring SHARD up just far enough to have a SOCKS listener, if one is not
-     * already running.
+     * Bring SHARD up just far enough to have a SOCKS listener, starting it
+     * ourselves when one is not already running.
+     *
+     * xray is a standalone process that binds 127.0.0.1:1824 — it needs no
+     * Android TUN, no tun2socks and no [ShardSocksFront], so provisioning can
+     * raise it in the background while the user's screen still says
+     * "WireGuard", register through its listener, then take it back down.
      *
      * Returns the listener address to route the account API through, or null
-     * when SHARD could not produce one. Does not own the SHARD session: when a
-     * listener already exists it is left alone, because tearing down a working
-     * tunnel to start our own would be destructive to a session the user is
-     * already relying on.
+     * when SHARD could not produce one. When the listener already exists it is
+     * left alone, because tearing down a working tunnel the user is relying on
+     * to start our own would be destructive.
      */
     fun ensureShardListener(context: Context): String? {
         if (ShardManager.isRunning) {
             Log.i(TAG, "SHARD already running; reusing its listener")
-            return "127.0.0.1:${ShardManager.SOCKS_PORT}"
+            return "127.0.0.1:${ShardManager.liveSocksPort}"
+        }
+        ConnectionLog.record("Identity: starting SHARD to provision through it")
+        // On a worker thread: start() races the node pool and blocks until a
+        // listener accepts, which can take the full race budget.
+        // Written by the starter thread, read by this one.
+        @Volatile var started = false
+        Thread({
+            started = try {
+                ShardManager.start(context)
+            } catch (e: Exception) {
+                Log.w(TAG, "SHARD would not start for provisioning: ${e.message}")
+                ConnectionLog.record("Identity: SHARD start failed — ${e.message}")
+                false
+            }
+            if (!started) {
+                ConnectionLog.record(
+                    "Identity: SHARD start failed — " +
+                        "${ShardManager.lastError.ifBlank { "no node answered" }}"
+                )
+            }
+        }, "identity-shard-start").start()
+        // Wait for that thread's result: the caller is already on a worker
+        // thread (startTunnel), so blocking here costs nothing.
+        val deadline = System.currentTimeMillis() + START_BUDGET_MS
+        while (System.currentTimeMillis() < deadline) {
+            if (ShardManager.isRunning) {
+                return "127.0.0.1:${ShardManager.liveSocksPort}"
+            }
+            if (!started && ShardManager.lastError.isNotEmpty()) break
+            try {
+                Thread.sleep(200)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return null
+            }
         }
         return null
+    }
+
+    /**
+     * Take the SHARD session this class raised back down.
+     *
+     * Only when [ensureShardListener] started it: a listener that was already
+     * live when provisioning began belongs to the user's own session and must
+     * survive it. Called after the identity is saved (or the attempt gave up),
+     * so the transport the user actually wanted starts from a clean slate.
+     */
+    fun releaseShardListener(startedOurselves: Boolean) {
+        if (!startedOurselves) return
+        if (!ShardManager.isRunning) return
+        ConnectionLog.record("Identity: stopping the SHARD session used for provisioning")
+        ShardManager.stop()
     }
 
     /**
@@ -238,9 +306,25 @@ object IdentityProvisioner {
         java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.US)
             .format(java.util.Date())
 
-    private const val API_PROBE_URL = "https://api.cloudflareclient.com/v0a4471/reg"
     private const val API_REGISTER_URL = "https://api.cloudflareclient.com/v0a4471/reg"
     private const val USER_AGENT = "okhttp/3.12.1"
     private const val CLIENT_VERSION = "a-6.41-2158"
     private const val DEFAULT_ENDPOINT = "162.159.192.1:2408"
+
+    /**
+     * The body [accountApiReachable] POSTs to see whether the carrier will let
+     * a real registration through.
+     *
+     * Deliberately invalid: a 400 is still a "yes, the route is open", and a
+     * valid body would burn a device slot on every probe.
+     */
+    private const val PROBE_BODY = "{}"
+
+    /**
+     * How long [ensureShardListener] waits for xray to race the pool and bind.
+     *
+     * [ShardManager.MAX_RACE_SLICES] × [ShardManager.RACE_BUDGET_MS] is the
+     * worst case for a dead network; the listener usually appears in 1–3 s.
+     */
+    private const val START_BUDGET_MS = 45_000L
 }

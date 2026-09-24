@@ -402,18 +402,27 @@ object ShardConfigs {
                     "tlsSettings",
                     JSONObject().apply {
                         put("serverName", node.serverName)
-                        // `fp=unsafe` is what the whole subscription ships, and it is
-                        // passed through verbatim at line 402. That is not a neutral
-                        // choice: it tells the fork to emit a bare, uncamouflaged
-                        // ClientHello, and Iranian DPI blocks it within seconds of
-                        // the tunnel coming up — the session connects, then dies in
-                        // ~13s with three failed probes, exactly the field symptom.
-                        // Patterniha's own app maps `unsafe` to a real browser
-                        // fingerprint, which is why the same config works there and
-                        // not here. chrome is the safest replacement: it is the most
-                        // common TLS client on this carrier, so its ClientHello is
-                        // the one shape a censor cannot afford to block.
-                        put("fingerprint", "chrome")
+                        // The fingerprint and the fragment mask are a matched pair.
+                        //
+                        // `finalmask` splits the TLS record at byte offsets that are
+                        // only correct when the ClientHello has a known, stable
+                        // length. `unsafe` (uTLS off) is what gives that: no GREASE,
+                        // no extension shuffling, no padding. Overriding it with a
+                        // browser fingerprint when a mask is present resizes the
+                        // ClientHello on every dial, the offsets stop landing on a
+                        // record boundary, and the session either fails its TLS
+                        // handshake or comes up and dies a few seconds later — the
+                        // exact field symptom this transport was reported with.
+                        //
+                        // Without a mask there is nothing to desync, so the bare
+                        // ClientHello that DPI profiles is the liability and a real
+                        // fingerprint is the whole point of running uTLS.
+                        val fp = if (node.finalMask.isNotEmpty()) {
+                            node.fingerprint.ifEmpty { "unsafe" }
+                        } else {
+                            node.fingerprint.ifEmpty { "chrome" }
+                        }
+                        put("fingerprint", fp)
                         if (node.cipherSuites.isNotEmpty()) put("cipherSuites", node.cipherSuites)
                         if (node.alpn.isNotEmpty()) {
                             put("alpn", JSONArray().apply { node.alpn.split(',').forEach { put(it.trim()) } })

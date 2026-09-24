@@ -424,6 +424,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     @Volatile
     private var sessionExitCountry: String? = null
 
+    /**
+     * Did this session raise the SHARD listener used for identity provisioning?
+     *
+     * Set by [provisionIdentityThroughShard] when it started xray itself, and
+     * read by [stopProvisioningShard] — the only code allowed to take that
+     * session down. A listener the user's own SHARD session owns must survive
+     * provisioning, so [IdentityProvisioner.releaseShardListener] refuses it.
+     */
+    @Volatile
+    private var provisionedShardOurselves = false
+
     /** Rotations left in this session's chase of [sessionExitCountry]. */
     @Volatile
     private var exitRotationsLeft = 0
@@ -1022,6 +1033,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
          * protocol name it actually understands.
          */
         const val CHAIN_PROTOCOL_MARKER = "PSIPHON-OVER-WARP"
+
+        /**
+         * Sentinel for "the identity decision is still pending".
+         *
+         * [startTunnel] runs on the main thread under ACTION_CONNECT, and the
+         * decision touches the network — an API probe, and possibly raising
+         * xray — so it is deferred into the worker, which resolves the sentinel
+         * to a real address (or null) and rebuilds the config there.
+         */
+        private const val DEFERRED_IDENTITY_PROXY = "__deferred__"
 
         /**
          * How long to wait for a rejected outer leg to actually stop.
@@ -4056,14 +4077,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // Only the WARP transports need this — Psiphon, Tor and SHARD have no
         // account API at all, and the chain's own outer leg handles its own
         // registration separately.
-        val needsIdentityProxy = if (currentProtocol.contains("wireguard") ||
+        // The identity decision touches the network (an API probe) and may have
+        // to raise xray, so it cannot run on the main thread — ACTION_CONNECT
+        // arrives there. Deferred into the worker below, which rebuilds
+        // effectiveConfig once it knows the answer.
+        var needsIdentityProxy: String? = null
+        if (currentProtocol.contains("wireguard") ||
             currentProtocol.contains("masque") ||
             currentProtocol.contains("gool") ||
             currentProtocol.contains("warp")
         ) {
-            provisionIdentityThroughShard(currentProtocol)
-        } else {
-            null
+            // Computed inside the worker, see below.
+            needsIdentityProxy = DEFERRED_IDENTITY_PROXY
         }
         if (sessionExitCountry != null &&
             exitPinPeer == null &&
@@ -4087,11 +4112,15 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 )
             }
         }
-        val effectiveConfig = if (exitPinPeer != null || needsIdentityProxy != null) {
+        var effectiveConfig = if (exitPinPeer != null || needsIdentityProxy != null) {
             runCatching {
                 val json = JSONObject(config)
                 exitPinPeer?.let { json.put("forced_peer", it) }
-                needsIdentityProxy?.let { json.put("socks_proxy", it) }
+                // DEFERRED_IDENTITY_PROXY is a placeholder, not an address: it
+                // only kept this branch open. The worker replaces it with the
+                // real SOCKS address (or drops it) once the probe is done.
+                needsIdentityProxy?.takeIf { it != DEFERRED_IDENTITY_PROXY }
+                    ?.let { json.put("socks_proxy", it) }
                 json.toString()
             }.getOrElse { config }
         } else {
@@ -4359,6 +4388,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
         worker.execute {
             try {
+                // Resolve the deferred identity decision on this thread: the
+                // probe (and possibly raising xray) blocks, and ACTION_CONNECT
+                // calls startTunnel on the main thread.
+                if (needsIdentityProxy == DEFERRED_IDENTITY_PROXY) {
+                    sendStatus(STATUS_CONNECTING, Strings.t("Preparing the account through SHARD…"), 10)
+                    needsIdentityProxy = provisionIdentityThroughShard(currentProtocol)
+                    effectiveConfig = if (exitPinPeer != null || needsIdentityProxy != null) {
+                        runCatching {
+                            val json = JSONObject(config)
+                            exitPinPeer?.let { json.put("forced_peer", it) }
+                            needsIdentityProxy?.let { json.put("socks_proxy", it) }
+                            json.toString()
+                        }.getOrElse { config }
+                    } else {
+                        config
+                    }
+                    storedConfig = effectiveConfig
+                }
+
                 ConnectionLog.record("Preparing $currentProtocol identity")
                 NativeCore.attach(this)
 
@@ -4531,6 +4579,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 nativeExitWasUnexpected = false
             } finally {
                 NativeCore.detach()
+                // The SHARD listener raised for identity provisioning has done
+                // its job by now — the core either registered through it and
+                // saved the identity, or gave up. Holding port 1824 past this
+                // point is what made the user's own SHARD connect fail with
+                // "address already in use" until the app was force-stopped.
+                stopProvisioningShard()
                 vpnModeActive.set(false)
                 TunnelStatus.isNativeTunMode = false
                 // Cleared for the SOCKS branch above, which is the only thing that
@@ -5171,11 +5225,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * proxy is gone from the config.
      *
      * Deliberately tries to disturb nothing. It does not stop a running tunnel,
-     * does not change the user's selected protocol, and leaves the SHARD session
-     * as it found it. When SHARD is already up its listener is reused; when it
-     * is not, nothing is started here and the caller reports its own failure —
-     * starting a tunnel on the user's behalf would be a surprise on a screen
-     * that says "WireGuard".
+     * does not change the user's selected protocol, and leaves an existing
+     * SHARD session as it found it. When SHARD is already up its listener is
+     * reused; when it is not, this raises xray itself, because on a fresh
+     * install nothing else can reach the open internet. The caller takes the
+     * listener back down again once the core settles ([stopProvisioningShard]).
      */
     private fun provisionIdentityThroughShard(protocol: String): String? {
         // Already have an identity: nothing to do. This is the case for every
@@ -5186,15 +5240,33 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // succeed on its own and there is no reason to involve SHARD at all.
         // A phone with no data at all also lands here and reports its own error.
         if (IdentityProvisioner.accountApiReachable(this)) return null
-        // Only SHARD can get us out. Reuse its listener when one is already up.
+        // Only SHARD can get us out. Start it ourselves when nothing is live —
+        // the user picked WireGuard, but xray binds its own listener without
+        // needing a TUN, so this is invisible to them.
+        provisionedShardOurselves = !ShardManager.isRunning
         val listener = IdentityProvisioner.ensureShardListener(this) ?: run {
-            ConnectionLog.record("Identity: account API blocked and SHARD is not running")
+            ConnectionLog.record("Identity: SHARD could not start to provision through")
+            provisionedShardOurselves = false
             return null
         }
         ConnectionLog.record("Identity: account API blocked — provisioning through SHARD")
         return listener
     }
 
+    /**
+     * Take the SHARD session that [provisionIdentityThroughShard] raised back
+     * down, once the identity it was raised for is settled.
+     *
+     * Called after the core exits — whether it registered through the proxy and
+     * saved an identity, or failed trying. Leaving xray up would hold port 1824
+     * against the user's own SHARD connect, which is the exact sequence that
+     * made SHARD refuse to start until the app was force-stopped.
+     */
+    private fun stopProvisioningShard() {
+        if (!provisionedShardOurselves) return
+        provisionedShardOurselves = false
+        IdentityProvisioner.releaseShardListener(startedOurselves = true)
+    }
 
     /**
      * Reads the endpoint of the running session's transport, as the core
