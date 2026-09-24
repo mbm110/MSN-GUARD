@@ -563,21 +563,19 @@ pub async fn bridge(
                 // global flag — has_encrypted() only says a resolver is
                 // configured, not that this packet is a query.
                 //
-                // v2.0.25: gate interception on ENCRYPTED resolvers only.
-                // A plain-UDP resolver must ride the tunnel untouched.
+                // v2.0.26: gate interception on ENCRYPTED resolvers OR a plain-UDP
+                // user resolver. A query the engine answers itself never reaches
+                // the resolver the packet was addressed to, so intercepting only
+                // makes sense when the engine actually has one.
                 //
-                // 2.0.0 worked because addDnsServer() put the resolver on the
-                // TUN and the UDP/53 datagram simply rode the WARP tunnel to
-                // the exit, which can reach the resolver. 2.0.24/2.0.25 broke
-                // it by intercepting the datagram and re-issuing it from the
-                // engine's own socket: that socket can only ride the carrier,
-                // and the Iranian carrier blocks plain UDP/53 to external
-                // resolvers — which is the very reason the user configured a
-                // custom DNS. Protected or not, the re-issued query times out,
-                // every one, and the anti-sanction fallback answers from
-                // Germany, producing the Iran-only 403.
+                // 2.0.0 worked by intercepting ONLY gemini.google.com and letting
+                // everything else ride the tunnel. 2.0.24 broke the device by
+                // intercepting every query and re-issuing it from a socket that
+                // had no working path to the resolver. 2.0.26's fix is the socket
+                // path: the user-resolver socket is no longer protect()ed, so it
+                // rides our own TUN to the WARP exit, which can reach it.
                 let is_dns = dns_payload_offset(&outbound).is_some()
-                    && crate::smart_dns::has_encrypted();
+                    && crate::smart_dns::has_resolver();
                 if is_dns {
                     if dns_tx.try_send(outbound.clone()).is_err() {
                         log::debug!("[smart-dns] query backlog — forwarding over the tunnel");

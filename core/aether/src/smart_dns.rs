@@ -533,19 +533,16 @@ impl SmartDnsSplit {
             match UdpSocket::bind(bind_addr).await {
                 Ok(sock) => {
                     let sock = Arc::new(sock);
-                    // v2.0.25: the user's OWN resolver ALWAYS rides the carrier.
-                    // Android routes an unprotected socket through our own VPN,
-                    // which exits in Germany, where an Iranian resolver is
-                    // unreachable — the log for 2.0.24 showed every single
-                    // user-resolver query fail with "All DNS queries failed" the
-                    // moment the VPN route table was populated, then fall back to
-                    // anti-sanction resolvers that answered from Germany, which
-                    // is what produced the Iran-only 403 on refresh. protect()
-                    // asks the OS to keep this socket on the physical network,
-                    // which is exactly what a plain UDP resolver needs.
-                    if let Err(e) = crate::platform::protect_socket(&sock) {
-                        log::warn!("[smart-dns] could not protect user-resolver socket: {e} — it may route through the tunnel");
-                    }
+                    // v2.0.26: no protect(). The engine's process runs with our
+                    // own UID, which applySplitTunneling keeps OUTSIDE the VPN,
+                    // so protected and unprotected are the same network here —
+                    // the carrier. 2.0.24/2.0.25 both proved that path is dead
+                    // for a public resolver. Leaving the socket unprotected lets
+                    // Android route it through our own TUN, which carries it to
+                    // the WARP exit — the one path that can reach the resolver.
+                    // The engine's own UID exclusion does NOT apply here because
+                    // this socket is bound by the tunnel process itself, whose
+                    // route table entries are installed before it dials.
                     if let Err(e) = sock.connect(addr).await {
                         log::warn!("[smart-dns] user resolver {} unreachable: {e}", ep.address);
                         continue;
