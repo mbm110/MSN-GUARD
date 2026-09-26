@@ -4082,10 +4082,15 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // arrives there. Deferred into the worker below, which rebuilds
         // effectiveConfig once it knows the answer.
         var needsIdentityProxy: String? = null
-        if (currentProtocol.contains("wireguard") ||
-            currentProtocol.contains("masque") ||
-            currentProtocol.contains("gool") ||
-            currentProtocol.contains("warp")
+        // currentProtocol is uppercased at line 4022 for use as a case-insensitive
+        // enum-like key, so compare against the lowercased form: this whole
+        // decision was silently dead code while it checked for "wireguard" against
+        // a string that can only ever contain "WIREGUARD".
+        val protocolLower = currentProtocol.lowercase()
+        if (protocolLower.contains("wireguard") ||
+            protocolLower.contains("masque") ||
+            protocolLower.contains("gool") ||
+            protocolLower.contains("warp")
         ) {
             // Computed inside the worker, see below.
             needsIdentityProxy = DEFERRED_IDENTITY_PROXY
@@ -4779,7 +4784,20 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             return
         }
 
-        if (notify && !connected.get()) sendStatus(STATUS_DISCONNECTED)
+        // The WARP transports (WireGuard, MASQUE, WoW, the chain's outer leg) are
+        // the only ones that end without a connected.set(false) of their own
+        // above: their tunnel runs on the worker thread and the `finally` there
+        // drops the latch when the core exits. But that is asynchronous —
+        // NativeCore.stop() sets the flag and returns, and the core takes a moment
+        // to unwind. A disconnect that immediately follows another connect (the
+        // Auto Scan ladder's handover is 1.5 s) can reach startTunnel's
+        // `connected.compareAndSet(false, true)` guard before the worker's
+        // finally has run, so the guard rejects the new session and the next
+        // rung — which can be SHARD, needing no core at all — never starts. It
+        // then reports "did not carry traffic", because nothing was ever running.
+        // Drop the latch here too. Idempotent: the finally runs the same set.
+        connected.set(false)
+        if (notify) sendStatus(STATUS_DISCONNECTED)
     }
 
     private fun rebuildKillSwitchVpn() {

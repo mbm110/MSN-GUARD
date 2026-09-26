@@ -402,27 +402,20 @@ object ShardConfigs {
                     "tlsSettings",
                     JSONObject().apply {
                         put("serverName", node.serverName)
-                        // The fingerprint and the fragment mask are a matched pair.
+                        // The subscription ships `fp=unsafe`, which the fork's
+                        // finalmask needs: the mask fragments the TLS record at
+                        // byte offsets that are only valid when the ClientHello has
+                        // a stable length, and uTLS off is what makes it stable —
+                        // no GREASE, no extension shuffling, no padding. Changing
+                        // the fingerprint while a mask is present resizes the
+                        // ClientHello and the offsets stop landing on a record
+                        // boundary, so the tunnel comes up and dies within seconds.
                         //
-                        // `finalmask` splits the TLS record at byte offsets that are
-                        // only correct when the ClientHello has a known, stable
-                        // length. `unsafe` (uTLS off) is what gives that: no GREASE,
-                        // no extension shuffling, no padding. Overriding it with a
-                        // browser fingerprint when a mask is present resizes the
-                        // ClientHello on every dial, the offsets stop landing on a
-                        // record boundary, and the session either fails its TLS
-                        // handshake or comes up and dies a few seconds later — the
-                        // exact field symptom this transport was reported with.
-                        //
-                        // Without a mask there is nothing to desync, so the bare
-                        // ClientHello that DPI profiles is the liability and a real
-                        // fingerprint is the whole point of running uTLS.
-                        val fp = if (node.finalMask.isNotEmpty()) {
-                            node.fingerprint.ifEmpty { "unsafe" }
-                        } else {
-                            node.fingerprint.ifEmpty { "chrome" }
-                        }
-                        put("fingerprint", fp)
+                        // v2.0.1 and every release before it overrode the
+                        // subscription's value with a hardcoded "chrome" here, and
+                        // that was wrong for exactly this reason. Keep what the
+                        // subscription sends, not what we used to hardcode.
+                        put("fingerprint", node.fingerprint)
                         if (node.cipherSuites.isNotEmpty()) put("cipherSuites", node.cipherSuites)
                         if (node.alpn.isNotEmpty()) {
                             put("alpn", JSONArray().apply { node.alpn.split(',').forEach { put(it.trim()) } })
