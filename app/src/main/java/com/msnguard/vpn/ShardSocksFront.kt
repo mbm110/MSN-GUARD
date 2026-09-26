@@ -164,6 +164,10 @@ object ShardSocksFront {
      * the app sees a dead flow and falls back to TCP instead of hanging on a
      * probe that can never be answered.
      */
+    // The WebSocket leg of a SHARD node (VLESS/ws/TLS through Cloudflare) has a
+    // hard ceiling on the UDP payload it will carry. Measured from the VPS
+    // against the live pool with real DNS queries padded to exact sizes: 512
+    // bytes answers, 513 never does. See [Tun2SocksManager.SHARD_TUNNEL_MTU].
     private const val UDP_MAX_PAYLOAD = 500
 
     /** How often the oversized-UDP diagnosis is written. See [reportOversizedUdp]. */

@@ -2881,7 +2881,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 ConnectionLog.record("SHARD: creating TUN before xray starts")
                 tun = Builder()
                     .setSession("MSN-GUARD")
-                    .setMtu(Tun2SocksManager.VPN_INTERFACE_MTU)
+                    .setMtu(Tun2SocksManager.SHARD_TUNNEL_MTU)
                     .addAddress(address.ipAddress, address.prefixLength)
                     .addRoute("0.0.0.0", 0)
                     .addRoute(address.subnet, address.prefixLength)
@@ -2931,7 +2931,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     error("Could not start the UDP front-end")
                 }
                 activeSocksPort = ShardSocksFront.LISTEN_PORT
-                if (!Tun2SocksManager.start(tun!!, ShardSocksFront.LISTEN_PORT)) {
+                if (!Tun2SocksManager.start(tun!!, ShardSocksFront.LISTEN_PORT, mtu = Tun2SocksManager.SHARD_TUNNEL_MTU)) {
                     error("Could not start device routing")
                 }
 

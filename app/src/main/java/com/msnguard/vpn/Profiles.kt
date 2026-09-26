@@ -127,29 +127,46 @@ object Profiles {
         if (index !in 0 until COUNT) return 0
         if (active(context) == index) return 0
         val prefs = context.getSharedPreferences(SETTINGS_FILE, Context.MODE_PRIVATE)
-        val snapshot = prefs.all
-        val editor = prefs.edit()
 
-        // One pass. A key is either already prefixed (p2_kill_switch) — in which
-        // case stripProfile returns its logical name — or bare (kill_switch), in
-        // which case stripProfile returns null and the key IS its own logical
-        // name. Both end up rewritten to the target profile's prefix.
+        // A switch moves nothing. Each profile already has its own namespace:
+        // while profile 0 is active, `Profiles.key()` maps `kill_switch` to
+        // `p0_kill_switch`, so the rows the user is looking at are already
+        // written under the outgoing profile's prefix. Profile B's own settings
+        // are sitting under `p1_*`, untouched and waiting. The only thing to
+        // change is which prefix is active.
         //
-        // The bare case is the upgrade path: an install from before this feature
-        // holds unprefixed keys, and they belong to whatever profile is active.
-        // Sending them to the target on the first switch is what keeps an
-        // existing user's settings — reading p0_kill_switch after the round trip
-        // would otherwise find nothing and silently reset the row.
-        var moved = 0
-        snapshot.forEach { (key, value) ->
-            if (!isProfiled(key)) return@forEach
-            val bare = stripProfile(key) ?: key
+        // The previous version rewrote every key in the file under the target's
+        // prefix: `p2_kill_switch` became `p1_kill_switch`, `p3_kill_switch`
+        // became `p1_kill_switch`, and whichever of the four came last in the
+        // map iteration won. Every switch merged all four profiles into one and
+        // wiped them — set something in Profile A, switch to B, and it is gone,
+        // and nothing is ever saved.
+        //
+        // Bare keys (an install upgraded from before profiles) are the one case
+        // that does need a move, because while they exist the app reads them as
+        // the active profile's. migrateIfNeeded() prefixes them on the next
+        // onCreate — that is its job, and it already runs on every start.
+        val bareToMove = prefs.all.entries
+            .filter { (key, _) -> isProfiled(key) && stripProfile(key) == null }
+            .toList()
+        if (bareToMove.isEmpty()) {
+            prefs.edit().putInt(ACTIVE_PROFILE, index).commit()
+            return 0
+        }
+        // Bare keys exist, which means migrateIfNeeded has not run since they
+        // were written. They belong to the OUTGOING profile — the one that was
+        // active when they were set — so prefix them with it before leaving.
+        // The incoming profile's own settings are already under its prefix and
+        // must not be touched.
+        val from = active(context)
+        val fromPrefix = profiledKey(from, "")
+        val editor = prefs.edit()
+        bareToMove.forEach { (key, value) ->
             editor.remove(key)
-            editor.putValue(profiledKey(index, bare), value)
-            moved++
+            editor.putValue(fromPrefix + key, value)
         }
         editor.putInt(ACTIVE_PROFILE, index).commit()
-        return moved
+        return bareToMove.size
     }
 
     /**

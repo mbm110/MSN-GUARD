@@ -27,6 +27,37 @@ object Tun2SocksManager {
     /** Psiphon's convention; the server intercepts this exact address. */
     private const val UDPGW_SERVER_PORT = 7300
     const val VPN_INTERFACE_MTU = 1500
+
+    /**
+     * The MTU a SHARD session must advertise.
+     *
+     * Measured, not chosen. A SHARD session is TUN → tun2socks → [ShardSocksFront]
+     * → xray → VLESS/ws/TLS → Cloudflare, and the WebSocket leg silently drops
+     * any datagram whose payload crosses a hard ceiling. Probed from the VPS
+     * against the live pool with real DNS queries padded to exact sizes: 512
+     * bytes answers, 513 never does. That number is half of 1024, which is the
+     * shape of a fixed buffer, not a coincidence of a slow node.
+     *
+     * Advertising the default 1500 here is the bug it looks like: lwIP tells the
+     * app the path is 1500, the app's QUIC stack sends a 1250-byte Initial, and
+     * the WebSocket leg swallows it whole. The app then waits on a probe that
+     * cannot ever answer instead of falling back to TCP, and that wait — not a
+     * slow node, not a rate limit — is why a tunnel that carries chat fine
+     * cannot open a page smoothly.
+     *
+     * Lowering the MTU makes lwIP fragment the datagram at the IP layer before
+     * it ever reaches the SOCKS leg. Each fragment lands under the ceiling, so
+     * the reassembled datagram reaches the destination and the reply comes back
+     * the same way. QUIC stops probing a dead path and TCP fallback is never
+     * needed. UDP that already fits (DNS, most QUIC short packets, Telegram's
+     * media chunks on small MTUs) is unaffected — the datagram is not split
+     * when it already fits.
+     *
+     * The 512 is the SOCKS payload budget, not the IP MTU: the SOCKS5 UDP
+     * header (10 bytes for IPv4) rides inside it, and IP fragmentation overhead
+     * (20 bytes per fragment) comes out of the datagram lwIP splits.
+     */
+    const val SHARD_TUNNEL_MTU = 512
     const val VPN_INTERFACE_IPV4_NETMASK = "255.255.255.0"
 
     /**
@@ -135,7 +166,15 @@ object Tun2SocksManager {
      * across Psiphon rotations without re-establishing the TUN interface.
      */
     @Synchronized
-    fun start(tunFd: ParcelFileDescriptor, socksProxyPort: Int, dnsOnlyUdpgw: Boolean = false): Boolean {
+    fun start(
+        tunFd: ParcelFileDescriptor,
+        socksProxyPort: Int,
+        dnsOnlyUdpgw: Boolean = false,
+        /** Path MTU the native stack should advertise. Defaults to the general
+         * 1500; SHARD passes [SHARD_TUNNEL_MTU] because its WebSocket leg drops
+         * datagrams past that size. See [SHARD_TUNNEL_MTU]. */
+        mtu: Int = VPN_INTERFACE_MTU,
+    ): Boolean {
         if (tun2SocksThread != null) {
             ConnectionLog.record("tun2socks already running")
             return true
@@ -202,7 +241,7 @@ object Tun2SocksManager {
             try {
                 Tun2SocksJniLoader.runTun2Socks(
                     duplicated.detachFd(),
-                    VPN_INTERFACE_MTU,
+                    mtu,
                     address.router,
                     VPN_INTERFACE_IPV4_NETMASK,
                     null, // IPv4-only routing

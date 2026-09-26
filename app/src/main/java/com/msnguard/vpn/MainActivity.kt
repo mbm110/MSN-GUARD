@@ -4767,7 +4767,12 @@ class MainActivity : Activity() {
             }
             val moved = Profiles.switch(this, index)
             ConnectionLog.record("Switched to $chosen ($moved settings keys)")
-            recreate()
+            // Repaint the settings screen, not the whole app. recreate() destroys
+            // and rebuilds the activity from scratch, which restarts the app from
+            // the user's point of view — the launcher animation, the splash, the
+            // whole onCreate. The rows are the only thing that changed, and they
+            // are rebuilt here.
+            reloadSettingsRows()
         }
     }
 
@@ -5642,6 +5647,48 @@ class MainActivity : Activity() {
         shardReMeasureRow = null
         settingsBackupRow = null
         settingsPage?.let { animatePageClose(it) { settingsPage = null } }
+    }
+
+    /**
+     * Rebuild the settings page in place, without restarting the activity.
+     *
+     * A profile switch changes what every row below the PROFILE section means, so
+     * the page has to be rebuilt — but [recreate] tears the whole activity down
+     * and runs onCreate again, which from the user's side is the app restarting:
+     * the launcher animation, the splash, the scroll position, everything. The
+     * only thing that changed is the rows, so this rebuilds just those.
+     *
+     * Keeps the page open and the scroll position, and keeps the PROFILE section
+     * expanded so the user can see the switch took.
+     */
+    private fun reloadSettingsRows() {
+        if (!showingSettings) return
+        settingsPage?.let { pageHost.removeView(it) } ?: return
+        // Drop the stale row references the same way closeSettingsScreen does —
+        // the views they point at are being removed from the hierarchy.
+        connectionModeRow = null
+        psiphonChainRow = null
+        smartSplitRow = null
+        chainOuterRow = null
+        egressRegionRow = null
+        psiphonModeRow = null
+        cdnEdgeIpsRow = null
+        cdnSniRow = null
+        lanSharingRow = null
+        torModeRowRef = null
+        torChainRowRef = null
+        torChainOuterRow = null
+        torRegionRowRef = null
+        torBridgeRowRef = null
+        tunnelTypeRow = null
+        proxyPortRow = null
+        logVerbosityRow = null
+        scannerRow = null
+        shardPoolRow = null
+        shardCustomIpRow = null
+        shardReMeasureRow = null
+        settingsBackupRow = null
+        openSettingsScreen(animate = false)
     }
 
     /**
