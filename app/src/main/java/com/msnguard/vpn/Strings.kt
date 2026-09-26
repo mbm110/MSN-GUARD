@@ -144,6 +144,23 @@ object Strings {
         "Disconnected" to Triple("Disconnected", "قطع شد", "已断开"),
         "Disconnecting" to Triple("Disconnecting", "در حال قطع اتصال", "正在断开"),
         "Done" to Triple("Done", "تایید", "完成"),
+        "Donate" to Triple("Donate", "حمایت مالی", "捐赠"),
+        "Support MSN-GUARD" to Triple("Support MSN-GUARD", "حمایت از MSN-GUARD", "支持 MSN-GUARD"),
+        // v2.0.9: the thanks line on the Donate screen. Warm and plain — the user
+        // opened the page, they do not need to be sold on why the app exists.
+        "Thank you for supporting the development and upkeep of MSN-GUARD. If this app helped you get through a filtered network, a small tip keeps the servers running and the updates coming." to Triple(
+            "Thank you for supporting the development and upkeep of MSN-GUARD. If this app helped you get through a filtered network, a small tip keeps the servers running and the updates coming.",
+            "از اینکه ما را در توسعه و نگهداری برنامه MSN-GUARD حمایت می‌کنید، سپاسگزاریم. اگر این برنامه به شما برای عبور از اینترنت محدود کمک کرده است، با یک حمایت کوچک سرورها روشن می‌مانند و آپدیت‌ها ادامه پیدا می‌کنند.",
+            "感谢您支持 MSN-GUARD 的开发与维护。如果这款应用帮助您穿过了受限的网络，一点小小的心意能让服务器继续运行、更新持续不断。",
+        ),
+        // The chain names stay Latin in every language: they are network
+        // identifiers, and a translated name is one a wallet cannot match.
+        "Ethereum Chain" to Triple("Ethereum Chain", "Ethereum Chain", "Ethereum Chain"),
+        "Bitcoin" to Triple("Bitcoin", "Bitcoin", "Bitcoin"),
+        "Tron Chain" to Triple("Tron Chain", "Tron Chain", "Tron Chain"),
+        "Solana Chain" to Triple("Solana Chain", "Solana Chain", "Solana Chain"),
+        "Copy" to Triple("Copy", "کپی", "复制"),
+        "Address copied" to Triple("Address copied", "آدرس کپی شد", "地址已复制"),
         "Double-layer tunnel" to Triple("Double-layer tunnel", "تونل دو لایه", "双层 WARP 加密隧道"),
         "Download" to Triple("Download", "دانلود", "下载"),
         "EXIT NODE" to Triple("EXIT NODE", "نود خروجی", "出口节点"),
@@ -355,6 +372,9 @@ object Strings {
         "Disconnect first — switching profile changes what the tunnel uses" to Triple("Disconnect first — switching profile changes what the tunnel uses", "اول قطع کنید — تعویض پروفایل چیزی که تونل استفاده می‌کند را تغییر می‌دهد", "请先断开连接 — 切换配置方案会改变隧道所使用的设置"),
         "Preferred exit country cleared — Psiphon chooses" to Triple("Preferred exit country cleared — Psiphon chooses", "کشور خروجی ترجیحی پاک شد — انتخاب با سایفون", "首选出口国家已清除 — 由 Psiphon 选择"),
         "Preparing WireGuard tunnel" to Triple("Preparing WireGuard tunnel", "آماده‌سازی تونل وایرگارد", "正在准备 WireGuard 隧道"),
+        // v2.0.9: the identity provisioning step is never user-facing detail —
+        // which transport does the fetching is the app's business, not the user's.
+        "Retrieving identity, please wait." to Triple("Retrieving identity, please wait.", "در حال دریافت Identity، لطفاً صبر کنید.", "正在获取 Identity，请稍候。"),
         "Preparing \\\${selectedProtocol.label} tunnel" to Triple("Preparing \\\${selectedProtocol.label} tunnel", "آماده‌سازی تانل \\\${selectedProtocol.label}", "正在准备 \\\${selectedProtocol.label} 隧道"),
         "Preset" to Triple("Preset", "از پیش تنظیم‌شده", "预设"),
         "Psiphon" to Triple("Psiphon", "سایفون", "Psiphon"),

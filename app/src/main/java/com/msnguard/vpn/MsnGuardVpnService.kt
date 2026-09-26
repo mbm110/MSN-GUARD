@@ -4358,7 +4358,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // probe (and possibly raising xray) blocks, and ACTION_CONNECT
                 // calls startTunnel on the main thread.
                 if (needsIdentityProxy == DEFERRED_IDENTITY_PROXY) {
-                    sendStatus(STATUS_CONNECTING, Strings.t("Preparing the account through SHARD…"), 10)
+                    sendStatus(STATUS_CONNECTING, Strings.t("Retrieving identity, please wait."), 10)
                     needsIdentityProxy = provisionIdentityThroughShard(currentProtocol)
                     effectiveConfig = if (exitPinPeer != null || needsIdentityProxy != null) {
                         runCatching {
