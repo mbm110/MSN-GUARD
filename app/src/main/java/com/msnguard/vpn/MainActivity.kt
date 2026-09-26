@@ -6987,9 +6987,34 @@ class MainActivity : Activity() {
      * starts at the connect and the gate runs after the handshake.
      */
     private fun autoScanBudgetMs(protocol: Protocol): Long = when (protocol) {
-        Protocol.WIREGUARD -> 32_000L
-        Protocol.MASQUE -> if (CoreConfig.mimArmed(this)) 75_000L else 48_000L
-        Protocol.WARP_IN_WARP -> 55_000L
+        // On a fresh install the WARP transports have to register through SHARD
+        // before they can handshake, and that is what this budget has to cover:
+        // raising xray, racing the pool, the registration itself, then the scan.
+        // 32 s fit only the scan, so on a phone with no saved identity the ladder
+        // gave up on WireGuard before the identity it was waiting for had landed —
+        // the scan advanced to MASQUE, which then connected on the identity SHARD
+        // had just fetched, and WireGuard looked broken when it had only been
+        // timed out.
+        Protocol.WIREGUARD -> if (!IdentityProvisioner.hasIdentity(this, "wireguard")) {
+            120_000L
+        } else {
+            32_000L
+        }
+        // Same reasoning for the other WARP transports: without an identity they
+        // all have to register through SHARD first, and their budgets were sized
+        // for a phone that already had one.
+        Protocol.MASQUE -> if (!IdentityProvisioner.hasIdentity(this, "masque")) {
+            120_000L
+        } else if (CoreConfig.mimArmed(this)) {
+            75_000L
+        } else {
+            48_000L
+        }
+        Protocol.WARP_IN_WARP -> if (!IdentityProvisioner.hasIdentity(this, "gool")) {
+            120_000L
+        } else {
+            55_000L
+        }
         else -> 45_000L
     }
 
