@@ -1173,6 +1173,16 @@ object ShardSocksFront {
                 // only ever send small UDP keep working untouched.
                 if (payload.size > UDP_MAX_PAYLOAD) {
                     reportOversizedUdp(payload.size, sendTo.hostAddress, sendToPort)
+                    // Kill the flow outright rather than just skipping the packet.
+                    // Dropping the datagram leaves lwIP retransmitting on a dead
+                    // association — the app's QUIC stack keeps probing a path that
+                    // can never answer, and that probe window is the "not smooth"
+                    // stall after every new site. Closing the socket raises a real
+                    // error on the next send, which lwIP reports to the app, so the
+                    // fallback to TCP happens on the next packet instead of after a
+                    // retransmit timeout.
+                    runCatching { association.close() }
+                    associations.remove(conid)
                     continue
                 }
                 try {

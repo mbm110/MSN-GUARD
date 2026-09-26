@@ -8544,7 +8544,16 @@ class MainActivity : Activity() {
          * configuration. An explicit choice by the user always wins over this: the
          * key is written on every toggle, so "off" persists.
          */
-        const val CHAIN_ARMED_DEFAULT = true
+        // Off by default. With it on, selecting Psiphon silently meant
+        // Psiphon-over-WARP, which on a fresh Iranian install needs an identity
+        // the carrier has blocked — so the one independent transport was
+        // chained to the one transport that cannot bootstrap, and it failed
+        // together with it. "Psiphon" now means Psiphon, alone and independent.
+        //
+        // The chain is still one switch away for anyone who needs it, and an
+        // explicit choice is remembered either way — this only sets the default
+        // for a user who has not expressed one.
+        const val CHAIN_ARMED_DEFAULT = false
 
         const val DEFAULT_PROTOCOL = "default_protocol"
 
