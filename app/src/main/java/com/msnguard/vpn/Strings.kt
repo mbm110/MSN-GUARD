@@ -649,10 +649,10 @@ object Strings {
         "Testing…" to Triple("Testing…", "در حال تست…", "测试中…"),
         "Enter at least one address first" to Triple("Enter at least one address first", "ابتدا حداقل یک آدرس وارد کنید", "请先输入至少一个地址"),
         "Custom DNS saved:" to Triple("Custom DNS saved:", "DNS سفارشی ذخیره شد:", "自定义 DNS 已保存："),
-        "Resolvers the tunnel answers DNS from. Each transport has its own list, comma-separated. Test before you save — a resolver that does not answer here will not answer through the tunnel either." to Triple(
-            "Resolvers the tunnel answers DNS from. Each transport has its own list, comma-separated. Test before you save — a resolver that does not answer here will not answer through the tunnel either.",
-            "سرورهایی که تونل جواب DNS را از آن‌ها می‌گیرد. هر پروتکل لیست خودش را دارد که با کاما جدا می‌شوند. قبل از ذخیره تست کنید — سروری که اینجا جواب نمی‌دهد از داخل تونل هم جواب نخواهد داد.",
-            "隧道用于应答 DNS 的解析器。每种传输方式各有自己的列表，以逗号分隔。保存前请先测试——在此处无响应的解析器，在隧道内同样不会响应。",
+        "Resolvers the tunnel answers DNS from. Comma-separated. Test before you save — a resolver that does not answer here will not answer through the tunnel either." to Triple(
+            "Resolvers the tunnel answers DNS from. Comma-separated. Test before you save — a resolver that does not answer here will not answer through the tunnel either.",
+            "سرورهایی که تونل جواب DNS را از آن‌ها می‌گیرد، با کاما جدا کنید. قبل از ذخیره تست کنید — سروری که اینجا جواب نمی‌دهد از داخل تونل هم جواب نخواهد داد.",
+            "隧道用于应答 DNS 的解析器，以逗号分隔。保存前请先测试——在此处无响应的解析器，在隧道内同样不会响应。",
         ),
         "Bare IP addresses, optionally with a port. The default port is 53. Fastest, but unencrypted — a carrier can see and hijack these lookups." to Triple(
             "Bare IP addresses, optionally with a port. The default port is 53. Fastest, but unencrypted — a carrier can see and hijack these lookups.",

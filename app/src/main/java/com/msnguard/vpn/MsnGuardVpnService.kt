@@ -219,23 +219,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var currentSpeedRx = 0L
     private var accountedTx = 0L
     private var accountedRx = 0L
-    /**
-     * Monthly totals held in memory, flushed to disk on a timer.
-     *
-     * These used to be written through to SharedPreferences on every traffic
-     * sample, i.e. roughly once a second for the whole life of a tunnel. That is
-     * thousands of `apply()` calls an hour, each one a disk write behind the
-     * scenes — expensive on flash and on battery, to persist a counter nobody
-     * reads until the traffic screen is opened.
-     *
-     * Now the counters live here and reach disk every [TRAFFIC_FLUSH_MS] and on
-     * teardown. Worst case a hard process kill loses the last few seconds of
-     * accounting, which is not a number anything depends on being exact.
-     */
-    private var monthKey: String? = null
-    private var monthTxTotal = 0L
-    private var monthRxTotal = 0L
-    private var lastTrafficFlushMs = 0L
 
     /**
      * Whether this session has already recorded its transport as working.
@@ -850,8 +833,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val EXTRA_TRAFFIC_RX = "traffic_rx"
         const val EXTRA_TRAFFIC_SPEED_TX = "traffic_speed_tx"
         const val EXTRA_TRAFFIC_SPEED_RX = "traffic_speed_rx"
-        const val EXTRA_TRAFFIC_MONTH_TX = "traffic_month_tx"
-        const val EXTRA_TRAFFIC_MONTH_RX = "traffic_month_rx"
         const val EXTRA_NOTIFICATION_IP = "notification_ip"
         const val EXTRA_NOTIFICATION_PING = "notification_ping"
 
@@ -1077,26 +1058,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         private const val REGION_PHASE_TIMEOUT_SECONDS = 25
 
         const val NOTIFICATION_ID = 1
-        const val TRAFFIC_PREFS = "traffic_stats"
-        const val TRAFFIC_MONTH = "month"
-        const val TRAFFIC_TX = "tx"
-        const val TRAFFIC_RX = "rx"
-
-        /**
-         * Schema version of [TRAFFIC_PREFS], bumped when stored totals become
-         * untrustworthy and have to be discarded rather than migrated.
-         *
-         * 1 = totals written before the monthly-inflation fix.
-         */
-        const val TRAFFIC_SCHEMA = "schema"
-        const val TRAFFIC_SCHEMA_VERSION = 1
-
-        /**
-         * How often the monthly traffic counters are written to disk while a
-         * tunnel is up. Teardown always flushes, so this only bounds what a hard
-         * process kill can lose.
-         */
-        private const val TRAFFIC_FLUSH_MS = 60_000L
 
         /**
          * In-tunnel RX bytes that count as "this transport really works".
@@ -4599,16 +4560,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 TunnelStatus.isProxyMode = false
                 // The native tunnel can end without stopTunnel() ever running —
                 // the core exiting on its own, or the kill-switch branch below,
-                // both land here instead. stopTunnel() is where the monthly
-                // counters are normally persisted, so without this the traffic
-                // since the last 60-second flush was lost on exactly the paths
-                // that end a session unexpectedly.
-                flushMonthlyTraffic()
-                // The kill switch is a VPN-mode concept: it works by establishing a
-                // TUN with no routes so nothing can leave the device. In SOCKS mode no
-                // TUN was ever created and nothing is routed implicitly, so there is
-                // no leak to seal — and building one here would put up a VPN the user
-                // never consented to in this session.
+                // both land here instead. The kill switch is a VPN-mode concept:
+                // it works by establishing a TUN with no routes so nothing can
+                // leave the device. In SOCKS mode no TUN was ever created and
+                // nothing is routed implicitly, so there is no leak to seal — and
+                // building one here would put up a VPN the user never consented
+                // to in this session.
                 val killSwitch = killSwitchArmed()
                 tun?.close()
                 tun = null
@@ -4660,10 +4617,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // make it fire on the wreckage of a session that is deliberately ending.
         stopWatchdog()
         stopTorProgressPolling()
-        // The traffic counters are only flushed to disk on a slow timer while
-        // running, so an ordinary disconnect must persist the remainder here or
-        // the last minute of the session would be lost from the monthly total.
-        flushMonthlyTraffic()
         // Clear the session stamp here, not in sendStatus: the reconnect path and
         // onDestroy both call stopTunnel(notify = false), so relying on the
         // DISCONNECTED broadcast left connectedSince set and the next session's
@@ -5005,19 +4958,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     " (sample tx=$tx rx=$rx, accounted tx=$accountedTx rx=$accountedRx)"
             )
         }
-        val (monthTx, monthRx) = recordMonthlyTraffic(deltaTx, deltaRx)
         accountedTx = tx
         accountedRx = rx
         // A plain tunnel that has moved real bytes is evidence about this carrier
         // that the chain can reuse later. Cheap: a single boolean check on the
         // common path.
         recordWorkingPlainTransport(rx)
-        sendTraffic(tx, rx, monthTx, monthRx)
-
-        if (now - lastTrafficFlushMs >= TRAFFIC_FLUSH_MS) {
-            flushMonthlyTraffic()
-            lastTrafficFlushMs = now
-        }
+        sendTraffic(tx, rx)
 
         // The notification is NOT reposted here any more.
         //
@@ -5038,74 +4985,6 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     /**
-     * Adds this sample to the monthly totals, in memory.
-     *
-     * The disk write is deliberately not here — see [flushMonthlyTraffic] and the
-     * fields it persists. The date is also only formatted when the month is not
-     * already known, because building a SimpleDateFormat once a second to
-     * re-derive the same string is waste in its own right.
-     */
-    private fun recordMonthlyTraffic(tx: Long, rx: Long): Pair<Long, Long> {
-        // First sample of this process, or the month rolled over mid-session.
-        loadMonthlyTotals()
-        monthTxTotal += tx
-        monthRxTotal += rx
-        return monthTxTotal to monthRxTotal
-    }
-
-    private fun currentMonthKey(): String =
-        java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.US).format(java.util.Date())
-
-    /** Loads the persisted monthly totals into memory, once per month key. */
-    private fun loadMonthlyTotals() {
-        val month = currentMonthKey()
-        if (monthKey == month) return
-        // The month just rolled over mid-session: persist what the old month
-        // accumulated before its key is replaced. Without this, everything since
-        // the last 60-second flush was silently dropped from the month that ended,
-        // because `monthKey` is what flushMonthlyTraffic() writes under.
-        if (monthKey != null) flushMonthlyTraffic()
-        val prefs = getSharedPreferences(TRAFFIC_PREFS, MODE_PRIVATE)
-        // Discard totals written by a build that had the inflation bug.
-        //
-        // Fixing the accounting does not fix the number already on disk: it was
-        // overstated by roughly the number of throttled backwards samples, which
-        // varies per device, so there is no honest factor to divide by. Zeroing
-        // once is the only truthful option — the month restarts from a correct
-        // baseline instead of carrying a figure nobody can interpret.
-        //
-        // Gated on a stored schema version, not on the app version, so it happens
-        // exactly once ever rather than on every update from here on.
-        if (prefs.getInt(TRAFFIC_SCHEMA, 0) < TRAFFIC_SCHEMA_VERSION) {
-            // Was there actually anything to throw away? On a fresh install there
-            // is not, and announcing "your total was miscounted" to someone who
-            // has never had a total is both false and alarming — the line showed
-            // up on the first line of every field log for that reason.
-            val hadTotals = prefs.contains(TRAFFIC_TX) || prefs.contains(TRAFFIC_RX)
-            prefs.edit()
-                .putInt(TRAFFIC_SCHEMA, TRAFFIC_SCHEMA_VERSION)
-                .remove(TRAFFIC_MONTH)
-                .remove(TRAFFIC_TX)
-                .remove(TRAFFIC_RX)
-                // commit(), not apply(): this must be on disk before anything
-                // else, because if the write is lost the discard runs again on the
-                // next launch and the month restarts from zero a second time.
-                .commit()
-            monthTxTotal = 0
-            monthRxTotal = 0
-            monthKey = month
-            if (hadTotals) {
-                ConnectionLog.record("Monthly traffic counter reset — previous total was miscounted")
-            }
-            return
-        }
-        val stored = prefs.getString(TRAFFIC_MONTH, null)
-        monthTxTotal = if (stored == month) prefs.getLong(TRAFFIC_TX, 0) else 0
-        monthRxTotal = if (stored == month) prefs.getLong(TRAFFIC_RX, 0) else 0
-        monthKey = month
-    }
-
-    /**
      * Clears everything that describes the *current session's* traffic.
      *
      * Called at the start of every tunnel. The core's counters are locals inside
@@ -5123,17 +5002,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      * passes" for a tunnel that was working. Force-stopping the app made the
      * first connect succeed again because fresh fields start at zero — which is
      * exactly the workaround that was being used.
-     *
-     * The monthly totals are deliberately NOT cleared: they are cumulative
-     * across sessions. Only the per-session deltas reset, and `accountedTx/Rx`
-     * going to zero is what keeps the monthly accounting correct — the next
-     * sample's delta is measured from zero, matching the core's fresh counter.
      */
     private fun resetSessionTraffic() {
-        // The month totals are read lazily on the first sample; make sure they are
-        // loaded before broadcasting, or a reset before any traffic would tell the
-        // UI the month total is zero and the traffic screen would blank out.
-        loadMonthlyTotals()
         currentTx = 0
         currentRx = 0
         prevTx = 0
@@ -5156,33 +5026,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // counting unless it is told. Without this broadcast the activity would
         // hold the old totals until the first traffic sample of the new session,
         // and the verification baseline is taken before that arrives.
-        sendTraffic(0, 0, monthTxTotal, monthRxTotal)
+        sendTraffic(0, 0)
     }
 
-    /**
-     * Writes the in-memory monthly totals to disk.
-     *
-     * Called on a slow timer from the traffic path and unconditionally on
-     * teardown, so an ordinary disconnect always persists an exact figure.
-     */
-    private fun flushMonthlyTraffic() {
-        val month = monthKey ?: return
-        getSharedPreferences(TRAFFIC_PREFS, MODE_PRIVATE).edit()
-            .putString(TRAFFIC_MONTH, month)
-            .putLong(TRAFFIC_TX, monthTxTotal)
-            .putLong(TRAFFIC_RX, monthRxTotal)
-            .apply()
-    }
-
-    private fun sendTraffic(tx: Long, rx: Long, monthTx: Long, monthRx: Long) {
+    private fun sendTraffic(tx: Long, rx: Long) {
         sendBroadcast(Intent(ACTION_STATUS)
             .setPackage(packageName)
             .putExtra(EXTRA_TRAFFIC_TX, tx)
             .putExtra(EXTRA_TRAFFIC_RX, rx)
             .putExtra(EXTRA_TRAFFIC_SPEED_TX, currentSpeedTx)
-            .putExtra(EXTRA_TRAFFIC_SPEED_RX, currentSpeedRx)
-            .putExtra(EXTRA_TRAFFIC_MONTH_TX, monthTx)
-            .putExtra(EXTRA_TRAFFIC_MONTH_RX, monthRx))
+            .putExtra(EXTRA_TRAFFIC_SPEED_RX, currentSpeedRx))
     }
 
     /**

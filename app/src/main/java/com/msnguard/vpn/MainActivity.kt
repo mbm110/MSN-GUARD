@@ -304,13 +304,10 @@ class MainActivity : Activity() {
     private var dnsPage: View? = null
     private var trafficSpeedValue: TextView? = null
     private var trafficSessionValue: TextView? = null
-    private var trafficMonthValue: TextView? = null
     private var trafficTx = 0L
     private var trafficRx = 0L
     private var trafficSpeedTx = 0L
     private var trafficSpeedRx = 0L
-    private var trafficMonthTx = 0L
-    private var trafficMonthRx = 0L
     @Volatile private var cachedUserApps: List<ApplicationInfo>? = null
     private var latencyRequest = 0
     @Volatile private var pingInFlight = false
@@ -443,8 +440,6 @@ class MainActivity : Activity() {
                 trafficRx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_RX, 0)
                 trafficSpeedTx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_SPEED_TX, 0)
                 trafficSpeedRx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_SPEED_RX, 0)
-                trafficMonthTx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_MONTH_TX, 0)
-                trafficMonthRx = intent.getLongExtra(MsnGuardVpnService.EXTRA_TRAFFIC_MONTH_RX, 0)
                 renderTrafficMonitor()
                 renderHomeMetrics()
                 return
@@ -5873,7 +5868,6 @@ class MainActivity : Activity() {
         ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
         trafficSpeedValue = addTrafficMetric(content, Strings.t("LIVE SPEED"))
         trafficSessionValue = addTrafficMetric(content, Strings.t("THIS SESSION"))
-        trafficMonthValue = addTrafficMetric(content, Strings.t("THIS MONTH"))
         scroll.addView(content)
         page.addView(scroll, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -5917,16 +5911,20 @@ class MainActivity : Activity() {
         trafficMonitorPage?.let { animatePageClose(it) { trafficMonitorPage = null } }
         trafficSpeedValue = null
         trafficSessionValue = null
-        trafficMonthValue = null
     }
 
     /**
      * The DNS screen (v2.0.0).
      *
-     * Replaces the single-line Custom DNS dialog with a full page: one field per
-     * transport (plain UDP, DoT, DoH), each with its own description and its own
-     * Test button that pings the resolver over that transport and reports
-     * reachable / unreachable.
+     * Replaces the single-line Custom DNS dialog with a full page: a
+     * plain-UDP field with its own Test button that pings the resolver over
+     * that transport and reports reachable / unreachable.
+     *
+     * v2.0.8: the DoT and DoH fields were removed from the page. The encrypted
+     * transports are still parsed by the core (`dns_servers_dot` /
+     * `dns_servers_doh` in [CoreConfig.json] and [saveDnsLists]) for anything
+     * that already has them stored, but no UI offers them, so the screen is
+     * plain-UDP only.
      *
      * Testing is done from inside the app's own process, NOT through the tunnel:
      * a DNS server that answers from the carrier is useless when reached through
@@ -5953,13 +5951,13 @@ class MainActivity : Activity() {
             addView(label(Strings.t("DNS"), 22f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) })
         })
         content.addView(label(
-            Strings.t("Resolvers the tunnel answers DNS from. Each transport has its own list, comma-separated. Test before you save — a resolver that does not answer here will not answer through the tunnel either."),
+            Strings.t("Resolvers the tunnel answers DNS from. Comma-separated. Test before you save — a resolver that does not answer here will not answer through the tunnel either."),
             14f, MUTED,
         ), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { leftMargin = dp(4); bottomMargin = dp(20) })
 
-        // The three fields are kept here so the Save button below can read what the
+        // The field is kept here so the Save button below can read what the
         // user actually typed. saveDnsLists() reads from SharedPreferences, and
         // nothing else ever wrote the typed text there — Save closed the page and
         // left the preferences empty, so Custom DNS read "Automatic" for a list
@@ -5969,12 +5967,12 @@ class MainActivity : Activity() {
         addDnsField(content, Strings.t("Plain UDP"), CUSTOM_DNS_UDP,
             Strings.t("Bare IP addresses, optionally with a port. The default port is 53. Fastest, but unencrypted — a carrier can see and hijack these lookups."),
             Strings.t("1.1.1.1, 10.202.10.202:53")) { fields[CUSTOM_DNS_UDP] = it }
-        addDnsField(content, Strings.t("DNS over TLS (DoT)"), CUSTOM_DNS_DOT,
-            Strings.t("Hostnames or IPs with a tls:// prefix, on port 853. The lookup is encrypted; the carrier sees only that you talked to this server."),
-            Strings.t("tls://dns.google, tls://1.1.1.1")) { fields[CUSTOM_DNS_DOT] = it }
-        addDnsField(content, Strings.t("DNS over HTTPS (DoH)"), CUSTOM_DNS_DOH,
-            Strings.t("Full https:// URLs, or a host with a doh: prefix. The lookup rides an ordinary HTTPS request, so it is the hardest to block."),
-            Strings.t("https://cloudflare-dns.com/dns-query, doh:dns.quad9.net")) { fields[CUSTOM_DNS_DOH] = it }
+        // v2.0.8: the DoT and DoH fields are intentionally not added here. The
+        // encrypted transports stay wired in CoreConfig and the core — this is
+        // the only UI that could offer them, and without an entry the user sees
+        // a plain-UDP-only DNS screen, which is the intended product.
+        // `saveDnsLists()` and `customDnsLabel()` still read the keys, so a
+        // stored value is never lost or miscounted; nothing new can be typed.
 
         content.addView(createSettingsButton(Strings.t("Save")) {
             // Commit the typed text before anything else reads it.
@@ -6365,13 +6363,17 @@ class MainActivity : Activity() {
     private fun renderTrafficMonitor() {
         trafficSpeedValue?.text = "↓ ${formatTraffic(trafficSpeedRx)}/s   ↑ ${formatTraffic(trafficSpeedTx)}/s"
         trafficSessionValue?.text = "↓ ${formatTraffic(trafficRx)}   ↑ ${formatTraffic(trafficTx)}"
-        trafficMonthValue?.text = "↓ ${formatTraffic(trafficMonthRx)}   ↑ ${formatTraffic(trafficMonthTx)}"
     }
 
-    /** One-line month total, shown as the Traffic monitor row's value. */
+    /**
+     * One-line session total, shown as the Traffic monitor row's value on the
+     * home screen. v2.0.8: reports the current session only — the monthly
+     * counter was removed from the UI (the whole month-tracking layer went with
+     * it), so a session figure is the only honest headline left.
+     */
     private fun trafficHeadline(): String =
-        if (trafficMonthRx + trafficMonthTx == 0L) Strings.t("No data yet")
-        else "\u200E" + formatTraffic(trafficMonthRx + trafficMonthTx) + " " + Strings.t("this month")
+        if (trafficRx + trafficTx == 0L) Strings.t("No data yet")
+        else "\u200E" + formatTraffic(trafficRx + trafficTx)
 
     private fun formatTraffic(bytes: Long): String = when {
         bytes < 1_024 -> "$bytes B"
