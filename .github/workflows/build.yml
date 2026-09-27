@@ -2,7 +2,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, fix/dns-three-transports ]
   workflow_dispatch:
 
 jobs:
