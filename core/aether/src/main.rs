@@ -1986,7 +1986,7 @@ async fn run_masque_tunnel(
         // not set yet); once smart_dns brings the engine up we can complete it.
         let dns_deferred = crate::smart_dns::smart_dns().is_none()
             && (options.dns_servers_dot.is_some() || options.dns_servers_doh.is_some());
-        push_encrypted_resolvers(&options);
+        push_encrypted_resolvers(options);
 
         // Custom encrypted DNS (DoT/DoH) needs the engine even without AI Mode.
         // Kotlin now auto-sets smart_dns when dot/doh are present, but keep a
@@ -1994,39 +1994,27 @@ async fn run_masque_tunnel(
         let needs_dns_engine = options.smart_dns
             || options.dns_servers_dot.is_some()
             || options.dns_servers_doh.is_some();
-        if needs_dns_engine {
-            if crate::smart_dns::smart_dns().is_none() {
-                if let Err(e) = crate::smart_dns::init_smart_dns().await {
-                    log::warn!("[tun] Smart DNS init failed: {}", e);
-                } else if dns_deferred {
-                    push_encrypted_resolvers(&options);
-                }
-            }
-            if options.smart_dns {
-                // Engine already up from needs_dns_engine path above; only the
-                // AI-specific smart_dns_servers list remains to be pushed.
-                // Guard against double-init: OnceCell is already set.
-                if crate::smart_dns::smart_dns().is_none() {
-                    if let Err(e) = crate::smart_dns::init_smart_dns().await {
-                        log::warn!("[tun] Smart DNS init failed: {}", e);
-                    }
-                }
-                if crate::smart_dns::smart_dns().is_some() {
-                    if let Some(list) = options.smart_dns_servers.as_deref() {
-                        let parsed: Vec<_> = list
-                            .split([',', ';', ' ', '\n', '\r'])
-                            .filter_map(crate::smart_dns::DnsEndpoint::parse)
-                            .collect();
-                        // All parsed endpoints (plain + encrypted) go to the
-                        // engine: it needs the user's plain resolvers for its
-                        // own Gemini lookups too, not just the DoT/DoH ones.
-                        crate::smart_dns::set_resolvers(parsed);
-                        log::info!("[smart-dns] resolvers pushed to engine (plain+encrypted)");
-                    }
-                }
+        if needs_dns_engine && crate::smart_dns::smart_dns().is_none() {
+            if let Err(e) = crate::smart_dns::init_smart_dns().await {
+                log::warn!("[tun] Smart DNS init failed: {}", e);
+            } else if dns_deferred {
+                push_encrypted_resolvers(options);
             }
         }
-        
+        if options.smart_dns && crate::smart_dns::smart_dns().is_some() {
+            if let Some(list) = options.smart_dns_servers.as_deref() {
+                let parsed: Vec<_> = list
+                    .split([',', ';', ' ', '\n', '\r'])
+                    .filter_map(crate::smart_dns::DnsEndpoint::parse)
+                    .collect();
+                // All parsed endpoints (plain + encrypted) go to the
+                // engine: it needs the user's plain resolvers for its
+                // own Gemini lookups too, not just the DoT/DoH ones.
+                crate::smart_dns::set_resolvers(parsed);
+                log::info!("[smart-dns] resolvers pushed to engine (plain+encrypted)");
+            }
+        }
+
         let bridge_smart = needs_dns_engine || options.smart_dns;
         tokio::spawn(tun::bridge(
             fd,
@@ -3023,7 +3011,7 @@ async fn run_warp_in_warp(
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
     let wow_dns_deferred = crate::smart_dns::smart_dns().is_none()
         && (options.dns_servers_dot.is_some() || options.dns_servers_doh.is_some());
-    push_encrypted_resolvers(&options);
+    push_encrypted_resolvers(options);
     let wow_needs_dns = options.smart_dns
         || options.dns_servers_dot.is_some()
         || options.dns_servers_doh.is_some();
@@ -3031,13 +3019,11 @@ async fn run_warp_in_warp(
         if let Err(e) = crate::smart_dns::init_smart_dns().await {
             log::warn!("[tun] Smart DNS init failed (WoW): {}", e);
         } else if wow_dns_deferred {
-            push_encrypted_resolvers(&options);
+            push_encrypted_resolvers(options);
         }
     }
-    if options.smart_dns {
-        if let Err(e) = crate::smart_dns::init_smart_dns().await {
-            log::warn!("[tun] Smart DNS init failed: {}", e);
-        } else if let Some(list) = options.smart_dns_servers.as_deref() {
+    if options.smart_dns && crate::smart_dns::smart_dns().is_some() {
+        if let Some(list) = options.smart_dns_servers.as_deref() {
             let parsed: Vec<_> = list
                 .split([',', ';', ' ', '\n', '\r'])
                 .filter_map(crate::smart_dns::DnsEndpoint::parse)
@@ -3104,9 +3090,8 @@ async fn run_warp_in_warp(
                 .await
                 .map_err(|e| AetherError::Other(format!("[inner] {e}")))
         });
-        let local_task =
-            let wow_bridge_smart = wow_needs_dns || options.smart_dns;
-            tokio::spawn(tun::bridge(fd, secondary_ipv4, inbound_rx, outbound_tx, wow_bridge_smart));
+        let wow_bridge_smart = wow_needs_dns || options.smart_dns;
+        let local_task = tokio::spawn(tun::bridge(fd, secondary_ipv4, inbound_rx, outbound_tx, wow_bridge_smart));
         (inner_exit, local_task)
     } else {
         let (inner_stack, inner_exit) = establish_wg(

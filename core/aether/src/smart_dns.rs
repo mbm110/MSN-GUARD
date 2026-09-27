@@ -689,3 +689,11 @@ pub fn set_resolvers(resolvers: Vec<DnsEndpoint>) {
         log::warn!("[smart-dns] set_resolvers called before init_smart_dns — ignored");
     }
 }
+
+pub fn set_encrypted_resolvers(resolvers: Vec<DnsEndpoint>) {
+    if let Some(engine) = SMART_DNS.get() {
+        engine.set_encrypted_resolvers(resolvers);
+    } else {
+        log::warn!("[smart-dns] set_encrypted_resolvers called before init_smart_dns — ignored");
+    }
+}
