@@ -5977,12 +5977,12 @@ class MainActivity : Activity() {
         addDnsField(content, Strings.t("Plain UDP"), CUSTOM_DNS_UDP,
             Strings.t("Bare IP addresses, optionally with a port. The default port is 53. Fastest, but unencrypted — a carrier can see and hijack these lookups."),
             Strings.t("1.1.1.1, 10.202.10.202:53")) { fields[CUSTOM_DNS_UDP] = it }
-        // v2.0.8: the DoT and DoH fields are intentionally not added here. The
-        // encrypted transports stay wired in CoreConfig and the core — this is
-        // the only UI that could offer them, and without an entry the user sees
-        // a plain-UDP-only DNS screen, which is the intended product.
-        // `saveDnsLists()` and `customDnsLabel()` still read the keys, so a
-        // stored value is never lost or miscounted; nothing new can be typed.
+        addDnsField(content, Strings.t("DNS-over-TLS"), CUSTOM_DNS_DOT,
+            Strings.t("Uses tls:// on port 853. Encrypted — the carrier cannot see the query names. Example: tls://1.1.1.1"),
+            Strings.t("tls://1.1.1.1, tls://8.8.8.8")) { fields[CUSTOM_DNS_DOT] = it }
+        addDnsField(content, Strings.t("DNS-over-HTTPS"), CUSTOM_DNS_DOH,
+            Strings.t("Uses https:// on port 443. Strongest censorship bypass — looks like normal HTTPS. Example: https://1.1.1.1/dns-query"),
+            Strings.t("https://1.1.1.1/dns-query")) { fields[CUSTOM_DNS_DOH] = it }
 
         content.addView(createSettingsButton(Strings.t("Save")) {
             // Commit the typed text before anything else reads it.

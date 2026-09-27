@@ -198,7 +198,6 @@ object CoreConfig {
             // hostname on every ClientHello. Off by default — it changes bytes
             // on the wire, so it must be opt-in per network.
             put("mixed_case_sni", prefs.getBoolean("mixed_case_sni", false))
-            putOpt("dns_servers", text("dns_servers").ifBlank { null })
             putOpt("route_block", text("route_block").ifBlank { null })
             putOpt("route_direct", text("route_direct").ifBlank { null })
             putOpt("team", SecureStore.getSecret(context, "zero_trust_team").ifBlank { null })
@@ -207,13 +206,20 @@ object CoreConfig {
             putOpt("access_token", SecureStore.getSecret(context, "zero_trust_token").ifBlank { null })
             putOpt("access_email", SecureStore.getSecret(context, "zero_trust_email").ifBlank { null })
             put("gateway", prefs.getBoolean("zero_trust_gateway", false))
-            // v2.0.0: DNS configuration lives on the DNS screen, split by
-            // transport. Android's resolver list can only speak plain UDP, so
-            // that list alone goes to the TUN; the encrypted lists are forwarded
-            // to the core, which speaks DoT on :853 and DoH over HTTPS itself.
-            put("dns_servers", prefs.getString("dns_servers_udp", null))
-            putOpt("dns_servers_dot", prefs.getString("dns_servers_dot", null)?.ifBlank { null })
-            putOpt("dns_servers_doh", prefs.getString("dns_servers_doh", null)?.ifBlank { null })
+            // DNS: three transports on the DNS screen. Plain UDP goes to the
+            // TUN via applyDns (rides WARP directly). DoT/DoH are spoken by the
+            // core engine over :853 / HTTPS. When the user configured encrypted
+            // DNS, the core's intercept must be up — without it the queries ride
+            // the tunnel as plain UDP and the encryption is silently not used.
+            val udpList = prefs.getString("dns_servers_udp", null)?.ifBlank { null }
+            val dotList = prefs.getString("dns_servers_dot", null)?.ifBlank { null }
+            val dohList = prefs.getString("dns_servers_doh", null)?.ifBlank { null }
+            putOpt("dns_servers", udpList)
+            putOpt("dns_servers_dot", dotList)
+            putOpt("dns_servers_doh", dohList)
+            if (!dotList.isNullOrBlank() || !dohList.isNullOrBlank()) {
+                put("smart_dns", true)
+            }
         }.toString()
     }
 

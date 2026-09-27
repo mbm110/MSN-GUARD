@@ -527,10 +527,15 @@ impl SmartDnsSplit {
             payload.len()
         );
 
-        // Only Gemini queries are intercepted. Everything else must flow through
-        // the tunnel's normal path — intercepting every query was the previous
-        // build's fatal flaw and broke all DNS on the device.
-        if !is_gemini {
+        // Two modes: (1) AI / Smart Split — only Gemini queries are
+        // intercepted; (2) Custom encrypted DNS (DoT/DoH) — every query is
+        // intercepted so the user's encrypted resolver answers it. Without (2)
+        // the query would ride the tunnel as plain UDP/53 and hit carrier
+        // filtering (poisoning / hijack) that the encrypted resolver was meant
+        // to bypass. When no encrypted resolver is configured the behaviour is
+        // exactly the old Gemini-only one.
+        let custom_encrypted = self.has_encrypted();
+        if !is_gemini && !custom_encrypted {
             return None;
         }
 
