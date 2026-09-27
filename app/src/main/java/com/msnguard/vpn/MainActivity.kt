@@ -575,6 +575,7 @@ class MainActivity : Activity() {
         // And the Smart Split fragment profiles, on the same triggers and the
         // same floor — see [SmartSplitSub]. Same shape: a 304 costs nothing.
         SmartSplitSub.refreshIfDue(this)
+        try { CoreConfig.ensurePinnedIps(this) } catch (_: Exception) {}
 
         // Orbit console. Every control below is built in onCreate so a single
         // pass wires the whole screen; no XML layouts exist in this app.
@@ -6467,6 +6468,7 @@ class MainActivity : Activity() {
             if (parts.isEmpty()) Strings.t("Custom DNS cleared — the default resolvers answer")
             else Strings.t("Custom DNS saved:") + " " + parts.joinToString(", ")
         )
+        try { CoreConfig.precomputePinnedIps(this) } catch (_: Exception) {}
     }
 
     private fun readDnsField(prefKey: String): List<String> =
@@ -6994,6 +6996,7 @@ class MainActivity : Activity() {
         // Decided BEFORE the consent dialog, because the answer depends on the
         // selection and the user is about to be able to change nothing else.
         if (shouldAutoScan()) beginAutoScan()
+        try { CoreConfig.refreshPinnedIpsBlocking(this) } catch (_: Exception) {}
         val config = configJson()
         // Proxy mode needs no VPN consent at all — no TUN is created, so asking for
         // it would put a system dialog in front of a feature that does not use the

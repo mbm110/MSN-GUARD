@@ -191,6 +191,10 @@ struct NativeStartOptions {
     /// api.cloudflareclient.com from its own link, so SHARD is brought up first
     /// and the registration rides its listener. See [crate::account::socks_proxy_addr].
     socks_proxy: Option<String>,
+    /// `host=ip,host=ip` pins for DoT/DoH resolvers. The core dials these IPs
+    /// instead of resolving the resolver's hostname — necessary before the TUN
+    /// exists and when the carrier poisons plain 53. See CoreConfig.
+    dns_pinned_ips: Option<String>,
 }
 
 impl Default for NativeStartOptions {
@@ -234,6 +238,7 @@ impl Default for NativeStartOptions {
             dns_servers_dot: None,
             dns_servers_doh: None,
             socks_proxy: None,
+            dns_pinned_ips: None,
         }
     }
 }
@@ -322,6 +327,7 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.smart_dns_servers = value.smart_dns_servers.clone();
         options.dns_servers_dot = value.dns_servers_dot.clone();
         options.dns_servers_doh = value.dns_servers_doh.clone();
+        options.dns_pinned_ips = value.dns_pinned_ips.clone();
         Ok(options)
     }
 }
