@@ -123,6 +123,9 @@ pub struct StartOptions {
     /// v2.0.0: per-transport lists from the DNS screen.
     pub dns_servers_dot: Option<String>,
     pub dns_servers_doh: Option<String>,
+    /// `host=ip,host=ip` pins for DoT/DoH — core dials these instead of
+    /// resolving the resolver hostname on a poisoned link.
+    pub dns_pinned_ips: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +230,7 @@ impl StartOptions {
             smart_dns_servers: None,
             dns_servers_dot: None,
             dns_servers_doh: None,
+            dns_pinned_ips: None,
         }
     }
 

@@ -1155,6 +1155,20 @@ pub(crate) fn is_cloudflare_resolver_addr(addr: &std::net::SocketAddr) -> bool {
     }
 }
 
+
+/// Compat: master called `smart_dns() -> Option<&'static SmartDnsSplit>`.
+/// Branch uses RwLock<Option<...>> — expose same shape via read guard trick.
+/// Returns a guard-like handle: we clone the engine so callers get owned value.
+pub fn smart_dns() -> Option<SmartDnsSplit> {
+    SMART_DNS.read().as_ref().cloned()
+}
+
+/// Compat: branched engine split set_resolvers into plain vs encrypted.
+/// `set_encrypted_resolvers` was the old name the push path uses.
+pub fn set_encrypted_resolvers(endpoints: Vec<DnsEndpoint>) {
+    set_resolvers(endpoints)
+}
+
 /// Get whether the engine is up and has encrypted resolvers configured.
 pub fn has_encrypted() -> bool {
     with_engine(|e| e.has_encrypted()).unwrap_or(false)
