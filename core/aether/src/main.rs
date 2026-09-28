@@ -25,7 +25,7 @@ static INITIALIZED: std::sync::Once = std::sync::Once::new();
 /// screen and are independent of AI Mode. Anything [DnsEndpoint::parse]
 /// rejects is logged rather than silently dropped, so a typo in the field is
 /// visible instead of turning into "my DoH server never answers".
-fn push_encrypted_resolvers(options: &StartOptions) {
+fn parse_encrypted_resolvers(options: &StartOptions) -> Vec<crate::smart_dns::DnsEndpoint> {
     let raw: Vec<String> = [options.dns_servers_dot.as_deref(), options.dns_servers_doh.as_deref()]
         .into_iter()
         .flatten()
@@ -35,23 +35,96 @@ fn push_encrypted_resolvers(options: &StartOptions) {
         .map(str::to_owned)
         .collect();
     if raw.is_empty() {
-        return;
+        return vec![];
     }
-    let parsed: Vec<_> = raw.iter().filter_map(|s| crate::smart_dns::DnsEndpoint::parse(s)).collect();
+    let mut parsed: Vec<_> = raw.iter().filter_map(|s| crate::smart_dns::DnsEndpoint::parse(s)).collect();
     if parsed.is_empty() {
         log::warn!("[dns] none of the user's DoT/DoH entries parsed");
+        return vec![];
+    }
+    let pinned: Vec<(String, std::net::IpAddr)> = options.dns_pinned_ips.as_deref()
+        .map(parse_pinned_ips).unwrap_or_default();
+    for ep in parsed.iter_mut() {
+        let host = ep.name.clone().unwrap_or_default();
+        let ips: Vec<_> = pinned.iter()
+            .filter(|(h, _)| h.eq_ignore_ascii_case(&host))
+            .map(|(_, ip)| *ip).collect();
+        if !ips.is_empty() {
+            ep.with_ips(ips.clone());
+            log::info!("[dns] pinned {} -> {} address(es)", host, ips.len());
+        } else {
+            log::warn!("[dns] no pinned IP for {host} — DoT/DoH will fail until the DNS screen is saved again", );
+        }
+    }
+    parsed
+}
+
+fn push_encrypted_resolvers(options: &StartOptions) {
+    let parsed = parse_encrypted_resolvers(options);
+    if parsed.is_empty() {
         return;
     }
-    if crate::smart_dns::smart_dns().is_none() {
-        // DoT/DoH push is unconditional but the engine may not be up yet
-        // (smart_dns is now auto-enabled from Kotlin when DoT/DoH are set, so
-        // the async caller will have initialised it — this branch is the
-        // non-async / early-call path).
-        log::warn!("[dns] engine not ready, DoT/DoH push skipped — async init will retry");
-        return;
-    }
-    crate::smart_dns::set_encrypted_resolvers(parsed.clone());
+    crate::smart_dns::set_resolvers(parsed.clone());
     log::info!("[dns] {} DoT/DoH resolver(s) pushed to the engine", parsed.len());
+}
+
+/// Push the user's full resolver set — plain UDP AND DoT/DoH — in ONE call.
+///
+/// v2.0.19: this replaces the two separate push sites, which each called
+/// set_resolvers() and each call CLEARS both lists first. A user with a custom
+/// UDP resolver AND a DoH server lost one of them depending on call order:
+/// the DoT/DoH push wiped user_resolvers, and the UDP push wiped
+/// encrypted_resolvers. Merging here means set_resolvers() sees one list
+/// containing both transports, so has_encrypted() and the UDP fallback both
+/// stay live at once. This is also the ONLY path that hands the plain-UDP
+/// list to the engine at all — applyDns() puts it on the Android resolver, but
+/// the engine answers UDP/53 itself and never consults that list.
+fn push_user_resolvers(options: &StartOptions) {
+    let mut all = parse_encrypted_resolvers(options);
+    if let Some(list) = options.smart_dns_servers.as_deref() {
+        let plain: Vec<_> = list
+            .split([',', ';', ' ', '\n', '\r'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(crate::smart_dns::DnsEndpoint::parse)
+            .collect();
+        all.extend(plain);
+    }
+    if all.is_empty() {
+        return;
+    }
+    crate::smart_dns::set_resolvers(all.clone());
+    log::info!("[smart-dns] {} resolver(s) pushed to engine (plain+encrypted)", all.len());
+}
+
+/// Parse the app's pinned-IP map: "host=ip,host=ip1+ip2" -> host/IP pairs,
+/// one pair per address. The v2.0.13 Kotlin side pins every address a
+/// Cloudflare Worker resolves to (separated by '+'), because Iranian carriers
+/// withdraw reachability to individual anycast addresses without warning and
+/// a single pin has no redundancy. Splitting here keeps `with_ips` receiving
+/// the whole set for one host.
+/// Malformed entries are skipped, never fatal — the engine simply falls back
+/// to resolving that host the hard way.
+fn parse_pinned_ips(raw: &str) -> Vec<(String, std::net::IpAddr)> {
+    let mut out = Vec::new();
+    for part in raw.split([',', ';', ' ', '\n', '\r']) {
+        let part = part.trim();
+        let Some((host, ips)) = part.split_once('=') else { continue };
+        let host = host.trim().to_string();
+        if host.is_empty() { continue }
+        for ip_str in ips.split('+') {
+            let ip_str = ip_str.trim();
+            let ip = match ip_str.parse::<std::net::IpAddr>() {
+                Ok(ip) => ip,
+                Err(_) => {
+                    log::warn!("[dns] bad pinned IP for {host}: {ip_str}");
+                    continue;
+                }
+            };
+            out.push((host.clone(), ip));
+        }
+    }
+    out
 }
 
 fn parse_local_v4(s: &str) -> Ipv4Addr {
