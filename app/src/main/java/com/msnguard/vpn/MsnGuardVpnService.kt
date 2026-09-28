@@ -5837,7 +5837,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     // carrier that hijacks port 53.
     private fun isWarpDotDnsEnabled(): Boolean {
         val prefs = this.profiled()
+        // CoreConfig writes "dns_servers" from "dns_servers_udp", but older prefs
+        // may still only have "dns_servers_udp". Check both so a single-reboot
+        // plain-UDP config is not missed.
         val udp = prefs.getString("dns_servers", null)?.trim().orEmpty()
+            .ifEmpty { prefs.getString("dns_servers_udp", null)?.trim().orEmpty() }
         val dot = prefs.getString("dns_servers_dot", null)?.trim().orEmpty()
         val doh = prefs.getString("dns_servers_doh", null)?.trim().orEmpty()
         return udp.isNotEmpty() || dot.isNotEmpty() || doh.isNotEmpty()

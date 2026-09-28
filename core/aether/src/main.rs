@@ -81,14 +81,19 @@ fn push_encrypted_resolvers(options: &StartOptions) {
 /// the engine answers UDP/53 itself and never consults that list.
 fn push_user_resolvers(options: &StartOptions) {
     let mut all = parse_encrypted_resolvers(options);
-    if let Some(list) = options.smart_dns_servers.as_deref() {
-        let plain: Vec<_> = list
-            .split([',', ';', ' ', '\n', '\r'])
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .filter_map(crate::smart_dns::DnsEndpoint::parse)
-            .collect();
-        all.extend(plain);
+    // Plain UDP lives in dns_servers (CoreConfig forwards dns_servers_udp there).
+    // smart_dns_servers is a legacy/placeholder — read both so a plain-only setup
+    // always hands its resolvers to the engine.
+    for key in [options.dns_servers.as_deref(), options.smart_dns_servers.as_deref()] {
+        if let Some(list) = key {
+            let plain: Vec<_> = list
+                .split([',', ';', ' ', '\n', '\r'])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .filter_map(crate::smart_dns::DnsEndpoint::parse)
+                .collect();
+            all.extend(plain);
+        }
     }
     if all.is_empty() {
         return;
@@ -2063,7 +2068,7 @@ async fn run_masque_tunnel(
         // not set yet); once smart_dns brings the engine up we can complete it.
         let dns_deferred = crate::smart_dns::smart_dns().is_none()
             && (options.dns_servers.is_some() || options.dns_servers_dot.is_some() || options.dns_servers_doh.is_some());
-        push_encrypted_resolvers(options);
+        push_user_resolvers(options);
 
         // Custom encrypted DNS (DoT/DoH) needs the engine even without AI Mode.
         // Kotlin now auto-sets smart_dns when dot/doh are present, but keep a
@@ -2076,10 +2081,13 @@ async fn run_masque_tunnel(
             if let Err(e) = crate::smart_dns::init_smart_dns().await {
                 log::warn!("[tun] Smart DNS init failed: {}", e);
             } else if dns_deferred {
-                push_encrypted_resolvers(options);
+                push_user_resolvers(options);
             }
         }
-        if options.smart_dns && crate::smart_dns::smart_dns().is_some() {
+        // Legacy AI-mode path: only if the caller actually sent a smart_dns_servers list.
+        // On a plain-UDP-only config this would otherwise overwrite the merged resolvers
+        // pushed above and wipe them.
+        if options.smart_dns && options.smart_dns_servers.is_some() && crate::smart_dns::smart_dns().is_some() {
             if let Some(list) = options.smart_dns_servers.as_deref() {
                 let parsed: Vec<_> = list
                     .split([',', ';', ' ', '\n', '\r'])
@@ -2702,7 +2710,7 @@ async fn run_wireguard_tunnel(
         log::info!("[+] Android TUN bridge active");
         let wg_dns_deferred = crate::smart_dns::smart_dns().is_none()
             && (options.dns_servers.is_some() || options.dns_servers_dot.is_some() || options.dns_servers_doh.is_some());
-        push_encrypted_resolvers(options);
+        push_user_resolvers(options);
         let needs_dns_engine = options.smart_dns
             || options.dns_servers.is_some()
             || options.dns_servers_dot.is_some()
@@ -2711,7 +2719,7 @@ async fn run_wireguard_tunnel(
             if let Err(e) = crate::smart_dns::init_smart_dns().await {
                 log::warn!("[tun] Smart DNS init failed (WireGuard): {}", e);
             } else if wg_dns_deferred {
-                push_encrypted_resolvers(options);
+                push_user_resolvers(options);
             }
         }
         let bridge_smart = needs_dns_engine || options.smart_dns;
@@ -3090,18 +3098,19 @@ async fn run_warp_in_warp(
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
     let wow_dns_deferred = crate::smart_dns::smart_dns().is_none()
         && (options.dns_servers.is_some() || options.dns_servers_dot.is_some() || options.dns_servers_doh.is_some());
-    push_encrypted_resolvers(options);
-    let wow_needs_dns = options.smart_dns || options.dns_servers.is_some()
+    push_user_resolvers(options);
+    let wow_needs_dns = options.smart_dns
+        || options.dns_servers.is_some()
         || options.dns_servers_dot.is_some()
         || options.dns_servers_doh.is_some();
     if wow_needs_dns && crate::smart_dns::smart_dns().is_none() {
         if let Err(e) = crate::smart_dns::init_smart_dns().await {
             log::warn!("[tun] Smart DNS init failed (WoW): {}", e);
         } else if wow_dns_deferred {
-            push_encrypted_resolvers(options);
+            push_user_resolvers(options);
         }
     }
-    if options.smart_dns && crate::smart_dns::smart_dns().is_some() {
+    if options.smart_dns && options.smart_dns_servers.is_some() && crate::smart_dns::smart_dns().is_some() {
         if let Some(list) = options.smart_dns_servers.as_deref() {
             let parsed: Vec<_> = list
                 .split([',', ';', ' ', '\n', '\r'])
