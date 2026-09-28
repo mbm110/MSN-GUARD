@@ -5832,11 +5832,15 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     // the Family filter is lost. Skipping the UID exclusion lets the unprotected
     // DoH socket be routed into the TUN and out the WARP exit. Tunnel sockets
     // (WireGuard/MASQUE/QUIC) are still per-socket protected, so no loop.
+    // Any custom DNS (plain UDP, DoT, or DoH) rides WARP — keep UID on the
+    // TUN so even plain-UDP queries reach the WARP exit instead of the
+    // carrier that hijacks port 53.
     private fun isWarpDotDnsEnabled(): Boolean {
         val prefs = this.profiled()
+        val udp = prefs.getString("dns_servers", null)?.trim().orEmpty()
         val dot = prefs.getString("dns_servers_dot", null)?.trim().orEmpty()
         val doh = prefs.getString("dns_servers_doh", null)?.trim().orEmpty()
-        return dot.isNotEmpty() || doh.isNotEmpty()
+        return udp.isNotEmpty() || dot.isNotEmpty() || doh.isNotEmpty()
     }
 
     private fun Builder.applySplitTunneling(): Builder {

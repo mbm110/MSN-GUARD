@@ -531,43 +531,49 @@ impl SmartDnsSplit {
     }
 
     /// Query the user's own plain-UDP endpoints in parallel.
-    /// v2.1.x queries are answered by the SOCKS-backed TCP
-    /// DNS path above (LocalDnsResolver: TCP DNS over SOCKS5 CONNECT :53), so
-    /// even plain UDP plainly rides the WARP exit. Sockets are opened on the spot — the user's list can change at runtime —
-    /// and each socket is protected (kept outside the tunnel) when its target is
-    /// a private address, since private IPs are unroutable through the tunnel.
+    /// Plain-UDP queries ride the WARP tunnel via SOCKS5 CONNECT :53
+    /// (TCP DNS with 2-byte framing). Sockets are opened per query so a
+    /// runtime change of the server list takes effect immediately.
+    // Plain-UDP servers but over TCP framed DNS via the tunnel's SOCKS
+    // listener (SOCKS5 CONNECT <ip>:53), mirroring the platform LocalDnsResolver
+    // path that is proven to reach public resolvers from behind carrier NAT.
+    // TCP framing: [u16 len][query] -> [u16 len][response]. Falls back to a
+    // direct TCP dial to :53 when the SOCKS listener is not yet up.
     async fn query_endpoints(&self, endpoints: &[DnsEndpoint], query: Vec<u8>, expected_id: u16, name: String, qtype: u16) -> Result<Vec<u8>> {
-        let mut socks: Vec<Arc<UdpSocket>> = Vec::with_capacity(endpoints.len());
-        for ep in endpoints {
-            let addr = format!("{}:53", ep.address);
-            let bind_addr = if ep.address.parse::<std::net::IpAddr>().map(|i| i.is_ipv4()).unwrap_or(true) { "0.0.0.0:0" } else { "[::]:0" };
-            match UdpSocket::bind(bind_addr).await {
-                Ok(sock) => {
-                    let sock = Arc::new(sock);
-                    // plain-UDP queries ride
-                    // own UID, which applySplitTunneling keeps OUTSIDE the VPN,
-                    // so protected and unprotected are the same network here —
-                    // the carrier. 2.0.24/2.0.25 both proved that path is dead
-                    // for a public resolver. Leaving the socket unprotected lets
-                    // Android route it through our own TUN, which carries it to
-                    // the WARP exit — the one path that can reach the resolver.
-                    // The engine's own UID exclusion does NOT apply here because
-                    // this socket is bound by the tunnel process itself, whose
-                    // route table entries are installed before it dials.
-                    if let Err(e) = sock.connect(addr).await {
-                        log::warn!("[smart-dns] user resolver {} unreachable: {e}", ep.address);
-                        continue;
+        if endpoints.is_empty() {
+            return Err(AetherError::Other("no plain resolvers configured".into()));
+        }
+        let query: Arc<Vec<u8>> = Arc::new(query);
+        let name0 = name.clone();
+        log::info!("[smart-dns] querying {} plain resolver(s) via SOCKS for {name0} (type {qtype})", endpoints.len());
+        // Happy-eyeballs across plain resolvers: first usable response wins.
+        let mut futs = futures::stream::FuturesUnordered::new();
+        for ep in endpoints.to_vec() {
+            let q: Arc<Vec<u8>> = Arc::clone(&query);
+            let ename = name.clone();
+            futs.push(async move {
+                let r = Self::query_one_endpoint_via_socks(&ep, &q).await;
+                match r {
+                    Ok(resp) if Self::is_usable_response(&resp, expected_id) => {
+                        log::info!("[smart-dns] plain UDP via SOCKS answered {} for {ename} (type {qtype})", ep.address);
+                        Some(resp)
                     }
-                    socks.push(sock);
+                    Ok(resp) => {
+                        log::warn!("[smart-dns] plain response from {} failed id check ({} bytes)", ep.address, resp.len());
+                        None
+                    }
+                    Err(e) => {
+                        log::warn!("[smart-dns] plain resolver {} failed: {e}", ep.address);
+                        None
+                    }
                 }
-                Err(e) => log::warn!("[smart-dns] bind for {} failed: {e}", ep.address),
-            }
+            });
         }
-        if socks.is_empty() {
-            return Err(AetherError::Other("no user resolver socket could be opened".into()));
+        use futures::StreamExt;
+        while let Some(item) = futs.next().await {
+            if let Some(resp) = item { return Ok(resp); }
         }
-        log::info!("[smart-dns] querying {} user resolver(s) for {name} (type {qtype})", socks.len());
-        self.parallel_query(Arc::new(socks), query, expected_id, name, qtype).await
+        Err(AetherError::Other(format!("all plain resolvers failed for {name}")))
     }
 
     /// Pull A/AAAA records out of a DNS response.
@@ -683,6 +689,57 @@ impl SmartDnsSplit {
     /// packet arrived on the TUN it was meant for the tunnel; dialing the
     /// resolver through SOCKS makes that explicit. Direct TCP is the fallback
     /// only when no SOCKS listener is up yet.
+    fn is_usable_response(resp: &[u8], expected_id: u16) -> bool {
+        if resp.len() < 12 { return false; }
+        let got = u16::from_be_bytes([resp[0], resp[1]]);
+        got == expected_id
+    }
+
+    async fn socks_tcp_dns_exchange(addr: std::net::SocketAddr, query: &[u8]) -> Result<Vec<u8>> {
+        let timeout = CONNECT_TIMEOUT;
+        let mut stream = match Self::connect_tcp_via_socks(addr, timeout).await {
+            Some(s) => s,
+            None => {
+                // Fallback: direct TCP to :53 when SOCKS is not yet up (startup race).
+                return Self::direct_tcp_dns_exchange(addr, query).await;
+            }
+        };
+        Self::tcp_dns_exchange(&mut stream, query, timeout).await
+    }
+
+    async fn direct_tcp_dns_exchange(addr: std::net::SocketAddr, query: &[u8]) -> Result<Vec<u8>> {
+        let mut stream = Self::connect_tcp_resolver_via_tun_or_direct(addr).await?;
+        Self::tcp_dns_exchange(&mut stream, query, CONNECT_TIMEOUT).await
+    }
+
+    async fn tcp_dns_exchange(stream: &mut tokio::net::TcpStream, query: &[u8], timeout: std::time::Duration) -> Result<Vec<u8>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut framed = Vec::with_capacity(2 + query.len());
+        framed.extend_from_slice(&(query.len() as u16).to_be_bytes());
+        framed.extend_from_slice(query);
+        tokio::time::timeout(timeout, stream.write_all(&framed)).await
+            .map_err(|_| AetherError::Other("tcp dns write timed out".into()))?
+            .map_err(AetherError::Io)?;
+        stream.flush().await.map_err(AetherError::Io)?;
+        let mut len_hdr = [0u8; 2];
+        tokio::time::timeout(timeout, stream.read_exact(&mut len_hdr)).await
+            .map_err(|_| AetherError::Other("tcp dns read len timed out".into()))?
+            .map_err(AetherError::Io)?;
+        let len = u16::from_be_bytes(len_hdr) as usize;
+        if len < 12 || len > 4096 { return Err(AetherError::Other(format!("tcp dns bad len {len}"))); }
+        let mut resp = vec![0u8; len];
+        tokio::time::timeout(timeout, stream.read_exact(&mut resp)).await
+            .map_err(|_| AetherError::Other("tcp dns read body timed out".into()))?
+            .map_err(AetherError::Io)?;
+        Ok(resp)
+    }
+
+    async fn query_one_endpoint_via_socks(ep: &DnsEndpoint, query: &[u8]) -> Result<Vec<u8>> {
+        let addr: std::net::SocketAddr = format!("{}:53", ep.address).parse()
+            .map_err(|e| AetherError::Other(format!("bad resolver {}: {e}", ep.address)))?;
+        Self::socks_tcp_dns_exchange(addr, query).await
+    }
+
     async fn connect_tcp_via_socks(addr: std::net::SocketAddr, timeout: std::time::Duration) -> Option<tokio::net::TcpStream> {
         // Core listens on options.listen (CoreConfig.SOCKS_PORT 1819) or AETHER_SOCKS;
         // keep env check for chain-outer leg, else default to 1819.
