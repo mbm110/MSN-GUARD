@@ -227,7 +227,7 @@ async fn connect_pinned(
     // but unfiltered" seen with tls://family on Iranian carriers (family
     // resolves to 2 v4 anycast IPs, the first unroutable from the tunnel).
     use futures::future::select_all;
-    let mut futs: Vec<std::pin::Pin<Box<dyn futures::Future<Output = Result<tokio::net::TcpStream, AetherError>> + Send>>> = Vec::new();
+    let mut futs: Vec<std::pin::Pin<Box<dyn futures::Future<Output = Result<tokio::net::TcpStream>> + Send>>> = Vec::new();
     for ip in &ordered {
         let addr = std::net::SocketAddr::new(**ip, port);
         futs.push(Box::pin(async move { SmartDnsSplit::connect_tcp_resolver(addr).await }));
