@@ -40,9 +40,9 @@ const QUERY_TIMEOUT: Duration = Duration::from_millis(1500);
 /// fallback on 443 — 10 s of dead air before the engine fell back to plain
 /// UDP. That is the "first seconds nothing loads" report. 2 s is enough for
 /// a real Cloudflare edge (RTT ~500 ms in the field logs) and cuts the worst
-/// case to 4 s while keeping the handshake bound. The Warp+Dot SOCKS path
-/// (DoH via the tunnel's SOCKS) will remove the carrier 853 path entirely in
-/// v2.0.31; until then this is the narrow stall fix.
+/// case to 4 s while keeping the handshake bound.
+/// v2.0.31 Warp+Dot: DoH rides the WARP tunnel (not the carrier), so the
+/// carrier 853 block is irrelevant and the tunnel exit answers.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 const MAX_CONCURRENT_QUERIES: usize = 32;
@@ -695,17 +695,14 @@ impl SmartDnsSplit {
         // Keeping those connections OUT of the tunnel is also the only way they
         // work at all on this transport.
         //
-        // v2.0.24: that reasoning was backwards. The app excludes its own uid
-        // from the VPN (addDisallowedApplication in applySplitTunneling), so an
-        // "unprotected" engine socket goes over the CARRIER, never the tunnel —
-        // protect() and no-protect() are the same path here. The real variable
-        // is the PORT: 443 is never filtered, but Iranian carriers block 853,
-        // so DoT times out at exactly CONNECT_TIMEOUT no matter what. Keep the
-        // Cloudflare-protect() call for the egress reason above; the DoT
-        // timeout is a carrier fact, and the caller falls back to plain UDP.
-        if crate::smart_dns::is_cloudflare_resolver_addr(&addr) {
-            crate::platform::protect_socket(&socket).map_err(AetherError::Io)?;
-        }
+        // v2.0.31 Warp+Dot (Rethink/firestack): DoH/DoT rides the WARP tunnel
+        // so the exit answers, not Frankfurt — fixes the German leak and the
+        // carrier 853 block. addDisallowedApplication is skipped for Warp+Dot
+        // sessions (see MsnGuardVpnService.applySplitTunneling), so an
+        // unprotected socket IS routed into the TUN and out the WARP exit.
+        // Anti-sanction resolvers (10.202.10.x) are still protected above; only
+        // public DoH/DoT stays unprotected to ride the tunnel.
+        // No protect() here on purpose.
 
         let bind = if addr.is_ipv4() {
             "0.0.0.0:0".parse().unwrap()

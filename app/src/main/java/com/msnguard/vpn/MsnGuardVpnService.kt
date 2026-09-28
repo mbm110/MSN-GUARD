@@ -5825,13 +5825,33 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             .also { cachedBadge = it }
     }
 
+
+    // v2.0.31 Warp+Dot: DoH/DoT rides the WARP tunnel (Rethink/firestack pattern).
+    // When a DoT/DoH server is configured, addDisallowedApplication(packageName)
+    // would keep the engine's DoH socket on the carrier where 853 is blocked and
+    // the Family filter is lost. Skipping the UID exclusion lets the unprotected
+    // DoH socket be routed into the TUN and out the WARP exit. Tunnel sockets
+    // (WireGuard/MASQUE/QUIC) are still per-socket protected, so no loop.
+    private fun isWarpDotDnsEnabled(): Boolean {
+        val prefs = this.profiled()
+        val dot = prefs.getString("dns_servers_dot", null)?.trim().orEmpty()
+        val doh = prefs.getString("dns_servers_doh", null)?.trim().orEmpty()
+        return dot.isNotEmpty() || doh.isNotEmpty()
+    }
+
     private fun Builder.applySplitTunneling(): Builder {
         val settings = SplitTunnelSettings(this@MsnGuardVpnService)
         val mode = settings.mode()
         val packages = settings.packages()
 
         if (mode == SplitTunnelSettings.Mode.ALL) {
-            // GLOBAL: all apps through VPN, but MUST exclude ourselves to prevent routing loop.
+            // Warp+Dot: keep our UID on the TUN so DoH rides the tunnel.
+            // Tunnel sockets are per-socket protected (platform::protect_socket),
+            // so there is no routing loop. Plain-UDP-only configs still exclude.
+            if (this@MsnGuardVpnService.isWarpDotDnsEnabled()) {
+                ConnectionLog.record("Warp+Dot DNS: keeping UID on TUN so DoH rides WARP")
+                return this
+            }
             addDisallowedApplication(packageName)
             return this
         }
@@ -5845,6 +5865,10 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 "No apps selected for tunnel. Connection aborted for safety."
             }
             // EXCLUDE with empty list: nothing to exclude beyond ourselves.
+            if (this@MsnGuardVpnService.isWarpDotDnsEnabled()) {
+                ConnectionLog.record("Warp+Dot DNS: keeping UID on TUN (empty exclude list)")
+                return this
+            }
             addDisallowedApplication(packageName)
             return this
         }
@@ -5876,7 +5900,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         }
 
         // EXCLUDE mode: also disallow our own app to prevent routing loop.
-        if (mode == SplitTunnelSettings.Mode.EXCLUDE) {
+        // Skipped for Warp+Dot — see ALL branch above.
+        if (mode == SplitTunnelSettings.Mode.EXCLUDE && !this@MsnGuardVpnService.isWarpDotDnsEnabled()) {
             addDisallowedApplication(packageName)
         }
 
