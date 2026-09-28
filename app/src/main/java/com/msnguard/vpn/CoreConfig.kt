@@ -213,7 +213,6 @@ object CoreConfig {
             // hostname on every ClientHello. Off by default — it changes bytes
             // on the wire, so it must be opt-in per network.
             put("mixed_case_sni", prefs.getBoolean("mixed_case_sni", false))
-            putOpt("dns_servers", text("dns_servers").ifBlank { null })
             putOpt("route_block", text("route_block").ifBlank { null })
             putOpt("route_direct", text("route_direct").ifBlank { null })
             putOpt("team", SecureStore.getSecret(context, "zero_trust_team").ifBlank { null })
@@ -227,6 +226,11 @@ object CoreConfig {
             // that list alone goes to the TUN; the encrypted lists are forwarded
             // to the core, which speaks DoT on :853 and DoH over HTTPS itself.
             put("dns_servers", prefs.getString("dns_servers_udp", null))
+            // plain UDP *is* DNS — it must also ride the WARP
+            // exit. Every previous build left smart_dns false for a plain-only
+            // setup, so tun::bridge never intercepted UDP/53 and the query left
+            // on the carrier. Now any DNS list arms the engine.
+            put("smart_dns", listOf(prefs.getString("dns_servers_udp", null), prefs.getString("dns_servers_dot", null), prefs.getString("dns_servers_doh", null)).any { !it.isNullOrBlank() })
             putOpt("dns_servers_dot", prefs.getString("dns_servers_dot", null)?.ifBlank { null })
             putOpt("dns_servers_doh", prefs.getString("dns_servers_doh", null)?.ifBlank { null })
             putOpt("dns_pinned_ips", prefs.getString(DNS_PINNED_IPS_PREF, null)?.ifBlank { null })

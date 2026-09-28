@@ -2062,13 +2062,14 @@ async fn run_masque_tunnel(
         // push_encrypted is best-effort before init (it defers if the cell is
         // not set yet); once smart_dns brings the engine up we can complete it.
         let dns_deferred = crate::smart_dns::smart_dns().is_none()
-            && (options.dns_servers_dot.is_some() || options.dns_servers_doh.is_some());
+            && (options.dns_servers.is_some() || options.dns_servers_dot.is_some() || options.dns_servers_doh.is_some());
         push_encrypted_resolvers(options);
 
         // Custom encrypted DNS (DoT/DoH) needs the engine even without AI Mode.
         // Kotlin now auto-sets smart_dns when dot/doh are present, but keep a
         // fallback so an older config or a direct core invocation still works.
         let needs_dns_engine = options.smart_dns
+            || options.dns_servers.is_some()
             || options.dns_servers_dot.is_some()
             || options.dns_servers_doh.is_some();
         if needs_dns_engine && crate::smart_dns::smart_dns().is_none() {
@@ -2700,9 +2701,10 @@ async fn run_wireguard_tunnel(
     let local_task = if let Some(fd) = options.tun_fd {
         log::info!("[+] Android TUN bridge active");
         let wg_dns_deferred = crate::smart_dns::smart_dns().is_none()
-            && (options.dns_servers_dot.is_some() || options.dns_servers_doh.is_some());
+            && (options.dns_servers.is_some() || options.dns_servers_dot.is_some() || options.dns_servers_doh.is_some());
         push_encrypted_resolvers(options);
         let needs_dns_engine = options.smart_dns
+            || options.dns_servers.is_some()
             || options.dns_servers_dot.is_some()
             || options.dns_servers_doh.is_some();
         if needs_dns_engine && crate::smart_dns::smart_dns().is_none() {
@@ -3087,9 +3089,9 @@ async fn run_warp_in_warp(
 
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
     let wow_dns_deferred = crate::smart_dns::smart_dns().is_none()
-        && (options.dns_servers_dot.is_some() || options.dns_servers_doh.is_some());
+        && (options.dns_servers.is_some() || options.dns_servers_dot.is_some() || options.dns_servers_doh.is_some());
     push_encrypted_resolvers(options);
-    let wow_needs_dns = options.smart_dns
+    let wow_needs_dns = options.smart_dns || options.dns_servers.is_some()
         || options.dns_servers_dot.is_some()
         || options.dns_servers_doh.is_some();
     if wow_needs_dns && crate::smart_dns::smart_dns().is_none() {

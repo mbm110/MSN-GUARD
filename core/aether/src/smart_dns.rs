@@ -239,7 +239,7 @@ async fn connect_pinned(
     let mut futs: Vec<std::pin::Pin<Box<dyn futures::Future<Output = Result<tokio::net::TcpStream>> + Send>>> = Vec::new();
     for ip in &ordered {
         let addr = std::net::SocketAddr::new(**ip, port);
-        futs.push(Box::pin(async move { SmartDnsSplit::connect_tcp_resolver(addr).await }));
+        futs.push(Box::pin(async move { SmartDnsSplit::connect_tcp_resolver_via_tun_or_direct(addr).await }));
     }
     while !futs.is_empty() {
         let (res, _idx, remaining) = select_all(futs).await;
@@ -531,7 +531,9 @@ impl SmartDnsSplit {
     }
 
     /// Query the user's own plain-UDP endpoints in parallel.
-    /// Sockets are opened on the spot — the user's list can change at runtime —
+    /// v2.1.x queries are answered by the SOCKS-backed TCP
+    /// DNS path above (LocalDnsResolver: TCP DNS over SOCKS5 CONNECT :53), so
+    /// even plain UDP plainly rides the WARP exit. Sockets are opened on the spot — the user's list can change at runtime —
     /// and each socket is protected (kept outside the tunnel) when its target is
     /// a private address, since private IPs are unroutable through the tunnel.
     async fn query_endpoints(&self, endpoints: &[DnsEndpoint], query: Vec<u8>, expected_id: u16, name: String, qtype: u16) -> Result<Vec<u8>> {
@@ -542,7 +544,7 @@ impl SmartDnsSplit {
             match UdpSocket::bind(bind_addr).await {
                 Ok(sock) => {
                     let sock = Arc::new(sock);
-                    // v2.0.26: no protect(). The engine's process runs with our
+                    // plain-UDP queries ride
                     // own UID, which applySplitTunneling keeps OUTSIDE the VPN,
                     // so protected and unprotected are the same network here —
                     // the carrier. 2.0.24/2.0.25 both proved that path is dead
@@ -676,7 +678,50 @@ impl SmartDnsSplit {
     /// outside-tunnel path IS where Iranian carriers block Cloudflare — so
     /// the fix is a working resolver IP, not a different socket. Cloudflare
     /// Workers also serve DoH over HTTP/2; see [doh_query].
-    async fn connect_tcp_resolver(addr: std::net::SocketAddr) -> Result<tokio::net::TcpStream> {
+    /// Try SOCKS5 CONNECT through the tunnel's own listener first (
+    /// When the
+    /// packet arrived on the TUN it was meant for the tunnel; dialing the
+    /// resolver through SOCKS makes that explicit. Direct TCP is the fallback
+    /// only when no SOCKS listener is up yet.
+    async fn connect_tcp_via_socks(addr: std::net::SocketAddr, timeout: std::time::Duration) -> Option<tokio::net::TcpStream> {
+        // Core listens on options.listen (CoreConfig.SOCKS_PORT 1819) or AETHER_SOCKS;
+        // keep env check for chain-outer leg, else default to 1819.
+        let proxy = std::env::var("AETHER_SOCKS").ok()
+            .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
+            .unwrap_or_else(|| "127.0.0.1:1819".parse().unwrap());
+        // Minimal SOCKS5 handshake: [05 01 00] -> [05 00] -> CONNECT
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(proxy)).await {
+            Ok(Ok(s)) => s, _ => return None,
+        };
+        let _ = stream.set_nodelay(true);
+        if tokio::time::timeout(timeout, stream.write_all(&[0x05, 0x01, 0x00])).await.is_err() { return None; }
+        if stream.flush().await.is_err() { return None; }
+        let mut greet = [0u8; 2];
+        if tokio::time::timeout(timeout, stream.read_exact(&mut greet)).await.is_err() { return None; }
+        if greet != [0x05, 0x00] { return None; }
+        let mut req = Vec::with_capacity(10);
+        req.extend_from_slice(&[0x05, 0x01, 0x00]);
+        match addr.ip() {
+            std::net::IpAddr::V4(v4) => { req.push(0x01); req.extend_from_slice(&v4.octets()); }
+            std::net::IpAddr::V6(v6) => { req.push(0x04); req.extend_from_slice(&v6.octets()); }
+        }
+        req.extend_from_slice(&addr.port().to_be_bytes());
+        if tokio::time::timeout(timeout, stream.write_all(&req)).await.is_err() { return None; }
+        if stream.flush().await.is_err() { return None; }
+        let mut hdr = [0u8; 4];
+        if tokio::time::timeout(timeout, stream.read_exact(&mut hdr)).await.is_err() { return None; }
+        if hdr[1] != 0x00 { return None; }
+        match hdr[3] {
+            0x01 => { let mut b=[0u8;6]; let _ = tokio::time::timeout(timeout, stream.read_exact(&mut b)).await; }
+            0x04 => { let mut b=[0u8;18]; let _ = tokio::time::timeout(timeout, stream.read_exact(&mut b)).await; }
+            0x03 => { let mut l=[0u8;1]; if tokio::time::timeout(timeout, stream.read_exact(&mut l)).await.is_ok() { let mut b=vec![0u8; l[0] as usize + 2]; let _ = tokio::time::timeout(timeout, stream.read_exact(&mut b)).await; } }
+            _ => {}
+        }
+        Some(stream)
+    }
+
+    async fn connect_tcp_resolver_via_tun_or_direct(addr: std::net::SocketAddr) -> Result<tokio::net::TcpStream> {
         let socket = if addr.is_ipv4() {
             tokio::net::TcpSocket::new_v4()
         } else {
@@ -709,6 +754,15 @@ impl SmartDnsSplit {
         } else {
             "[::]:0".parse().unwrap()
         };
+        // try SOCKS5 through the tunnel's own listener first
+        // tunnel-routed, then fall
+        // back to a direct TCP connect. This is what carries plain UDP / DoT /
+        // DoH through WARP when the WARP leg is up; without it every query
+        // rides the carrier and family filtering is lost.
+        if let Some(via_socks) = Self::connect_tcp_via_socks(addr, CONNECT_TIMEOUT).await {
+            log::debug!("[smart-dns] {} via SOCKS5", addr);
+            return Ok(via_socks);
+        }
         socket.bind(bind).map_err(AetherError::Io)?;
         // A dead or blocked path must fail fast, not hang the query forever.
         let connect = timeout(CONNECT_TIMEOUT, socket.connect(addr));
