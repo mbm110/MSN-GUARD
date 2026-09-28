@@ -34,7 +34,16 @@ const DNS_PORT: u16 = 53;
 const QUERY_TIMEOUT: Duration = Duration::from_millis(1500);
 /// DoT/DoH connect + TLS handshake. The 2.0.10 hang was a connect() with no
 /// bound at all; a blocked path must fail in seconds, not sit forever.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// v2.0.30: was 5 s. On Iranian carriers 853 is hard-blocked, so every DoT
+/// query paid 5 s for the 853 TCP connect plus another 5 s for the DoH
+/// fallback on 443 — 10 s of dead air before the engine fell back to plain
+/// UDP. That is the "first seconds nothing loads" report. 2 s is enough for
+/// a real Cloudflare edge (RTT ~500 ms in the field logs) and cuts the worst
+/// case to 4 s while keeping the handshake bound. The Warp+Dot SOCKS path
+/// (DoH via the tunnel's SOCKS) will remove the carrier 853 path entirely in
+/// v2.0.31; until then this is the narrow stall fix.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 const MAX_CONCURRENT_QUERIES: usize = 32;
 
