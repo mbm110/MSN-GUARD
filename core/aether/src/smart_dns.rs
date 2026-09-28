@@ -220,28 +220,28 @@ async fn connect_pinned(
     // first pinned IP is frequently unroutable from inside the tunnel.
     // A failed connect here only abandons that racer; the query then falls
     // back to plain UDP, so the device stays online.
-    let mut racers = Vec::new();
+    // True happy-eyeballs: all pins race in parallel, first success wins.
+    // The old `for r in racers { r.await }` awaited them SEQUENTIALLY — each
+    // black-holed anycast IP cost a full CONNECT_TIMEOUT (5 s) before the next
+    // was even tried, giving the "first seconds nothing loads, then sites open
+    // but unfiltered" seen with tls://family on Iranian carriers (family
+    // resolves to 2 v4 anycast IPs, the first unroutable from the tunnel).
+    use futures::future::select_all;
+    let mut futs: Vec<std::pin::Pin<Box<dyn futures::Future<Output = Result<tokio::net::TcpStream, AetherError>> + Send>>> = Vec::new();
     for ip in &ordered {
         let addr = std::net::SocketAddr::new(**ip, port);
-        racers.push(tokio::spawn(async move {
-            SmartDnsSplit::connect_tcp_resolver(addr).await
-        }));
+        futs.push(Box::pin(async move { SmartDnsSplit::connect_tcp_resolver(addr).await }));
     }
-    let mut ok: Option<tokio::net::TcpStream> = None;
-    for r in racers {
-        match r.await {
-            Ok(Ok(s)) => {
-                log::debug!("{proto}: connected to {host} via a raced pinned IP");
-                ok = Some(s);
-                break;
+    while !futs.is_empty() {
+        let (res, _idx, remaining) = select_all(futs).await;
+        match res {
+            Ok(s) => {
+                log::debug!("{proto}: connected to {host} via raced pinned IP");
+                return Ok(s);
             }
-            Ok(Err(e)) => last = Some(e),
-            Err(j) => last = Some(AetherError::Other(format!(" racer panicked: {j}"))),
+            Err(e) => last = Some(e),
         }
-    }
-    match ok {
-        Some(s) => return Ok(s),
-        None => {}
+        futs = remaining;
     }
     Err(last.unwrap_or_else(|| AetherError::Other(format!(
         "{proto}: {host}: every pinned IP failed"
@@ -723,7 +723,18 @@ impl SmartDnsSplit {
         let host = ep.address.split("://").nth(1).unwrap_or(&ep.address);
         let host = host.split('/').next().unwrap_or(host);
         let host = host.split(':').next().unwrap_or(host);
-        let plain = connect_pinned(ep, port, host, "dot").await?;
+        // On carriers that block 853, connect_pinned fails at TCP — don't
+        // fall back to plain UDP (which has no family policy); retry the same
+        // hostname as DoH on 443 before giving up. This is what makes
+        // tls://family.cloudflare-dns.com filter on the same IPs that serve
+        // https://family.cloudflare-dns.com/dns-query.
+        let plain = match connect_pinned(ep, port, host, "dot").await {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("[smart-dns] DoT connect to {host}:853 failed ({e}); trying DoH on 443");
+                return self.query_doh_fallback(ep, query).await;
+            }
+        };
         // The TLS handshake needs its own bound: on Iranian carriers a TCP
         // connect to a Cloudflare IP can succeed while the handshake's first
         // flight is blackholed, and tokio_boring has no timeout of its own.
