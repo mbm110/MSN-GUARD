@@ -587,7 +587,7 @@ pub async fn bridge(
             // DNS replies from the dedicated task. This arm can never block the
             // loop's other arms, so a slow resolver stalls only the queries
             // queued behind it instead of the whole tunnel.
-            r = dns_reply_rx.recv(), if !dns_reply_rx.is_empty() => {
+            r = dns_reply_rx.recv() => {
                 if let Some(resp) = r {
                     rx_total += resp.len() as u64;
                     let _ = write_packet(&tun, &resp).await;

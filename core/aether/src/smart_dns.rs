@@ -43,7 +43,7 @@ const QUERY_TIMEOUT: Duration = Duration::from_millis(1500);
 /// case to 4 s while keeping the handshake bound.
 /// v2.0.31 Warp+Dot: DoH rides the WARP tunnel (not the carrier), so the
 /// carrier 853 block is irrelevant and the tunnel exit answers.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 const MAX_CONCURRENT_QUERIES: usize = 32;
 
@@ -713,7 +713,7 @@ impl SmartDnsSplit {
 
     async fn direct_tcp_dns_exchange(addr: std::net::SocketAddr, query: &[u8]) -> Result<Vec<u8>> {
         let mut stream = Self::connect_tcp_resolver_via_tun_or_direct(addr).await?;
-        Self::tcp_dns_exchange(&mut stream, query, CONNECT_TIMEOUT).await
+        Self::tcp_dns_exchange(&mut stream, query, Duration::from_secs(4)).await
     }
 
     async fn tcp_dns_exchange(stream: &mut tokio::net::TcpStream, query: &[u8], timeout: std::time::Duration) -> Result<Vec<u8>> {
@@ -1173,6 +1173,9 @@ impl SmartDnsSplit {
             .filter(|e| e.transport == DnsTransport::Plain)
             .cloned()
             .collect();
+        if plain_user.is_empty() {
+            log::warn!("[smart-dns] no plain resolvers available for {domain} (qtype {qtype}); falling back to built-ins");
+        }
         if !plain_user.is_empty() {
             match self.query_endpoints(&plain_user, query.clone(), new_id, domain.clone(), qtype).await {
                 Ok(resp) => {
