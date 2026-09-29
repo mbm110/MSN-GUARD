@@ -413,6 +413,10 @@ impl SmartDnsSplit {
             || !self.user_resolvers.read().is_empty()
     }
 
+    pub fn user_resolvers_snapshot(&self) -> Vec<DnsEndpoint> {
+        self.user_resolvers.read().clone()
+    }
+
     /// The hostnames and addresses of the configured DoT/DoH servers.
     ///
     /// These are EXCLUDED from interception. This is the fix for the bootstrap

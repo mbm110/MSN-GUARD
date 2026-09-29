@@ -2089,15 +2089,18 @@ async fn run_masque_tunnel(
         // pushed above and wipe them.
         if options.smart_dns && options.smart_dns_servers.is_some() && crate::smart_dns::smart_dns().is_some() {
             if let Some(list) = options.smart_dns_servers.as_deref() {
-                let parsed: Vec<_> = list
+                let mut merged: Vec<_> = crate::smart_dns::smart_dns()
+                    .map(|e| e.user_resolvers_snapshot())
+                    .unwrap_or_default();
+                let smart_extra: Vec<_> = list
                     .split([',', ';', ' ', '\n', '\r'])
                     .filter_map(crate::smart_dns::DnsEndpoint::parse)
                     .collect();
-                // All parsed endpoints (plain + encrypted) go to the
-                // engine: it needs the user's plain resolvers for its
-                // own Gemini lookups too, not just the DoT/DoH ones.
-                crate::smart_dns::set_resolvers(parsed);
-                log::info!("[smart-dns] resolvers pushed to engine (plain+encrypted)");
+                let mut seen = std::collections::HashSet::new();
+                for ep in &merged { seen.insert((ep.address.clone(), ep.transport as u8)); }
+                for ep in smart_extra { if seen.insert((ep.address.clone(), ep.transport as u8)) { merged.push(ep); } }
+                crate::smart_dns::set_resolvers(merged);
+                log::info!("[smart-dns] resolvers merged from smart_dns_servers");
             }
         }
 
@@ -3111,20 +3114,6 @@ async fn run_warp_in_warp(
         }
     }
     if options.smart_dns && options.smart_dns_servers.is_some() && crate::smart_dns::smart_dns().is_some() {
-        if let Some(list) = options.smart_dns_servers.as_deref() {
-            let parsed: Vec<_> = list
-                .split([',', ';', ' ', '\n', '\r'])
-                .filter_map(crate::smart_dns::DnsEndpoint::parse)
-                .collect();
-            let resolvers: Vec<_> = parsed.clone();
-            if resolvers.is_empty() {
-                log::info!("[smart-dns] no resolvers in user list");
-            } else {
-                let n = resolvers.len();
-                crate::smart_dns::set_resolvers(resolvers);
-                log::info!("[smart-dns] {n} resolver(s) from user list pushed to engine");
-            }
-        }
         log::info!(
             "[smart-dns] AI Mode ON for WoW (smart_dns={} encrypted={})",
             options.smart_dns,
