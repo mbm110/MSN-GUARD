@@ -76,6 +76,24 @@ data class ShardNode(
     val alpn: String,
     /** `ech`, e.g. "cloudflare-ech.com+udp://1.1.1.1". Empty when absent. Verbatim from subscription. */
     val echConfigList: String,
+    /** `echOutbound`, raw JSON outbound for ECH query. Empty when absent. Verbatim. */
+    val echOutbound: String,
+    /** `insecure`/`allowInsecure` — true means skip cert verify. False by default (same as upstream). */
+    val allowInsecure: Boolean,
+    /** `vcn` verifyPeerCertByName. Empty when absent. Verbatim. */
+    val verifyPeerCertByName: String,
+    /** `pcs` pinnedPeerCertSha256. Empty when absent. Verbatim. */
+    val pinnedPeerCertSha256: String,
+    /** `flow` for VLESS (xtls-rprx-vision etc). Empty when absent. Verbatim. */
+    val flow: String,
+    /** `pbk` REALITY public key. Empty when absent. Verbatim. */
+    val realityPublicKey: String,
+    /** `sid` REALITY shortId. Empty when absent. Verbatim. */
+    val realityShortId: String,
+    /** `spx` REALITY spiderX. Empty when absent. Verbatim. */
+    val realitySpiderX: String,
+    /** `pqv` REALITY mldsa65Verify. Empty when absent. Verbatim. */
+    val realityMldsa65Verify: String,
     /**
      * `extra`, a raw JSON object. Empty when absent.
      *
@@ -99,7 +117,7 @@ data class ShardNode(
      * away every node's measured latency once a day for no reason.
      */
     val key: String
-        get() = "$protocol|$credential|$address|$port|$network|$security|$path|$host|$echConfigList"
+        get() = "$protocol|$credential|$address|$port|$network|$security|$path|$host|$echConfigList|$echOutbound|$flow"
 
     /** What the UI may show. Never the raw label, which carries other people's channel ads. */
     val displayName: String
@@ -303,11 +321,26 @@ object ShardConfigs {
                 finalMask = "",
                 alpn = "",
                 echConfigList = "",
+                echOutbound = "",
+                allowInsecure = insecure,
+                verifyPeerCertByName = "",
+                pinnedPeerCertSha256 = "",
+                flow = "",
+                realityPublicKey = "",
+                realityShortId = "",
+                realitySpiderX = "",
+                realityMldsa65Verify = "",
                 extra = "",
                 label = label,
             )
         }
 
+        // Exhaustive parity: every query param is read verbatim.
+        // No normalization, no defaults — the publisher's own tuning is the source of truth.
+        // insecure: 3 keys (insecure/allowInsecure/allow_insecure), pcs-gated like upstream TLS builder
+        val rawInsecure = params["insecure"] == "1" || params["allowinsecure"] == "1" || params["allow_insecure"] == "1"
+        val pcs = params["pcs"].orEmpty()
+        val allowInsecure = rawInsecure && pcs.isEmpty()
         ShardNode(
             protocol = scheme,
             credential = credential,
@@ -326,6 +359,15 @@ object ShardConfigs {
             finalMask = params["fm"].orEmpty(),
             alpn = params["alpn"].orEmpty(),
             echConfigList = params["ech"].orEmpty(),
+            echOutbound = params["echoutbound"].orEmpty(),
+            allowInsecure = allowInsecure,
+            verifyPeerCertByName = params["vcn"].orEmpty(),
+            pinnedPeerCertSha256 = pcs,
+            flow = params["flow"].orEmpty(),
+            realityPublicKey = params["pbk"].orEmpty(),
+            realityShortId = params["sid"].orEmpty(),
+            realitySpiderX = params["spx"].orEmpty(),
+            realityMldsa65Verify = params["pqv"].orEmpty(),
             extra = params["extra"].orEmpty(),
             label = label,
         )
@@ -389,6 +431,7 @@ object ShardConfigs {
                                     // "none" is the only VLESS encryption there is;
                                     // the field is still required by the parser.
                                     put("encryption", "none")
+                                    if (node.flow.isNotEmpty()) put("flow", node.flow)
                                 }
                             )
                         )
@@ -424,50 +467,36 @@ object ShardConfigs {
                     "tlsSettings",
                     JSONObject().apply {
                         put("serverName", node.serverName)
-                        // The subscription ships `fp=unsafe`, which the fork's
-                        // finalmask needs: the mask fragments the TLS record at
-                        // byte offsets that are only valid when the ClientHello has
-                        // a stable length, and uTLS off is what makes it stable —
-                        // no GREASE, no extension shuffling, no padding. Changing
-                        // the fingerprint while a mask is present resizes the
-                        // ClientHello and the offsets stop landing on a record
-                        // boundary, so the tunnel comes up and dies within seconds.
-                        //
-                        // v2.0.1 and every release before it overrode the
-                        // subscription's value with a hardcoded "chrome" here, and
-                        // that was wrong for exactly this reason. Keep what the
-                        // subscription sends, not what we used to hardcode.
-                        put("fingerprint", node.fingerprint)
+                        // Fingerprint verbatim from subscription (fp=unsafe for plain, fp=chrome for ECH).
+                        // v2.0.1 hardcoded chrome — wrong for fm stability. Keep what the publisher sends.
+                        // When present, this is Chrome's ClientHello via uTLS; when "unsafe", uTLS is off
+                        // so the fm offsets stay byte-exact. Never override.
+                        if (node.fingerprint.isNotEmpty()) put("fingerprint", node.fingerprint)
                         if (node.cipherSuites.isNotEmpty()) put("cipherSuites", node.cipherSuites)
-                        // ALPN is the one place xhttp and ws cannot share a value.
-                        //
-                        // The fork's splithttp dialer picks its HTTP version from
-                        // exactly one ALPN entry (decideHTTPVersion,
-                        // transport/internet/splithttp/dialer.go): one entry that
-                        // is not "http/1.1" or "h3" means HTTP/2, and zero entries
-                        // mean HTTP/2 as well. So the `http/1.1` the subscription
-                        // pins for a WebSocket node is correct there — the upgrade
-                        // is a 1.1 request — but on xhttp it would force the whole
-                        // tunnel onto 1.1 while the publisher's own recipe for the
-                        // current Iranian block is "XHTTP with alpn h2".
-                        //
-                        // Only override when the node did not say: an xhttp node
-                        // that ships its own `alpn` was tuned by whoever runs it,
-                        // and that verdict beats our default. ws nodes keep whatever
-                        // they always had, so nothing already in the field changes.
+                        // ALPN: xhttp with empty alpn -> h2 (publisher's recipe for current block), else verbatim.
                         if (node.network == "xhttp" && node.alpn.isEmpty()) {
                             put("alpn", JSONArray().put("h2"))
                         } else if (node.alpn.isNotEmpty()) {
                             put("alpn", JSONArray().apply { node.alpn.split(',').forEach { put(it.trim()) } })
                         }
                         if (node.echConfigList.isNotEmpty()) put("echConfigList", node.echConfigList)
-                        // allowInsecure stays FALSE. These are other people's CDN
-                        // hosts and the certificate is the only evidence we are
-                        // talking to the host we asked for; turning verification
-                        // off to raise the success rate would make every node
-                        // MITM-able by the carrier, which is the exact threat this
-                        // transport exists to defeat.
-                        put("allowInsecure", false)
+                        // Upstream parity: insecure is pcs-gated. allowInsecure true only
+                        // when URL had insecure=1 and no pcs. User's example insecure=0 -> false, correct.
+                        put("allowInsecure", node.allowInsecure)
+                        if (node.verifyPeerCertByName.isNotEmpty()) put("verifyPeerCertByName", node.verifyPeerCertByName)
+                        if (node.pinnedPeerCertSha256.isNotEmpty()) put("pinnedPeerCertSha256", node.pinnedPeerCertSha256)
+                    }
+                )
+            } else if (node.security == "reality") {
+                put(
+                    "realitySettings",
+                    JSONObject().apply {
+                        put("serverName", node.serverName)
+                        if (node.fingerprint.isNotEmpty()) put("fingerprint", node.fingerprint)
+                        if (node.realityPublicKey.isNotEmpty()) put("publicKey", node.realityPublicKey)
+                        if (node.realityShortId.isNotEmpty()) put("shortId", node.realityShortId)
+                        if (node.realitySpiderX.isNotEmpty()) put("spiderX", node.realitySpiderX)
+                        if (node.realityMldsa65Verify.isNotEmpty()) put("mldsa65Verify", node.realityMldsa65Verify)
                     }
                 )
             }
