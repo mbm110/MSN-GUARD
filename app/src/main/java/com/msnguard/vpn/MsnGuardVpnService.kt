@@ -3021,8 +3021,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             try {
                 val address = Tun2SocksManager.selectPrivateAddress()
                 ConnectionLog.record("SHARD: creating TUN before xray starts")
-                val shardMtu = Tun2SocksManager.SHARD_TUNNEL_MTU
-                ConnectionLog.record("MTU: $shardMtu for SHARD (legacy path)")
+                val shardMtu = Tun2SocksManager.VPN_INTERFACE_MTU
+                ConnectionLog.record("MTU: $shardMtu for SHARD (PattNG parity — VLESS/Reality, same TUN MTU as every transport)")
                 tun = Builder()
                     .setSession("MSN-GUARD")
                     .setMtu(shardMtu)
@@ -4874,7 +4874,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 //    Per-method since 2.3.20 — MtuConfig resolves the user's choice
                 //    for THIS transport (MASQUE/WireGuard/WoW), defaulting to the
                 //    measured value each path shipped before the screen existed.
-                //    SHARD is the only tunnel bound to 512 — its WebSocket leg
+                //    SHARD uses the same TUN MTU (1500) as every transport — PattNG parity; the WebSocket UDP leg
                 //    drops anything bigger, and it has its own Builder below. A WARP
                 //    leg (like the one behind Psiphon or Tor) is
                 //    WireGuard/MASQUE+jumbo-safe, so pushing it down to 512 would

@@ -29,11 +29,17 @@ object Tun2SocksManager {
     const val VPN_INTERFACE_MTU = 1500
 
     /**
-     * Legacy compatibility name for the old payload ceiling. It is NOT an
-     * Android TUN MTU and must not be passed to Builder.setMtu or tun2socks.
-     * SHARD's actual UDP ceiling is enforced by ShardSocksFront.
+     * SHARD's TUN MTU — identical to [VPN_INTERFACE_MTU].
+     *
+     * PattNG parity: this transport is PattNG's VLESS/Reality core
+     * (msn calls it SHARD). PattNG uses one MTU for every method:
+     * AppConfig.VPN_MTU = 1500, SettingsManager.getVpnMtu() defaults to it,
+     * CoreVpnService.builder.setMtu(getVpnMtu()) and TProxyService
+     * tunnel.mtu = getVpnMtu(). The previous 512 was a WebSocket *payload*
+     * ceiling, not a TUN MTU — the real UDP ceiling (500) stays enforced
+     * per-datagram inside ShardSocksFront.
      */
-    const val SHARD_TUNNEL_MTU = 512
+    const val SHARD_TUNNEL_MTU = 1500
     const val VPN_INTERFACE_IPV4_NETMASK = "255.255.255.0"
 
     /**
@@ -145,9 +151,10 @@ object Tun2SocksManager {
         tunFd: ParcelFileDescriptor,
         socksProxyPort: Int,
         dnsOnlyUdpgw: Boolean = false,
-        /** Path MTU the native stack should advertise. Defaults to the general
-         * 1500; SHARD passes [SHARD_TUNNEL_MTU] because its WebSocket leg drops
-         * datagrams past that size. See [SHARD_TUNNEL_MTU]. */
+        /** Path MTU the native stack should advertise. Defaults to
+         * [VPN_INTERFACE_MTU] (1500). PattNG parity: every transport uses the
+         * same 1500 — the WebSocket UDP ceiling (500) is enforced per-datagram
+         * in ShardSocksFront, not here. */
         mtu: Int = VPN_INTERFACE_MTU,
     ): Boolean {
         if (tun2SocksThread != null) {

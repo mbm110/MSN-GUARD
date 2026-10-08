@@ -145,10 +145,10 @@ object ZeptunEngine : TunEngine {
         // handler is socks5 at 127.0.0.1:port. auto_route is OFF because the
         // VpnService.Builder already installed addresses/routes/DNS.
         //
-        // mtu: pass through the caller's choice. SHARD's 512 is honoured here
-        // as well — Zeptun's fragmentation is IP-layer too, so a 512 payload
-        // budget is the same constraint. If this ever hurts Zeptun throughput,
-        // bump it to 1500 only for Zeptun via a separate code path.
+        // mtu: pass through the caller's choice. PattNG parity: SHARD is the
+        // PattNG VLESS/Reality core — TUN MTU is 1500 like every transport
+        // (AppConfig.VPN_MTU). The WebSocket UDP ceiling (500) is per-datagram
+        // inside ShardSocksFront, not an IP MTU.
         val toml = buildString {
             appendLine("preset = \"mobile\"")
             appendLine("log_level = \"warn\"")

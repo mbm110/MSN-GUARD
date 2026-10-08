@@ -15,9 +15,8 @@ import android.content.Context
  *   defaults, plausible for their respective encap overheads.
  * - Psiphon / Tor 1500 — they carry TCP directly, no extra tunnel
  *   header to account for beyond the TUN itself.
- * - SHARD 1280 — a normal TUN MTU. The WebSocket/Xray path has a separate
- *   UDP payload ceiling enforced by ShardSocksFront; that ceiling must never
- *   be used as the Android interface MTU.
+ * - SHARD 1500 — PattNG's VLESS/Reality core (msn calls it SHARD) — same TUN MTU as every other transport: AppConfig.VPN_MTU=1500. The WebSocket/Xray UDP payload ceiling (500) stays per-datagram
+ *   inside ShardSocksFront.
  *
  * Range 68..1500 — the IPv4 minimum header plus the Ethernet ceiling.
  * Anything narrower cannot carry a minimal packet; anything wider is
@@ -42,8 +41,13 @@ object MtuConfig {
     const val DEFAULT_WOW = 1220
     const val DEFAULT_PSIPHON = 1500
     const val DEFAULT_TOR = 1500
-    // 2.3.10 legacy: SHARD's TUN MTU is the WebSocket payload ceiling (512).
-    const val DEFAULT_SHARD = 512
+    // PattNG parity: SHARD is the PattNG core for VLESS/Reality — same TUN
+    // MTU as every other transport. PattNG's AppConfig.VPN_MTU = 1500 and
+    // SettingsManager.getVpnMtu() defaults to it; CoreVpnService and
+    // TProxyService both call builder.setMtu(getVpnMtu()). No method has a
+    // separate MTU. The WebSocket UDP ceiling (500) is a per-datagram limit
+    // inside ShardSocksFront, not a TUN MTU.
+    const val DEFAULT_SHARD = 1500
 
     /** All methods in the order the screen lists them. */
     enum class Method(

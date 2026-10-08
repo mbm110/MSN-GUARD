@@ -36,9 +36,9 @@ import java.util.concurrent.TimeUnit
  *  - binary search 1200..min(localMtu,1500), 900 ms per probe, 90 ms gap
  *  - optimal = (bestPathMtu - overhead - SAFETY_MARGIN), snapped down to a
  *    16-byte boundary, clamped to [SCAN_FLOOR, SCAN_CEIL]
- *  - SHARD is additionally capped at its WebSocket-leg ceiling: the pooled
- *    nodes drop any UDP datagram larger than that, so a larger TUN MTU makes
- *    QUIC probe a dead path while chat still works
+ *  - SHARD is PattNG's VLESS/Reality core (msn calls it SHARD) — same TUN
+ *    MTU and same probe as every other method. The WebSocket UDP ceiling
+ *    (500) is per-datagram inside ShardSocksFront and does not cap the TUN.
  *
  * Psiphon/Tor are TCP-based: they re-segment, so their constraint is the
  * outer path rather than a hard per-packet expansion. A TCP-based method
@@ -88,8 +88,9 @@ object MtuProbe {
     )
 
     /**
-     * SHARD's WebSocket/Xray UDP payload ceiling is enforced per datagram in
-     * ShardSocksFront. It is not a TUN MTU and must not cap the scanner result.
+     * SHARD's WebSocket/Xray UDP payload ceiling (500) is enforced per datagram
+     * inside ShardSocksFront. It is not a TUN MTU and never caps the scanner.
+     * Kept for documentation; the probe treats SHARD like every other method.
      */
     private const val SHARD_WEBSOCKET_CEILING = 500
 
@@ -146,17 +147,15 @@ object MtuProbe {
             }
         }
 
-        val overhead = if (method == MtuConfig.Method.SHARD) 0 else OVERHEAD[method] ?: 0
-        var optimal = if (method == MtuConfig.Method.SHARD) {
-            MtuConfig.DEFAULT_SHARD
-        } else {
+        val overhead = OVERHEAD[method] ?: 0
+        var optimal = run {
             var o = bestPathMtu - overhead - SAFETY_MARGIN
             o -= o % SNAP
             o.coerceIn(SCAN_FLOOR, SCAN_CEIL)
         }
 
         Log.i(TAG, "${method.title}: pathMtu=$bestPathMtu overhead=$overhead optimal=$optimal after $probes probes localMtu=$localMtu")
-        val capped = method == MtuConfig.Method.SHARD
+        val capped = false
         return Result(method, bestPathMtu, optimal, probes, capped = capped)
     }
 
