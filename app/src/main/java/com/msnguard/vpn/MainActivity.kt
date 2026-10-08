@@ -1254,7 +1254,18 @@ class MainActivity : Activity() {
                     // the carrier link proves nothing about the TUN, so if the
                     // core has still not moved a single byte after the settle
                     // window, do not leave the user on a confident green dial.
-                    watchForTunnelBytes(request, rxAtStart)
+                    // Tor/SHARD (and chained Psiphon) count bytes in their
+                    // front-ends, not in the core's TUN bridge — the core's
+                    // counter stays at 0 while TorSocksFront/ShardSocksFront
+                    // already moves bytes. Judging them on trafficRx painted
+                    // a healthy Tor session DEGRADED 12 s after connect. Only
+                    // the WARP native path genuinely needs this byte gate; for
+                    // front-end transports the probe that just passed already
+                    // went through the front (openTunnelConnection SOCKS) so it
+                    // IS inside the tunnel.
+                    if (TunnelStatus.isNativeTunMode) {
+                        watchForTunnelBytes(request, rxAtStart)
+                    }
                 } else {
                     ConnectionLog.record(
                         "No reachability after $attempts probe(s) — treating the tunnel as dead"

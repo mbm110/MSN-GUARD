@@ -528,6 +528,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var psiphonTunnel: PsiphonTunnel? = null
     private var psiphonConfigJson: String = ""
     private var psiphonVpnMode = false
+    private var psiphonUdpFilteredLogged = false
 
     /**
      * Whether THIS session is proxy-only, latched at [startTunnel].
@@ -1451,6 +1452,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     }
 
     override fun onDiagnosticMessage(message: String) {
+        // Psiphon's s0 proxy logs every UDP ASSOCIATE (0x03) as a Warning:
+        // tun2socks forwards ALL UDP through SOCKS, but Psiphon only speaks
+        // CONNECT (0x01). Hundreds of QUIC/DNS attempts per second then flood
+        // the screen with an identical scary line that has nothing to do with
+        // whether TCP sites load. Filter it here — TCP is the real signal.
+        if (message.contains("s0 proxy accept error") &&
+            message.contains("0x03, not 0x01")
+        ) {
+            // Count, don't print: one line per session is enough to prove the
+            // filter is live without drowning the next real diagnostic.
+            if (!psiphonUdpFilteredLogged) {
+                psiphonUdpFilteredLogged = true
+                ConnectionLog.record("Psiphon: UDP ASSOCIATE not supported — filtered (TCP sites unaffected)")
+            }
+            return
+        }
         ConnectionLog.record("Psiphon: $message")
         // Capture the protocol that actually carried the tunnel.
         //
@@ -5638,6 +5655,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // out a window inherited from the tunnel that just died.
         prevSpeedSampleMs = 0
         lastTrafficSampleMs = 0
+        psiphonUdpFilteredLogged = false
         // Per-session latch: each tunnel gets one chance to prove its transport
         // works. Without this reset the flag would stay set for the life of the
         // process, so a later session on a different transport (or a different
