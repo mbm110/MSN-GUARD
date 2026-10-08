@@ -74,6 +74,8 @@ data class ShardNode(
     val finalMask: String,
     /** `alpn`, comma-separated. Empty when absent. */
     val alpn: String,
+    /** `ech`, e.g. "cloudflare-ech.com+udp://1.1.1.1". Empty when absent. Verbatim from subscription. */
+    val echConfigList: String,
     /**
      * `extra`, a raw JSON object. Empty when absent.
      *
@@ -97,7 +99,7 @@ data class ShardNode(
      * away every node's measured latency once a day for no reason.
      */
     val key: String
-        get() = "$protocol|$credential|$address|$port|$network|$security|$path|$host"
+        get() = "$protocol|$credential|$address|$port|$network|$security|$path|$host|$echConfigList"
 
     /** What the UI may show. Never the raw label, which carries other people's channel ads. */
     val displayName: String
@@ -262,7 +264,6 @@ object ShardConfigs {
         if (address.isEmpty() || port !in 1..65535) return null
 
         val params = parseQuery(query)
-        if (params.containsKey("ech")) return null
         val host = params["host"].orEmpty()
         val sni = params["sni"].orEmpty()
         val security = params["security"]?.lowercase(Locale.US).orEmpty().ifEmpty { "none" }
@@ -301,6 +302,7 @@ object ShardConfigs {
                 cipherSuites = "",
                 finalMask = "",
                 alpn = "",
+                echConfigList = "",
                 extra = "",
                 label = label,
             )
@@ -323,6 +325,7 @@ object ShardConfigs {
             cipherSuites = params["cs"].orEmpty(),
             finalMask = params["fm"].orEmpty(),
             alpn = params["alpn"].orEmpty(),
+            echConfigList = params["ech"].orEmpty(),
             extra = params["extra"].orEmpty(),
             label = label,
         )
@@ -457,6 +460,7 @@ object ShardConfigs {
                         } else if (node.alpn.isNotEmpty()) {
                             put("alpn", JSONArray().apply { node.alpn.split(',').forEach { put(it.trim()) } })
                         }
+                        if (node.echConfigList.isNotEmpty()) put("echConfigList", node.echConfigList)
                         // allowInsecure stays FALSE. These are other people's CDN
                         // hosts and the certificate is the only evidence we are
                         // talking to the host we asked for; turning verification
