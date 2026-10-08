@@ -6263,7 +6263,7 @@ class MainActivity : Activity() {
             scanButton.text = Strings.tf("Scanning… %s", MtuConfig.MIN_MTU)
             scanButton.isEnabled = false
             Thread {
-                val r = MtuProbe.measure(method) { size ->
+                val r = MtuProbe.measure(this, method) { size ->
                     runOnUiThread { scanButton.text = Strings.tf("Scanning… %s", size) }
                 }
                 runOnUiThread {
