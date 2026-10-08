@@ -6278,8 +6278,18 @@ class MainActivity : Activity() {
                         found == null ->
                             toastShort(Strings.t("This line dropped every probe — MTU unchanged"))
                         else -> {
+                            // Persisted immediately so the list shows it without Back:
+                            // the row reads from SharedPreferences via MtuConfig, not from
+                            // the field alone. Without this the user would type the number
+                            // back in by hand.
+                            MtuConfig.set(this, method, found)
+                            ConnectionLog.record("${method.title} MTU auto-set to $found (scan path ${r.outerPathMtu}, ${r.probes} probes)")
                             field.setText(found.toString())
                             toastShort(Strings.tf("Best MTU for %s on this line: %s", method.title, found))
+                            // Repaint the list behind the dialog so the value is visible
+                            // without dismissing — Activity dialogs sit above pageHost.
+                            mtuPage?.let { pageHost.removeView(it); mtuPage = null }
+                            openMtuScreen()
                         }
                     }
                 }
