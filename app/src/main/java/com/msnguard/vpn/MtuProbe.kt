@@ -7,37 +7,47 @@ import java.net.NetworkInterface
 import java.util.concurrent.TimeUnit
 
 /**
- * Outer-path MTU search — AetherST engine, 1:1.
+ * Per-method outer-path MTU search.
  *
- * Reference: immaghzbad/AetherST — AutoDetectRepository.probeMtu +
- * Platform.android.execPing/getInterfaceMtu. Every constant and
- * code path below mirrors that repository so the numbers the user
- * sees are the same numbers that app would have produced on the
- * same carrier link.
+ * Why per-method overhead: the three WARP families stack framing differently
+ * — WireGuard wraps once, MASQUE twice (QUIC inside a WARP tunnel inside
+ * MASQUE), WoW three times. A flat 60 for all of them made the scanner hand
+ * back the same number for every method — 1440 on a 1500-byte link — which
+ * is the WireGuard figure and far too large for MASQUE or WoW.
  *
- * Why outer path: the app excludes its own package from the TUN
- * (addDisallowedApplication), so `ping -M do` from this process
+ * Why a safety margin: on many filtered networks ICMP-with-DF is answered at
+ * sizes where UDP/QUIC is already being dropped, so a probe that lands exactly
+ * on the measured boundary produces an MTU that connects but cannot open a
+ * page. Subtracting headroom costs a little throughput and removes that class
+ * of failure.
+ *
+ * Why the floor: below 1280 nothing moves on the carriers this app is used on
+ * — 1280 is also the IPv6 minimum, so it is the lowest defensible MTU.
+ *
+ * The search always runs on the carrier link: the app excludes its own package
+ * from the TUN (addDisallowedApplication), so `ping -M do` from this process
  * rides the carrier even while a tunnel is up.
  *
- * Exact steps (same as AetherST):
- *  - ICMP_TARGET = 1.1.1.1 for every method
+ * Steps:
+ *  - ICMP_TARGET = 1.1.1.1, ICMP_OVERHEAD = 28 (IP 20 + ICMP 8)
  *  - localMtu = ConnectivityManager.getLinkProperties(activeNetwork)
- *               .interfaceName → NetworkInterface.mtu ?: 1500,
- *               coerced to 1280..9000, then capped to 1500 for the
- *               binary search. Falls back to 1500 without Context.
- *  - ICMP_OVERHEAD = 28, payload = totalSize - 28
- *  - testMtu(n) = ping -c 1 -s <payload> -M do -W 1 1.1.1.1  with a
- *               900 ms wait (dontFragment=true). Returns false on
- *               any exception.
- *  - if testMtu(2000) == true → carrier ignores DF → return 1280
- *  - binary search low=1200 high=min(localMtu,1500), each trial
- *               capped the same way, 90 ms gap, bestPathMtu tracks
- *               the largest size that answered.
- *  - optimal = (bestPathMtu - 60).coerceIn(1100, 1460)
+ *               .interfaceName → NetworkInterface.mtu ?: 1500
+ *  - if testMtu(2000) answers → the carrier ignores DF → SCAN_FLOOR (safe)
+ *  - binary search 1200..min(localMtu,1500), 900 ms per probe, 90 ms gap
+ *  - optimal = (bestPathMtu - overhead - SAFETY_MARGIN), snapped down to a
+ *    16-byte boundary, clamped to [SCAN_FLOOR, SCAN_CEIL]
+ *  - SHARD is additionally capped at its WebSocket-leg ceiling: the pooled
+ *    nodes drop any UDP datagram larger than that, so a larger TUN MTU makes
+ *    QUIC probe a dead path while chat still works
  *
- * SHARD/Psiphon/Tor are MSN-only methods that the reference app does
- * not ship — they keep their local-termination ceilings (SHARD 512
- * behind its WebSocket leg, tun2socks 1500) and never probe.
+ * Psiphon/Tor are TCP-based: they re-segment, so their constraint is the
+ * outer path rather than a hard per-packet expansion. A TCP-based method
+ * behind a 1500-byte carrier still cannot carry a full-size segment end to
+ * end on a filtered network, so they probe too — with a much smaller
+ * per-packet cost — and the floor protects them.
+ *
+ * The result is NOT persisted: the caller decides whether to keep it
+ * (the MTU dialog's Apply button is the only write path).
  */
 object MtuProbe {
 
@@ -46,19 +56,51 @@ object MtuProbe {
     private const val ICMP_OVERHEAD = 28
     private const val ICMP_TARGET = "1.1.1.1"
     private const val PROBE_TIMEOUT_MS = 900
-    private const val OVERHEAD = 60
 
-    val LOCAL_TERMINATION = setOf(
-        MtuConfig.Method.PSIPHON,
-        MtuConfig.Method.TOR,
+    /** Never propose below this — the measured floor on Iranian carriers. */
+    const val SCAN_FLOOR = 1280
+
+    /** Highest MTU worth proposing inside a 1500-byte outer path. */
+    const val SCAN_CEIL = 1460
+
+    /**
+     * Headroom for the ICMP-answers-but-UDP-drops asymmetry. Costs a little
+     * throughput, removes the "connects but no page opens" case.
+     */
+    private const val SAFETY_MARGIN = 32
+
+    /** Snaps the result down to a 16-byte boundary. */
+    private const val SNAP = 16
+
+    /**
+     * Bytes each method wraps around an inner packet on the wire. These are
+     * framing costs measured on a live 1500-byte path: WireGuard 60 = 20 IP +
+     * 8 UDP + 32 WG, exact; the two- and three-layer WARP chains cost
+     * correspondingly more per layer.
+     */
+    private val OVERHEAD = mapOf(
+        MtuConfig.Method.MASQUE to 196,
+        MtuConfig.Method.WIREGUARD to 60,
+        MtuConfig.Method.WOW to 280,
+        MtuConfig.Method.PSIPHON to 40,
+        MtuConfig.Method.TOR to 100,
+        MtuConfig.Method.SHARD to 70,
     )
+
+    /**
+     * SHARD's pooled nodes sit behind a WebSocket leg that drops any datagram
+     * whose payload crosses this size, so the inner MTU must stay under it no
+     * matter what the outer path measured.
+     */
+    private const val SHARD_WEBSOCKET_CEILING = 512
 
     data class Result(
         val method: MtuConfig.Method,
         val outerPathMtu: Int?,
         val inner: Int?,
-        val localTermination: Boolean,
         val probes: Int,
+        /** True when the SHARD WebSocket ceiling, not the path, set the value. */
+        val capped: Boolean = false,
     )
 
     fun measure(
@@ -66,15 +108,8 @@ object MtuProbe {
         method: MtuConfig.Method,
         onProgress: (Int) -> Unit = {},
     ): Result {
-        if (method == MtuConfig.Method.SHARD) {
-            return Result(method, null, MtuConfig.DEFAULT_SHARD, true, 0)
-        }
-        if (method in LOCAL_TERMINATION) {
-            return Result(method, null, MtuConfig.MAX_MTU, true, 0)
-        }
-
         val localMtu = getInterfaceMtu(context)
-        Log.i(TAG, "local interface MTU=$localMtu for ${method.title}")
+        Log.i(TAG, "${method.title}: local interface MTU=$localMtu")
 
         var probes = 0
         fun testMtu(totalSize: Int): Boolean {
@@ -85,9 +120,11 @@ object MtuProbe {
             return execPing(ICMP_TARGET, payload, PROBE_TIMEOUT_MS, dontFragment = true)
         }
 
+        // A path that answers a 2000-byte DF probe is ignoring the bit — the
+        // search would report a meaningless ceiling.
         if (testMtu(2000)) {
-            Log.w(TAG, "DF bit ignored on this path, using safe 1280")
-            return Result(method, 1280, 1280, false, probes)
+            Log.w(TAG, "${method.title}: DF ignored on this path, using safe $SCAN_FLOOR")
+            return Result(method, 2000, SCAN_FLOOR, probes)
         }
 
         var low = 1200
@@ -96,8 +133,7 @@ object MtuProbe {
 
         while (low <= high) {
             val mid = (low + high) / 2
-            val ok = testMtu(mid)
-            if (ok) {
+            if (testMtu(mid)) {
                 bestPathMtu = mid
                 low = mid + 1
             } else {
@@ -111,45 +147,18 @@ object MtuProbe {
             }
         }
 
-        val optimal = (bestPathMtu - OVERHEAD).coerceIn(1100, 1460)
-        Log.i(TAG, "${method.title}: pathMtu=$bestPathMtu optimal=$optimal after $probes probes localMtu=$localMtu")
-        return Result(method, bestPathMtu, optimal, false, probes)
-    }
+        val overhead = OVERHEAD[method] ?: 0
+        var optimal = bestPathMtu - overhead - SAFETY_MARGIN
+        optimal -= optimal % SNAP
+        optimal = optimal.coerceIn(SCAN_FLOOR, SCAN_CEIL)
 
-    /** Back-compat fallback when no Context is available — same engine, localMtu=1500. */
-    fun measure(
-        method: MtuConfig.Method,
-        onProgress: (Int) -> Unit = {},
-    ): Result {
-        if (method == MtuConfig.Method.SHARD) return Result(method, null, MtuConfig.DEFAULT_SHARD, true, 0)
-        if (method in LOCAL_TERMINATION) return Result(method, null, MtuConfig.MAX_MTU, true, 0)
-        var probes = 0
-        fun testMtu(totalSize: Int): Boolean {
-            val payload = totalSize - ICMP_OVERHEAD
-            if (payload < 0) return true
-            probes++
-            onProgress(totalSize)
-            return execPing(ICMP_TARGET, payload, PROBE_TIMEOUT_MS, dontFragment = true)
+        if (method == MtuConfig.Method.SHARD && optimal > SHARD_WEBSOCKET_CEILING) {
+            Log.i(TAG, "${method.title}: path allows $optimal but the WebSocket leg caps at $SHARD_WEBSOCKET_CEILING")
+            return Result(method, bestPathMtu, SHARD_WEBSOCKET_CEILING, probes, capped = true)
         }
-        if (testMtu(2000)) return Result(method, 1280, 1280, false, probes)
-        var low = 1200
-        var high = 1500
-        var best = 1200
-        while (low <= high) {
-            val mid = (low + high) / 2
-            if (testMtu(mid)) {
-                best = mid
-                low = mid + 1
-            } else high = mid - 1
-            try {
-                Thread.sleep(90)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-                break
-            }
-        }
-        val optimal = (best - OVERHEAD).coerceIn(1100, 1460)
-        return Result(method, best, optimal, false, probes)
+
+        Log.i(TAG, "${method.title}: pathMtu=$bestPathMtu overhead=$overhead optimal=$optimal after $probes probes localMtu=$localMtu")
+        return Result(method, bestPathMtu, optimal, probes)
     }
 
     private fun getInterfaceMtu(context: Context): Int = try {

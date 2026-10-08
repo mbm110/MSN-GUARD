@@ -6272,35 +6272,33 @@ class MainActivity : Activity() {
                     scanButton.text = Strings.t("Scan the best value")
                     mtuScanResult = r
                     val found = r.inner
-                    when {
-                        found == null && r.localTermination ->
-                            toastShort(Strings.tf("%s needs no scan — using %s", method.title, MtuConfig.get(this, method)))
-                        found == null ->
-                            toastShort(Strings.t("This line dropped every probe — MTU unchanged"))
-                        else -> {
-                            // Persisted immediately so the list shows it without Back:
-                            // the row reads from SharedPreferences via MtuConfig, not from
-                            // the field alone. Without this the user would type the number
-                            // back in by hand.
-                            MtuConfig.set(this, method, found)
-                            ConnectionLog.record("${method.title} MTU auto-set to $found (scan path ${r.outerPathMtu}, ${r.probes} probes)")
-                            field.setText(found.toString())
-                            toastShort(Strings.tf("Best MTU for %s on this line: %s", method.title, found))
-                            // Repaint the list behind the dialog so the value is visible
-                            // without dismissing — Activity dialogs sit above pageHost.
-                            mtuPage?.let { pageHost.removeView(it); mtuPage = null }
-                            openMtuScreen()
+                    if (found == null) {
+                        toastShort(Strings.t("This line dropped every probe — MTU unchanged"))
+                    } else {
+                        // NOT persisted: the scan only fills the field. Apply is the
+                        // single write path — closing without it must leave the stored
+                        // value alone, even though the number is now visible.
+                        field.setText(found.toString())
+                        val note = if (r.capped) {
+                            " (WebSocket ceiling)"
+                        } else {
+                            " (path ${r.outerPathMtu ?: "—"}, ${r.probes} probes)"
                         }
+                        ConnectionLog.record("${method.title} MTU scan found $found$note — waiting for Apply")
+                        toastShort(Strings.tf("Found %s — press Apply to keep it", found))
                     }
                 }
             }.start()
         }
         sheet.addView(scanButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { bottomMargin = dp(14) })
-        mtuScanResult?.takeIf { it.method == method }?.inner?.let { found ->
-            sheet.addView(label(
-                Strings.tf("Last scan: %s (path %s, %s probes)", found, mtuScanResult?.outerPathMtu ?: "—", mtuScanResult?.probes ?: 0),
-                12f, MUTED,
-            ), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
+        mtuScanResult?.takeIf { it.method == method }?.let { res ->
+            val inner = res.inner
+            val line = if (res.capped) {
+                Strings.tf("Last scan: %s (WebSocket ceiling)", inner)
+            } else {
+                Strings.tf("Last scan: %s (path %s, %s probes)", inner, res.outerPathMtu ?: "—", res.probes)
+            }
+            sheet.addView(label(line, 12f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
         }
 
         val entry = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }

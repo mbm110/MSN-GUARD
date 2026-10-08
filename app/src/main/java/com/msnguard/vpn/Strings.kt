@@ -736,6 +736,16 @@ object Strings {
             "آخرین اسکن: %s (مسیر %s، %s بسته)",
             "上次扫描: %s (路径 %s, %s 次探测)",
         ),
+        "Found %s — press Apply to keep it" to Triple(
+            "Found %s — press Apply to keep it",
+            "%s پیدا شد — برای نگه داشتن اعمال را بزنید",
+            "已找到 %s — 点击应用以保留",
+        ),
+        "Last scan: %s (WebSocket ceiling)" to Triple(
+            "Last scan: %s (WebSocket ceiling)",
+            "آخرین اسکن: %s (سقف WebSocket)",
+            "上次扫描: %s (WebSocket 上限)",
+        ),
     )
 
     /** Translate [key] into the active language, falling back to English. */
