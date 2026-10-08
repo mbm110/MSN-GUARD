@@ -3022,7 +3022,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 val address = Tun2SocksManager.selectPrivateAddress()
                 ConnectionLog.record("SHARD: creating TUN before xray starts")
                 val shardMtu = Tun2SocksManager.VPN_INTERFACE_MTU
-                ConnectionLog.record("MTU: $shardMtu for SHARD (PattNG parity — VLESS/Reality, same TUN MTU as every transport)")
+                ConnectionLog.record("MTU: $shardMtu for SHARD")
                 tun = Builder()
                     .setSession("MSN-GUARD")
                     .setMtu(shardMtu)

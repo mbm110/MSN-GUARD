@@ -11,7 +11,7 @@ import android.content.Context
  * Profile A and Profile B can keep different tunings.
  *
  * Defaults are MEASURED, not copied from the reference screenshot:
- * - MASQUE 1304, WireGuard 1440, WoW 1220 — the reference app's
+ * - MASQUE 1304, WireGuard 1440, WoW 1280 — the reference app's
  *   defaults, plausible for their respective encap overheads.
  * - Psiphon / Tor 1500 — they carry TCP directly, no extra tunnel
  *   header to account for beyond the TUN itself.
@@ -38,7 +38,7 @@ object MtuConfig {
     // Defaults shown as "1304 (default)" etc.
     const val DEFAULT_MASQUE = 1304
     const val DEFAULT_WIREGUARD = 1440
-    const val DEFAULT_WOW = 1220
+    const val DEFAULT_WOW = 1280
     const val DEFAULT_PSIPHON = 1500
     const val DEFAULT_TOR = 1500
     // PattNG parity: SHARD is the PattNG core for VLESS/Reality — same TUN
