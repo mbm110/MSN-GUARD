@@ -1324,7 +1324,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             return
         }
 
-        if (!TunEngineManager.start(this, tunFd, port, mtu = MtuConfig.get(this, MtuConfig.Method.PSIPHON))) {
+        if (!TunEngineManager.start(
+                this,
+                tunFd,
+                port,
+                dnsOnly = true,
+                mtu = MtuConfig.get(this, MtuConfig.Method.PSIPHON),
+            )) {
             failAndStop(Strings.t("Could not start whole-device routing"))
             return
         }
@@ -3884,15 +3890,24 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         sendStatus(STATUS_CONNECTING, Strings.tf("Reconnecting after %s…", reason))
         ConnectionLog.record("Auto reconnect #$reconnectAttempts in ${delay}s")
         reconnectTask?.cancel(false)
-        reconnectTask = ladderScheduler.schedule({
-            try {
-                if (userInitiatedStop.get() || connected.get()) return@schedule
-                startTunnel(config)
-            } catch (e: Exception) {
-                ConnectionLog.record("Auto reconnect failed to start: ${e.message}")
-                scheduleAutoReconnect("start failure")
-            }
-        }, delay, TimeUnit.SECONDS)
+        reconnectTask = try {
+            ladderScheduler.schedule({
+                try {
+                    if (userInitiatedStop.get() || connected.get()) return@schedule
+                    startTunnel(config)
+                } catch (e: Exception) {
+                    ConnectionLog.record("Auto reconnect failed to start: ${e.message}")
+                    scheduleAutoReconnect("start failure")
+                }
+            }, delay, TimeUnit.SECONDS)
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // onDestroy() may win the race with a failure callback. A terminated
+            // scheduler means the service is already leaving; never crash the
+            // worker while trying to schedule a retry on a dead executor.
+            ConnectionLog.record("Auto reconnect skipped: scheduler is terminated")
+            reconnectTask = null
+            return
+        }
     }
 
     private fun cancelAutoReconnect() {
@@ -3918,16 +3933,20 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     ConnectionLog.record("NetworkCallback: connectivity restored, resetting backoff and retrying")
                     reconnectAttempts = 0
                     reconnectTask?.cancel(false)
-                    reconnectTask = ladderScheduler.schedule({
-                        try {
-                            if (userInitiatedStop.get() || connected.get()) return@schedule
-                            val config = storedConfig
-                            if (config != null) startTunnel(config)
-                        } catch (e: Exception) {
-                            ConnectionLog.record("Auto reconnect after network restore failed: ${e.message}")
-                            scheduleAutoReconnect("network restore failure")
-                        }
-                    }, 0, TimeUnit.SECONDS)
+                    reconnectTask = runCatching {
+                        ladderScheduler.schedule({
+                            try {
+                                if (userInitiatedStop.get() || connected.get()) return@schedule
+                                val config = storedConfig
+                                if (config != null) startTunnel(config)
+                            } catch (e: Exception) {
+                                ConnectionLog.record("Auto reconnect after network restore failed: ${e.message}")
+                                scheduleAutoReconnect("network restore failure")
+                            }
+                        }, 0, TimeUnit.SECONDS)
+                    }.onFailure {
+                        ConnectionLog.record("Network restore retry skipped: scheduler is terminated")
+                    }.getOrNull()
                 }
             }
 

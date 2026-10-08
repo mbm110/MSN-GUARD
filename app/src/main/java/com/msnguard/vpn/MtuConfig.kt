@@ -15,11 +15,9 @@ import android.content.Context
  *   defaults, plausible for their respective encap overheads.
  * - Psiphon / Tor 1500 — they carry TCP directly, no extra tunnel
  *   header to account for beyond the TUN itself.
- * - SHARD 512 — not 1500. The pooled nodes sit behind a WebSocket
- *   leg that silently drops any datagram whose payload crosses 512
- *   bytes (probed on the live pool; see Tun2SocksManager.ShardTunnelMtu).
- *   Advertising 1500 there would make QUIC probe a dead path while
- *   chat still works — the exact "page won't open, chat fine" report.
+ * - SHARD 1280 — a normal TUN MTU. The WebSocket/Xray path has a separate
+ *   UDP payload ceiling enforced by ShardSocksFront; that ceiling must never
+ *   be used as the Android interface MTU.
  *
  * Range 68..1500 — the IPv4 minimum header plus the Ethernet ceiling.
  * Anything narrower cannot carry a minimal packet; anything wider is
@@ -45,13 +43,11 @@ object MtuConfig {
     const val DEFAULT_PSIPHON = 1500
     const val DEFAULT_TOR = 1500
     /**
-     * SHARD's ceiling is measured, not a preference — the pooled nodes sit
-     * behind a WebSocket leg that silently drops any datagram whose payload
-     * crosses 512 bytes (probed on the live pool; 512 answers, 513 never).
-     * The screen still shows the value and the row is editable, but the field
-     * keeps the constant so nothing else hardcodes 512 and drifts.
+     * SHARD uses a normal Android TUN MTU. The WebSocket/Xray UDP payload
+     * ceiling is enforced in ShardSocksFront and must never become the TUN MTU.
+     * 1280 is the safe carrier floor used by the app in Iran.
      */
-    const val DEFAULT_SHARD = Tun2SocksManager.SHARD_TUNNEL_MTU
+    const val DEFAULT_SHARD = 1280
 
     /** All methods in the order the screen lists them. */
     enum class Method(
@@ -83,6 +79,11 @@ object MtuConfig {
         // 0 and -1 both mean "unset": an earlier build wrote the default rather
         // than leaving the key absent, and reading that back would hand 0 to
         // Builder.setMtu, which Android rejects with an exception.
+        // A legacy SHARD preference of 512 was the payload ceiling, not a
+        // usable Android TUN MTU. Migrate it in memory to the safe floor.
+        if (method == Method.SHARD && raw == Tun2SocksManager.SHARD_TUNNEL_MTU) {
+            return DEFAULT_SHARD
+        }
         return if (raw == -1 || raw == 0) method.default else raw.coerceIn(MIN_MTU, MAX_MTU)
     }
 
@@ -90,7 +91,8 @@ object MtuConfig {
     fun isCustom(context: Context, method: Method): Boolean {
         // The same legacy-0 case as [get]: a key holding 0 is not a choice.
         val raw = context.profiled().getInt(method.prefKey, -1)
-        return raw != -1 && raw != 0
+        return raw != -1 && raw != 0 &&
+            !(method == Method.SHARD && raw == Tun2SocksManager.SHARD_TUNNEL_MTU)
     }
 
     /** Persist [value] for [method]; returns false if out of range. */

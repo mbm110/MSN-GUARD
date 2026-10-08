@@ -88,11 +88,10 @@ object MtuProbe {
     )
 
     /**
-     * SHARD's pooled nodes sit behind a WebSocket leg that drops any datagram
-     * whose payload crosses this size, so the inner MTU must stay under it no
-     * matter what the outer path measured.
+     * SHARD's WebSocket/Xray UDP payload ceiling is enforced per datagram in
+     * ShardSocksFront. It is not a TUN MTU and must not cap the scanner result.
      */
-    private const val SHARD_WEBSOCKET_CEILING = 512
+    private const val SHARD_WEBSOCKET_CEILING = 500
 
     data class Result(
         val method: MtuConfig.Method,
@@ -151,11 +150,6 @@ object MtuProbe {
         var optimal = bestPathMtu - overhead - SAFETY_MARGIN
         optimal -= optimal % SNAP
         optimal = optimal.coerceIn(SCAN_FLOOR, SCAN_CEIL)
-
-        if (method == MtuConfig.Method.SHARD && optimal > SHARD_WEBSOCKET_CEILING) {
-            Log.i(TAG, "${method.title}: path allows $optimal but the WebSocket leg caps at $SHARD_WEBSOCKET_CEILING")
-            return Result(method, bestPathMtu, SHARD_WEBSOCKET_CEILING, probes, capped = true)
-        }
 
         Log.i(TAG, "${method.title}: pathMtu=$bestPathMtu overhead=$overhead optimal=$optimal after $probes probes localMtu=$localMtu")
         return Result(method, bestPathMtu, optimal, probes)

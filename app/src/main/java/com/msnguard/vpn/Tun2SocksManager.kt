@@ -29,33 +29,9 @@ object Tun2SocksManager {
     const val VPN_INTERFACE_MTU = 1500
 
     /**
-     * The MTU a SHARD session must advertise.
-     *
-     * Measured, not chosen. A SHARD session is TUN → tun2socks → [ShardSocksFront]
-     * → xray → VLESS/ws/TLS → Cloudflare, and the WebSocket leg silently drops
-     * any datagram whose payload crosses a hard ceiling. Probed from the VPS
-     * against the live pool with real DNS queries padded to exact sizes: 512
-     * bytes answers, 513 never does. That number is half of 1024, which is the
-     * shape of a fixed buffer, not a coincidence of a slow node.
-     *
-     * Advertising the default 1500 here is the bug it looks like: lwIP tells the
-     * app the path is 1500, the app's QUIC stack sends a 1250-byte Initial, and
-     * the WebSocket leg swallows it whole. The app then waits on a probe that
-     * cannot ever answer instead of falling back to TCP, and that wait — not a
-     * slow node, not a rate limit — is why a tunnel that carries chat fine
-     * cannot open a page smoothly.
-     *
-     * Lowering the MTU makes lwIP fragment the datagram at the IP layer before
-     * it ever reaches the SOCKS leg. Each fragment lands under the ceiling, so
-     * the reassembled datagram reaches the destination and the reply comes back
-     * the same way. QUIC stops probing a dead path and TCP fallback is never
-     * needed. UDP that already fits (DNS, most QUIC short packets, Telegram's
-     * media chunks on small MTUs) is unaffected — the datagram is not split
-     * when it already fits.
-     *
-     * The 512 is the SOCKS payload budget, not the IP MTU: the SOCKS5 UDP
-     * header (10 bytes for IPv4) rides inside it, and IP fragmentation overhead
-     * (20 bytes per fragment) comes out of the datagram lwIP splits.
+     * Legacy compatibility name for the old payload ceiling. It is NOT an
+     * Android TUN MTU and must not be passed to Builder.setMtu or tun2socks.
+     * SHARD's actual UDP ceiling is enforced by ShardSocksFront.
      */
     const val SHARD_TUNNEL_MTU = 512
     const val VPN_INTERFACE_IPV4_NETMASK = "255.255.255.0"
