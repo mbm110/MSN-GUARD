@@ -1324,13 +1324,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             return
         }
 
-        if (!TunEngineManager.start(
-                this,
-                tunFd,
-                port,
-                dnsOnly = true,
-                mtu = MtuConfig.get(this, MtuConfig.Method.PSIPHON),
-            )) {
+        if (!TunEngineManager.start(this, tunFd, port)) {
             failAndStop(Strings.t("Could not start whole-device routing"))
             return
         }
@@ -2731,8 +2725,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 if (!proxyMode) {
                     val address = Tun2SocksManager.selectPrivateAddress()
                     ConnectionLog.record("Chain: creating TUN before either tunnel starts")
-                    val psiphonChainMtu = MtuConfig.get(this@MsnGuardVpnService, MtuConfig.Method.PSIPHON)
-                    ConnectionLog.record("MTU: $psiphonChainMtu for Psiphon (chain)")
+                    val psiphonChainMtu = Tun2SocksManager.VPN_INTERFACE_MTU
+                    ConnectionLog.record("MTU: $psiphonChainMtu for Psiphon (legacy path)")
                     tun = Builder()
                         .setSession("MSN-GUARD")
                         .setMtu(psiphonChainMtu)
@@ -2837,8 +2831,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             try {
                 val address = Tun2SocksManager.selectPrivateAddress()
                 ConnectionLog.record("Tor: creating TUN before Tor starts")
-                val torMtu = MtuConfig.get(this@MsnGuardVpnService, MtuConfig.Method.TOR)
-                ConnectionLog.record("MTU: $torMtu for Tor")
+                val torMtu = Tun2SocksManager.VPN_INTERFACE_MTU
+                ConnectionLog.record("MTU: $torMtu for Tor (legacy path)")
                 tun = Builder()
                     .setSession("MSN-GUARD")
                     .setMtu(torMtu)
@@ -2946,7 +2940,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // e.g. speed tests) DNS replies came back on rebinded conids and
                 // were rejected as "wrong remote address" — name resolution died
                 // mid-session while the tunnel itself was still healthy.
-                if (!TunEngineManager.start(this, tun!!, TorManager.FRONT_SOCKS_PORT, dnsOnly = true, mtu = MtuConfig.get(this, MtuConfig.Method.TOR))) {
+                if (!TunEngineManager.start(this, tun!!, TorManager.FRONT_SOCKS_PORT, dnsOnly = true)) {
                     error("Could not start device routing")
                 }
 
@@ -3010,8 +3004,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             try {
                 val address = Tun2SocksManager.selectPrivateAddress()
                 ConnectionLog.record("SHARD: creating TUN before xray starts")
-                val shardMtu = MtuConfig.get(this@MsnGuardVpnService, MtuConfig.Method.SHARD)
-                ConnectionLog.record("MTU: $shardMtu for SHARD")
+                val shardMtu = Tun2SocksManager.SHARD_TUNNEL_MTU
+                ConnectionLog.record("MTU: $shardMtu for SHARD (legacy path)")
                 tun = Builder()
                     .setSession("MSN-GUARD")
                     .setMtu(shardMtu)
@@ -4637,8 +4631,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     val address = Tun2SocksManager.selectPrivateAddress()
 
                     ConnectionLog.record("Creating TUN interface BEFORE Psiphon starts")
-                    val psiphonMtu = MtuConfig.get(this@MsnGuardVpnService, MtuConfig.Method.PSIPHON)
-                    ConnectionLog.record("MTU: $psiphonMtu for Psiphon")
+                    val psiphonMtu = Tun2SocksManager.VPN_INTERFACE_MTU
+                    ConnectionLog.record("MTU: $psiphonMtu for Psiphon (legacy path)")
                     tun = Builder()
                         .setSession("MSN-GUARD")
                         .setMtu(psiphonMtu)

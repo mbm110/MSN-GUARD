@@ -42,12 +42,8 @@ object MtuConfig {
     const val DEFAULT_WOW = 1220
     const val DEFAULT_PSIPHON = 1500
     const val DEFAULT_TOR = 1500
-    /**
-     * SHARD uses a normal Android TUN MTU. The WebSocket/Xray UDP payload
-     * ceiling is enforced in ShardSocksFront and must never become the TUN MTU.
-     * 1280 is the safe carrier floor used by the app in Iran.
-     */
-    const val DEFAULT_SHARD = 1280
+    // 2.3.10 legacy: SHARD's TUN MTU is the WebSocket payload ceiling (512).
+    const val DEFAULT_SHARD = 512
 
     /** All methods in the order the screen lists them. */
     enum class Method(
@@ -79,20 +75,13 @@ object MtuConfig {
         // 0 and -1 both mean "unset": an earlier build wrote the default rather
         // than leaving the key absent, and reading that back would hand 0 to
         // Builder.setMtu, which Android rejects with an exception.
-        // A legacy SHARD preference of 512 was the payload ceiling, not a
-        // usable Android TUN MTU. Migrate it in memory to the safe floor.
-        if (method == Method.SHARD && raw == Tun2SocksManager.SHARD_TUNNEL_MTU) {
-            return DEFAULT_SHARD
-        }
         return if (raw == -1 || raw == 0) method.default else raw.coerceIn(MIN_MTU, MAX_MTU)
     }
 
     /** Whether [method] has a user override (vs default). */
     fun isCustom(context: Context, method: Method): Boolean {
-        // The same legacy-0 case as [get]: a key holding 0 is not a choice.
         val raw = context.profiled().getInt(method.prefKey, -1)
-        return raw != -1 && raw != 0 &&
-            !(method == Method.SHARD && raw == Tun2SocksManager.SHARD_TUNNEL_MTU)
+        return raw != -1 && raw != 0
     }
 
     /** Persist [value] for [method]; returns false if out of range. */

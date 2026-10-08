@@ -146,13 +146,18 @@ object MtuProbe {
             }
         }
 
-        val overhead = OVERHEAD[method] ?: 0
-        var optimal = bestPathMtu - overhead - SAFETY_MARGIN
-        optimal -= optimal % SNAP
-        optimal = optimal.coerceIn(SCAN_FLOOR, SCAN_CEIL)
+        val overhead = if (method == MtuConfig.Method.SHARD) 0 else OVERHEAD[method] ?: 0
+        var optimal = if (method == MtuConfig.Method.SHARD) {
+            MtuConfig.DEFAULT_SHARD
+        } else {
+            var o = bestPathMtu - overhead - SAFETY_MARGIN
+            o -= o % SNAP
+            o.coerceIn(SCAN_FLOOR, SCAN_CEIL)
+        }
 
         Log.i(TAG, "${method.title}: pathMtu=$bestPathMtu overhead=$overhead optimal=$optimal after $probes probes localMtu=$localMtu")
-        return Result(method, bestPathMtu, optimal, probes)
+        val capped = method == MtuConfig.Method.SHARD
+        return Result(method, bestPathMtu, optimal, probes, capped = capped)
     }
 
     private fun getInterfaceMtu(context: Context): Int = try {
