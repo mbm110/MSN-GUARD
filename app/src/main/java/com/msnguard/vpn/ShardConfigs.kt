@@ -257,10 +257,12 @@ object ShardConfigs {
         val hostPort = hostPortAndQuery.substringBefore('?')
         val query = hostPortAndQuery.substringAfter('?', "")
         val address = hostPort.substringBeforeLast(':', "")
+        if (address.contains("[") || address.contains("]")) return null
         val port = hostPort.substringAfterLast(':', "").toIntOrNull() ?: return null
         if (address.isEmpty() || port !in 1..65535) return null
 
         val params = parseQuery(query)
+        if (params.containsKey("ech")) return null
         val host = params["host"].orEmpty()
         val sni = params["sni"].orEmpty()
         val security = params["security"]?.lowercase(Locale.US).orEmpty().ifEmpty { "none" }
