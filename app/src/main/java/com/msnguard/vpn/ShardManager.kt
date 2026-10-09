@@ -801,6 +801,7 @@ object ShardManager {
             val winner = java.util.concurrent.atomic.AtomicReference<ShardNode?>(null)
             val winnerLatency = java.util.concurrent.atomic.AtomicInteger(0)
             val latch = java.util.concurrent.CountDownLatch(1)
+            val failureSamples = java.util.Collections.synchronizedList(mutableListOf<String>())
             val pool = java.util.concurrent.Executors.newFixedThreadPool(
                 candidates.size.coerceAtMost(RACE_WIDTH)
             )
@@ -815,7 +816,7 @@ object ShardManager {
                     // user is already waiting on this connect being over.
                     if (stopRequestedDuringStart) return@execute
                     val started = System.currentTimeMillis()
-                    val ok = ShardProbe.check(portOf.getValue(node), PROBE_TIMEOUT_MS)
+                    val (ok, reason) = ShardProbe.checkDetailed(portOf.getValue(node), PROBE_TIMEOUT_MS)
                     val elapsed = (System.currentTimeMillis() - started).toInt()
                     if (ok) {
                         ShardHealth.recordSuccess(context, node, elapsed)
@@ -827,6 +828,15 @@ object ShardManager {
                         }
                     } else {
                         ShardHealth.recordFailure(context, node)
+                        // Keep a sample of why probes failed — throttled to 3 so the
+                        // log stays useful without flooding. These names contain no
+                        // addresses/ports (rewritten by the redactor) and no publisher
+                        // strings; they are stage labels like "socks reply 0x05".
+                        if (failureSamples.size < 3) {
+                            synchronized(failureSamples) {
+                                if (failureSamples.size < 3) failureSamples.add(reason)
+                            }
+                        }
                     }
                 }
             }
@@ -837,7 +847,9 @@ object ShardManager {
             val chosen = winner.get()
             if (chosen == null) {
                 lastError = "no node answered"
-                ConnectionLog.record("$TAG race found nothing in ${RACE_BUDGET_MS}ms — tried ${candidates.size} nodes")
+                val sample = synchronized(failureSamples) { failureSamples.toList() }
+                val hint = if (sample.isNotEmpty()) " — e.g. ${sample.joinToString("; ")}" else ""
+                ConnectionLog.record("$TAG race found nothing in ${RACE_BUDGET_MS}ms — tried ${candidates.size} nodes$hint")
             } else {
                 ConnectionLog.record("$TAG winner ${LogRedactor.nodeTag(chosen.key)} in ${winnerLatency.get()}ms")
             }

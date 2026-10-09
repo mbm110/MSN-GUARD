@@ -64,46 +64,57 @@ object ShardProbe {
      * @param timeoutMs budget for the whole exchange, handshake included.
      * @return true if any target answered as expected.
      */
-    fun check(socksPort: Int, timeoutMs: Int): Boolean {
-        // First target only, in the common case: the race is latency-sensitive and
-        // trying all three per node would triple its cost. The others exist as
-        // fallbacks so one unreachable endpoint does not condemn a good node.
+    fun check(socksPort: Int, timeoutMs: Int): Boolean =
+        checkDetailed(socksPort, timeoutMs).first
+
+    /**
+     * Same as [check] but returns the failure stage for diagnostics.
+     * @return Pair(passed, reason) — reason is "ok" on pass, otherwise the stage that failed.
+     */
+    fun checkDetailed(socksPort: Int, timeoutMs: Int): Pair<Boolean, String> {
+        var lastReason = "no target tried"
         for ((host, path, port) in TARGETS) {
-            when (probeOnce(socksPort, host, path, port, timeoutMs)) {
-                Result.PASS -> return true
-                // The node itself is unreachable — trying another endpoint through
-                // the same dead node is wasted time.
-                Result.NODE_DEAD -> return false
-                // Node reachable, this endpoint was not. Try the next one.
-                Result.ENDPOINT_BAD -> continue
+            val (result, detail) = probeOnceDetailed(socksPort, host, path, port, timeoutMs)
+            when (result) {
+                Result.PASS -> return true to "ok"
+                Result.NODE_DEAD -> return false to detail
+                Result.ENDPOINT_BAD -> lastReason = detail
             }
         }
-        return false
+        return false to lastReason
     }
 
     private enum class Result { PASS, NODE_DEAD, ENDPOINT_BAD }
 
-    private fun probeOnce(
+    private fun probeOnceDetailed(
         socksPort: Int,
         host: String,
         path: String,
         port: Int,
         timeoutMs: Int,
-    ): Result {
+    ): Pair<Result, String> {
         Socket().use { socket ->
             try {
                 socket.tcpNoDelay = true
                 socket.soTimeout = timeoutMs
-                socket.connect(InetSocketAddress("127.0.0.1", socksPort), timeoutMs)
+                try {
+                    socket.connect(InetSocketAddress("127.0.0.1", socksPort), timeoutMs)
+                } catch (e: java.net.SocketTimeoutException) {
+                    return Result.NODE_DEAD to "tcp connect timeout to lo:$socksPort"
+                } catch (e: java.net.ConnectException) {
+                    return Result.NODE_DEAD to "tcp connect refused lo:$socksPort"
+                } catch (e: Exception) {
+                    return Result.NODE_DEAD to "tcp connect failed: ${e.javaClass.simpleName}"
+                }
                 val output = socket.getOutputStream()
                 val input = socket.getInputStream()
 
                 // Greeting: SOCKS5, one method, no auth.
-                output.write(byteArrayOf(0x05, 0x01, 0x00))
-                output.flush()
-                val greeting = readExactly(input, 2) ?: return Result.NODE_DEAD
+                try { output.write(byteArrayOf(0x05, 0x01, 0x00)); output.flush() }
+                catch (_: Exception) { return Result.NODE_DEAD to "socks greeting write failed" }
+                val greeting = readExactly(input, 2) ?: return Result.NODE_DEAD to "socks greeting no reply"
                 if (greeting[0] != 0x05.toByte() || greeting[1] != 0x00.toByte()) {
-                    return Result.NODE_DEAD
+                    return Result.NODE_DEAD to "socks greeting rejected 0x${greeting[1].toInt().and(0xFF).toString(16)}"
                 }
 
                 // CONNECT to a hostname (ATYP 3), so the tunnel resolves it, not us.
@@ -117,35 +128,46 @@ object ShardProbe {
                 System.arraycopy(hostBytes, 0, request, 5, hostBytes.size)
                 request[5 + hostBytes.size] = ((port shr 8) and 0xFF).toByte()
                 request[6 + hostBytes.size] = (port and 0xFF).toByte()
-                output.write(request)
-                output.flush()
+                try { output.write(request); output.flush() }
+                catch (_: Exception) { return Result.NODE_DEAD to "socks connect write failed" }
 
-                val reply = readExactly(input, 4) ?: return Result.NODE_DEAD
+                val reply = readExactly(input, 4) ?: return Result.NODE_DEAD to "socks connect no reply"
                 if (reply[1] != 0x00.toByte()) {
-                    // A non-zero SOCKS reply means the far side refused to open the
-                    // stream: that is the node failing, not the endpoint.
-                    return Result.NODE_DEAD
+                    return Result.NODE_DEAD to "socks reply 0x${reply[1].toInt().and(0xFF).toString(16)} for $host"
                 }
-                // Consume the bound address so the stream is positioned at the
-                // payload; its length depends on the address type in reply[3].
+                // Consume the bound address so the stream is positioned at the payload
                 val addressLength = when (reply[3].toInt() and 0xFF) {
                     0x01 -> 4
                     0x04 -> 16
-                    0x03 -> (readExactly(input, 1)?.get(0)?.toInt()?.and(0xFF)) ?: return Result.NODE_DEAD
-                    else -> return Result.NODE_DEAD
+                    0x03 -> (readExactly(input, 1)?.get(0)?.toInt()?.and(0xFF)) ?: return Result.NODE_DEAD to "socks bnd addr len missing"
+                    else -> return Result.NODE_DEAD to "socks bnd atyp 0x${reply[3].toInt().and(0xFF).toString(16)}"
                 }
-                readExactly(input, addressLength + 2) ?: return Result.NODE_DEAD
+                readExactly(input, addressLength + 2) ?: return Result.NODE_DEAD to "socks bnd addr truncated"
 
-                sendRequest(output, host, path)
-                val statusLine = readStatusLine(input) ?: return Result.ENDPOINT_BAD
+                try { sendRequest(output, host, path) }
+                catch (_: Exception) { return Result.NODE_DEAD to "http request write failed" }
+                val statusLine = readStatusLine(input) ?: return Result.ENDPOINT_BAD to "no http status from $host"
                 val passed = statusLine.contains(" 204") ||
                     (host == "captive.apple.com" && statusLine.contains(" 200"))
-                return if (passed) Result.PASS else Result.ENDPOINT_BAD
-            } catch (_: Exception) {
-                return Result.NODE_DEAD
+                return if (passed) Result.PASS to "ok"
+                else Result.ENDPOINT_BAD to "http ${statusLine.take(64)} from $host"
+            } catch (e: java.net.SocketTimeoutException) {
+                return Result.NODE_DEAD to "read timeout after ${timeoutMs}ms"
+            } catch (e: Exception) {
+                return Result.NODE_DEAD to "error: ${e.javaClass.simpleName}: ${e.message?.take(60) ?: ""}"
             }
         }
     }
+
+    // Kept for internal reuse; delegates to the detailed version.
+    @Suppress("unused")
+    private fun probeOnce(
+        socksPort: Int,
+        host: String,
+        path: String,
+        port: Int,
+        timeoutMs: Int,
+    ): Result = probeOnceDetailed(socksPort, host, path, port, timeoutMs).first
 
     private fun sendRequest(output: OutputStream, host: String, path: String) {
         val request = buildString {
