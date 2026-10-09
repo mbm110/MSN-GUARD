@@ -106,6 +106,14 @@ object MtuConfig {
         return if (isCustom(context, method)) "$v" else "$v (default)"
     }
 
+    /** Map a protocol uppercase string to its WARP method, or null if not a WARP transport. */
+    fun methodForProtocol(protocolUpper: String): Method? = when {
+        protocolUpper.contains("MASQUE") || protocolUpper.contains("MIM") -> Method.MASQUE
+        protocolUpper.contains("WIREGUARD") -> Method.WIREGUARD
+        protocolUpper.contains("GOOL") || protocolUpper.contains("WOW") -> Method.WOW
+        else -> null
+    }
+
     /**
      * MTU to hand to Builder.setMtu + TunEngine.start for the
      * *currently selected* WARP transport (currentProtocol in

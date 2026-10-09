@@ -4881,22 +4881,28 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 //    fragment every real page while helping nothing. The two must
                 //    agree — a 1500 TUN feeding a 1420 engine (or vice versa) still
                 //    asks the peer to carry more than the hop advertises.
-                val warpMtu = MtuConfig.forWarpProtocol(this@MsnGuardVpnService, currentProtocol)
-                ConnectionLog.record("MTU: $warpMtu for $currentProtocol")
-                tun = Builder()
-                    .setSession("MSN-GUARD")
-                    .setMtu(warpMtu)
-                    .applyTunnelAddresses(addresses)
-                    .applyDns(effectiveConfig, addresses, activeEngine)
-                    .applyGatewayProxy(effectiveConfig, addresses)
-                    .applyLanAccess(addresses)
-                    .applyIranBypass()
-                    .applySplitTunneling()
-                    .establish() ?: error("Android could not establish the VPN interface")
-                vpnModeActive.set(true)
-                TunnelStatus.isNativeTunMode = false
-                TunnelStatus.isProxyMode = false
-                if (!TunEngineManager.start(this, tun!!, socksForEngine, mtu = warpMtu)) {
+                // WARP MTU auto-retry: stored/default → 1500 → Scan result. One ladder per connect.
+                // Each rung that reaches SOCKS is persisted for next time (Psiphon/Tor/SHARD excluded).
+                val warpMethod = MtuConfig.methodForProtocol(currentProtocol)
+                if (warpMethod != null) {
+                    if (!runWarpWithMtuRetry(effectiveConfig, warpMethod, socksForEngine, activeEngine, warpListen, generation)) return@execute
+                } else {
+                    val warpMtu = MtuConfig.forWarpProtocol(this@MsnGuardVpnService, currentProtocol)
+                    ConnectionLog.record("MTU: $warpMtu for $currentProtocol")
+                    tun = Builder()
+                        .setSession("MSN-GUARD")
+                        .setMtu(warpMtu)
+                        .applyTunnelAddresses(addresses)
+                        .applyDns(effectiveConfig, addresses, activeEngine)
+                        .applyGatewayProxy(effectiveConfig, addresses)
+                        .applyLanAccess(addresses)
+                        .applyIranBypass()
+                        .applySplitTunneling()
+                        .establish() ?: error("Android could not establish the VPN interface")
+                    vpnModeActive.set(true)
+                    TunnelStatus.isNativeTunMode = false
+                    TunnelStatus.isProxyMode = false
+                    if (!TunEngineManager.start(this, tun!!, socksForEngine, mtu = warpMtu)) {
                     ConnectionLog.record("TunEngine failed — falling back to native TUN")
                     try { TunEngineManager.stop(this) } catch (_: Throwable) {}
                     tun?.close(); tun = null; vpnModeActive.set(false)
@@ -5010,6 +5016,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     if (!willAutoReconnect()) sendStatus(STATUS_FAILED, "Tunnel stopped unexpectedly")
                 }
                 nativeExitWasUnexpected = diedOnItsOwn && result != 0
+                }
                 }
             } catch (error: Exception) {
                 val detail = NativeCore.lastError().ifBlank { error.message ?: "Tunnel setup failed" }
@@ -5397,6 +5404,232 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         } catch (_: java.io.IOException) {
             false
         }
+    }
+
+    /**
+     * Try the WARP tunnel on this MTU ladder, stopping on first SOCKS success.
+     * Returns true when the tunnel came up (caller should return@execute), false when non-WARP.
+     * The original VPN-mode plumbing — Builder, TunEngine, fronts, NativeCore.startProxy —
+     * is replicated per rung so each attempt is clean. A failed rung tears down its TUN
+     * and engine state before the next.
+     */
+    private fun runWarpWithMtuRetry(
+        effectiveConfig: String,
+        method: MtuConfig.Method,
+        socksForEngine: Int,
+        activeEngine: String,
+        warpListen: String,
+        generationAtStart: Int,
+    ): Boolean {
+        val storedMtu = MtuConfig.get(this, method)
+        // Build ladder: stored → 1500 → Scan result. Deduplicated, in-range only.
+        val ladder = mutableListOf<Int>()
+        fun addMtu(v: Int) { if (MtuConfig.isValid(v) && v !in ladder) ladder.add(v) }
+        addMtu(storedMtu)
+        addMtu(1500)
+        val needScan = storedMtu != 1500
+        var scanned: Int? = null
+        var scanTried = false
+        // We do not scan upfront — only after the first two rungs fail, per spec.
+        // persist on rung success; budget per rung uses a share of SOCKS_READY_TIMEOUT_MS
+        // so the whole ladder cannot exceed roughly one normal connect.
+        val perRungBudgetMs = when (method) {
+            MtuConfig.Method.WIREGUARD -> 45_000L
+            MtuConfig.Method.MASQUE -> 55_000L
+            else -> 50_000L // WOW
+        }
+        for ((rungIdx, mtu) in ladder.withIndex()) {
+            if (stopRequested.get() || userInitiatedStop.get()) return true
+            if (generationAtStart != sessionGeneration) return true
+            if (rungIdx > 0) {
+                ConnectionLog.record("MTU auto-retry for " + method.title + ": trying " + mtu)
+            } else {
+                ConnectionLog.record("MTU: " + mtu + " for " + currentProtocol)
+            }
+            // Ensure AETHER_* carries this rung's MTU, not a stale one.
+            runCatching {
+                val env = CoreConfig.envFromEffectiveConfig(this, effectiveConfig)
+                val patched = LinkedHashMap(env)
+                when (method) {
+                    MtuConfig.Method.MASQUE -> patched["AETHER_MASQUE_MTU"] = mtu.toString()
+                    MtuConfig.Method.WIREGUARD -> patched["AETHER_WG_MTU"] = mtu.toString()
+                    MtuConfig.Method.WOW -> { patched["AETHER_WG_MTU"] = mtu.toString(); patched["AETHER_MASQUE_MTU"] = mtu.toString() }
+                    else -> {}
+                }
+                CoreConfig.applyEnv(patched)
+            }
+            val addresses = NativeCore.prepare(effectiveConfig)
+            tun = Builder()
+                .setSession("MSN-GUARD")
+                .setMtu(mtu)
+                .applyTunnelAddresses(addresses)
+                .applyDns(effectiveConfig, addresses, activeEngine)
+                .applyGatewayProxy(effectiveConfig, addresses)
+                .applyLanAccess(addresses)
+                .applyIranBypass()
+                .applySplitTunneling()
+                .establish() ?: run {
+                    ConnectionLog.record("MTU " + mtu + " — Android rejected the VPN interface")
+                    continue
+                }
+            vpnModeActive.set(true)
+            TunnelStatus.isNativeTunMode = false
+            TunnelStatus.isProxyMode = false
+            if (!TunEngineManager.start(this, tun!!, socksForEngine, mtu = mtu)) {
+                ConnectionLog.record("TunEngine failed — falling back to native TUN")
+                try { TunEngineManager.stop(this) } catch (_: Throwable) {}
+                tun?.close(); tun = null; vpnModeActive.set(false)
+                val fbAddr = NativeCore.prepare(effectiveConfig)
+                tun = Builder().setSession("MSN-GUARD").setMtu(mtu).applyTunnelAddresses(fbAddr).applyDns(effectiveConfig, fbAddr, TunEnginePref.LEGACY).applyGatewayProxy(effectiveConfig, fbAddr).applyLanAccess(fbAddr).applyIranBypass().applySplitTunneling().establish() ?: run {
+                    ConnectionLog.record("MTU " + mtu + " — Android rejected the VPN interface (native fallback)")
+                    continue
+                }
+                TunnelStatus.isNativeTunMode = true; vpnModeActive.set(true)
+                val fbResult = NativeCore.start(effectiveConfig, tun!!.fd)
+                val fbDead = !stopRequested.get()
+                if (fbResult != 0 && !stopRequested.get()) {
+                    val d = NativeCore.lastError().ifBlank { "Tunnel exited with code " + fbResult }
+                    ConnectionLog.record("Native tunnel exited: " + d)
+                    if (startedWithExitPin) { clearExitPin("the pinned endpoint failed"); startedWithExitPin = false; storedConfig = unpinnedStoredConfig ?: storedConfig }
+                } else if (fbResult == 0 && !stopRequested.get()) {
+                    ConnectionLog.record("aether job running — identity/scan in progress")
+                    val ok = waitForSocksReadyBudget("127.0.0.1:" + CoreConfig.SOCKS_PORT, perRungBudgetMs)
+                    if (ok) {
+                        if (mtu != storedMtu) { MtuConfig.set(this, method, mtu); ConnectionLog.record("MTU " + mtu + " connected — saved for " + method.title) }
+                        while (!stopRequested.get() && NativeCore.isRunning()) { try { Thread.sleep(500) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break } }
+                        return true
+                    }
+                    ConnectionLog.record("MTU " + mtu + " — no SOCKS listener in " + (perRungBudgetMs/1000) + "s")
+                } else if (stopRequested.get()) {
+                    if (reconnectRequested.get()) sendStatus(STATUS_CONNECTING, Strings.t("Reconnecting…")) else sendStatus(STATUS_DISCONNECTED)
+                    return true
+                }
+                // Tear down before next rung
+                try { TunEngineManager.stop(this) } catch (_: Throwable) {}
+                try { NativeCore.stop() } catch (_: Throwable) {}
+                try { tun?.close() } catch (_: Throwable) {}
+                tun = null; vpnModeActive.set(false); TunnelStatus.isNativeTunMode = false
+                // Also clear the AETHER MTU override for next rung scan fairness — next iteration patches again
+                WarpUdpgwFront.stop(); SmartDnsFront.stop()
+                socksListenerPortForWatchdog = null
+                try { NativeCore.detach() } catch (_: Throwable) {}
+                // If this was the last ladder rung and we haven't scanned yet, scan now and extend ladder
+                if (rungIdx == ladder.lastIndex && needScan && !scanTried) {
+                    scanTried = true
+                    ConnectionLog.record("Scanning MTU for " + method.title + "…")
+                    val r = runCatching { MtuProbe.measure(this, method) }.getOrNull()
+                    val v = r?.inner
+                    if (v != null && MtuConfig.isValid(v) && v !in ladder) {
+                        scanned = v
+                        ladder.add(v)
+                        ConnectionLog.record("Scan MTU for " + method.title + ": " + v + " — retrying")
+                        continue
+                    } else {
+                        ConnectionLog.record("Scan MTU for " + method.title + ": no result")
+                    }
+                }
+                if (rungIdx == ladder.lastIndex && scanned == null && needScan && scanTried) {
+                    // ladder exhausted and scan already attempted — fall through to failure handling below
+                } else if (rungIdx < ladder.lastIndex) {
+                    // next ladder entry
+                }
+                continue
+            } else {
+                ConnectionLog.record("TunEngine " + TunEngineManager.current(this).label + " → " + warpListen)
+                val result = NativeCore.startProxy(org.json.JSONObject(effectiveConfig).apply { put("listen", warpListen) }.toString())
+                val diedOnItsOwn = !stopRequested.get()
+                if (result != 0 && !stopRequested.get()) {
+                    val detail = NativeCore.lastError().ifBlank { "Tunnel exited with code " + result }
+                    ConnectionLog.record("Native tunnel exited: " + detail)
+                    if (startedWithExitPin) { clearExitPin("the pinned endpoint failed"); startedWithExitPin = false; storedConfig = unpinnedStoredConfig ?: storedConfig }
+                } else if (result == 0 && !stopRequested.get()) {
+                    ConnectionLog.record("aether job running — identity/scan in progress")
+                    val ok = waitForSocksReadyBudget(warpListen, perRungBudgetMs)
+                    if (ok) {
+                        if (mtu != storedMtu) { MtuConfig.set(this, method, mtu); ConnectionLog.record("MTU " + mtu + " connected — saved for " + method.title) }
+                        while (!stopRequested.get() && NativeCore.isRunning()) { try { Thread.sleep(500) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break } }
+                        return true
+                    }
+                    ConnectionLog.record("MTU " + mtu + " — no SOCKS listener in " + (perRungBudgetMs/1000) + "s")
+                } else if (stopRequested.get()) {
+                    if (reconnectRequested.get()) sendStatus(STATUS_CONNECTING, Strings.t("Reconnecting…")) else sendStatus(STATUS_DISCONNECTED)
+                    return true
+                } else {
+                    ConnectionLog.record("Native tunnel stopped unexpectedly")
+                }
+                // Tear down before next rung
+                try { TunEngineManager.stop(this) } catch (_: Throwable) {}
+                try { NativeCore.stop() } catch (_: Throwable) {}
+                try { tun?.close() } catch (_: Throwable) {}
+                tun = null; vpnModeActive.set(false); TunnelStatus.isNativeTunMode = false
+                WarpUdpgwFront.stop(); SmartDnsFront.stop()
+                socksListenerPortForWatchdog = null
+                try { NativeCore.detach() } catch (_: Throwable) {}
+                if (rungIdx == ladder.lastIndex && needScan && !scanTried) {
+                    scanTried = true
+                    ConnectionLog.record("Scanning MTU for " + method.title + "…")
+                    val r = runCatching { MtuProbe.measure(this, method) }.getOrNull()
+                    val v = r?.inner
+                    if (v != null && MtuConfig.isValid(v) && v !in ladder) {
+                        scanned = v
+                        ladder.add(v)
+                        ConnectionLog.record("Scan MTU for " + method.title + ": " + v + " — retrying")
+                        continue
+                    } else {
+                        ConnectionLog.record("Scan MTU for " + method.title + ": no result")
+                    }
+                }
+                continue
+            }
+        }
+        // All rungs exhausted without a SOCKS listener. Leave failure to the existing willAutoReconnect path:
+        // set nativeExitWasUnexpected so finally triggers a reconnect attempt rather than a hard stop.
+        // Also ensure no stale TUN/engine remains.
+        try { TunEngineManager.stop(this) } catch (_: Throwable) {}
+        try { NativeCore.stop() } catch (_: Throwable) {}
+        try { tun?.close() } catch (_: Throwable) {}
+        tun = null; vpnModeActive.set(false); TunnelStatus.isNativeTunMode = false
+        WarpUdpgwFront.stop(); SmartDnsFront.stop()
+        socksListenerPortForWatchdog = null
+        try { NativeCore.detach() } catch (_: Throwable) {}
+        ConnectionLog.record("MTU auto-retry exhausted for " + method.title + " — tried " + ladder.joinToString(","))
+        // Signal the outer finally: treat as an unexpected exit so willAutoReconnect can schedule the normal backoff.
+        nativeExitWasUnexpected = true
+        if (!willAutoReconnect()) sendStatus(STATUS_FAILED, "Could not connect with any MTU (" + ladder.joinToString(",") + ")")
+        return true
+    }
+
+        /**
+     * Bounded SOCKS wait for the MTU auto-retry ladder.
+     * Returns true if the listener answered within [budgetMs], false otherwise.
+     * On true it also publishes CONNECTED and arms/watchdogs the same as waitForSocksReady.
+     * Never exceeds its budget — the caller controls the retry clock.
+     */
+    private fun waitForSocksReadyBudget(listenAddress: String, budgetMs: Long): Boolean {
+        val port = runCatching { listenAddress.substringAfter(':').toInt() }.getOrElse { return false }
+        socksListenerPortForWatchdog = port
+        val deadline = SystemClock.elapsedRealtime() + budgetMs.coerceAtLeast(1L)
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (stopRequested.get() || userInitiatedStop.get()) return false
+            if (!NativeCore.isRunning()) return false
+            try {
+                java.net.Socket().use { probe ->
+                    probe.connect(java.net.InetSocketAddress("127.0.0.1", port), SOCKS_READY_PROBE_MS)
+                }
+                connected.set(true)
+                TunnelStatus.isProxyMode = proxyMode
+                TunnelStatus.isNativeTunMode = false
+                repostNotification()
+                sendStatus(STATUS_CONNECTED)
+                ConnectionLog.record("aether SOCKS listener up at " + listenAddress + " — connected")
+                startWatchdog()
+                startWarpTrafficPolling()
+                return true
+            } catch (_: java.io.IOException) {
+            }
+            try { Thread.sleep(SOCKS_READY_POLL_MS) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); return false }
+        }
+        return false
     }
 
     private fun waitForSocksReady(listenAddress: String) {
