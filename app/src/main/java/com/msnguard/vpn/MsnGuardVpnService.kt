@@ -947,6 +947,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
         /** Value of [EXIT_COUNTRY_PREF] meaning "whichever edge answers first". */
         const val EXIT_COUNTRY_AUTO = "auto"
+        const val ENDPOINT_DISCOVERY = "endpoint_discovery"
 
         /**
          * The floor of endpoint rotations one user-initiated connect may
@@ -3905,6 +3906,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             ladderScheduler.schedule({
                 try {
                     if (userInitiatedStop.get() || connected.get()) return@schedule
+                    // Auto fresh-scan on repeated failure: if the tunnel keeps dying on the
+                    // same cached gateway (watchdog / native exit), evict the gateway cache
+                    // so the retry actually scans instead of re-verifying the same dead peer.
+                    // Applied to every WARP transport (MASQUE/WireGuard/WoW).
+                    if (reconnectAttempts >= 2) {
+                        runCatching {
+                            clearEndpointCaches()
+                            clearStaleWireguardCache(this)
+                            ConnectionLog.record("Auto-reconnect: cleared cached gateways after repeated failure — scanning fresh")
+                        }
+                    }
                     startTunnel(config)
                 } catch (e: Exception) {
                     ConnectionLog.record("Auto reconnect failed to start: ${e.message}")
@@ -3939,6 +3951,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // carrier back to open: the blocked verdict belongs to the link
                 // we just left, not the one we just joined.
                 IdentityProvisioner.clearApiBlockedCache()
+                // Carrier flip (Samantel -> MCI etc): the lastconn gateway is bound to the previous
+                // carrier's anycast/route. Evict it so the next connect scans fresh on the new link.
+                // Applies to every WARP transport.
+                runCatching {
+                    clearEndpointCaches()
+                    clearStaleWireguardCache(this@MsnGuardVpnService)
+                    ConnectionLog.record("Network change: cleared cached gateways — next connect will scan fresh")
+                }
                 // Connectivity restored - reset backoff and try immediately if we're in auto-reconnect
                 if (willAutoReconnect() && !connected.get() && !userInitiatedStop.get()) {
                     ConnectionLog.record("NetworkCallback: connectivity restored, resetting backoff and retrying")
@@ -4340,6 +4360,22 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // exitPin() compares the saved pin against it, and a stale value from
         // the previous session would let a pin saved for one transport be
         // injected into another.
+        // Fresh-scan gate: honoured on every WARP/masque transport (same for WireGuard/WoW).
+        // "Fresh scan next time" must ACTUALLY scan — evict every on-disk gateway cache
+        // (lastconn rings + masque JSON + exit pin) and flip the pref back to cache so
+        // the gate is one-shot ("next time", not "forever").
+        runCatching {
+            val disc = profiled().getString(ENDPOINT_DISCOVERY, "cache")?.lowercase()
+            if (disc == "fresh") {
+                clearEndpointCaches()
+                clearExitPin("fresh scan requested")
+                profiled().edit().putString(ENDPOINT_DISCOVERY, "cache").apply()
+                ConnectionLog.record("Fresh scan: cleared cached gateways — scanning anew")
+                // Also clear the wireguard/masque shared cache helper for older installs
+                clearStaleWireguardCache(this)
+            }
+        }
+
         currentProtocol = config.substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
         currentVpnIp = ""
         // Exit-country preference: latched for the whole session, like

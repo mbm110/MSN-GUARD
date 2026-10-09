@@ -426,6 +426,16 @@ object CoreConfig {
             out["AETHER_ROUTE_DIRECT"] = it
         }
 
+        // Endpoint discovery: honoured on every WARP transport (MASQUE/WireGuard/WoW).
+        // CACHE (default): quick-reconnect may reuse a verified lastconn ring.
+        // FRESH: force a new scan on next connect by disabling quick-reconnect.
+        // The service clears the on-disk cache before start as well; this env is
+        // the in-engine half so even a lingering file cannot be reused.
+        when (text("endpoint_discovery", "cache").lowercase()) {
+            "fresh" -> out["AETHER_QUICK_RECONNECT"] = "0"
+            else -> { /* cache: let the engine decide; do not force */ }
+        }
+
         return out
     }
 
