@@ -438,6 +438,7 @@ object ShardManager {
             return false
         }
         ShardHealth.prune(context, pool)
+        ConnectionLog.record("$TAG pool ${pool.size} nodes, edges ${ShardEdges.edges(context).size} edges")
 
         // Ranked, then sliced: the race is over the nodes most likely to work, in
         // the order most likely to be fast. Diversified so one endpoint's variants
@@ -449,6 +450,7 @@ object ShardManager {
         // available than before. Bounded at [MAX_RACE_SLICES] so a genuinely dead
         // network fails in a predictable time rather than grinding through
         // everything — each slice costs up to RACE_BUDGET_MS.
+        if (ranked.isEmpty()) ConnectionLog.record("$TAG ranked pool empty before slicing — health may have pruned everything")
         var raced: ShardNode? = null
         for (slice in 0 until MAX_RACE_SLICES) {
             // Checkpoint between slices: a Disconnect that arrived mid-race must
@@ -459,6 +461,7 @@ object ShardManager {
                 return false
             }
             val candidates = ranked.drop(slice * RACE_WIDTH).take(RACE_WIDTH)
+            if (candidates.isNotEmpty()) ConnectionLog.record("$TAG slice $slice: racing ${candidates.size} candidates")
             if (candidates.isEmpty()) break
             raced = race(context, candidates)
             if (raced != null) break
@@ -793,6 +796,7 @@ object ShardManager {
                 ConnectionLog.record("$TAG probe listeners did not bind")
                 return null
             }
+            ConnectionLog.record("$TAG racing ${candidates.size} nodes — budget ${RACE_BUDGET_MS}ms, per-node ${PROBE_TIMEOUT_MS}ms")
 
             val winner = java.util.concurrent.atomic.AtomicReference<ShardNode?>(null)
             val winnerLatency = java.util.concurrent.atomic.AtomicInteger(0)
@@ -833,7 +837,7 @@ object ShardManager {
             val chosen = winner.get()
             if (chosen == null) {
                 lastError = "no node answered"
-                ConnectionLog.record("$TAG race found nothing in ${RACE_BUDGET_MS}ms")
+                ConnectionLog.record("$TAG race found nothing in ${RACE_BUDGET_MS}ms — tried ${candidates.size} nodes")
             } else {
                 ConnectionLog.record("$TAG winner ${LogRedactor.nodeTag(chosen.key)} in ${winnerLatency.get()}ms")
             }

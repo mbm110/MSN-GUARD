@@ -480,6 +480,24 @@ object ShardConfigs {
                             put("alpn", JSONArray().apply { node.alpn.split(',').forEach { put(it.trim()) } })
                         }
                         if (node.echConfigList.isNotEmpty()) put("echConfigList", node.echConfigList)
+                        // When ECH is on, the live tunnel's ECH config fetch
+                        // (QueryRecord -> DialSystem) must ride the node's own
+                        // outbound instead of DialSystem's default path, which on
+                        // this device goes through the TUN before the tunnel is up
+                        // — the query leaves over the carrier link and is dropped.
+                        // `echSocketSettings.dialerProxy` tells xray to redial the
+                        // DNS query through the outbound named here. The probe has
+                        // many parallel outbounds (out-0, out-1, …) and routing
+                        // would make a self-proxy a cycle, so the field is omitted
+                        // there — the live tunnel has a single "proxy" outbound and
+                        // is where the request actually leaves. Proto:
+                        // tls.Config.ech_socket_settings=21, SocketConfig.dialer_proxy=9.
+                        if (node.echConfigList.isNotEmpty() && tag == "proxy") {
+                            put(
+                                "echSocketSettings",
+                                JSONObject().put("dialerProxy", "proxy")
+                            )
+                        }
                         // Upstream parity: insecure is pcs-gated. allowInsecure true only
                         // when URL had insecure=1 and no pcs. User's example insecure=0 -> false, correct.
                         put("allowInsecure", node.allowInsecure)
