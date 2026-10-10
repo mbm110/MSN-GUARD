@@ -292,7 +292,7 @@ object ShardConfigs {
         // dropped rather than forced onto a transport it did not ask for, which
         // would fail at the handshake with a useless error.
         val network = params["type"]?.lowercase(Locale.US).orEmpty().ifEmpty { "tcp" }
-        if (network != "ws" && network != "xhttp" && scheme != "anytls") return null
+        if (network != "ws" && network != "xhttp" && network != "grpc" && scheme != "anytls") return null
 
         // anytls:// is its own URI shape (docs/uri_scheme.md): password in the
         // userinfo, host[:port] with 443 as the default port, `sni` and
@@ -348,7 +348,7 @@ object ShardConfigs {
             port = port,
             network = network,
             security = security,
-            path = params["path"].orEmpty().ifEmpty { "/" },
+            path = params["path"].orEmpty().ifEmpty { params["serviceName"].orEmpty().ifEmpty { "/" } },
             host = host,
             // serverName falls back to host because that is what the CDN routes
             // on; an empty SNI to Cloudflare gets the default certificate and the
@@ -518,7 +518,15 @@ object ShardConfigs {
                     }
                 )
             }
-            if (node.network == "xhttp") {
+            if (node.network == "grpc") {
+                put(
+                    "grpcSettings",
+                    JSONObject().apply {
+                        put("serviceName", node.path.trimStart('/').ifEmpty { "mohsen" })
+                        if (node.host.isNotEmpty()) put("authority", node.host)
+                    }
+                )
+            } else if (node.network == "xhttp") {
                 put(
                     "xhttpSettings",
                     JSONObject().apply {

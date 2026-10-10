@@ -4768,9 +4768,17 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 if (proxyMode) {
                     // WARP over SOCKS still counts through the same AETHER_STATS
                     // counters; installs the same env the VPN branch already did.
-                    CoreConfig.applyEnv(
-                        CoreConfig.envFromEffectiveConfig(this@MsnGuardVpnService, effectiveConfig),
-                    )
+                    var _proxyWarpUpstream: String? = null
+                    val _proxyProto = runCatching { org.json.JSONObject(effectiveConfig).optString("protocol") }.getOrElse { "" }.lowercase()
+                    if ((_proxyProto == "masque" || _proxyProto == "mim") && CoreConfig.warpExitIsCustom(this@MsnGuardVpnService)) {
+                        val custom = CoreConfig.warpExitCustom(this@MsnGuardVpnService)
+                        ConnectionLog.record("Warp Setting: custom exit (proxy mode), starting sidecar")
+                        val ok = WarpExitManager.start(this@MsnGuardVpnService, custom)
+                        if (ok) _proxyWarpUpstream = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}" else ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError}")
+                    }
+                    val _proxyBaseEnv = CoreConfig.envFromEffectiveConfig(this@MsnGuardVpnService, effectiveConfig)
+                    val _proxyPatchedEnv = if (_proxyWarpUpstream != null) LinkedHashMap(_proxyBaseEnv).apply { put("AETHER_UPSTREAM", _proxyWarpUpstream!!) } else _proxyBaseEnv
+                    CoreConfig.applyEnv(_proxyPatchedEnv)
                     val port = CoreConfig.proxyListenPort(this@MsnGuardVpnService)
                     val host = CoreConfig.proxyBindHost(this@MsnGuardVpnService)
                     NativeCore.prepare(effectiveConfig)
@@ -4864,12 +4872,27 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // Aether 2.3.0 reads its whole config from AETHER_*; install it before the
                 // engine starts. The engine owns no TUN — it publishes the SOCKS listener
                 // AETHER_SOCKS names and the TunEngine below bridges the VPN interface to it.
-                CoreConfig.applyEnv(
-                    CoreConfig.envFromEffectiveConfig(
-                        this@MsnGuardVpnService,
-                        effectiveConfig,
-                    ),
+                // Warp Setting (Masque/MIM only): bring up WarpExit xray sidecar for custom exit so
+                // the Masque scan is chained through the user's VLESS (e.g. Lithuania gRPC).
+                var warpExitUpstream: String? = null
+                val _warpProto = runCatching { org.json.JSONObject(effectiveConfig).optString("protocol") }.getOrElse { "" }.lowercase()
+                if ((_warpProto == "masque" || _warpProto == "mim") && CoreConfig.warpExitIsCustom(this@MsnGuardVpnService)) {
+                    val custom = CoreConfig.warpExitCustom(this@MsnGuardVpnService)
+                    ConnectionLog.record("Warp Setting: custom exit requested, starting sidecar for Masque")
+                    val ok = WarpExitManager.start(this@MsnGuardVpnService, custom)
+                    if (ok) {
+                        warpExitUpstream = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"
+                        ConnectionLog.record("Warp Setting: sidecar up at $warpExitUpstream")
+                    } else {
+                        ConnectionLog.record("Warp Setting: sidecar failed: ${WarpExitManager.lastError} — falling back to Freedom")
+                    }
+                }
+                val baseEnv = CoreConfig.envFromEffectiveConfig(
+                    this@MsnGuardVpnService,
+                    effectiveConfig,
                 )
+                val patchedEnv = if (warpExitUpstream != null) LinkedHashMap(baseEnv).apply { put("AETHER_UPSTREAM", warpExitUpstream!!) } else baseEnv
+                CoreConfig.applyEnv(patchedEnv)
                 val addresses = NativeCore.prepare(effectiveConfig)
                 if (addresses.organization.isNotBlank()) {
                     ConnectionLog.record("Zero Trust organization ${addresses.organization}")
@@ -5194,6 +5217,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // rendezvous, so it has to come down here too — leaving it bound across
         // a reconnect would fail the next start() with "already running" and
         // silently drop the front again.
+        WarpExitManager.stop()
         WarpUdpgwFront.stop()
         TunnelStatus.isNativeTunMode = false
         // AI Mode's Smart DNS Split runs inside the Rust core's TUN bridge, so
