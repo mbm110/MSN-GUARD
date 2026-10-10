@@ -397,27 +397,42 @@ object CoreConfig {
             }
         }
 
-        // ECH: PattNG default is off (aetherEch=false). Only the profile
-        // that explicitly enables ECH sends --ech auto + dns/domain. Forcing
-        // auto on every install makes the engine fetch ECHConfigList via
-        // udp://1.1.1.1:53 and abort with "ECH is on but there is no ECH key
-        // to offer" when that UDP is blocked — which is exactly this
-        // carrier: the log shows 90s of silence then no s0, no error.
-        // So: set AETHER_ECH only when the user enabled it (pref aether_ech
-        // == auto/1/true). Otherwise leave it unset — engine connects without
-        // ECH, SNI www.cloudflare.com alone (PattNG parity).
+        // ECH fast lane for the WARP account API (api.cloudflareclient.com).
+        // That host is filtered on this carrier: without ECH every MASQUE
+        // connect burns 5 x 20s (API_TIMEOUT) + backoff = 109s in
+        // account::enable_warp before the scan even starts (3.0.16 logs:
+        // 23:02:10->23:03:59, 23:22:49->23:24:37). PattNG provisions in <60s
+        // because it goes over ECH — FCAE log: "fetched ECHConfigList
+        // (71 bytes) for cloudflare-ech.com via udp://1.1.1.1:53" /
+        // "fetched ECHConfigList automatically for the WARP API" /
+        // "registration went over ECH". Re-enable that path here.
+        // Default is ON (like FCAE 6e08b77) via DoH so the lookup itself
+        // survives when udp://1.1.1.1:53 is blocked. DoH goes as
+        // https::send with Chrome fingerprint (tls.rs) — more survivable
+        // than UDP on this DPI. User can still set off/0/false to disable.
         if (socksProxyForCore.isBlank()) {
             val echPref = text("aether_ech", "").trim().lowercase()
-            if (echPref == "auto" || echPref == "1" || echPref == "true") {
-                out["AETHER_ECH"] = "auto"
-                // When ECH is on, its lookup goes via the same DNS as PattNG's default
-                // (udp://1.1.1.1 / cloudflare-ech.com) unless the user set another.
-                val dns = text("aether_ech_dns", "").trim()
-                if (dns.isNotEmpty()) out["AETHER_ECH_DNS"] = dns
-                val dom = text("aether_ech_domain", "").trim()
-                if (dom.isNotEmpty()) out["AETHER_ECH_DOMAIN"] = dom
-            } else if (echPref.isNotEmpty() && echPref != "off" && echPref != "0" && echPref != "false") {
-                out["AETHER_ECH"] = text("aether_ech", "auto")
+            val useEch = when {
+                echPref.isEmpty() -> true
+                echPref in setOf("auto", "1", "true") -> true
+                echPref in setOf("off", "0", "false") -> false
+                else -> true // custom base64 value
+            }
+            if (useEch) {
+                if (echPref.isEmpty() || echPref in setOf("auto", "1", "true")) {
+                    out["AETHER_ECH"] = "auto"
+                    val dns = text("aether_ech_dns", "").trim()
+                    // DoH default — not udp://1.1.1.1 which the carrier drops
+                    if (dns.isNotEmpty()) out["AETHER_ECH_DNS"] = dns else out["AETHER_ECH_DNS"] = "https://1.1.1.1/dns-query"
+                    val dom = text("aether_ech_domain", "").trim()
+                    if (dom.isNotEmpty()) out["AETHER_ECH_DOMAIN"] = dom
+                } else {
+                    out["AETHER_ECH"] = text("aether_ech", "auto")
+                    val dns = text("aether_ech_dns", "").trim()
+                    if (dns.isNotEmpty()) out["AETHER_ECH_DNS"] = dns
+                    val dom = text("aether_ech_domain", "").trim()
+                    if (dom.isNotEmpty()) out["AETHER_ECH_DOMAIN"] = dom
+                }
             }
         } else if (socksProxyForCore.isNotBlank()) {
             out["AETHER_UPSTREAM"] = socksProxyForCore
