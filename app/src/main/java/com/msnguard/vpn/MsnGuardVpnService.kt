@@ -5519,25 +5519,23 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // so the whole ladder cannot exceed roughly one normal connect.
         val perRungBudgetMsDefault = when (method) {
             MtuConfig.Method.WIREGUARD -> 45_000L
-            // MASQUE: the engine binds the SOCKS listener only AFTER identity
-            // provisioning + the balanced scan + establish_masque
-            // (lib.rs run_masque_tunnel), not at job start. Before the scan
-            // there is also a WARP API call (account::enable_warp) and, when a
-            // lastconn cache exists, one 5s verify per cached gateway
-            // (quick_verify_masque_peer). The scan itself has a 120s deadline
-            // (prober.rs ScanMode::Balanced overall_deadline), so 120s left no
-            // room for the pre-scan work and killed the scan mid-flight. The
-            // plain (non-ladder) path already uses SOCKS_READY_TIMEOUT_MS =
-            // 180s for the same reason; match it. PattNG gives a scan
-            // AETHER_WARM_UP_MS-retried waits up to 8 minutes total
-            // (AetherScanner.SCAN_TIMEOUT_MS).
-            MtuConfig.Method.MASQUE -> 180_000L
+            // MASQUE: the engine binds the SOCKS listener only AFTER
+            // load_or_enrol_masque (which always calls account::enable_warp)
+            // + the balanced scan + establish_masque, not at job start.
+            // In Iran api.cloudflareclient.com is filtered: enable_warp burns
+            // 5 x 20s (API_TIMEOUT) + backoff = ~109s (see 3.0.16 logs:
+            // 23:02:10->23:03:59 and 23:22:49->23:24:37) BEFORE the scan even
+            // starts, then the scan itself needs 120s (prober.rs Balanced
+            // overall_deadline). 180s left only ~72s for the scan and killed
+            // it mid-flight every time. 300s covers 109s + 120s + margin.
+            // PattNG gives the scan 8 minutes (AetherScanner.SCAN_TIMEOUT_MS).
+            MtuConfig.Method.MASQUE -> 300_000L
             else -> 50_000L // WOW
         }
         val perRungBudgetMsFollow = when (method) {
-            // The follow-up rungs have a cached identity, so only the scan
-            // remains; still give it the engine's full budget.
-            MtuConfig.Method.MASQUE -> 180_000L
+            // Follow-up rungs also re-run enable_warp (load_or_enrol_masque
+            // always does), so they need the same budget.
+            MtuConfig.Method.MASQUE -> 300_000L
             else -> perRungBudgetMsDefault
         }
         for ((rungIdx, mtu) in ladder.withIndex()) {
