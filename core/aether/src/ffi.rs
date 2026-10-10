@@ -17,6 +17,61 @@ use crate::zerotrust;
 
 type Reply = std::result::Result<Value, String>;
 
+/// The engine logs through env_logger to logcat (tag MSN_AETHER), which the
+/// app cannot read without READ_LOGS. PattNG instead reads the core's stdout
+/// line by line and relays it into its own log. An in-process library has no
+/// stdout, so the host installs this sink and the engine's log records reach
+/// ConnectionLog with no permission and no round trip.
+static LOG_SINK: OnceLock<parking_lot::Mutex<Option<LogSink>>> = OnceLock::new();
+
+struct LogSink {
+    callback: extern "C" fn(*const c_char),
+}
+
+/// Installs the host's log relay. PattNG parity: every line the engine emits
+/// becomes visible in the app's connection log.
+#[no_mangle]
+pub extern "C" fn aether_set_log_sink(callback: Option<extern "C" fn(*const c_char)>) {
+    let sink = LOG_SINK.get_or_init(|| parking_lot::Mutex::new(None));
+    let mut guard = sink.lock();
+    match callback {
+        Some(f) => *guard = Some(LogSink { callback: f }),
+        None => *guard = None,
+    }
+}
+
+/// Called by the logger below; kept separate so a sink that is never installed
+/// costs one atomic-ish check and nothing else.
+fn forward_log_line(line: &str) {
+    let Some(sink) = LOG_SINK.get() else { return };
+    let guard = sink.lock();
+    let Some(installed) = guard.as_ref() else { return };
+    let Ok(text) = CString::new(line) else { return };
+    (installed.callback)(text.as_ptr());
+}
+
+/// The log target the engine uses when a host sink is installed.
+pub(crate) struct SinkLogger;
+
+impl log::Log for SinkLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        forward_log_line(&format!("{}", record.args()));
+    }
+    fn flush(&self) {}
+}
+
+/// True when the host installed a log sink, so lib.rs can prefer it over
+/// env_logger alone.
+pub(crate) fn sink_installed() -> bool {
+    LOG_SINK.get().is_some_and(|sink| sink.lock().is_some())
+}
+
 fn runtime() -> Option<&'static tokio::runtime::Runtime> {
     static RUNTIME: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
     RUNTIME

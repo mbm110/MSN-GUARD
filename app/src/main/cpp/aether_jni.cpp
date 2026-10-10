@@ -35,6 +35,7 @@ const char* aether_job_cancel(unsigned long long id);
 const char* aether_job_free(unsigned long long id);
 const char* aether_stats_snapshot();
 void aether_string_free(const char* raw);
+void aether_set_log_sink(void (*callback)(const char* line));
 }
 
 namespace {
@@ -48,7 +49,40 @@ unsigned long long g_job = 0;
 JavaVM* g_vm = nullptr;
 jobject g_service = nullptr;
 jmethodID g_on_event = nullptr;
+jmethodID g_on_log = nullptr;
 std::mutex g_service_mutex;
+
+// The engine's log relay. PattNG reads the core's stdout line by line; an
+// in-process library has none, so the engine calls this for every log record
+// and the host routes it to ConnectionLog. The signature is
+// onEngineLog(String) on the service.
+extern "C" JNIEXPORT void JNICALL
+Java_com_msnguard_vpn_NativeCore_nativeSetLogSink(JNIEnv*, jobject) {
+    // Looked up lazily: attach() may not have run when a test sets the sink.
+    aether_set_log_sink([](const char* line) {
+        JNIEnv* env = nullptr;
+        bool attached = false;
+        if (g_vm == nullptr) return;
+        if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+            if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+            attached = true;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_service_mutex);
+            if (g_service != nullptr && g_on_log != nullptr) {
+                jstring jline = env->NewStringUTF(line);
+                env->CallVoidMethod(g_service, g_on_log, jline);
+                env->DeleteLocalRef(jline);
+            }
+        }
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        if (attached) g_vm->DetachCurrentThread();
+    });
+}
+
 
 void on_event(const std::string& json) {
     JNIEnv* env = nullptr;
@@ -367,6 +401,7 @@ Java_com_msnguard_vpn_NativeCore_nativeAttach(JNIEnv* env, jobject, jobject serv
     g_service = env->NewGlobalRef(service);
     const jclass type = env->GetObjectClass(service);
     g_on_event = env->GetMethodID(type, "onEvent", "(Ljava/lang/String;)V");
+    g_on_log = env->GetMethodID(type, "onEngineLog", "(Ljava/lang/String;)V");
     env->DeleteLocalRef(type);
 }
 

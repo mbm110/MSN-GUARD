@@ -99,13 +99,23 @@ pub async fn run_with(args: Vec<String>) -> Result<()> {
         .map(|v| v.trim().to_lowercase())
         .filter(|v| matches!(v.as_str(), "error" | "warn" | "info" | "debug" | "trace"))
         .unwrap_or_else(|| "info".to_string());
-    let default_filter = format!("info,aether={level}");
-    let _ =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
+
+    // PattNG relays the core's own output line by line; an in-process library
+    // has no stdout, so when the host installed a sink it is the log target
+    // and env_logger stays for logcat. Both receive every line.
+    if ffi::sink_installed() {
+        // set_logger takes &'static, so the logger is a static, not a local.
+        static SINK: ffi::SinkLogger = ffi::SinkLogger;
+        let _ = log::set_logger(&SINK)
+            .map(|()| log::set_max_level(log::LevelFilter::Info));
+        log::info!("Aether v{} (host log sink)", env!("CARGO_PKG_VERSION"));
+    } else {
+        let default_filter = format!("info,aether={level}");
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
             .format_timestamp_millis()
             .try_init();
-
-    log::info!("Aether v{}", env!("CARGO_PKG_VERSION"));
+        log::info!("Aether v{}", env!("CARGO_PKG_VERSION"));
+    }
     sysprofile::log_summary();
     sysprofile::raise_fd_limit();
     egress::init()?;

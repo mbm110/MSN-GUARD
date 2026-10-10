@@ -2556,6 +2556,24 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
     fun protectSocket(fd: Int): Boolean = !vpnModeActive.get() || protect(fd)
 
+    /**
+     * The engine's own log, relayed line by line. PattNG reads the core's
+     * stdout; an in-process library has none, so [NativeCore.setLogSink]
+     * installs a callback the engine calls for every record. This is what
+     * makes a MASQUE connect diagnosable: identity provisioning, the scan
+     * (candidates, budget, the gateway chosen) and the tunnel's own exit
+     * reason all appear here instead of ending in 90s of silence.
+     *
+     * Called from the engine's logger thread, so the work here stays cheap:
+     * record and return.
+     */
+    @androidx.annotation.Keep
+    fun onEngineLog(line: String) {
+        val text = line.trim()
+        if (text.isEmpty()) return
+        ConnectionLog.record("aether: $text")
+    }
+
     override fun onEvent(json: String) {
         try {
             val event = JSONObject(json)
@@ -4749,6 +4767,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             try {
                 ConnectionLog.record("Preparing $currentProtocol identity")
                 NativeCore.attach(this)
+                // PattNG relays the core's own output line by line; an
+                // in-process library has no stdout, so install the callback
+                // before the engine starts. Without it a MASQUE connect that
+                // fails inside identity provisioning or the scan shows the
+                // user nothing but 90s of silence.
+                NativeCore.setLogSink()
 
                 // SOCKS TUNNEL TYPE on a WARP transport: no TUN, no consent, no
                 // tun2socks. The core runs its userspace netstack and publishes the
@@ -5495,11 +5519,19 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // so the whole ladder cannot exceed roughly one normal connect.
         val perRungBudgetMsDefault = when (method) {
             MtuConfig.Method.WIREGUARD -> 45_000L
-            MtuConfig.Method.MASQUE -> 90_000L
+            // MASQUE: the engine's own balanced scan has a 120s deadline
+            // (prober.rs ScanMode::Balanced overall_deadline), and the SOCKS
+            // listener is only bound AFTER identity provisioning + the scan +
+            // establish_masque — not at job start. 90s killed the scan mid-flight
+            // on every attempt. PattNG gives the scan 8 minutes; 120s is the
+            // engine's own budget for balanced, which is what we ask for.
+            MtuConfig.Method.MASQUE -> 120_000L
             else -> 50_000L // WOW
         }
         val perRungBudgetMsFollow = when (method) {
-            MtuConfig.Method.MASQUE -> 55_000L
+            // The follow-up rungs have a cached identity, so only the scan
+            // remains; still give it the engine's full budget.
+            MtuConfig.Method.MASQUE -> 120_000L
             else -> perRungBudgetMsDefault
         }
         for ((rungIdx, mtu) in ladder.withIndex()) {

@@ -88,6 +88,15 @@ object NativeCore {
     fun attach(service: MsnGuardVpnService) = nativeAttach(service)
     fun detach() = nativeDetach()
 
+    /**
+     * Installs the engine log relay. PattNG reads the core's stdout line by
+     * line; an in-process library has none, so the engine calls back instead.
+     * Every line it emits then reaches ConnectionLog via
+     * [MsnGuardVpnService.onEngineLog], which is what made a MASQUE connect
+     * fail in silence — no log line, no lastError, just 90s of nothing.
+     */
+    fun setLogSink() = nativeSetLogSink()
+
     interface CoreCallback {
         fun onEvent(json: String)
     }
@@ -116,4 +125,5 @@ object NativeCore {
     @JvmStatic private external fun nativeLastLog(): String
     @JvmStatic private external fun nativeAttach(service: MsnGuardVpnService)
     @JvmStatic private external fun nativeDetach()
+    @JvmStatic private external fun nativeSetLogSink()
 }
