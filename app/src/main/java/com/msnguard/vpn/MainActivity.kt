@@ -311,6 +311,7 @@ class MainActivity : Activity() {
     private var dnsPage: View? = null
     private var donatePage: View? = null
     private var mtuPage: View? = null
+    private var warpSettingPage: View? = null
     private var mtuScanning: Boolean = false
     private var mtuScanResult: MtuProbe.Result? = null
     private var trafficSpeedValue: TextView? = null
@@ -3278,6 +3279,10 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
+            body.addView(navRow(Strings.t("Warp Setting"), warpSettingSummary()) { openWarpSettingScreen() }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
             // Share over LAN, directly under the port it publishes.
             //
             // Moved out of the PSIPHON section: it is not Psiphon's any more. Every
@@ -6234,6 +6239,54 @@ class MainActivity : Activity() {
         openSettingsScreen()
     }
 
+    // Warp Setting — for Masque only: Freedom (direct) vs a custom VLESS/outbound that the Masque scan is chained through.
+    private fun warpSettingSummary(): String {
+        val mode = CoreConfig.warpExitMode(this)
+        if (mode == CoreConfig.WARP_EXIT_MODE_FREEDOM) return Strings.t("Freedom · Direct")
+        val v = CoreConfig.warpExitCustom(this)
+        if (v.isBlank()) return Strings.t("Custom · Not set")
+        return Strings.tf("Custom · %s", v.take(28) + if (v.length > 28) "…" else "")
+    }
+
+    private fun openWarpSettingScreen() {
+        warpSettingPage?.let(pageHost::removeView)
+        val page = FrameLayout(this).apply { setBackgroundColor(CANVAS); isClickable = true }
+        val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(16), dp(24), dp(24)) }
+        content.addView(LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; addView(createHeaderBackButton { closeWarpSettingScreen() }, LinearLayout.LayoutParams(dp(48), dp(48))); addView(label(Strings.t("Warp Setting"), 22f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) }) })
+        content.addView(label(Strings.t("Exit for Masque only. Freedom — dial direct. Custom — paste a VLESS (e.g. Lithuania) and Masque will scan through it. WireGuard, WoW, SHARD, Tor are unaffected."), 13f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(4); topMargin = dp(4); bottomMargin = dp(16) })
+        val freedomSel = CoreConfig.warpExitMode(this) == CoreConfig.WARP_EXIT_MODE_FREEDOM
+        val freedomRow = navRow(title = Strings.t("Freedom — Direct"), value = if (freedomSel) Strings.t("Selected") else null) { if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@navRow }; preferences().edit().putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_FREEDOM).apply(); toastShort(Strings.t("Warp exit: Freedom")); ConnectionLog.record("Warp Setting: Freedom (direct)"); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() }
+        content.addView(freedomRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
+        val customSel = CoreConfig.warpExitIsCustom(this)
+        val customRow = navRow(title = Strings.t("Custom exit"), value = if (customSel) Strings.t("Selected") else Strings.t("Tap to paste")) { if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return@navRow }; editWarpCustom() }
+        content.addView(customRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
+        if (customSel) content.addView(label(CoreConfig.warpExitCustom(this).take(240), 12f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(4); topMargin = dp(8) })
+        scroll.addView(content)
+        page.addView(scroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        page.setOnApplyWindowInsetsListener { _, insets -> content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24)); insets }
+        warpSettingPage = page; pageHost.addView(page); page.requestApplyInsets(); animatePageOpen(page)
+    }
+
+    private fun closeWarpSettingScreen() { warpSettingPage?.let { animatePageClose(it) { warpSettingPage = null } }; openSettingsScreen() }
+
+    private fun editWarpCustom() {
+        if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first to change")); return }
+        val cur = CoreConfig.warpExitCustom(this)
+        val field = settingsField(value = cur, hintText = "vless://uuid@host:port?security=reality#name").apply { inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE; minLines = 2; maxLines = 5 }
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val sheet = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(24), dp(24), dp(24)); background = roundedBackground(SURFACE, 28, SURFACE) }
+        sheet.addView(LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48))); addView(label(Strings.t("Custom exit"), 18f, INK, TypefaceStyle.MEDIUM)) })
+        sheet.addView(label(Strings.t("Paste a VLESS URL or outbound JSON. Masque scan will be chained through it; other transports ignore it."), 13f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(14) })
+        sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val actions = LinearLayout(this).apply { gravity = Gravity.END; orientation = LinearLayout.HORIZONTAL }
+        actions.addView(createSettingsButton(Strings.t("Clear")) { preferences().edit().remove(CoreConfig.WARP_EXIT_CUSTOM_PREF).putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_FREEDOM).apply(); ConnectionLog.record("Warp Setting: cleared, back to Freedom"); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() }, LinearLayout.LayoutParams(dp(90), dp(46)).apply { rightMargin = dp(8) })
+        actions.addView(createSettingsButton(Strings.t("Save")) { val raw = field.text.toString().trim(); if (raw.isEmpty()) { field.error = Strings.t("Paste a config first"); return@createSettingsButton }; preferences().edit().putString(CoreConfig.WARP_EXIT_CUSTOM_PREF, raw).putString(CoreConfig.WARP_EXIT_MODE_PREF, CoreConfig.WARP_EXIT_MODE_CUSTOM).apply(); ConnectionLog.record("Warp Setting: custom exit saved (" + raw.take(48) + ")"); toastShort(Strings.t("Warp exit saved")); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() })
+        sheet.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) })
+        dialog.setContentView(FrameLayout(this).apply { addView(sheet); setPadding(dp(16), 0, dp(16), dp(16)) })
+        dialog.show(); dialog.window?.apply { setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); setDimAmount(0.62f); setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT); setGravity(Gravity.BOTTOM) }; field.requestFocus()
+    }
+
     private fun editMtu(method: MtuConfig.Method) {
         if (TunnelStatus.isActive()) {
             toastShort(Strings.t("Disconnect first to change MTU"))
@@ -7140,6 +7193,7 @@ class MainActivity : Activity() {
             dnsPage != null -> closeDnsScreen()
             donatePage != null -> closeDonateScreen()
             tunnelControlsPage != null -> closeTunnelControlsScreen()
+            warpSettingPage != null -> closeWarpSettingScreen()
             mtuPage != null -> closeMtuScreen()
             showingLogs -> closeLogsScreen()
             showingScanner -> closeScannerScreen()

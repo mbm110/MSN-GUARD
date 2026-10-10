@@ -790,7 +790,32 @@ pub fn default_path() -> &'static str {
 }
 
 pub fn default_sni() -> &'static str {
-    consts::CONNECT_SNI
+    consts::DEFAULT_MASQUE_SNI
+}
+
+/// The server name the MASQUE handshakes put in their ClientHello, over HTTP/3 and HTTP/2:
+/// that of --masque-sni (AETHER_MASQUE_SNI), see `masque_sni_of`. Only the TLS name changes;
+/// the HTTP host, the :authority of the CONNECT request, stays `default_authority`.
+pub fn masque_sni() -> Result<String> {
+    masque_sni_of(&std::env::var("AETHER_MASQUE_SNI").unwrap_or_default())
+}
+
+/// The server name `value`, given to --masque-sni, makes the MASQUE handshakes send: none
+/// given, `default_sni`; else that domain name, without a trailing dot, as SNI has it
+/// (RFC 6066). An address or anything else that is no domain name is refused, rather than
+/// have the handshakes send the default name in its place.
+pub fn masque_sni_of(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(default_sni().to_string());
+    }
+    let name = value.strip_suffix('.').unwrap_or(value);
+    if name.ends_with('.') || name.parse::<IpAddr>().is_ok() || !crate::dns::valid_domain(name) {
+        return Err(AetherError::Tls(format!(
+            "--masque-sni: {value} is no domain name"
+        )));
+    }
+    Ok(name.to_string())
 }
 
 #[derive(Clone)]

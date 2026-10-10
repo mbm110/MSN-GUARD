@@ -106,6 +106,24 @@ object CoreConfig {
     /** The core's protocol name for masque-over-masque. */
     const val MIM_PROTOCOL = "mim"
 
+    // ── Warp Setting ──
+    const val WARP_EXIT_MODE_PREF = "warp_exit_mode"
+    const val WARP_EXIT_MODE_FREEDOM = "freedom"
+    const val WARP_EXIT_MODE_CUSTOM = "custom"
+    const val WARP_EXIT_MODE_DEFAULT = WARP_EXIT_MODE_FREEDOM
+    const val WARP_EXIT_CUSTOM_PREF = "warp_exit_custom"
+
+    fun warpExitMode(context: android.content.Context): String =
+        context.profiled().getString(WARP_EXIT_MODE_PREF, WARP_EXIT_MODE_DEFAULT)?.trim()?.lowercase().orEmpty().let {
+            if (it == WARP_EXIT_MODE_CUSTOM) WARP_EXIT_MODE_CUSTOM else WARP_EXIT_MODE_FREEDOM
+        }
+
+    fun warpExitCustom(context: android.content.Context): String =
+        context.profiled().getString(WARP_EXIT_CUSTOM_PREF, "")?.trim().orEmpty()
+
+    fun warpExitIsCustom(context: android.content.Context): Boolean =
+        warpExitMode(context) == WARP_EXIT_MODE_CUSTOM && warpExitCustom(context).isNotBlank()
+
     /** Whether the user armed masque-over-masque. */
     fun mimArmed(context: Context): Boolean =
         context.profiled()
@@ -343,6 +361,13 @@ object CoreConfig {
         // AETHER_WG_NO_DATA_CHECK is the inverse of the app's toggle.
         if (!bool("wireguard_data_check", true)) {
             out["AETHER_WG_NO_DATA_CHECK"] = "1"
+        }
+
+        // Masque SNI (DPI bypass): engine reads AETHER_MASQUE_SNI as the ClientHello SNI for
+        // MASQUE handshakes (H2 + H3). PattNG 512726 changed default from
+        // consumer-masque.cloudflareclient.com to www.cloudflare.com; set explicitly, only for masque/mim.
+        if (effectiveProtocol == "masque" || effectiveProtocol == MIM_PROTOCOL) {
+            out["AETHER_MASQUE_SNI"] = "www.cloudflare.com"
         }
 
         // Traffic counters for the WARP path: socks.rs add_up/add_down is
