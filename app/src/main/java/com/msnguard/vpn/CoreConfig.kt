@@ -404,26 +404,24 @@ object CoreConfig {
         // 23:02:10->23:03:59, 23:22:49->23:24:37). PattNG provisions in <60s
         // because it goes over ECH — FCAE log: "fetched ECHConfigList
         // (71 bytes) for cloudflare-ech.com via udp://1.1.1.1:53" /
-        // "fetched ECHConfigList automatically for the WARP API" /
-        // "registration went over ECH". Re-enable that path here.
-        // Default is ON (like FCAE 6e08b77) via DoH so the lookup itself
-        // survives when udp://1.1.1.1:53 is blocked. DoH goes as
-        // https::send with Chrome fingerprint (tls.rs) — more survivable
-        // than UDP on this DPI. User can still set off/0/false to disable.
+        // "registration went over ECH". 3.0.18 tried DoH https://1.1.1.1
+        // but that IP is itself filtered here (NS98MBQ 12s timeout), so
+        // the ECH lookup never landed. Fix: embed the key directly — no
+        // DNS at all, and a stale key is handled by ECH retry_configs.
         if (socksProxyForCore.isBlank()) {
             val echPref = text("aether_ech", "").trim().lowercase()
             val useEch = when {
                 echPref.isEmpty() -> true
                 echPref in setOf("auto", "1", "true") -> true
                 echPref in setOf("off", "0", "false") -> false
-                else -> true // custom base64 value
+                else -> true
             }
             if (useEch) {
                 if (echPref.isEmpty() || echPref in setOf("auto", "1", "true")) {
-                    out["AETHER_ECH"] = "auto"
-                    val dns = text("aether_ech_dns", "").trim()
-                    // DoH default — not udp://1.1.1.1 which the carrier drops
-                    if (dns.isNotEmpty()) out["AETHER_ECH_DNS"] = dns else out["AETHER_ECH_DNS"] = "https://1.1.1.1/dns-query"
+                    // Embedded key — no DNS query, survives any DNS block.
+                    // If the key has rotated the server returns retry_configs
+                    // which the engine adopts automatically (masque_h2/https).
+                    out["AETHER_ECH"] = "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
                     val dom = text("aether_ech_domain", "").trim()
                     if (dom.isNotEmpty()) out["AETHER_ECH_DOMAIN"] = dom
                 } else {
