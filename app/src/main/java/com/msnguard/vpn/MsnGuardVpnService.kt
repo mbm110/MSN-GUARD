@@ -5519,19 +5519,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // so the whole ladder cannot exceed roughly one normal connect.
         val perRungBudgetMsDefault = when (method) {
             MtuConfig.Method.WIREGUARD -> 45_000L
-            // MASQUE: the engine's own balanced scan has a 120s deadline
-            // (prober.rs ScanMode::Balanced overall_deadline), and the SOCKS
-            // listener is only bound AFTER identity provisioning + the scan +
-            // establish_masque — not at job start. 90s killed the scan mid-flight
-            // on every attempt. PattNG gives the scan 8 minutes; 120s is the
-            // engine's own budget for balanced, which is what we ask for.
-            MtuConfig.Method.MASQUE -> 120_000L
+            // MASQUE: the engine binds the SOCKS listener only AFTER identity
+            // provisioning + the balanced scan + establish_masque
+            // (lib.rs run_masque_tunnel), not at job start. Before the scan
+            // there is also a WARP API call (account::enable_warp) and, when a
+            // lastconn cache exists, one 5s verify per cached gateway
+            // (quick_verify_masque_peer). The scan itself has a 120s deadline
+            // (prober.rs ScanMode::Balanced overall_deadline), so 120s left no
+            // room for the pre-scan work and killed the scan mid-flight. The
+            // plain (non-ladder) path already uses SOCKS_READY_TIMEOUT_MS =
+            // 180s for the same reason; match it. PattNG gives a scan
+            // AETHER_WARM_UP_MS-retried waits up to 8 minutes total
+            // (AetherScanner.SCAN_TIMEOUT_MS).
+            MtuConfig.Method.MASQUE -> 180_000L
             else -> 50_000L // WOW
         }
         val perRungBudgetMsFollow = when (method) {
             // The follow-up rungs have a cached identity, so only the scan
             // remains; still give it the engine's full budget.
-            MtuConfig.Method.MASQUE -> 120_000L
+            MtuConfig.Method.MASQUE -> 180_000L
             else -> perRungBudgetMsDefault
         }
         for ((rungIdx, mtu) in ladder.withIndex()) {
