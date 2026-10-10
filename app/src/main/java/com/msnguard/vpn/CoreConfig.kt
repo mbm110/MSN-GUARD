@@ -387,50 +387,42 @@ object CoreConfig {
         out["AETHER_LOG_LEVEL"] = text("log_level", "info")
         out["AETHER_PERF_PROFILE"] = text("perf_profile", "auto")
 
-        // H2 fragmentation. PattNG sends --fragment only on masque H2.
-        // MSN hardcodes masque to H2, so only masque/mim may fragment.
+        // H2 fragmentation. PattNG screenshot 1-22-03 shows Fragment OFF yet
+        // MASQUE connects in <30s; MSN with fragment ON (default "on") found
+        // 0 gateways in 120s (3.0.19 log). Match PattNG: MASQUE fragment OFF
+        // by default — user can still turn it on via h2_fragmentation pref.
         // Mixed-case SNI only inside fragment branch (FCAE parity).
-        if (isMasqueForEnv && text("h2_fragmentation", "on") == "on") {
+        if (isMasqueForEnv && text("h2_fragmentation", "off") == "on") {
             out["AETHER_MASQUE_H2_FRAGMENT"] = "1"
             if (bool("mixed_case_sni", false)) {
                 out["AETHER_MASQUE_H2_FRAGMENT_SNI"] = "1"
             }
         }
 
-        // ECH fast lane for the WARP account API (api.cloudflareclient.com).
-        // That host is filtered on this carrier: without ECH every MASQUE
-        // connect burns 5 x 20s (API_TIMEOUT) + backoff = 109s in
-        // account::enable_warp before the scan even starts (3.0.16 logs:
-        // 23:02:10->23:03:59, 23:22:49->23:24:37). PattNG provisions in <60s
-        // because it goes over ECH — FCAE log: "fetched ECHConfigList
-        // (71 bytes) for cloudflare-ech.com via udp://1.1.1.1:53" /
-        // "registration went over ECH". 3.0.18 tried DoH https://1.1.1.1
-        // but that IP is itself filtered here (NS98MBQ 12s timeout), so
-        // the ECH lookup never landed. Fix: embed the key directly — no
-        // DNS at all, and a stale key is handled by ECH retry_configs.
+        // ECH: PattNG 1-22-03 shows Encrypted Client Hello OFF, command line
+        // has no --ech, and it finds a gateway in <30s without ECH.
+        // MSN 3.0.19 forced ECH ON with an embedded cloudflare-ech.com key
+        // (AETHER_ECH=...); WARP API went over ECH in 2s but the MASQUE
+        // scan then offered the same cloudflare-ech.com key for
+        // www.cloudflare.com handshakes → 0 candidates in 120s (ECH mismatch).
+        // Fix: PattNG parity — ECH OFF by default for MASQUE, like the
+        // screenshot. Only set AETHER_ECH when user explicitly enables it.
+        // WARP API filtering (api.cloudflareclient.com) is not fatal: enable_warp
+        // warns and continues to hunt, and a cached identity needs no reprovision.
         if (socksProxyForCore.isBlank()) {
             val echPref = text("aether_ech", "").trim().lowercase()
             val useEch = when {
-                echPref.isEmpty() -> true
+                echPref.isEmpty() -> false
                 echPref in setOf("auto", "1", "true") -> true
                 echPref in setOf("off", "0", "false") -> false
                 else -> true
             }
             if (useEch) {
-                if (echPref.isEmpty() || echPref in setOf("auto", "1", "true")) {
-                    // Embedded key — no DNS query, survives any DNS block.
-                    // If the key has rotated the server returns retry_configs
-                    // which the engine adopts automatically (masque_h2/https).
-                    out["AETHER_ECH"] = "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
-                    val dom = text("aether_ech_domain", "").trim()
-                    if (dom.isNotEmpty()) out["AETHER_ECH_DOMAIN"] = dom
-                } else {
-                    out["AETHER_ECH"] = text("aether_ech", "auto")
-                    val dns = text("aether_ech_dns", "").trim()
-                    if (dns.isNotEmpty()) out["AETHER_ECH_DNS"] = dns
-                    val dom = text("aether_ech_domain", "").trim()
-                    if (dom.isNotEmpty()) out["AETHER_ECH_DOMAIN"] = dom
-                }
+                out["AETHER_ECH"] = text("aether_ech", "auto")
+                val dns = text("aether_ech_dns", "").trim()
+                if (dns.isNotEmpty()) out["AETHER_ECH_DNS"] = dns
+                val dom = text("aether_ech_domain", "").trim()
+                if (dom.isNotEmpty()) out["AETHER_ECH_DOMAIN"] = dom
             }
         } else if (socksProxyForCore.isNotBlank()) {
             out["AETHER_UPSTREAM"] = socksProxyForCore
