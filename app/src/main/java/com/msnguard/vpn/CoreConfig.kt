@@ -284,8 +284,12 @@ object CoreConfig {
 
         // Obfuscation (aethernoize). off/light/balanced/aggressive/firewall/gfw;
         // the engine defaults wireguard to "firewall" and masque to "balanced".
-        text("obfuscation_profile").ifBlank { "balanced" }.let {
-            out["AETHER_NOIZE"] = it
+        // PattNG parity: MASQUE over H2 takes no obfuscation at all (UDP-only).
+        // MSN hardcodes masque to H2, so skip NOIZE for masque/mim.
+        if (!isMasqueForEnv) {
+            text("obfuscation_profile").ifBlank { "balanced" }.let {
+                out["AETHER_NOIZE"] = it
+            }
         }
 
         // Manual obfuscation overrides. 2.3.0 exposes only the profile through
@@ -383,43 +387,38 @@ object CoreConfig {
         out["AETHER_LOG_LEVEL"] = text("log_level", "info")
         out["AETHER_PERF_PROFILE"] = text("perf_profile", "auto")
 
-        // H2 fragmentation. FCAE sends AETHER_MASQUE_H2_FRAGMENT_SNI only when
-        // fragment_enabled is true (config.rs: if fragment_enabled { ... SNI ... } else { None }).
-        // Mixed-case SNI when fragmentation is OFF would be a behaviour FCAE never has
-        // — so gate it the same way, not independently.
-        if (text("h2_fragmentation", "on") == "on") {
+        // H2 fragmentation. PattNG sends --fragment only on masque H2.
+        // MSN hardcodes masque to H2, so only masque/mim may fragment.
+        // Mixed-case SNI only inside fragment branch (FCAE parity).
+        if (isMasqueForEnv && text("h2_fragmentation", "on") == "on") {
             out["AETHER_MASQUE_H2_FRAGMENT"] = "1"
-            // Only while fragmented; FCAE nests SNI inside the fragment branch.
             if (bool("mixed_case_sni", false)) {
                 out["AETHER_MASQUE_H2_FRAGMENT_SNI"] = "1"
             }
         }
 
-        // Distributed identity via ECH — EXACTLY as FCAE does.
-        // FCAE never raised SHARD and never set AETHER_UPSTREAM for a fresh
-        // install; its log says:
-        //   fetched ECHConfigList (71 bytes) for cloudflare-ech.com via udp://1.1.1.1:53
-        //   fetched ECHConfigList automatically for the WARP API (71 bytes)
-        //   registration went over ECH
-        // That path is inside the engine: with AETHER_ECH=auto the engine
-        // looks the ECHConfigList up over udp://1.1.1.1:53 for
-        // cloudflare-ech.com and offers it on the api.cloudflareclient.com
-        // ClientHello, so the register goes encrypted and is not named on the
-        // wire. On a filtered carrier it is the ONLY way the API answers.
-        // Enabling it is the whole fix for (1) and (3): the engine provisions
-        // on its own link, no SHARD session, no probe, no timeout.
+        // ECH: PattNG default is off (aetherEch=false). Only the profile
+        // that explicitly enables ECH sends --ech auto + dns/domain. Forcing
+        // auto on every install makes the engine fetch ECHConfigList via
+        // udp://1.1.1.1:53 and abort with "ECH is on but there is no ECH key
+        // to offer" when that UDP is blocked — which is exactly this
+        // carrier: the log shows 90s of silence then no s0, no error.
+        // So: set AETHER_ECH only when the user enabled it (pref aether_ech
+        // == auto/1/true). Otherwise leave it unset — engine connects without
+        // ECH, SNI www.cloudflare.com alone (PattNG parity).
         if (socksProxyForCore.isBlank()) {
-            if (text("aether_ech", "").isBlank()) {
+            val echPref = text("aether_ech", "").trim().lowercase()
+            if (echPref == "auto" || echPref == "1" || echPref == "true") {
                 out["AETHER_ECH"] = "auto"
-            } else {
+                // When ECH is on, its lookup goes via the same DNS as PattNG's default
+                // (udp://1.1.1.1 / cloudflare-ech.com) unless the user set another.
+                val dns = text("aether_ech_dns", "").trim()
+                if (dns.isNotEmpty()) out["AETHER_ECH_DNS"] = dns
+                val dom = text("aether_ech_domain", "").trim()
+                if (dom.isNotEmpty()) out["AETHER_ECH_DOMAIN"] = dom
+            } else if (echPref.isNotEmpty() && echPref != "off" && echPref != "0" && echPref != "false") {
                 out["AETHER_ECH"] = text("aether_ech", "auto")
             }
-            // Same for the AETHER_UPSTREAM comment above: with AETHER_ECH the
-            // carrier no longer dictates an uplink for the account API.
-            // AETHER_UPSTREAM is kept only for the two transports that have no
-            // account at all (Psiphon, Tor) and for the case a future setting
-            // explicitly wants a proxy — otherwise it stays unset, exactly as
-            // in the FCAE run whose log you sent.
         } else if (socksProxyForCore.isNotBlank()) {
             out["AETHER_UPSTREAM"] = socksProxyForCore
         }

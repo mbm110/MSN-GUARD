@@ -5565,6 +5565,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         return true
                     }
                     ConnectionLog.record("MTU " + mtu + " — no SOCKS listener in " + (effectiveBudget/1000) + "s")
+                    runCatching {
+                        val err = NativeCore.lastError().takeIf { e -> e.isNotBlank() }
+                        if (err != null) ConnectionLog.record("aether lastError: " + err)
+                        val tailLines = NativeCore.lastLog().lineSequence().filter { line -> line.isNotBlank() }.toList().takeLast(20)
+                        if (tailLines.isNotEmpty()) tailLines.forEach { line -> ConnectionLog.record("aether: " + line) }
+                    }
                 } else if (stopRequested.get()) {
                     if (reconnectRequested.get()) sendStatus(STATUS_CONNECTING, Strings.t("Reconnecting…")) else sendStatus(STATUS_DISCONNECTED)
                     return true
@@ -5617,6 +5623,12 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         return true
                     }
                     ConnectionLog.record("MTU " + mtu + " — no SOCKS listener in " + (effectiveBudget2/1000) + "s")
+                    runCatching {
+                        val err = NativeCore.lastError().takeIf { e -> e.isNotBlank() }
+                        if (err != null) ConnectionLog.record("aether lastError: " + err)
+                        val tailLines = NativeCore.lastLog().lineSequence().filter { line -> line.isNotBlank() }.toList().takeLast(20)
+                        if (tailLines.isNotEmpty()) tailLines.forEach { line -> ConnectionLog.record("aether: " + line) }
+                    }
                 } else if (stopRequested.get()) {
                     if (reconnectRequested.get()) sendStatus(STATUS_CONNECTING, Strings.t("Reconnecting…")) else sendStatus(STATUS_DISCONNECTED)
                     return true
