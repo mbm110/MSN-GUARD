@@ -5493,10 +5493,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // We do not scan upfront — only after the first two rungs fail, per spec.
         // persist on rung success; budget per rung uses a share of SOCKS_READY_TIMEOUT_MS
         // so the whole ladder cannot exceed roughly one normal connect.
-        val perRungBudgetMs = when (method) {
+        val perRungBudgetMsDefault = when (method) {
             MtuConfig.Method.WIREGUARD -> 45_000L
-            MtuConfig.Method.MASQUE -> 55_000L
+            MtuConfig.Method.MASQUE -> 90_000L
             else -> 50_000L // WOW
+        }
+        val perRungBudgetMsFollow = when (method) {
+            MtuConfig.Method.MASQUE -> 55_000L
+            else -> perRungBudgetMsDefault
         }
         for ((rungIdx, mtu) in ladder.withIndex()) {
             if (stopRequested.get() || userInitiatedStop.get()) return true
@@ -5553,13 +5557,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     if (startedWithExitPin) { clearExitPin("the pinned endpoint failed"); startedWithExitPin = false; storedConfig = unpinnedStoredConfig ?: storedConfig }
                 } else if (fbResult == 0 && !stopRequested.get()) {
                     ConnectionLog.record("aether job running — identity/scan in progress")
-                    val ok = waitForSocksReadyBudget("127.0.0.1:" + CoreConfig.SOCKS_PORT, perRungBudgetMs)
+                    val effectiveBudget = if (rungIdx == 0) perRungBudgetMsDefault else perRungBudgetMsFollow
+                    val ok = waitForSocksReadyBudget("127.0.0.1:" + CoreConfig.SOCKS_PORT, effectiveBudget)
                     if (ok) {
                         if (mtu != storedMtu) { MtuConfig.set(this, method, mtu); ConnectionLog.record("MTU " + mtu + " connected — saved for " + method.title) }
                         while (!stopRequested.get() && NativeCore.isRunning()) { try { Thread.sleep(500) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break } }
                         return true
                     }
-                    ConnectionLog.record("MTU " + mtu + " — no SOCKS listener in " + (perRungBudgetMs/1000) + "s")
+                    ConnectionLog.record("MTU " + mtu + " — no SOCKS listener in " + (effectiveBudget/1000) + "s")
                 } else if (stopRequested.get()) {
                     if (reconnectRequested.get()) sendStatus(STATUS_CONNECTING, Strings.t("Reconnecting…")) else sendStatus(STATUS_DISCONNECTED)
                     return true
@@ -5604,13 +5609,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     if (startedWithExitPin) { clearExitPin("the pinned endpoint failed"); startedWithExitPin = false; storedConfig = unpinnedStoredConfig ?: storedConfig }
                 } else if (result == 0 && !stopRequested.get()) {
                     ConnectionLog.record("aether job running — identity/scan in progress")
-                    val ok = waitForSocksReadyBudget(warpListen, perRungBudgetMs)
+                    val effectiveBudget2 = if (rungIdx == 0) perRungBudgetMsDefault else perRungBudgetMsFollow
+                    val ok = waitForSocksReadyBudget(warpListen, effectiveBudget2)
                     if (ok) {
                         if (mtu != storedMtu) { MtuConfig.set(this, method, mtu); ConnectionLog.record("MTU " + mtu + " connected — saved for " + method.title) }
                         while (!stopRequested.get() && NativeCore.isRunning()) { try { Thread.sleep(500) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break } }
                         return true
                     }
-                    ConnectionLog.record("MTU " + mtu + " — no SOCKS listener in " + (perRungBudgetMs/1000) + "s")
+                    ConnectionLog.record("MTU " + mtu + " — no SOCKS listener in " + (effectiveBudget2/1000) + "s")
                 } else if (stopRequested.get()) {
                     if (reconnectRequested.get()) sendStatus(STATUS_CONNECTING, Strings.t("Reconnecting…")) else sendStatus(STATUS_DISCONNECTED)
                     return true

@@ -523,7 +523,14 @@ object ShardConfigs {
                     "grpcSettings",
                     JSONObject().apply {
                         put("serviceName", node.path.trimStart('/').ifEmpty { "mohsen" })
-                        if (node.host.isNotEmpty()) put("authority", node.host)
+                        val authority = when {
+                            node.host.isNotBlank() -> node.host
+                            node.serverName.isNotBlank() -> node.serverName
+                            else -> ""
+                        }
+                        if (authority.isNotBlank()) put("authority", authority)
+                        // mode=gun is default for gRPC in xray; keep stream semantics
+                        // (no explicit multiMode needed — xray infers from serviceName)
                     }
                 )
             } else if (node.network == "xhttp") {
