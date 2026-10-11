@@ -399,30 +399,45 @@ object CoreConfig {
             }
         }
 
-        // ECH: PattNG 1-22-03 shows Encrypted Client Hello OFF, command line
-        // has no --ech, and it finds a gateway in <30s without ECH.
-        // MSN 3.0.19 forced ECH ON with an embedded cloudflare-ech.com key
-        // (AETHER_ECH=...); WARP API went over ECH in 2s but the MASQUE
-        // scan then offered the same cloudflare-ech.com key for
-        // www.cloudflare.com handshakes → 0 candidates in 120s (ECH mismatch).
-        // Fix: PattNG parity — ECH OFF by default for MASQUE, like the
-        // screenshot. Only set AETHER_ECH when user explicitly enables it.
-        // WARP API filtering (api.cloudflareclient.com) is not fatal: enable_warp
-        // warns and continues to hunt, and a cached identity needs no reprovision.
+        // ECH: per-exit handling for MASQUE.
+        // - Custom exit (sidecar Lithuania): goes via AETHER_UPSTREAM, so both
+        //   api.cloudflareclient.com and the 162.159 scan ride the Lithuania
+        //   egress — no DPI on this carrier, no ECH needed. Keep ECH OFF
+        //   (fragment also OFF) like PattNG screenshot 1-22-03.
+        // - Freedom (direct): api.cloudflareclient.com IS filtered on this
+        //   carrier (log: Connection refused / enable_warp 4 retries), so the
+        //   MASQUE API needs ECH to provision. PattNG Freedom log you sent
+        //   shows `ECH off` because its cached identity was already warp-enabled
+        //   (no api call); MSN's fresh enable_warp fails without ECH. So for
+        //   Freedom direct we embed cloudflare-ech.com key (no DNS) so the
+        //   API goes over ECH, while MASQUE H2 stays fragment OFF.
+        // User pref aether_ech still wins when set (off/0/false → force off).
         if (socksProxyForCore.isBlank()) {
-            val echPref = text("aether_ech", "").trim().lowercase()
-            val useEch = when {
-                echPref.isEmpty() -> false
-                echPref in setOf("auto", "1", "true") -> true
-                echPref in setOf("off", "0", "false") -> false
-                else -> true
+            val echRaw = text("aether_ech", "").trim()
+            val echLower = echRaw.lowercase()
+            val isFreedom = !warpExitIsCustom(context)
+            val useEch: Boolean
+            var echValue: String? = null
+            var echIsEmbedded = false
+            when {
+                echLower.isEmpty() && isMasqueForEnv && isFreedom -> {
+                    useEch = true
+                    echValue = "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
+                    echIsEmbedded = true
+                }
+                echLower.isEmpty() -> useEch = false
+                echLower in setOf("auto", "1", "true") -> { useEch = true; echValue = "auto" }
+                echLower in setOf("off", "0", "false") -> useEch = false
+                else -> { useEch = true; echValue = echRaw }
             }
-            if (useEch) {
-                out["AETHER_ECH"] = text("aether_ech", "auto")
-                val dns = text("aether_ech_dns", "").trim()
-                if (dns.isNotEmpty()) out["AETHER_ECH_DNS"] = dns
-                val dom = text("aether_ech_domain", "").trim()
-                if (dom.isNotEmpty()) out["AETHER_ECH_DOMAIN"] = dom
+            if (useEch && echValue != null) {
+                out["AETHER_ECH"] = echValue
+                if (!echIsEmbedded) {
+                    val dns = text("aether_ech_dns", "").trim()
+                    if (dns.isNotEmpty()) out["AETHER_ECH_DNS"] = dns
+                    val dom = text("aether_ech_domain", "").trim()
+                    if (dom.isNotEmpty()) out["AETHER_ECH_DOMAIN"] = dom
+                }
             }
         } else if (socksProxyForCore.isNotBlank()) {
             out["AETHER_UPSTREAM"] = socksProxyForCore
