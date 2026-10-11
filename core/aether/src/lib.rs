@@ -1236,14 +1236,14 @@ async fn select_wg_peers(
 /// server name never goes out in the clear.
 async fn resolve_ech() -> Result<Option<Vec<u8>>> {
     let setting = std::env::var(tls::SESSION_ECH_OPTION.variable).ok();
-    if setting.as_deref().is_some_and(|value| !value.is_empty()) {
-        if let Some(key) = account::api_ech_in_use() {
-            log::info!(
-                "[+] offering the ECHConfigList the WARP API took ({} bytes)",
-                key.len()
-            );
-            return Ok(Some(key));
-        }
+    if setting.as_deref().is_none_or(str::is_empty) {
+        return Ok(None);
+    }
+    if account::api_ech_in_use().is_some() {
+        log::info!(
+            "[+] ECH for the H2 session disabled — the API's ECH key is not reused for MASQUE H2"
+        );
+        return Ok(None);
     }
     let key = tls::ech_key(&tls::SESSION_ECH_OPTION, setting.as_deref(), || {
         dns::fetch_ech_config(&dns::SESSION_ECH)

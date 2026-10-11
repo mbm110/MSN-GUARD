@@ -403,27 +403,31 @@ object CoreConfig {
         // - Custom exit (sidecar Lithuania): goes via AETHER_UPSTREAM, so both
         //   api.cloudflareclient.com and the 162.159 scan ride the Lithuania
         //   egress — no DPI on this carrier, no ECH needed. Keep ECH OFF
-        //   (fragment also OFF) like PattNG screenshot 1-22-03.
+        //   like PattNG screenshot 1-22-03.
         // - Freedom (direct): api.cloudflareclient.com IS filtered on this
-        //   carrier (log: Connection refused / enable_warp 4 retries), so the
-        //   MASQUE API needs ECH to provision. PattNG Freedom log you sent
-        //   shows `ECH off` because its cached identity was already warp-enabled
-        //   (no api call); MSN's fresh enable_warp fails without ECH. So for
-        //   Freedom direct we embed cloudflare-ech.com key (no DNS) so the
-        //   API goes over ECH, while MASQUE H2 stays fragment OFF.
+        //   carrier (log: Connection refused). The API needs ECH but the H2
+        //   scan to www.cloudflare.com must NOT offer cloudflare-ech.com or
+        //   every probe fails — hence the split into AETHER_API_ECH (API
+        //   only) and no AETHER_ECH for the H2 session (see tls.rs
+        //   API_ECH_OPTION + lib.rs resolve_ech).
         // User pref aether_ech still wins when set (off/0/false → force off).
+        // Exit Node case is handled below in the socksProxyForCore branch;
+        // this if is Freedom direct only.
         if (socksProxyForCore.isBlank()) {
             val echRaw = text("aether_ech", "").trim()
             val echLower = echRaw.lowercase()
-            val isFreedom = !warpExitIsCustom(context)
             val useEch: Boolean
             var echValue: String? = null
+            var useApiEch = false
             var echIsEmbedded = false
             when {
-                echLower.isEmpty() && isMasqueForEnv && isFreedom -> {
+                echLower.isEmpty() && isMasqueForEnv -> {
+                    // Freedom direct: embed key on the API-only var so
+                    // resolve_ech for H2 stays OFF (no AETHER_ECH).
                     useEch = true
                     echValue = "AEX+DQBBrwAgACCbK1mYDYFz/BAn6S5t+Q/v+Oej3eFNxtPWgz50fNnFPAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
                     echIsEmbedded = true
+                    useApiEch = true
                 }
                 echLower.isEmpty() -> useEch = false
                 echLower in setOf("auto", "1", "true") -> { useEch = true; echValue = "auto" }
@@ -431,16 +435,27 @@ object CoreConfig {
                 else -> { useEch = true; echValue = echRaw }
             }
             if (useEch && echValue != null) {
-                out["AETHER_ECH"] = echValue
-                if (!echIsEmbedded) {
-                    val dns = text("aether_ech_dns", "").trim()
-                    if (dns.isNotEmpty()) out["AETHER_ECH_DNS"] = dns
-                    val dom = text("aether_ech_domain", "").trim()
-                    if (dom.isNotEmpty()) out["AETHER_ECH_DOMAIN"] = dom
+                if (useApiEch) {
+                    out["AETHER_API_ECH"] = echValue
+                } else {
+                    out["AETHER_ECH"] = echValue
+                    if (!echIsEmbedded) {
+                        val dns = text("aether_ech_dns", "").trim()
+                        if (dns.isNotEmpty()) out["AETHER_ECH_DNS"] = dns
+                        val dom = text("aether_ech_domain", "").trim()
+                        if (dom.isNotEmpty()) out["AETHER_ECH_DOMAIN"] = dom
+                    }
                 }
             }
         } else if (socksProxyForCore.isNotBlank()) {
             out["AETHER_UPSTREAM"] = socksProxyForCore
+            // Exit Node via Lithuania: no ECH — the log proves 3.0.20 worked
+            // with ECH OFF from the very first Freedom=custom attempt.
+            // Do not set AETHER_ECH here even if the pre-patched env would have.
+            out.remove("AETHER_ECH")
+            out.remove("AETHER_API_ECH")
+            out.remove("AETHER_ECH_DNS")
+            out.remove("AETHER_ECH_DOMAIN")
         }
 
         // Zero Trust / Teams. The engine reads the team name and the Access

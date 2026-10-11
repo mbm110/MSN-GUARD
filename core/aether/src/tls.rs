@@ -530,9 +530,11 @@ pub const SESSION_ECH_OPTION: EchOption = EchOption {
 };
 
 /// --ech as the calls to the WARP API take it, which register and enroll the WARP keys.
+/// Prefers AETHER_API_ECH so Freedom direct can keep MASQUE H2 at ECH OFF while the API
+/// goes via cloudflare-ech.com (filtered carrier); falls back to AETHER_ECH for compat.
 pub const API_ECH_OPTION: EchOption = EchOption {
     flag: "--ech",
-    variable: "AETHER_ECH",
+    variable: "AETHER_API_ECH",
     purpose: " for the WARP API",
     refusal: "not asking it rather than send its name in the clear",
 };

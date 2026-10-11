@@ -346,7 +346,10 @@ pub fn api_ech_in_use() -> Option<Vec<u8>> {
 /// can offer, an error that says so: the API is not asked with its name in the clear.
 async fn api_ech() -> Result<Option<Vec<u8>>> {
     let option = &crate::tls::API_ECH_OPTION;
-    let setting = std::env::var(option.variable).ok();
+    let mut setting = std::env::var(option.variable).ok();
+    if setting.as_deref().is_none_or(str::is_empty) {
+        setting = std::env::var(crate::tls::SESSION_ECH_OPTION.variable).ok();
+    }
     if setting.as_deref().is_none_or(str::is_empty) {
         return Ok(None);
     }
