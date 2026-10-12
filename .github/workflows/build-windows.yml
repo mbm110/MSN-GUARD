@@ -1,38 +1,36 @@
 name: Build MSN-GUARD Windows Core
 
 on:
-  workflow_dispatch:
   push:
     branches: [ "main", "master" ]
+  workflow_dispatch:
 
 jobs:
-  build-windows:
+  build:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout Code
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Setup Rust Toolchain
+      - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
           targets: x86_64-pc-windows-msvc
 
-      - name: Install Build Dependencies (NASM & Perl)
+      - name: Install Build Tools (NASM & Perl for BoringSSL)
         run: |
-          choco install nasm -y
-          choco install strawberryperl -y
+          choco install nasm strawberryperl -y
           echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
 
-      - name: Build aether CLI
+      - name: Build Aether Core Executable
         run: |
           cd core/aether
           cargo build --release --bin aether
 
-      - name: Upload Binary
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: aether-windows-x64
