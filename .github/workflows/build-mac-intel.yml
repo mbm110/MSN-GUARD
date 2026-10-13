@@ -1,0 +1,44 @@
+name: Build macOS Intel App
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - '**.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/build-mac-intel.yml'
+
+jobs:
+  build-macos-intel:
+    runs-on: macos-13 # GitHub 提供的 macOS Intel 宿主机环境
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-action@master
+        with:
+          toolchain: stable
+          target: x86_64-apple-darwin
+
+      - name: Build Rust Core (Release)
+        run: |
+          echo "Building for x86_64-apple-darwin..."
+          cargo build --release --target x86_64-apple-darwin
+
+      - name: Archive Artifacts
+        run: |
+          mkdir -p output_bin
+          # 将编译好的二进制核心或相关产物打包
+          cp target/x86_64-apple-darwin/release/msn_guard_* output_bin/ 2>/dev/null || cp target/x86_64-apple-darwin/release/* output_bin/ || true
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: msn-guard-macos-intel-bin
+          path: output_bin/
