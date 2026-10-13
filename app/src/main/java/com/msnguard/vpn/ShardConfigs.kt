@@ -252,9 +252,10 @@ object ShardConfigs {
      * every other node in it.
      */
     fun parse(body: String): List<ShardNode> {
+        val effectiveBody = decodeIfBase64(body)
         val nodes = mutableListOf<ShardNode>()
         val seen = mutableSetOf<String>()
-        body.lineSequence().forEach { rawLine ->
+        effectiveBody.lineSequence().forEach { rawLine ->
             val line = rawLine.trim()
             if (line.isEmpty() || line.startsWith("#")) return@forEach
             val node = parseOne(line) ?: return@forEach
@@ -263,6 +264,34 @@ object ShardConfigs {
             if (seen.add(node.key)) nodes.add(node)
         }
         return nodes
+    }
+
+    /**
+     * Try base64 decode when the body looks like a base64 sub (no :// but decodes to ://).
+     * Mirrors PattNG's Utils.decode branch: decode first, fall back to plain if it does not produce ://.
+     * Gated so a plain vless:// body is never corrupted.
+     */
+    private fun decodeIfBase64(body: String): String {
+        val trimmed = body.trim()
+        if (trimmed.isEmpty() || trimmed.contains("://")) return body
+        // Strip whitespace/newlines that some subs insert; try standard then URL-safe
+        val compact = trimmed.filterNot { it.isWhitespace() }
+        if (compact.isEmpty()) return body
+        for (flags in listOf(android.util.Base64.NO_WRAP, android.util.Base64.NO_WRAP or android.util.Base64.URL_SAFE)) {
+            try {
+                val decoded = android.util.Base64.decode(compact, flags).toString(Charsets.UTF_8)
+                if (decoded.contains("://")) return decoded
+            } catch (_: Exception) {}
+            // Also try with padding restored (PattNG trims = then tries both)
+            try {
+                val padded = compact.trimEnd('=')
+                if (padded != compact) {
+                    val decoded = android.util.Base64.decode(padded, flags).toString(Charsets.UTF_8)
+                    if (decoded.contains("://")) return decoded
+                }
+            } catch (_: Exception) {}
+        }
+        return body
     }
 
     private fun parseOne(line: String): ShardNode? = try {
@@ -348,7 +377,7 @@ object ShardConfigs {
             port = port,
             network = network,
             security = security,
-            path = params["path"].orEmpty().ifEmpty { params["serviceName"].orEmpty().ifEmpty { "/" } },
+            path = params["path"].orEmpty().ifEmpty { params["serviceName"].orEmpty().ifEmpty { "/" } }.replace("MTMVPNfp=", "MTMVPN&fp="),
             host = host,
             // serverName falls back to host because that is what the CDN routes
             // on; an empty SNI to Cloudflare gets the default certificate and the
@@ -357,7 +386,18 @@ object ShardConfigs {
             fingerprint = params["fp"].orEmpty(),
             cipherSuites = params["cs"].orEmpty(),
             finalMask = params["fm"].orEmpty(),
-            alpn = params["alpn"].orEmpty(),
+            alpn = run {
+                val raw = params["alpn"].orEmpty()
+                val net = params["type"]?.lowercase(java.util.Locale.US).orEmpty().ifEmpty { "tcp" }
+                val sec = params["security"]?.lowercase(java.util.Locale.US).orEmpty()
+                // PattNG's TlsSettingsCheck.fixImportedAlpn: ws/http-upgrade with alpn other than http/1.1 alone
+                // is rewritten to http/1.1 — shared links often carry h2,http/1.1 and the fork offers h2 then,
+                // which some Cloudflare hosts pick even after http/1.1. Keep verbatim otherwise.
+                if ((net == "ws" || net == "httpupgrade") && sec == "tls" && raw.isNotEmpty()) {
+                    val parts = raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                    if (parts != listOf("http/1.1")) "http/1.1" else raw
+                } else raw
+            },
             echConfigList = params["ech"].orEmpty(),
             echOutbound = params["echoutbound"].orEmpty(),
             allowInsecure = allowInsecure,
@@ -467,19 +507,24 @@ object ShardConfigs {
                     "tlsSettings",
                     JSONObject().apply {
                         put("serverName", node.serverName)
-                        // Fingerprint verbatim from subscription (fp=unsafe for plain, fp=chrome for ECH).
-                        // v2.0.1 hardcoded chrome — wrong for fm stability. Keep what the publisher sends.
-                        // When present, this is Chrome's ClientHello via uTLS; when "unsafe", uTLS is off
-                        // so the fm offsets stay byte-exact. Never override.
                         if (node.fingerprint.isNotEmpty()) put("fingerprint", node.fingerprint)
                         if (node.cipherSuites.isNotEmpty()) put("cipherSuites", node.cipherSuites)
-                        // ALPN: xhttp with empty alpn -> h2 (publisher's recipe for current block), else verbatim.
-                        if (node.network == "xhttp" && node.alpn.isEmpty()) {
-                            put("alpn", JSONArray().put("h2"))
-                        } else if (node.alpn.isNotEmpty()) {
+                        if (node.alpn.isNotEmpty()) {
                             put("alpn", JSONArray().apply { node.alpn.split(',').forEach { put(it.trim()) } })
+                        } else if (node.network == "xhttp" && node.alpn.isEmpty()) {
+                            put("alpn", JSONArray().put("h2"))
                         }
-                        if (node.echConfigList.isNotEmpty()) put("echConfigList", node.echConfigList)
+                        // ECH DNS: udp://1.1.1.1:53 is blocked on many Iranian carriers (i/o timeout -> malformed ECHConfigList -> handshake fail).
+                        // Rewrite to DoH so the query rides TCP+TLS via DialSystem rather than raw UDP; the hello of that DoH leg
+                        // is itself a normal Chrome hello (no ECH on it), so the fragment of the node's own hello still applies.
+                        val echForConfig = if (node.echConfigList.contains("+udp://")) {
+                            node.echConfigList.replace("+udp://", "+https://").let { v ->
+                                // normalize like cloudflare-ech.com+https://1.1.1.1 -> +https://1.1.1.1/dns-query (xray expects a URL)
+                                if (v.contains("/dns-query", ignoreCase = true)) v else "$v/dns-query"
+                            }
+                        } else node.echConfigList
+                        if (echForConfig.isNotEmpty()) put("echConfigList", echForConfig)
+                        // Keep pcs-gated allowInsecure / vcn from the node as before.
                         // When ECH is on, the live tunnel's ECH config fetch
                         // (QueryRecord -> DialSystem) must ride the node's own
                         // outbound instead of DialSystem's default path, which on
@@ -492,7 +537,7 @@ object ShardConfigs {
                         // there — the live tunnel has a single "proxy" outbound and
                         // is where the request actually leaves. Proto:
                         // tls.Config.ech_socket_settings=21, SocketConfig.dialer_proxy=9.
-                        if (node.echConfigList.isNotEmpty() && tag == "proxy") {
+                        if (tag == "proxy") {
                             put(
                                 "echSocketSettings",
                                 JSONObject().put("dialerProxy", "proxy")
@@ -720,12 +765,12 @@ object ShardConfigs {
             )
         }
         return JSONObject().apply {
-            // "none" during the race. The probe opens and abandons dozens of
-            // connections by design, and at any higher level every one of those
-            // writes several lines — tens of thousands of lines of log for a
-            // measurement nobody reads, on a phone.
+            // "warning" during the race: a few dozen extra lines bought by real
+            // failure causes (TLS alert, ECH fallback, transport write). Kept low
+            // enough not to drown the ConnectionLog.
+            // "none" would hide the very lines that explain why every nd timed out.
             put("log", JSONObject().apply {
-                put("loglevel", "none")
+                put("loglevel", "warning")
                 put("access", "none")
             })
             put("inbounds", inbounds)

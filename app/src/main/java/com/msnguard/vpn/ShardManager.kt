@@ -438,7 +438,13 @@ object ShardManager {
             return false
         }
         ShardHealth.prune(context, pool)
-        ConnectionLog.record("$TAG pool ${pool.size} nodes, edges ${ShardEdges.edges(context).size} edges")
+        run {
+            val rawLines = ShardSubscription.rawLineCount(context)
+            val parsed = ShardSubscription.cachedCount(context)
+            val cacheAge = ShardSubscription.lastCheckMillis(context).let { if (it <= 0L) "never" else "${(System.currentTimeMillis() - it) / 1000}s ago" }
+            val seedFallback = if (parsed == 0 && rawLines == 0) " — seed fallback" else ""
+            ConnectionLog.record("$TAG pool ${pool.size} nodes · raw $rawLines lines · parsed $parsed · cache $cacheAge$seedFallback, edges ${ShardEdges.edges(context).size} edges")
+        }
 
         // Ranked, then sliced: the race is over the nodes most likely to work, in
         // the order most likely to be fast. Diversified so one endpoint's variants
@@ -667,6 +673,21 @@ object ShardManager {
         ranked.forEach { node ->
             val identity = "${node.protocol}|${node.credential}|${node.host}|${node.path}|${node.port}"
             groups.getOrPut(identity) { mutableListOf() }.add(node)
+        }
+        // Fast variants first within each endpoint: fm (fragmented) handshakes cost
+        // ~1 s extra (110 one-byte fragments x 1 ms delay) and the probe budget is
+        // only 5 s, so putting all fm variants in the first three slices would fill
+        // the entire race with the slowest path. PattNG does not fragment before the
+        // handshake completes, which is why the same subscription succeeded there
+        // while every slice here timed out with `read timeout after 5000ms`.
+        // For Iran, fm (fragment) bypasses the SNI filter locally without any DNS lookup; ECH variants need a
+        // 5 s UDP DNS query to 1.1.1.1:53 over the carrier link, which is blocked on many ISPs (i/o timeout ->
+        // malformed ECHConfigList -> handshake fail). So fm must be tried first; ech/bare are the fallback slice.
+        groups.values.forEach { variants ->
+            variants.sortWith(compareBy(
+                { if (it.finalMask.isNotEmpty()) 0 else 1 },
+                { if (it.echConfigList.isNotEmpty()) 0 else 1 },
+            ))
         }
         val out = ArrayList<ShardNode>(ranked.size)
         var round = 0

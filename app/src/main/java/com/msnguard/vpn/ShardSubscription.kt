@@ -86,6 +86,17 @@ object ShardSubscription {
     /** How many nodes the cache last yielded. Shown in settings as a subtitle. */
     fun cachedCount(context: Context): Int = prefs(context).getInt(LAST_COUNT_PREF, 0)
 
+    /** Raw non-# non-empty lines in the cached file; 0 when no cache. For the effective race log. */
+    fun rawLineCount(context: Context): Int {
+        val f = cacheFile(context)
+        if (!f.exists()) return 0
+        return try {
+            var n = 0
+            f.bufferedReader().useLines { seq -> seq.forEach { line -> if (line.trim().isNotEmpty() && !line.trim().startsWith("#")) n++ } }
+            n
+        } catch (_: Exception) { 0 }
+    }
+
     /**
      * How many distinct paths those nodes expand to across the CDN edges.
      *
