@@ -2,7 +2,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ master, shard-rewrite ]
+    branches: [ master, shard-rewrite, temp-real-delay-build ]
   workflow_dispatch:
 
 jobs:

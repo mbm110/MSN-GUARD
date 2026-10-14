@@ -6373,6 +6373,64 @@ class MainActivity : Activity() {
         transportCard(CoreConfig.WarpTransport.WIREGUARD, Strings.t("Where WireGuard exits to the internet"))
         transportCard(CoreConfig.WarpTransport.WOW, Strings.t("Where WoW (WARP-on-WARP) exits to the internet"))
 
+        // ── Warp Identity (ECH) — isolated card. Uses the engine's own ECH
+        // stack on a side port (1839), like Diagnostics/Get Warp Key: one
+        // protocol at a time, fresh file(s), backup/restore, with the user's
+        // ECH settings. Never touches SHARD/Tor/Psiphon or the main tunnel.
+        run {
+            val section = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(14), dp(16), dp(14))
+                background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
+            }
+            section.addView(label(Strings.t("Warp Identity"), 14f, INK, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.06f) })
+            section.addView(label(Strings.t("Get a fresh WARP key via ECH. One protocol at a time — disconnect first."), 12f, MUTED).apply { setPadding(0, dp(4), 0, dp(12)) })
+            val protocols = listOf("wireguard" to "WireGuard", "masque" to "Masque", "gool" to "WoW", "mim" to "Masque-in-Masque")
+            var busyProtocol: String? = null
+            fun refreshButtons() {
+                // rebuilt on next open; keep minimal: disable other buttons while one runs
+            }
+            for ((proto, title) in protocols) {
+                val has = IdentityProvisioner.hasIdentity(this, proto)
+                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(6), 0, dp(6)) }
+                val nameCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                nameCol.addView(label(title, 14f, INK, TypefaceStyle.MEDIUM))
+                nameCol.addView(label(if (has) Strings.t("Identity on disk") else Strings.t("No identity yet"), 11f, if (has) primary else MUTED))
+                val statusDot = TextView(this).apply { text = if (has) "●" else "○"; textSize = 10f; setTextColor(if (has) primary else MUTED); setPadding(0, 0, dp(8), 0) }
+                val btn = createSettingsButton(if (has) Strings.t("Refresh") else Strings.t("Get key")) {}
+                btn.setOnClickListener {
+                    if (busyProtocol != null) { toastShort(Strings.t("Please wait…")); return@setOnClickListener }
+                    if (TunnelStatus.isActive()) { toastShort(Strings.t("Disconnect first")); return@setOnClickListener }
+                    busyProtocol = proto
+                    btn.text = Strings.t("Getting…")
+                    btn.isEnabled = false
+                    ConnectionLog.record("Warp Setting: identity request $title via ECH")
+                    Thread({
+                        val ok = try { WarpIdentityFetcher.fetch(this@MainActivity, proto) } catch (e: Exception) { android.util.Log.w("WarpSetting", "identity $proto: ${e.message}"); false }
+                        runOnUiThread {
+                            busyProtocol = null
+                            btn.isEnabled = true
+                            if (ok) {
+                                ConnectionLog.record("Warp Setting: identity $title saved")
+                                toastShort(Strings.t("Identity saved — ") + title)
+                            } else {
+                                ConnectionLog.record("Warp Setting: identity $title failed")
+                                toastShort(Strings.t("Identity failed — ") + title)
+                            }
+                            warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }
+                            openWarpSettingScreen()
+                        }
+                    }, "warp-identity-$proto").start()
+                }
+                row.addView(statusDot, LinearLayout.LayoutParams(dp(18), dp(18)))
+                row.addView(nameCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                row.addView(btn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)))
+                section.addView(row)
+            }
+            section.addView(label(Strings.t("If the device is on a VPN, the request rides it — that is how a filtered carrier is bypassed, same as Diagnostics."), 11f, MUTED).apply { setPadding(0, dp(10), 0, 0) })
+            content.addView(section, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(16) })
+        }
+
         scroll.addView(content)
         page.addView(scroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         page.setOnApplyWindowInsetsListener { _, insets -> content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24)); insets }
