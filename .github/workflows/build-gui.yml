@@ -1,0 +1,55 @@
+name: Build MSN-GUARD Windows GUI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+
+jobs:
+  build-windows-gui:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Build Dependencies (NASM & Perl)
+        run: |
+          choco install nasm -y
+          choco install strawberryperl -y
+          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+
+      - name: 1. Build aether.exe Core
+        run: |
+          cargo build --release --manifest-path core/aether/Cargo.toml --bin aether
+          New-Item -ItemType Directory -Force -Path "src-tauri/binaries"
+          # 复制核心并重命名为 Tauri 要求的动态外部二进制命名规范 (target triple后缀)
+          Copy-Item "core/target/release/aether.exe" "src-tauri/binaries/aether-x86_64-pc-windows-msvc.exe"
+
+      - name: 2. Build Frontend & Tauri GUI
+        run: |
+          npm install
+          npm run tauri build
+
+      - name: 3. Upload Windows Installer Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: MSN-GUARD-Windows-GUI-Installer
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
