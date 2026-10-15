@@ -37,8 +37,9 @@ jobs:
         run: |
           cargo build --release --manifest-path core/aether/Cargo.toml --bin aether
           New-Item -ItemType Directory -Force -Path "src-tauri/binaries"
-          Copy-Item "core/target/release/aether.exe" "src-tauri/binaries/aether-x86_64-pc-windows-msvc.exe"
-
+          # 修改这里的源路径，指向正确的 core/aether/target/release/aether.exe
+          Copy-Item "core/aether/target/release/aether.exe" "src-tauri/binaries/aether-x86_64-pc-windows-msvc.exe"
+          
       - name: 2. Build Frontend & Tauri GUI
         run: |
           npm install
