@@ -25,7 +25,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
+          # 移除了会导致报错的 cache: 'npm'
 
       - name: Install Build Dependencies (NASM & Perl)
         run: |
@@ -37,7 +37,6 @@ jobs:
         run: |
           cargo build --release --manifest-path core/aether/Cargo.toml --bin aether
           New-Item -ItemType Directory -Force -Path "src-tauri/binaries"
-          # 复制核心并重命名为 Tauri 要求的动态外部二进制命名规范 (target triple后缀)
           Copy-Item "core/target/release/aether.exe" "src-tauri/binaries/aether-x86_64-pc-windows-msvc.exe"
 
       - name: 2. Build Frontend & Tauri GUI
