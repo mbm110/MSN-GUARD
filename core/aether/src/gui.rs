@@ -12,8 +12,8 @@ use std::os::windows::process::CommandExt;
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([560.0, 620.0])
-            .with_min_inner_size([480.0, 500.0])
+            .with_inner_size([600.0, 700.0])
+            .with_min_inner_size([520.0, 560.0])
             .with_title("MSN-GUARD Windows 桌面端"),
         ..Default::default()
     };
@@ -28,7 +28,7 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-// 自动加载 Windows 系统的微软雅黑字体以支持中文显示
+// 加载 Windows 微软雅黑字体以正常显示中文
 fn setup_custom_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     if let Ok(font_data) = std::fs::read("C:\\Windows\\Fonts\\msyh.ttc") {
@@ -51,19 +51,33 @@ fn setup_custom_fonts(ctx: &egui::Context) {
 }
 
 struct MsnGuardApp {
+    // 核心协议与传输配置
     protocol: String,
     masque_carrier: String,
     scan_mode: String,
     noize_profile: String,
     ip_version: String,
+
+    // SHARD 专属配置项
+    enable_shard: bool,
+    shard_size: String,
+    shard_sleep_ms: String,
+    shard_mode: String,
+    ech_mode: String,
+    custom_sni: String,
+
+    // 节点与端口配置
     custom_peer: String,
     custom_inner_peer: String,
     socks_listen: String,
     http_listen: String,
-    enable_tor: bool,
-    enable_psiphon: bool,
+
+    // 链式传输与附加功能
+    chain_mode: String,
+    bypass_lan_iran: bool,
     sys_proxy: bool,
 
+    // 运行状态与进程管理
     is_running: bool,
     child_proc: Arc<Mutex<Option<Child>>>,
     logs: Arc<Mutex<Vec<String>>>,
@@ -72,23 +86,32 @@ struct MsnGuardApp {
 impl Default for MsnGuardApp {
     fn default() -> Self {
         Self {
-            protocol: "masque".to_string(),
+            protocol: "shard".to_string(),
             masque_carrier: "h3".to_string(),
             scan_mode: "verified".to_string(),
-            noize_profile: "balanced".to_string(),
+            noize_profile: "firewall".to_string(),
             ip_version: "4".to_string(),
+
+            enable_shard: true,
+            shard_size: "24".to_string(),
+            shard_sleep_ms: "10".to_string(),
+            shard_mode: "tls".to_string(),
+            ech_mode: "off".to_string(),
+            custom_sni: String::new(),
+
             custom_peer: String::new(),
             custom_inner_peer: String::new(),
             socks_listen: "127.0.0.1:1819".to_string(),
             http_listen: "127.0.0.1:1820".to_string(),
-            enable_tor: false,
-            enable_psiphon: false,
+
+            chain_mode: "none".to_string(),
+            bypass_lan_iran: false,
             sys_proxy: true,
 
             is_running: false,
             child_proc: Arc::new(Mutex::new(None)),
             logs: Arc::new(Mutex::new(vec![
-                "[*] 欢迎使用 MSN-GUARD Windows 客户端".to_string(),
+                "[*] 欢迎使用 MSN-GUARD Windows 客户端 (含 SHARD 抗审查引擎)".to_string(),
                 "[*] 请确保 aether.exe 与本程序在同一文件夹下".to_string(),
             ])),
         }
@@ -99,7 +122,7 @@ impl MsnGuardApp {
     fn append_log(&self, msg: impl Into<String>) {
         if let Ok(mut logs) = self.logs.lock() {
             logs.push(msg.into());
-            if logs.len() > 500 {
+            if logs.len() > 600 {
                 logs.remove(0);
             }
         }
@@ -138,7 +161,56 @@ impl MsnGuardApp {
     fn start_core(&mut self, ctx: egui::Context) {
         let mut cmd = Command::new("./aether.exe");
 
-        cmd.env("AETHER_PROTOCOL", &self.protocol);
+        // 1. 解析主协议与独立传输通道
+        match self.protocol.as_str() {
+            "shard" => {
+                // SHARD 协议底层采用 TCP/H2 + TLS 分片穿透
+                cmd.env("AETHER_PROTOCOL", "masque");
+                cmd.env("AETHER_MASQUE_HTTP2", "1");
+                cmd.env("AETHER_SHARD", "1");
+                cmd.env("AETHER_FRAGMENT", "1");
+            }
+            "psiphon_only" => {
+                cmd.env("AETHER_PSIPHON", "only");
+                cmd.env("AETHER_PROTOCOL", "masque");
+            }
+            "tor_only" => {
+                cmd.env("AETHER_TOR", "only");
+                cmd.env("AETHER_PROTOCOL", "masque");
+            }
+            other => {
+                cmd.env("AETHER_PROTOCOL", other);
+                if (other == "masque" || other == "mim") && self.masque_carrier == "h2" {
+                    cmd.env("AETHER_MASQUE_HTTP2", "1");
+                }
+            }
+        }
+
+        // 2. 注入 SHARD 分片参数（当选择 SHARD 协议或手动勾选启用 SHARD 分片时生效）
+        if self.protocol == "shard" || self.enable_shard {
+            cmd.env("AETHER_SHARD", "1");
+            cmd.env("AETHER_FRAGMENT", "1");
+            cmd.env("AETHER_SHARD_MODE", &self.shard_mode);
+
+            if !self.shard_size.trim().is_empty() {
+                cmd.env("AETHER_SHARD_SIZE", self.shard_size.trim());
+                cmd.env("AETHER_FRAGMENT_SIZE", self.shard_size.trim());
+            }
+            if !self.shard_sleep_ms.trim().is_empty() {
+                cmd.env("AETHER_SHARD_SLEEP", self.shard_sleep_ms.trim());
+                cmd.env("AETHER_FRAGMENT_SLEEP", self.shard_sleep_ms.trim());
+            }
+            if !self.custom_sni.trim().is_empty() {
+                cmd.env("AETHER_SNI", self.custom_sni.trim());
+            }
+        }
+
+        // 3. ECH (Encrypted Client Hello) 配置
+        if self.ech_mode == "auto" {
+            cmd.env("AETHER_ECH", "auto");
+        }
+
+        // 4. 扫描与混淆通用配置
         cmd.env("AETHER_SCAN", &self.scan_mode);
         cmd.env("AETHER_NOIZE", &self.noize_profile);
         cmd.env("AETHER_IP", &self.ip_version);
@@ -149,17 +221,14 @@ impl MsnGuardApp {
             cmd.env("AETHER_HTTP_PROXY", self.http_listen.trim());
         }
 
-        if self.protocol == "masque" || self.protocol == "mim" {
-            if self.masque_carrier == "h2" {
-                cmd.env("AETHER_MASQUE_HTTP2", "1");
-            }
-        }
-
+        // 5. 自定义节点 (Outer / Inner Peer)
         let peer = self.custom_peer.trim();
         let inner = self.custom_inner_peer.trim();
         if !peer.is_empty() {
             match self.protocol.as_str() {
-                "wg" => { cmd.env("AETHER_WG_PEER", peer); }
+                "wg" => {
+                    cmd.env("AETHER_WG_PEER", peer);
+                }
                 "gool" => {
                     cmd.env("AETHER_WIW_OUTER_PEER", peer);
                     if !inner.is_empty() {
@@ -172,26 +241,38 @@ impl MsnGuardApp {
                         cmd.env("AETHER_MIM_INNER_PEER", inner);
                     }
                 }
-                _ => { cmd.env("AETHER_PEER", peer); }
+                _ => {
+                    cmd.env("AETHER_PEER", peer);
+                }
             }
         }
 
-        if self.enable_tor {
-            cmd.env("AETHER_TOR", "chain");
+        // 6. 链式代理配置 (Chain / Reverse)
+        match self.chain_mode.as_str() {
+            "psiphon_chain" => { cmd.env("AETHER_PSIPHON", "chain"); }
+            "psiphon_reverse" => { cmd.env("AETHER_PSIPHON", "reverse"); }
+            "tor_chain" => { cmd.env("AETHER_TOR", "chain"); }
+            "tor_reverse" => { cmd.env("AETHER_TOR", "reverse"); }
+            _ => {}
         }
-        if self.enable_psiphon {
-            cmd.env("AETHER_PSIPHON", "chain");
+
+        if self.bypass_lan_iran {
+            cmd.env("AETHER_BYPASS_DIRECT", "1");
         }
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         #[cfg(target_os = "windows")]
-        cmd.creation_flags(0x08000000); // 隐藏后台黑框
+        cmd.creation_flags(0x08000000); // 隐藏后台控制台窗口
 
         match cmd.spawn() {
             Ok(mut child) => {
                 self.is_running = true;
-                self.append_log("[+] 正在启动 Aether 核心...");
+                self.append_log(format!(
+                    "[+] 正在启动核心 (协议: {} | 探测: {})...",
+                    self.protocol.to_uppercase(),
+                    self.scan_mode
+                ));
 
                 if self.sys_proxy {
                     self.set_windows_system_proxy(true);
@@ -228,7 +309,7 @@ impl MsnGuardApp {
                 }
             }
             Err(e) => {
-                self.append_log(format!("[-] 启动失败，请确认 aether.exe 是否在同一目录: {}", e));
+                self.append_log(format!("[-] 启动失败，请确认 aether.exe 在同一目录: {}", e));
             }
         }
     }
@@ -263,46 +344,102 @@ impl eframe::App for MsnGuardApp {
             ui.add_enabled_ui(!self.is_running, |ui| {
                 egui::Grid::new("settings_grid")
                     .num_columns(2)
-                    .spacing([16.0, 10.0])
+                    .spacing([16.0, 9.0])
                     .striped(true)
                     .show(ui, |ui| {
-                        // 1. 传输协议选择
-                        ui.label("传输协议 (Protocol):");
+                        // 1. 传输协议选择（含 SHARD 与 5 大通道）
+                        ui.label("传输协议 (Transport):");
                         egui::ComboBox::from_id_salt("protocol_cb")
+                            .width(340.0)
                             .selected_text(match self.protocol.as_str() {
-                                "masque" => "MASQUE (QUIC/H3 现代抗封锁)",
-                                "wg" => "WireGuard (WARP 经典高速)",
-                                "gool" => "WARP-in-WARP (Gool 双跳)",
-                                "mim" => "MASQUE-in-MASQUE (双跳变出口)",
+                                "shard" => "⚡ SHARD (TLS 分片抗 DPI 封锁 / 推荐)",
+                                "masque" => "MASQUE (QUIC/H3 现代高速通道)",
+                                "wg" => "WireGuard (WARP + AetherNoize 混淆)",
+                                "gool" => "WARP-in-WARP (Gool 双跳隧道)",
+                                "mim" => "MASQUE-in-MASQUE (双跳变更出口)",
+                                "psiphon_only" => "Psiphon 独立通道 (纯 Psiphon)",
+                                "tor_only" => "Tor 独立通道 (纯 Tor 网络)",
                                 _ => &self.protocol,
                             })
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.protocol, "masque".to_string(), "MASQUE (推荐)");
-                                ui.selectable_value(&mut self.protocol, "wg".to_string(), "WireGuard (WARP)");
-                                ui.selectable_value(&mut self.protocol, "gool".to_string(), "WARP-in-WARP (Gool)");
-                                ui.selectable_value(&mut self.protocol, "mim".to_string(), "MASQUE-in-MASQUE");
+                                if ui.selectable_value(&mut self.protocol, "shard".to_string(), "⚡ SHARD (TLS 分片抗 DPI 封锁 / 推荐)").clicked() {
+                                    self.enable_shard = true;
+                                    self.masque_carrier = "h2".to_string();
+                                }
+                                ui.selectable_value(&mut self.protocol, "masque".to_string(), "MASQUE (QUIC/H3 现代高速通道)");
+                                ui.selectable_value(&mut self.protocol, "wg".to_string(), "WireGuard (WARP + AetherNoize 混淆)");
+                                ui.selectable_value(&mut self.protocol, "gool".to_string(), "WARP-in-WARP (Gool 双跳隧道)");
+                                ui.selectable_value(&mut self.protocol, "mim".to_string(), "MASQUE-in-MASQUE (双跳变更出口)");
+                                ui.separator();
+                                ui.selectable_value(&mut self.protocol, "psiphon_only".to_string(), "Psiphon 独立通道 (纯 Psiphon)");
+                                ui.selectable_value(&mut self.protocol, "tor_only".to_string(), "Tor 独立通道 (纯 Tor 网络)");
                             });
                         ui.end_row();
 
                         // 2. MASQUE 载体模式
                         if self.protocol == "masque" || self.protocol == "mim" {
-                            ui.label("MASQUE 传输层:");
+                            ui.label("MASQUE 载体:");
                             ui.horizontal(|ui| {
                                 ui.radio_value(&mut self.masque_carrier, "h3".to_string(), "HTTP/3 (UDP/QUIC)");
-                                ui.radio_value(&mut self.masque_carrier, "h2".to_string(), "HTTP/2 (TCP 伪装)");
+                                ui.radio_value(&mut self.masque_carrier, "h2".to_string(), "HTTP/2 (TCP + 可开 SHARD)");
+                                if self.masque_carrier == "h2" {
+                                    ui.checkbox(&mut self.enable_shard, "开启 SHARD 分片");
+                                }
                             });
                             ui.end_row();
                         }
 
-                        // 3. 节点扫描模式
+                        // 3. SHARD 协议专属参数设置区
+                        if self.protocol == "shard" || (self.masque_carrier == "h2" && self.enable_shard) {
+                            ui.label("⚡ SHARD 分片策略:");
+                            egui::ComboBox::from_id_salt("shard_mode_cb")
+                                .selected_text(match self.shard_mode.as_str() {
+                                    "tls" => "TLS Record 分片 + TCP 拆分 (标准 SHARD)",
+                                    "sni" => "精准 SNI 边界切割 (对抗域名阻断)",
+                                    "random" => "随机抖动分片 (对抗流量特征分析)",
+                                    _ => &self.shard_mode,
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.shard_mode, "tls".to_string(), "TLS Record 分片 + TCP 拆分 (标准 SHARD)");
+                                    ui.selectable_value(&mut self.shard_mode, "sni".to_string(), "精准 SNI 边界切割 (对抗域名阻断)");
+                                    ui.selectable_value(&mut self.shard_mode, "random".to_string(), "随机抖动分片 (对抗流量特征分析)");
+                                });
+                            ui.end_row();
+
+                            ui.label("⚡ SHARD 分片参数:");
+                            ui.horizontal(|ui| {
+                                ui.label("分片大小(字节):");
+                                ui.add(egui::TextEdit::singleline(&mut self.shard_size).desired_width(50.0));
+                                ui.label("分片间隔(ms):");
+                                ui.add(egui::TextEdit::singleline(&mut self.shard_sleep_ms).desired_width(50.0));
+                                ui.label("ECH:");
+                                egui::ComboBox::from_id_salt("ech_cb")
+                                    .width(75.0)
+                                    .selected_text(&self.ech_mode)
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.ech_mode, "off".to_string(), "off");
+                                        ui.selectable_value(&mut self.ech_mode, "auto".to_string(), "auto");
+                                    });
+                            });
+                            ui.end_row();
+
+                            ui.label("⚡ 自定义 SNI (选填):");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.custom_sni)
+                                    .hint_text("留空使用默认混淆域名，或填写自定义 Fronting 域名"),
+                            );
+                            ui.end_row();
+                        }
+
+                        // 4. 节点探测模式
                         ui.label("节点探测模式 (Scan):");
                         egui::ComboBox::from_id_salt("scan_cb")
                             .selected_text(match self.scan_mode.as_str() {
                                 "turbo" => "Turbo (极速，首命中)",
                                 "balanced" => "Balanced (均衡默认)",
                                 "thorough" => "Thorough (深度测速)",
-                                "verified" => "Verified (仅内置实测节点)",
-                                "ironclad" => "Ironclad (真机全链路校验)",
+                                "verified" => "Verified (仅内置实测节点 / 推荐)",
+                                "ironclad" => "Ironclad (真机全链路 HTTP 校验)",
                                 _ => &self.scan_mode,
                             })
                             .show_ui(ui, |ui| {
@@ -314,8 +451,8 @@ impl eframe::App for MsnGuardApp {
                             });
                         ui.end_row();
 
-                        // 4. 混淆强度
-                        ui.label("DPI 混淆方案 (Noize):");
+                        // 5. DPI 混淆方案
+                        ui.label("DPI 混淆强度 (Noize):");
                         egui::ComboBox::from_id_salt("noize_cb")
                             .selected_text(&self.noize_profile)
                             .show_ui(ui, |ui| {
@@ -327,7 +464,7 @@ impl eframe::App for MsnGuardApp {
                             });
                         ui.end_row();
 
-                        // 5. IP 协议版本
+                        // 6. IP 协议栈
                         ui.label("扫描 IP 版本:");
                         ui.horizontal(|ui| {
                             ui.radio_value(&mut self.ip_version, "4".to_string(), "IPv4");
@@ -336,11 +473,11 @@ impl eframe::App for MsnGuardApp {
                         });
                         ui.end_row();
 
-                        // 6. 自定义节点
+                        // 7. 自定义节点
                         ui.label("指定节点 (选填):");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.custom_peer)
-                                .hint_text("留空则自动扫描，格式如 162.159.192.1:443"),
+                                .hint_text("留空则自动扫描内置节点，如 162.159.192.1:443"),
                         );
                         ui.end_row();
 
@@ -348,32 +485,53 @@ impl eframe::App for MsnGuardApp {
                             ui.label("第二跳节点 (选填):");
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.custom_inner_peer)
-                                    .hint_text("留空则自动分配，格式如 188.114.96.1:443"),
+                                    .hint_text("留空则自动分配，如 188.114.96.1:443"),
                             );
                             ui.end_row();
                         }
 
-                        // 7. 本地代理端口
-                        ui.label("本地 SOCKS5 端口:");
-                        ui.text_edit_singleline(&mut self.socks_listen);
+                        // 8. 隧道串联模式 (Chain / Reverse)
+                        if self.protocol != "psiphon_only" && self.protocol != "tor_only" {
+                            ui.label("隧道嵌套串联 (Chain):");
+                            egui::ComboBox::from_id_salt("chain_cb")
+                                .selected_text(match self.chain_mode.as_str() {
+                                    "none" => "不串联 (直连主协议网关)",
+                                    "psiphon_chain" => "Psiphon 跑在隧道内 (WARP -> Psiphon)",
+                                    "psiphon_reverse" => "隧道跑在 Psiphon 内 (Psiphon -> WARP)",
+                                    "tor_chain" => "Tor 跑在隧道内 (WARP -> Tor)",
+                                    "tor_reverse" => "隧道跑在 Tor 内 (Tor -> WARP)",
+                                    _ => &self.chain_mode,
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.chain_mode, "none".to_string(), "不串联 (直连主协议网关)");
+                                    ui.selectable_value(&mut self.chain_mode, "psiphon_chain".to_string(), "Psiphon 跑在隧道内 (--psiphon)");
+                                    ui.selectable_value(&mut self.chain_mode, "psiphon_reverse".to_string(), "隧道跑在 Psiphon 内 (--psiphon-reverse)");
+                                    ui.selectable_value(&mut self.chain_mode, "tor_chain".to_string(), "Tor 跑在隧道内 (--tor)");
+                                    ui.selectable_value(&mut self.chain_mode, "tor_reverse".to_string(), "隧道跑在 Tor 内 (--tor-reverse)");
+                                });
+                            ui.end_row();
+                        }
+
+                        // 9. 本地端口与系统代理
+                        ui.label("本地代理端口:");
+                        ui.horizontal(|ui| {
+                            ui.label("SOCKS5:");
+                            ui.add(egui::TextEdit::singleline(&mut self.socks_listen).desired_width(115.0));
+                            ui.label("HTTP:");
+                            ui.add(egui::TextEdit::singleline(&mut self.http_listen).desired_width(115.0));
+                        });
                         ui.end_row();
 
-                        ui.label("本地 HTTP 端口:");
-                        ui.text_edit_singleline(&mut self.http_listen);
-                        ui.end_row();
-
-                        // 8. 附加链式代理与系统代理
-                        ui.label("附加选项:");
-                        ui.vertical(|ui| {
-                            ui.checkbox(&mut self.sys_proxy, "连接后自动设置 Windows 系统代理");
-                            ui.checkbox(&mut self.enable_psiphon, "串联 Psiphon 隧道 (--psiphon)");
-                            ui.checkbox(&mut self.enable_tor, "串联 Tor 隧道 (--tor)");
+                        ui.label("系统与路由选项:");
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.sys_proxy, "自动设置 Windows 系统代理");
+                            ui.checkbox(&mut self.bypass_lan_iran, "绕过局域网与直连地址 (不破坏 SHARD)");
                         });
                         ui.end_row();
                     });
             });
 
-            ui.add_space(12.0);
+            ui.add_space(10.0);
 
             // 启动 / 停止 按钮
             ui.vertical_centered(|ui| {
@@ -381,7 +539,7 @@ impl eframe::App for MsnGuardApp {
                     let btn = egui::Button::new(
                         egui::RichText::new("🚀 启动连接 (Connect)").size(16.0),
                     )
-                    .min_size(egui::vec2(220.0, 42.0));
+                    .min_size(egui::vec2(240.0, 40.0));
                     if ui.add(btn).clicked() {
                         self.start_core(ctx.clone());
                     }
@@ -389,14 +547,14 @@ impl eframe::App for MsnGuardApp {
                     let btn = egui::Button::new(
                         egui::RichText::new("🛑 断开连接 (Disconnect)").size(16.0),
                     )
-                    .min_size(egui::vec2(220.0, 42.0));
+                    .min_size(egui::vec2(240.0, 40.0));
                     if ui.add(btn).clicked() {
                         self.stop_core();
                     }
                 }
             });
 
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             ui.separator();
 
             ui.horizontal(|ui| {
