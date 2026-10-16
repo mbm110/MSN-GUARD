@@ -1,4 +1,4 @@
-name: Build MSN-GUARD Windows Core
+name: Build MSN-GUARD Windows GUI & Core
 
 on:
   workflow_dispatch:
@@ -27,13 +27,15 @@ jobs:
           choco install strawberryperl -y
           echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
 
-      - name: Build aether CLI
+      - name: Build Aether Core & GUI
         run: |
-          cargo build --release --manifest-path core/aether/Cargo.toml --bin aether
+          cargo build --release --manifest-path core/aether/Cargo.toml --bin aether --bin aether-gui
 
-      - name: Upload Binary
+      - name: Upload Windows Client Bundle
         uses: actions/upload-artifact@v4
         with:
-          name: aether-windows-x64
-          path: "**/release/aether.exe"
+          name: MSN-GUARD-Windows-x64
+          path: |
+            **/release/aether.exe
+            **/release/aether-gui.exe
           if-no-files-found: error
