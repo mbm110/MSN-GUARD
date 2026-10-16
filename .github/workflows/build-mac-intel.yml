@@ -1,4 +1,4 @@
-name: Build MSN-GUARD macOS Intel Core
+name: Build MSN-GUARD macOS Intel App
 
 on:
   workflow_dispatch:
@@ -15,19 +15,38 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm' # 如果用 pnpm/yarn 可相应调整
+
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           targets: x86_64-apple-darwin
 
-      - name: Build aether CLI
+      - name: Install Frontend Dependencies & Build UI
         run: |
-          cargo build --release --target x86_64-apple-darwin --manifest-path core/aether/Cargo.toml --bin aether
+          # 假设前端 UI 项目在 ui 目录或根目录下，根据实际路径调整
+          cd ui
+          npm install
+          npm run build
+          cd ..
 
-      - name: Upload Binary
+      - name: Build Tauri / Desktop App (Intel)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 假设使用 Tauri 或类似的打包工具
+          cargo tauri build --target x86_64-apple-darwin --release
+
+      - name: Upload App Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: aether-macos-intel
-          path: "**/release/aether"
+          name: msn-guard-macos-intel-ui
+          path: |
+            ui/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+            ui/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app
           if-no-files-found: error
