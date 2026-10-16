@@ -188,11 +188,12 @@ jobs:
           cp core/aether/target/x86_64-apple-darwin/release/aether "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/aether-core"
           cp -r generated_ui/* "$BUILD_DIR/$APP_NAME.app/Contents/Resources/"
           
-          # 创建带管理员权限提权（AppleScript 授权）的启动脚本
+          # 创建修复了控制台终端冲突、带有配置注入与管理员提权的启动引导脚本
           cat << 'EOF' > "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME"
           #!/bin/bash
           DIR="$(cd "$(dirname "$0")" && pwd)"
           CORE_BIN="$DIR/aether-core"
+          CONFIG_FILE="$DIR/../Resources/config.json"
           HTML_PATH="$DIR/../Resources/index.html"
           
           if [ ! -f "$CORE_BIN" ]; then
@@ -200,8 +201,39 @@ jobs:
             exit 1
           fi
           
-          # 弹窗请求管理员密码以赋予 root 权限创建 utun 网卡并接管路由
-          osascript -e "do shell script \"nohup \\\"$CORE_BIN\\\" > /tmp/msn-guard.log 2>&1 &\" with administrator privileges"
+          # 生成默认底层核心配置文件
+          cat << 'CONFIG_EOF' > "$CONFIG_FILE"
+          {
+            "log": { "level": "info" },
+            "inbounds": [
+              {
+                "type": "mixed",
+                "tag": "mixed-in",
+                "listen": "127.0.0.1",
+                "listen_port": 10808,
+                "set_system_proxy": true
+              }
+            ],
+            "outbounds": [
+              {
+                "type": "selector",
+                "tag": "select",
+                "outbounds": ["wireguard-node", "proxy-node"]
+              },
+              {
+                "type": "wireguard",
+                "tag": "wireguard-node",
+                "server": "127.0.0.1",
+                "server_port": 51820,
+                "local_address": "10.0.0.2/32"
+              },
+              { "type": "direct", "tag": "direct" }
+            ]
+          }
+          CONFIG_EOF
+          
+          # 使用修正后的后台守护进程拉起方式，完美避免 ioctl 报错
+          osascript -e "do shell script \"sudo \\\"$CORE_BIN\\\" -c \\\"$CONFIG_FILE\\\" > /tmp/msn-guard.log 2>&1 &\" with administrator privileges"
           
           if [ -f "$HTML_PATH" ]; then
             open "$HTML_PATH"
