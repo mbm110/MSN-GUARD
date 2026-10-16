@@ -1,5 +1,8 @@
 package com.msnguard.vpn
 
+import com.msnguard.vpn.shard.toShardNode
+import com.msnguard.vpn.shard.toShardProfile
+
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
@@ -252,169 +255,23 @@ object ShardConfigs {
      * every other node in it.
      */
     fun parse(body: String): List<ShardNode> {
-        val effectiveBody = decodeIfBase64(body)
-        val nodes = mutableListOf<ShardNode>()
-        val seen = mutableSetOf<String>()
-        effectiveBody.lineSequence().forEach { rawLine ->
-            val line = rawLine.trim()
-            if (line.isEmpty() || line.startsWith("#")) return@forEach
-            val node = parseOne(line) ?: return@forEach
-            // Dedupe on the way in: the pool is built from 9 upstream aggregators
-            // and the same node routinely appears in several of them.
-            if (seen.add(node.key)) nodes.add(node)
+        val profiles = com.msnguard.vpn.shard.ShardImport.parseBatch(body)
+        val seen = LinkedHashSet<String>()
+        val out = mutableListOf<ShardNode>()
+        for (pr in profiles) {
+            val node = pr.toShardNode()
+            // keep original dedupe + drop ipv6 bracket + port check via ShardNode key
+            if (node.address.contains("[") || node.address.contains("]")) continue
+            if (node.port !in 1..65535) continue
+            if (seen.add(node.key)) out.add(node)
         }
-        return nodes
-    }
-
-    /**
-     * Try base64 decode when the body looks like a base64 sub (no :// but decodes to ://).
-     * Mirrors PattNG's Utils.decode branch: decode first, fall back to plain if it does not produce ://.
-     * Gated so a plain vless:// body is never corrupted.
-     */
-    private fun decodeIfBase64(body: String): String {
-        val trimmed = body.trim()
-        if (trimmed.isEmpty() || trimmed.contains("://")) return body
-        // Strip whitespace/newlines that some subs insert; try standard then URL-safe
-        val compact = trimmed.filterNot { it.isWhitespace() }
-        if (compact.isEmpty()) return body
-        for (flags in listOf(android.util.Base64.NO_WRAP, android.util.Base64.NO_WRAP or android.util.Base64.URL_SAFE)) {
-            try {
-                val decoded = android.util.Base64.decode(compact, flags).toString(Charsets.UTF_8)
-                if (decoded.contains("://")) return decoded
-            } catch (_: Exception) {}
-            // Also try with padding restored (PattNG trims = then tries both)
-            try {
-                val padded = compact.trimEnd('=')
-                if (padded != compact) {
-                    val decoded = android.util.Base64.decode(padded, flags).toString(Charsets.UTF_8)
-                    if (decoded.contains("://")) return decoded
-                }
-            } catch (_: Exception) {}
-        }
-        return body
+        return out
     }
 
     private fun parseOne(line: String): ShardNode? = try {
-        val scheme = line.substringBefore("://", "").lowercase(Locale.US)
-        if (scheme !in SUPPORTED) return null
-        val rest = line.substringAfter("://")
-        val label = rest.substringAfter('#', "").let { decode(it) }
-        val withoutLabel = rest.substringBefore('#')
-        val credential = decode(withoutLabel.substringBefore('@', ""))
-        if (credential.isEmpty()) return null
-        val hostPortAndQuery = withoutLabel.substringAfter('@')
-        val hostPort = hostPortAndQuery.substringBefore('?')
-        val query = hostPortAndQuery.substringAfter('?', "")
-        val address = hostPort.substringBeforeLast(':', "")
-        if (address.contains("[") || address.contains("]")) return null
-        val port = hostPort.substringAfterLast(':', "").toIntOrNull() ?: return null
-        if (address.isEmpty() || port !in 1..65535) return null
-
-        val params = parseQuery(query)
-        val host = params["host"].orEmpty()
-        val sni = params["sni"].orEmpty()
-        val security = params["security"]?.lowercase(Locale.US).orEmpty().ifEmpty { "none" }
-        // ws and xhttp are implemented. `ws` rides a WebSocket upgrade;
-        // `xhttp` rides plain HTTP/1.1-or-h2 requests, which is the shape that
-        // still crosses a firewall that killed UDP and capped WebSocket — see
-        // the xhttp branch in [outbound]. A node announcing anything else is
-        // dropped rather than forced onto a transport it did not ask for, which
-        // would fail at the handshake with a useless error.
-        val network = params["type"]?.lowercase(Locale.US).orEmpty().ifEmpty { "tcp" }
-        if (network != "ws" && network != "xhttp" && network != "grpc" && scheme != "anytls") return null
-
-        // anytls:// is its own URI shape (docs/uri_scheme.md): password in the
-        // userinfo, host[:port] with 443 as the default port, `sni` and
-        // `insecure` as the only parameters. No ws, no path, no CDN `host` —
-        // the fields below are filled so the node survives the xray-shaped
-        // [ShardNode] and the health/rank machinery unchanged, and the
-        // engine-specific values travel in the fields the sidecar reads:
-        // [ShardNode.serverName] is the SNI param, and [ShardNode.security]
-        // carries the insecure flag ("insecure" vs "tls") for the sidecar's
-        // TLS verification. Insecure stays opt-in per node from its own URL,
-        // never a default — see AnyTlsManager.
-        if (scheme == "anytls") {
-            val insecure = params["insecure"] == "1" || params["insecure"] == "true"
-            return ShardNode(
-                protocol = scheme,
-                credential = credential,
-                address = address,
-                port = port,
-                network = network,
-                security = if (insecure) "insecure" else "tls",
-                path = "",
-                host = "",
-                serverName = sni,
-                fingerprint = "",
-                cipherSuites = "",
-                finalMask = "",
-                alpn = "",
-                echConfigList = "",
-                echOutbound = "",
-                allowInsecure = insecure,
-                verifyPeerCertByName = "",
-                pinnedPeerCertSha256 = "",
-                flow = "",
-                realityPublicKey = "",
-                realityShortId = "",
-                realitySpiderX = "",
-                realityMldsa65Verify = "",
-                extra = "",
-                label = label,
-            )
-        }
-
-        // Exhaustive parity: every query param is read verbatim.
-        // No normalization, no defaults — the publisher's own tuning is the source of truth.
-        // insecure: 3 keys (insecure/allowInsecure/allow_insecure), pcs-gated like upstream TLS builder
-        val rawInsecure = params["insecure"] == "1" || params["allowinsecure"] == "1" || params["allow_insecure"] == "1"
-        val pcs = params["pcs"].orEmpty()
-        val allowInsecure = rawInsecure && pcs.isEmpty()
-        ShardNode(
-            protocol = scheme,
-            credential = credential,
-            address = address,
-            port = port,
-            network = network,
-            security = security,
-            path = params["path"].orEmpty().ifEmpty { params["serviceName"].orEmpty().ifEmpty { "/" } }.replace("MTMVPNfp=", "MTMVPN&fp="),
-            host = host,
-            // serverName falls back to host because that is what the CDN routes
-            // on; an empty SNI to Cloudflare gets the default certificate and the
-            // handshake fails.
-            serverName = sni.ifEmpty { host },
-            fingerprint = params["fp"].orEmpty(),
-            cipherSuites = params["cs"].orEmpty(),
-            finalMask = params["fm"].orEmpty(),
-            alpn = run {
-                val raw = params["alpn"].orEmpty()
-                val net = params["type"]?.lowercase(java.util.Locale.US).orEmpty().ifEmpty { "tcp" }
-                val sec = params["security"]?.lowercase(java.util.Locale.US).orEmpty()
-                // PattNG's TlsSettingsCheck.fixImportedAlpn: ws/http-upgrade with alpn other than http/1.1 alone
-                // is rewritten to http/1.1 — shared links often carry h2,http/1.1 and the fork offers h2 then,
-                // which some Cloudflare hosts pick even after http/1.1. Keep verbatim otherwise.
-                if ((net == "ws" || net == "httpupgrade") && sec == "tls" && raw.isNotEmpty()) {
-                    val parts = raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-                    if (parts != listOf("http/1.1")) "http/1.1" else raw
-                } else raw
-            },
-            echConfigList = params["ech"].orEmpty(),
-            echOutbound = params["echoutbound"].orEmpty(),
-            allowInsecure = allowInsecure,
-            verifyPeerCertByName = params["vcn"].orEmpty(),
-            pinnedPeerCertSha256 = pcs,
-            flow = params["flow"].orEmpty(),
-            realityPublicKey = params["pbk"].orEmpty(),
-            realityShortId = params["sid"].orEmpty(),
-            realitySpiderX = params["spx"].orEmpty(),
-            realityMldsa65Verify = params["pqv"].orEmpty(),
-            extra = params["extra"].orEmpty(),
-            label = label,
-        )
-    } catch (_: Exception) {
-        // One unparseable line, not a failed refresh.
-        null
-    }
+        val pr = com.msnguard.vpn.shard.ShardImport.parseOne(line) ?: return null
+        pr.toShardNode()
+    } catch (_: Exception) { null }
 
     /**
      * Split a query string without letting one bad pair kill the rest.
@@ -453,176 +310,27 @@ object ShardConfigs {
      */
     fun outbound(context: Context, node: ShardNode, tag: String, mux: Boolean = true): JSONObject {
         val customIp = getCustomCfIp(context)
-        val effectiveAddress = if (customIp.isNotEmpty()) customIp else node.address
-
-        val settings = JSONObject()
-        when (node.protocol) {
-            "vless" -> settings.put(
-                "vnext",
-                JSONArray().put(
-                    JSONObject().apply {
-                        put("address", effectiveAddress)
-                        put("port", node.port)
-                        put(
-                            "users",
-                            JSONArray().put(
-                                JSONObject().apply {
-                                    put("id", node.credential)
-                                    // "none" is the only VLESS encryption there is;
-                                    // the field is still required by the parser.
-                                    put("encryption", "none")
-                                    if (node.flow.isNotEmpty()) put("flow", node.flow)
-                                }
-                            )
-                        )
-                    }
-                )
-            )
-            "trojan" -> settings.put(
-                "servers",
-                JSONArray().put(
-                    JSONObject().apply {
-                        put("address", effectiveAddress)
-                        put("port", node.port)
-                        put("password", node.credential)
-                    }
-                )
-            )
+        val profile = node.toShardProfile().apply {
+            if (customIp.isNotEmpty()) server = customIp
         }
-
-        val stream = JSONObject().apply {
-            put("network", node.network)
-            put("security", node.security)
-            // Verbatim, and only when the subscription supplied it. See the
-            // ShardNode doc: these three values are numerically interlocked and
-            // must not be normalised or defaulted.
-            if (node.finalMask.isNotEmpty()) {
-                // Parsed rather than concatenated as a string, so a malformed `fm`
-                // is caught here — where the node can simply be skipped — instead
-                // of making the whole config unparseable at launch.
-                put("finalmask", JSONObject(node.finalMask))
-            }
-            if (node.security == "tls") {
-                put(
-                    "tlsSettings",
-                    JSONObject().apply {
-                        put("serverName", node.serverName)
-                        if (node.fingerprint.isNotEmpty()) put("fingerprint", node.fingerprint)
-                        if (node.cipherSuites.isNotEmpty()) put("cipherSuites", node.cipherSuites)
-                        if (node.alpn.isNotEmpty()) {
-                            put("alpn", JSONArray().apply { node.alpn.split(',').forEach { put(it.trim()) } })
-                        } else if (node.network == "xhttp" && node.alpn.isEmpty()) {
-                            put("alpn", JSONArray().put("h2"))
-                        }
-                        // ECH DNS: udp://1.1.1.1:53 is blocked on many Iranian carriers (i/o timeout -> malformed ECHConfigList -> handshake fail).
-                        // Rewrite to DoH so the query rides TCP+TLS via DialSystem rather than raw UDP; the hello of that DoH leg
-                        // is itself a normal Chrome hello (no ECH on it), so the fragment of the node's own hello still applies.
-                        val echForConfig = if (node.echConfigList.contains("+udp://")) {
-                            node.echConfigList.replace("+udp://", "+https://").let { v ->
-                                // normalize like cloudflare-ech.com+https://1.1.1.1 -> +https://1.1.1.1/dns-query (xray expects a URL)
-                                if (v.contains("/dns-query", ignoreCase = true)) v else "$v/dns-query"
-                            }
-                        } else node.echConfigList
-                        if (echForConfig.isNotEmpty()) put("echConfigList", echForConfig)
-                        // Keep pcs-gated allowInsecure / vcn from the node as before.
-                        // When ECH is on, the live tunnel's ECH config fetch
-                        // (QueryRecord -> DialSystem) must ride the node's own
-                        // outbound instead of DialSystem's default path, which on
-                        // this device goes through the TUN before the tunnel is up
-                        // — the query leaves over the carrier link and is dropped.
-                        // `echSocketSettings.dialerProxy` tells xray to redial the
-                        // DNS query through the outbound named here. The probe has
-                        // many parallel outbounds (out-0, out-1, …) and routing
-                        // would make a self-proxy a cycle, so the field is omitted
-                        // there — the live tunnel has a single "proxy" outbound and
-                        // is where the request actually leaves. Proto:
-                        // tls.Config.ech_socket_settings=21, SocketConfig.dialer_proxy=9.
-                        if (tag == "proxy") {
-                            put(
-                                "echSocketSettings",
-                                JSONObject().put("dialerProxy", "proxy")
-                            )
-                        }
-                        // Upstream parity: insecure is pcs-gated. allowInsecure true only
-                        // when URL had insecure=1 and no pcs. User's example insecure=0 -> false, correct.
-                        put("allowInsecure", node.allowInsecure)
-                        if (node.verifyPeerCertByName.isNotEmpty()) put("verifyPeerCertByName", node.verifyPeerCertByName)
-                        if (node.pinnedPeerCertSha256.isNotEmpty()) put("pinnedPeerCertSha256", node.pinnedPeerCertSha256)
-                    }
-                )
-            } else if (node.security == "reality") {
-                put(
-                    "realitySettings",
-                    JSONObject().apply {
-                        put("serverName", node.serverName)
-                        if (node.fingerprint.isNotEmpty()) put("fingerprint", node.fingerprint)
-                        if (node.realityPublicKey.isNotEmpty()) put("publicKey", node.realityPublicKey)
-                        if (node.realityShortId.isNotEmpty()) put("shortId", node.realityShortId)
-                        if (node.realitySpiderX.isNotEmpty()) put("spiderX", node.realitySpiderX)
-                        if (node.realityMldsa65Verify.isNotEmpty()) put("mldsa65Verify", node.realityMldsa65Verify)
-                    }
-                )
-            }
-            if (node.network == "grpc") {
-                put(
-                    "grpcSettings",
-                    JSONObject().apply {
-                        put("serviceName", node.path.trimStart('/').ifEmpty { "mohsen" })
-                        val authority = when {
-                            node.host.isNotBlank() -> node.host
-                            node.serverName.isNotBlank() -> node.serverName
-                            else -> ""
-                        }
-                        if (authority.isNotBlank()) put("authority", authority)
-                        // mode=gun is default for gRPC in xray; keep stream semantics
-                        // (no explicit multiMode needed — xray infers from serviceName)
-                    }
-                )
-            } else if (node.network == "xhttp") {
-                put(
-                    "xhttpSettings",
-                    JSONObject().apply {
-                        put("path", node.path)
-                        put("host", node.host)
-                        // `mode` is not carried in the subscription, and the
-                        // fork's own default ("auto") is what a CDN-fronted node
-                        // wants: packet-up for small uploads, stream-up once a
-                        // flow grows. Sending "auto" explicitly is byte-identical
-                        // to omitting it (SplitHTTPConfig.Build), and it keeps
-                        // this object self-describing in the user's log.
-                        put("mode", "auto")
-                        // Verbatim, same rule as finalmask: `extra` is the
-                        // publisher's own override block and the fork applies it
-                        // on top of these fields, so anything we put here that
-                        // contradicts it would simply be overwritten — and
-                        // anything we invent would be ours to maintain.
-                        if (node.extra.isNotEmpty()) {
-                            put("extra", JSONObject(node.extra))
-                        }
-                    }
-                )
-            } else {
-                put(
-                    "wsSettings",
-                    JSONObject().apply {
-                        put("path", node.path)
-                        // Independent "host", not headers.Host. The fork's
-                        // WebSocketConfig.Build() accepts the header form but calls
-                        // PrintDeprecatedFeatureWarning for it, which would put a
-                        // warning line in the user's log on every single connect.
-                        put("host", node.host)
-                    }
-                )
-            }
+        val out = com.msnguard.vpn.shard.ShardOutboundBuilder.outbound(profile, tag)
+        // Apply mux only when requested and protocol is vless (same gate as before)
+        if (mux) {
+            muxFor(node)?.let { out.put("mux", it) }
+        } else {
+            // Ensure no mux when race (probe) — builder has no mux by itself
         }
-
-        return JSONObject().apply {
-            put("tag", tag)
-            put("protocol", node.protocol)
-            put("settings", settings)
-            put("streamSettings", stream)
-            if (mux) muxFor(node)?.let { put("mux", it) }
+        // Preserve xhttp alpn h2 default when empty (builder already does tls, but old code added h2 for xhttp none)
+        // ShardOutboundBuilder handles tls alpn via profile, but keeps xhttp none -> builder adds finalMask only;
+        // old outbound added alpn h2 for xhttp+tls empty — mimic if needed:
+        if (node.network == "xhttp" && node.security == "tls" && node.alpn.isEmpty()) {
+            try {
+                val ss = out.optJSONObject("streamSettings")
+                val tls = ss?.optJSONObject("tlsSettings")
+                if (tls != null && !tls.has("alpn")) tls.put("alpn", org.json.JSONArray().put("h2"))
+            } catch (_: Exception) {}
         }
+        return out
     }
 
     /**
@@ -823,16 +531,11 @@ object ShardConfigs {
         val outbounds = JSONArray()
             .put(outbound(context, node, "proxy", mux = false))
             .put(
-                // DoH resolver, chained through the node. This is the fix for the
-                // "Telegram works, nothing in a browser does" symptom: the node's
-                // Cloudflare WebSocket leg silently drops UDP datagrams above ~500
-                // bytes, so a browser's EDNS0-padded DNS query and its QUIC initial
-                // both vanish into the tunnel. TCP has no such ceiling — measured
-                // end to end on the live pool, a 612-byte padded UDP query timed
-                // out while an identical lookup over DoH returned in 95 bytes, and
-                // google/amazon/github/instagram all resolved that way. See
-                // [dohOutbound] and the port-53 rule in [routingRules].
-                dohOutbound()
+                JSONObject().apply {
+                    put("tag", "dns-out")
+                    put("protocol", "dns")
+                    put("settings", JSONObject().apply { put("userLevel", 1) })
+                }
             )
             .put(
                 JSONObject().apply {
@@ -935,21 +638,15 @@ object ShardConfigs {
                     // the name — an extra failure mode and a DNS leak surface. Both
                     // were tested against the real binary; both route correctly, and
                     // this is the safer one.
-                    if (smartSplit != null) {
-                        put(
-                            "sniffing",
-                            JSONObject().apply {
-                                put("enabled", true)
-                                put("destOverride", JSONArray().put("tls").put("http").put("quic"))
-                                put("routeOnly", true)
-                                // `quic` next to tls/http: a QUIC initial carries the
-                                // SNI too, so with it the `domain:`/`geosite:` rules
-                                // below decide QUIC flows as well instead of falling
-                                // to the catch-all. Cheap — same sniff, one more
-                                // parser — and it only reads the first packet.
-                            }
-                        )
-                    }
+                    // PattNG parity: always sniff+fakedns. Plain SHARD had no sniffing before, so fake IPs were never generated.
+                    put(
+                        "sniffing",
+                        JSONObject().apply {
+                            put("enabled", true)
+                            put("destOverride", JSONArray().put("tls").put("http").put("quic").put("fakedns"))
+                            put("routeOnly", smartSplit != null)
+                        }
+                    )
                 }
             )
             if (listenHost != "127.0.0.1") {
@@ -976,21 +673,16 @@ object ShardConfigs {
             // With Smart Split this rule is unnecessary: that profile ships its own
             // DNS config with the same DoH endpoint, and adding this rule beside it
             // would only create a second resolver to reason about.
+            // PattNG parity: no DoH. Plain SHARD uses fakedns + dns-out like PattNG's configureLocalDns.
+            // Inbound sniffing carries "fakedns" so Xray synthesizes a fake IP per query and the routing rules resolve via dns-out.
             if (smartSplit == null) {
+                put("fakedns", JSONArray().put(JSONObject().apply {
+                    put("ipPool", "198.18.0.0/16")
+                    put("poolSize", 1024)
+                }))
                 put("dns", JSONObject().apply {
                     put("queryStrategy", "UseIP")
-                    put("useSystemHosts", true)
-                    put("serveStale", true)
-                    put(
-                        "servers",
-                        JSONArray().put(
-                            JSONObject().apply {
-                                put("tag", DOH_OUTBOUND_TAG)
-                                put("address", "https://cloudflare-dns.com/dns-query")
-                                put("timeoutMs", 12000)
-                            }
-                        )
-                    )
+                    put("servers", JSONArray().put(JSONObject().apply { put("address", "fakedns") }))
                 })
                 put(
                     "routing",
@@ -1000,7 +692,7 @@ object ShardConfigs {
                             JSONObject().apply {
                                 put("type", "field")
                                 put("port", 53)
-                                put("outboundTag", DOH_OUTBOUND_TAG)
+                                put("outboundTag", "dns-out")
                             }
                         )
                     )

@@ -746,6 +746,28 @@ object Strings {
             "آخرین اسکن: %s (سقف WebSocket)",
             "上次扫描: %s (WebSocket 上限)",
         ),
+        "Exit Route" to Triple("Exit Route", "مسیر خروج", "出口路由"),
+        "Identity Vault" to Triple("Identity Vault", "مخزن هویت", "身份库"),
+        "Pick method, pick strategy, then Start. Green means identity stored (persists per method)." to Triple(
+            "Pick method, pick strategy, then Start. Green means identity stored (persists per method).",
+            "روش را انتخاب کنید، استراتژی را انتخاب کنید، سپس شروع کنید. سبز یعنی هویت ذخیره شده (برای هر روش جداگانه باقی می‌ماند).",
+            "先选择方法，再选择策略，然后点击开始。绿色表示身份已存储（按每种方法分别保存）。"
+        ),
+        "Quantum ECH" to Triple("Quantum ECH", "ECH کوانتومی", "量子 ECH"),
+        "Shard Relay" to Triple("Shard Relay", "رله شارد", "Shard 中继"),
+        "START — GET IDENTITY" to Triple("START — GET IDENTITY", "شروع — دریافت هویت", "开始 — 获取身份"),
+        "PROVISIONING..." to Triple("PROVISIONING...", "در حال دریافت...", "正在获取..."),
+        "Key received" to Triple("Key received", "کلید دریافت شد", "已获取密钥"),
+        "Get key" to Triple("Get key", "دریافت کلید", "获取密钥"),
+        "Per transport" to Triple("Per transport", "برای هر روش", "每个传输单独"),
+        "Through your V2Ray exit — per transport, others untouched." to Triple(
+            "Through your V2Ray exit — per transport, others untouched.",
+            "از طریق خروجی V2Ray شما — برای هر روش جداگانه، بقیه دست‌نخورده می‌مانند.",
+            "通过你的 V2Ray 出口 — 按传输单独生效，其他不变。"
+        ),
+        "Freedom — direct" to Triple("Freedom — direct", "آزادی — مستقیم", "自由 — 直连"),
+        "Through your V2Ray config" to Triple("Through your V2Ray config", "از طریق کانفیگ V2Ray شما", "通过你的 V2Ray 配置"),
+        "Freedom — dial direct" to Triple("Freedom — dial direct", "آزادی — اتصال مستقیم", "自由 — 直连拨号"),
     )
 
     /** Translate [key] into the active language, falling back to English. */

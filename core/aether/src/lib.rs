@@ -1171,7 +1171,10 @@ async fn select_wg_peers(
     let private_key = identity.private_key_bytes()?;
     let peer_public = identity.peer_public_key_bytes()?;
 
-    let ports = wireguard::WG_PORTS.to_vec();
+    // Ptech scanner: narrow the port sweep to 2408 (warpendpoint's default)
+    // when the user flipped the Warp Setting toggle. Masque is untouched.
+    // REVERT: delete this if let → ports always come from WG_PORTS.
+    let ports = if let Some(p) = wireguard::env_wg_ports() { p } else { wireguard::WG_PORTS.to_vec() };
     let excluded: HashSet<SocketAddr> = avoid
         .iter()
         .flat_map(|address| {
@@ -2230,7 +2233,7 @@ async fn hunt_wg_peer_with_profile(
             .parse()
             .map_err(|_| AetherError::Other("invalid ipv4".into()))?,
         aethernoize: profile,
-        ports: wireguard::WG_PORTS.to_vec(),
+        ports: if let Some(p) = wireguard::env_wg_ports() { p } else { wireguard::WG_PORTS.to_vec() },
         ip,
         excluded: excluded.clone(),
     };

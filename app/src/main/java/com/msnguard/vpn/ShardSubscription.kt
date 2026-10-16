@@ -39,18 +39,12 @@ object ShardSubscription {
     private const val TAG = "ShardSubscription"
 
     /**
-     * The subscription. Our own mirror, not the publisher's URL: the SHARD
-     * node list must be editable on GitHub and reach every installed app —
-     * old and new, Smart Split on or off — with no release. The mirror is
-     * rebuilt by `.github/workflows/shard-nodes-sync.yml` every six hours
-     * from the publisher's live list, so a node change reaches the fleet
-     * with no build and no version bump.
-     *
-     * v1.8.7 and later dial this URL. Versions before it read the publisher
-     * directly; they keep working, they just do not follow our edits.
+     * The subscription — direct from publisher, refreshed every few hours.
+     * The app itself fetches and extracts all configs from this link; the old
+     * mirror is no longer used.
      */
     const val SUBSCRIPTION_URL =
-        "https://raw.githubusercontent.com/mbm110/MSN-GUARD/master/remote/shard-nodes.txt"
+        "https://raw.githubusercontent.com/patterniha/Free-Configs/main/configs.txt"
 
     /** Seed list in assets, so the first ever connect works with no network. */
     private const val SEED_ASSET = "shard-seed.txt"
@@ -210,7 +204,9 @@ object ShardSubscription {
             }
 
             val body = connection.inputStream.bufferedReader().use { it.readText() }
+            val rawLines = body.lines().count { it.trim().isNotEmpty() && !it.trim().startsWith("#") }
             val parsed = ShardConfigs.parse(body)
+            ConnectionLog.record("$TAG extracted $rawLines lines · parsed ${parsed.size} configs from sub")
             // Refuse to replace a working cache with something that yields nothing.
             // A truncated response or a publisher mistake must not disarm the
             // button — the user would see a transport that worked yesterday and

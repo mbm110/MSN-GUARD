@@ -762,15 +762,68 @@ pub const WG_SEEDS_V6: &[&str] = &[
     "2606:4700:d0::bc72:6001",
 ];
 
+// Warp Setting Ptech scanner — env-driven CIDR override, isolated & reversible.
+// When AETHER_PTECH_SCAN=1 the prober keeps the same UDP verify + NOIZE
+// but ignores the compiled WG_* tables and expands only the 7+2 ranges
+// warpendpoint actually samples. Delete this whole block and the engine
+// falls back to WG_* defaults — nothing else changes.
+pub const PTECH_CIDRS_V4: &[&str] = &[
+    "162.159.192.0/24",
+    "162.159.193.0/24",
+    "162.159.195.0/24",
+    "188.114.96.0/24",
+    "188.114.97.0/24",
+    "188.114.98.0/24",
+    "188.114.99.0/24",
+];
+pub const PTECH_CIDRS_V6: &[&str] = &[
+    "2606:4700:d0::/48",
+    "2606:4700:d1::/48",
+];
+pub fn ptech_enabled() -> bool {
+    std::env::var("AETHER_PTECH_SCAN").is_ok()
+}
+pub fn env_cidrs_v4() -> Option<Vec<&'static str>> {
+    std::env::var("AETHER_SCAN_CIDRS_V4").ok().map(|v| {
+        // Leak the split strings so they live as 'static for the caller.
+        v.split(|c| c == ',' || c == ';' || c == ' ' || c == '\n')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| Box::leak(s.to_owned().into_boxed_str()) as &str)
+            .collect()
+    })
+}
+pub fn env_cidrs_v6() -> Option<Vec<&'static str>> {
+    std::env::var("AETHER_SCAN_CIDRS_V6").ok().map(|v| {
+        v.split(|c| c == ',' || c == ';' || c == ' ' || c == '\n')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| Box::leak(s.to_owned().into_boxed_str()) as &str)
+            .collect()
+    })
+}
+pub fn env_wg_ports() -> Option<Vec<u16>> {
+    std::env::var("AETHER_WG_PORTS").ok().map(|v| {
+        v.split(|c| c == ',' || c == ';' || c == ' ' || c == '\n')
+            .filter_map(|s| s.trim().parse::<u16>().ok())
+            .collect()
+    })
+}
+
 pub fn wg_prefixes_v4() -> Vec<&'static str> {
+    if let Some(v) = env_cidrs_v4() { return v; }
+    if ptech_enabled() { return PTECH_CIDRS_V4.to_vec(); }
     crate::prober::prioritize(WG_PREFIXES_V4, WG_ZT_PREFIXES_V4)
 }
 
 pub fn wg_prefixes_v6() -> Vec<&'static str> {
+    if let Some(v) = env_cidrs_v6() { return v; }
+    if ptech_enabled() { return PTECH_CIDRS_V6.to_vec(); }
     crate::prober::prioritize(WG_PREFIXES_V6, WG_ZT_PREFIXES_V6)
 }
 
 pub fn wg_seeds_v4() -> Vec<&'static str> {
+    if ptech_enabled() { return PTECH_CIDRS_V4.iter().map(|c| c.split('/').next().unwrap_or(c)).collect(); }
     crate::prober::prioritize(WG_SEEDS_V4, &["162.159.193.1"])
 }
 

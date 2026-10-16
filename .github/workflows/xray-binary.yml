@@ -45,8 +45,7 @@ jobs:
       - name: Clone the fork
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch v26.8.28 \
-            https://github.com/patterniha/Xray-core.git xray
+          git clone --depth 1 https://github.com/patterniha/Xray-core.git xray && git -C xray fetch --depth 1 origin aa7886b51c14 && git -C xray checkout aa7886b51c14
           cd xray
           echo "Pinned commit: $(git rev-parse HEAD)"
           # Confirm the three features we are here for are in this tree, so a
@@ -63,7 +62,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.27'
           cache: false
 
       - name: Setup Android NDK

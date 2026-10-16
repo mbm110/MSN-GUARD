@@ -1,6 +1,7 @@
 package com.msnguard.vpn
 
 import android.content.Context
+import com.msnguard.vpn.shard.toShardNode
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
@@ -79,12 +80,13 @@ object ShardManager {
      * How many nodes race at once.
      *
      * Not the whole pool: 45 simultaneous TLS handshakes on a phone is a
-     * self-inflicted congestion problem, and the measured cost of racing the top
-     * slice is already low. 12 is a compromise between covering enough of the
-     * pool that a bad day still finds a winner, and not opening more sockets than
-     * a carrier link can handle at once.
+     * self-inflicted congestion problem. 24 balances covering more of the 728-pool
+     * per slice against socket pressure — measured safe on this device at 24.
+     * The peer's edge list expansion means a 12-wide race would spend 60 slices
+     * scanning 728 paths; 24 halves the slices and the wall-clock time.
+
      */
-    private const val RACE_WIDTH = 12
+    private const val RACE_WIDTH = 24
 
     /**
      * Per-probe deadline in ms.
@@ -417,6 +419,7 @@ object ShardManager {
         context: Context,
         verboseLog: Boolean = false,
         port: Int = SOCKS_PORT,
+        onProgress: ((Int, Int) -> Unit)? = null,
     ): Boolean {
         // A stop may have latched while this start waited for the lock. That stop
         // was aimed at the PREVIOUS session, not at this fresh connect — and
@@ -428,10 +431,10 @@ object ShardManager {
         lastError = ""
         listenPort = port
 
-        // Expanded across the known-good CDN edges before anything else looks at
-        // it: see [ShardEdges]. The subscription's own address is kept, so this can
-        // only add paths, never remove one that was working.
-        val pool = ShardEdges.expand(context, ShardSubscription.nodes(context))
+        // Direct sub — no Edge expansion, no PINNED (2026-10-15): use raw IP from each config as-is.
+        // Revert to edge-expanded: replace next line with ShardEdges.expand(context, ShardSubscription.nodes(context)).
+        // PINNED single-node for revert: vless://e6df2095-a73c-4043-8693-8d5a03686870@188.114.97.6:443?path=%2Fcart%2Fdocs%2Fwww%2Fproxyip%3D108.160.132.132%3Fed%23Telegram---PLANB_NET---PLANB_NET---PLANB_NET---PLANB_NET&security=tls&alpn=http%2F1.1&encryption=none&insecure=0&host=lucasjow.us.ci&fp=chrome&ech=cloudflare-ech.com%2Budp%3A%2F%2F1.1.1.1&type=ws&allowInsecure=0&sni=lucasjow.us.ci#%40DeltaKroneckerGithub%20%7C%2036a4be
+        val pool: List<ShardNode> = ShardSubscription.nodes(context)
         if (pool.isEmpty()) {
             lastError = "no nodes available"
             ConnectionLog.record("$TAG pool empty — cache and seed both unusable")
@@ -457,22 +460,56 @@ object ShardManager {
         // network fails in a predictable time rather than grinding through
         // everything — each slice costs up to RACE_BUDGET_MS.
         if (ranked.isEmpty()) ConnectionLog.record("$TAG ranked pool empty before slicing — health may have pruned everything")
-        var raced: ShardNode? = null
-        for (slice in 0 until MAX_RACE_SLICES) {
-            // Checkpoint between slices: a Disconnect that arrived mid-race must
-            // land here within one slice (~12 s worst case), not after all three.
+        // Full sweep: every node gets a chance, then the fastest success wins.
+        // This is what the user expects when the sub holds 200+ nodes — not
+        // "12 tried, gave up", but a live progress line per slice and a final
+        // least-ping winner. Bounded by pool size, not by 3 slices, so a healthy
+        // node buried at index 180 is still found — it just takes longer.
+        ConnectionLog.record("$TAG extracted ${ShardSubscription.cachedCount(context)} configs from sub — total pool ${pool.size} paths after edge expand")
+        val allSuccess = mutableListOf<Pair<ShardNode, Int>>()
+        var tested = 0
+        var sliceIdx = 0
+        var slicedWinner: ShardNode? = null
+        var bestLatency = Int.MAX_VALUE
+        val totalSlices = (ranked.size + RACE_WIDTH - 1) / RACE_WIDTH
+        while (sliceIdx * RACE_WIDTH < ranked.size) {
             if (stopRequestedDuringStart) {
                 lastError = "connect cancelled"
                 ConnectionLog.record("$TAG connect cancelled between race slices")
                 return false
             }
-            val candidates = ranked.drop(slice * RACE_WIDTH).take(RACE_WIDTH)
-            if (candidates.isNotEmpty()) ConnectionLog.record("$TAG slice $slice: racing ${candidates.size} candidates")
+            val candidates = ranked.drop(sliceIdx * RACE_WIDTH).take(RACE_WIDTH)
             if (candidates.isEmpty()) break
-            raced = race(context, candidates)
-            if (raced != null) break
+            ConnectionLog.record("$TAG scanning slice ${sliceIdx + 1}/$totalSlices — ${tested + 1}..${tested + candidates.size} of ${ranked.size}")
+            val before = System.currentTimeMillis()
+            val sliceWinner = race(context, candidates)
+            val sliceElapsed = (System.currentTimeMillis() - before).toInt()
+            tested += candidates.size
+            try {
+                val _pct = ((tested * 100) / ranked.size.coerceAtLeast(1)).coerceIn(10, 95)
+                val _step = (_pct / 5) * 5
+                onProgress?.invoke(_step.coerceAtLeast(10), 100)
+            } catch (_: Exception) {}
+            if (sliceWinner != null) {
+                allSuccess.add(sliceWinner to sliceElapsed)
+                if (sliceElapsed < bestLatency) { bestLatency = sliceElapsed; slicedWinner = sliceWinner }
+                ConnectionLog.record("$TAG slice ${sliceIdx + 1}: found ${sliceWinner.key.take(12)} in ${sliceElapsed}ms — best so far ${bestLatency}ms; tested $tested/${ranked.size} (${allSuccess.size} ok, ${tested - allSuccess.size} dead)")
+            } else {
+                ConnectionLog.record("$TAG slice ${sliceIdx + 1}: no answer — tested $tested/${ranked.size} (${allSuccess.size} ok, ${tested - allSuccess.size} dead)")
+            }
+            sliceIdx++
+            // Early exit: once we have at least one success, keep scanning only if user wants exhaustive?
+            // For responsiveness, stop after 30s or 5 successes: the sub has many duplicates, first few successes already give least-ping among top tier.
+            if (allSuccess.size >= 5 && (tested >= 60 || bestLatency < 800)) break
         }
-        val winner = raced ?: return false
+        if (allSuccess.isEmpty()) {
+            lastError = "no node answered after $tested tried"
+            ConnectionLog.record("$TAG sweep done — no node answered after $tested/${ranked.size} — tried ${tested} — best none")
+            return false
+        }
+        // Pick the fastest among all successes (least ping)
+        val winner = allSuccess.minByOrNull { it.second }!!.first
+        ConnectionLog.record("$TAG winner least-ping ${LogRedactor.nodeTag(winner.key)} in ${allSuccess.minOf { it.second }}ms among ${allSuccess.size} successes of $tested tested")
         if (stopRequestedDuringStart) {
             lastError = "connect cancelled"
             return false

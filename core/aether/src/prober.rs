@@ -89,10 +89,17 @@ pub fn prioritize(all: &[&'static str], first: &[&'static str]) -> Vec<&'static 
 }
 
 pub fn masque_cidrs_v4() -> Vec<&'static str> {
+    // Ptech scanner override — same env as WireGuard, so the whole Warp
+    // surface (WG/Masque/WoW) flips together when the user picks Ptech.
+    // REVERT: comment these two early-returns.
+    if let Some(v) = crate::wireguard::env_cidrs_v4() { return v; }
+    if crate::wireguard::ptech_enabled() { return crate::wireguard::PTECH_CIDRS_V4.to_vec(); }
     prioritize(MASQUE_CIDRS_V4, MASQUE_ZT_CIDRS_V4)
 }
 
 pub fn masque_cidrs_v6() -> Vec<&'static str> {
+    if let Some(v) = crate::wireguard::env_cidrs_v6() { return v; }
+    if crate::wireguard::ptech_enabled() { return crate::wireguard::PTECH_CIDRS_V6.to_vec(); }
     prioritize(MASQUE_CIDRS_V6, MASQUE_ZT_CIDRS_V6)
 }
 
