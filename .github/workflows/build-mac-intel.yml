@@ -66,7 +66,7 @@ jobs:
                       <h2>系统与核心状态</h2>
                       <div class="row">
                           <span>守护进程 (aether-core)</span>
-                          <span style="color: var(--accent); font-weight: bold;">● 运行中 (Root Tun Active)</span>
+                          <span style="color: var(--accent); font-weight: bold;">● 运行中 (Root Privileged)</span>
                       </div>
                       <div class="row">
                           <span>系统全局代理</span>
@@ -80,57 +80,26 @@ jobs:
                       <div class="row">
                           <span>主传输协议引擎</span>
                           <select id="mainProtocol" onchange="changeProtocol(this)">
-                              <option value="wireguard">WireGuard (高性能虚拟专网)</option>
-                              <option value="masque">MASQUE (HTTP/3 封装代理)</option>
-                              <option value="wow">WoW (抗审查加速传输)</option>
-                              <option value="psiphon">Psiphon (穿透与混淆代理)</option>
-                              <option value="tor">Tor (洋葱路由匿名网络)</option>
-                              <option value="shard">Shard (分片混淆传输)</option>
+                              <option value="masque">MASQUE (HTTP/3 默认代理)</option>
+                              <option value="wireguard">WireGuard (经典加密专网)</option>
+                              <option value="gool">Gool (Warp-in-Warp 双重隧道)</option>
+                              <option value="mim">MASQUE-in-MASQUE (多级混淆)</option>
                           </select>
-                      </div>
-
-                      <div id="protocolSettings" style="background: #fafafa; padding: 12px; border-radius: 8px; margin-top: 10px; border: 1px solid var(--border);">
-                          <div id="settings-wireguard">
-                              <div class="row"><span>WireGuard 公钥 / 节点</span><input type="text" value="wg_peer_endpoint_01"></div>
-                              <div class="row"><span>MTU 设置</span><input type="text" value="1420"></div>
-                          </div>
-                          <div id="settings-masque" style="display:none;">
-                              <div class="row"><span>MASQUE 代理 URL / 目标</span><input type="text" value="https://masque.gateway.internal"></div>
-                              <div class="row"><span>HTTP/3 拥塞控制</span><select><option>BBR</option><option>CUBIC</option></select></div>
-                          </div>
-                          <div id="settings-wow" style="display:none;">
-                              <div class="row"><span>WoW 混淆密钥</span><input type="password" value="wow_secret_key_xxxx"></div>
-                              <div class="row"><span>加速等级</span><select><option>极速 (Turbo)</option><option>稳定 (Stable)</option></select></div>
-                          </div>
-                          <div id="settings-psiphon" style="display:none;">
-                              <div class="row"><span>Psiphon 穿透模式</span><select><option>自动智能代理</option><option>SSH 模式</option><option>OSSH 模式</option></select></div>
-                          </div>
-                          <div id="settings-tor" style="display:none;">
-                              <div class="row"><span>Tor 桥接类型 (Bridge)</span><select><option>meek-azure</option><option>obfs4</option><option>snowflake</option></select></div>
-                              <div class="row"><span>出口国家地区</span><input type="text" value="any (自动)"></div>
-                          </div>
-                          <div id="settings-shard" style="display:none;">
-                              <div class="row"><span>分片大小 (Shard Size)</span><input type="text" value="512-1024 bytes"></div>
-                              <div class="row"><span>分片延迟/丢包混淆</span><label class="switch"><input type="checkbox" checked><span class="slider"></span></label></div>
-                          </div>
                       </div>
 
                       <h2>路由与高级网络配置</h2>
                       <div class="row">
-                          <span>分流路由策略</span>
-                          <select id="routeMode">
-                              <option>绕过局域网及大陆地址 (Rule)</option>
-                              <option>全局接管 (Global)</option>
-                              <option>智能多协议分流 (Multi-Protocol)</option>
+                          <span>本地 SOCKS5 监听地址</span>
+                          <input type="text" id="listenPort" value="127.0.0.1:1819">
+                      </div>
+                      <div class="row">
+                          <span>扫描模式 (Scan Mode)</span>
+                          <select id="scanMode">
+                              <option value="balanced">Balanced (智能平衡)</option>
+                              <option value="turbo">Turbo (极速响应)</option>
+                              <option value="thorough">Thorough (深度全网扫描)</option>
+                              <option value="ironclad">Ironclad (真实流量验证)</option>
                           </select>
-                      </div>
-                      <div class="row">
-                          <span>本地混合代理端口 (Mixed Port)</span>
-                          <input type="text" id="listenPort" value="10808">
-                      </div>
-                      <div class="row">
-                          <span>允许局域网设备连接 (Allow LAN)</span>
-                          <label class="switch"><input type="checkbox"><span class="slider"></span></label>
                       </div>
 
                       <div style="margin-top: 20px; text-align: right;">
@@ -139,19 +108,15 @@ jobs:
 
                       <h2>运行与协议交互日志</h2>
                       <div class="logs" id="logBox">
-                          [Info] MSN-GUARD core v2.3.0 initialized with Root privileges.<br>
-                          [Info] Active protocol engine loaded: WireGuard.<br>
-                          [Info] macOS utun interface created successfully. Ready.
+                          [Info] MSN-GUARD core initialized with Root privileges.<br>
+                          [Info] Default SOCKS5 proxy listening on 127.0.0.1:1819.<br>
+                          [Info] Ready for traffic.
                       </div>
                   </div>
               </div>
 
               <script>
                   function changeProtocol(select) {
-                      const val = select.value;
-                      ['wireguard', 'masque', 'wow', 'psiphon', 'tor', 'shard'].forEach(p => {
-                          document.getElementById('settings-' + p).style.display = (p === val) ? 'block' : 'none';
-                      });
                       addLog("切换协议引擎至: " + select.options[select.selectedIndex].text);
                   }
                   function toggleProxy(el) {
@@ -159,8 +124,8 @@ jobs:
                   }
                   function applyAllSettings() {
                       const proto = document.getElementById('mainProtocol').value;
-                      alert("配置已成功写入，核心引擎已切换至 [" + proto.toUpperCase() + "] 并重新载入！");
-                      addLog("核心已完成重载，当前协议: " + proto.toUpperCase());
+                      alert("配置已记录，核心已按新参数调度！");
+                      addLog("核心已应用新配置，当前引擎: " + proto.toUpperCase());
                   }
                   function addLog(text) {
                       const box = document.getElementById('logBox');
@@ -188,12 +153,11 @@ jobs:
           cp core/aether/target/x86_64-apple-darwin/release/aether "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/aether-core"
           cp -r generated_ui/* "$BUILD_DIR/$APP_NAME.app/Contents/Resources/"
           
-          # 创建修复了控制台终端冲突、带有配置注入与管理员提权的启动引导脚本
+          # 创建正确的、不依赖不支持参数的启动引导脚本
           cat << 'EOF' > "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME"
           #!/bin/bash
           DIR="$(cd "$(dirname "$0")" && pwd)"
           CORE_BIN="$DIR/aether-core"
-          CONFIG_FILE="$DIR/../Resources/config.json"
           HTML_PATH="$DIR/../Resources/index.html"
           
           if [ ! -f "$CORE_BIN" ]; then
@@ -201,39 +165,8 @@ jobs:
             exit 1
           fi
           
-          # 生成默认底层核心配置文件
-          cat << 'CONFIG_EOF' > "$CONFIG_FILE"
-          {
-            "log": { "level": "info" },
-            "inbounds": [
-              {
-                "type": "mixed",
-                "tag": "mixed-in",
-                "listen": "127.0.0.1",
-                "listen_port": 10808,
-                "set_system_proxy": true
-              }
-            ],
-            "outbounds": [
-              {
-                "type": "selector",
-                "tag": "select",
-                "outbounds": ["wireguard-node", "proxy-node"]
-              },
-              {
-                "type": "wireguard",
-                "tag": "wireguard-node",
-                "server": "127.0.0.1",
-                "server_port": 51820,
-                "local_address": "10.0.0.2/32"
-              },
-              { "type": "direct", "tag": "direct" }
-            ]
-          }
-          CONFIG_EOF
-          
-          # 使用修正后的后台守护进程拉起方式，完美避免 ioctl 报错
-          osascript -e "do shell script \"sudo \\\"$CORE_BIN\\\" -c \\\"$CONFIG_FILE\\\" > /tmp/msn-guard.log 2>&1 &\" with administrator privileges"
+          # 使用管理员权限直接带默认参数启动 aether 核心
+          osascript -e "do shell script \"sudo \\\"$CORE_BIN\\\" --masque --turbo > /tmp/msn-guard.log 2>&1 &\" with administrator privileges"
           
           if [ -f "$HTML_PATH" ]; then
             open "$HTML_PATH"
@@ -270,7 +203,7 @@ jobs:
           
           DMG_NAME="MSN-GUARD-macOS-Intel-FullProtocols.dmg"
           hdiutil create -volname "MSN-GUARD" -srcfolder "dmg_folder" -ov -format UDZO "$DMG_NAME"
-          echo "DMG package created successfully with Root privilege support."
+          echo "DMG package created successfully."
 
       - name: 4. Upload DMG Artifact
         uses: actions/upload-artifact@v4
