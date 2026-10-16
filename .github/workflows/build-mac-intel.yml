@@ -26,48 +26,53 @@ jobs:
           toolchain: stable
           targets: x86_64-apple-darwin
 
-      - name: List Repository Structure
+      - name: Check and Build Frontend UI (If exists)
         run: |
-          echo "=== Root Directory ==="
-          ls -la
-          echo "=== Finding package.json ==="
-          find . -name "package.json"
-
-      - name: Install Frontend Dependencies & Build UI
-        run: |
-          # 自动寻找 package.json 所在的目录（排除 core 目录）
-          PKG_PATH=$(find . -name "package.json" | grep -v "core/" | head -n 1)
+          echo "=== Searching for package.json ==="
+          PKG_PATH=$(find . -name "package.json" -not -path "*/node_modules/*" | head -n 1)
+          
           if [ -n "$PKG_PATH" ]; then
             UI_DIR=$(dirname "$PKG_PATH")
+            echo "Found frontend directory at: $UI_DIR"
+            cd "$UI_DIR"
+            
+            if [ ! -f "package-lock.json" ] && [ ! -f "yarn.lock" ] && [ ! -f "pnpm-lock.yaml" ]; then
+              npm install
+            else
+              npm ci || npm install
+            fi
+            
+            # 检查是否有 build 脚本，有则执行
+            if npm run | grep -q "build"; then
+              npm run build
+            fi
+            cd -
           else
-            # 如果没找到，默认使用 app 目录
-            UI_DIR="app"
+            echo "No package.json found. Skipping Node.js build step."
           fi
-          echo "Found UI directory: $UI_DIR"
-          cd "$UI_DIR"
-          
-          if [ ! -f "package-lock.json" ] && [ ! -f "yarn.lock" ] && [ ! -f "pnpm-lock.yaml" ]; then
-            npm install --package-lock-only || npm init -y
-          fi
-          npm install
-          npm run build
-          cd -
 
-      - name: Build Tauri / Desktop App (Intel)
+      - name: Build Desktop App / CLI (Intel)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAURI_CONF=$(find . -name "tauri.conf.json" | head -n 1)
-          if [ -n "$TAURI_CONF" ]; then
-            cd "$(dirname "$TAURI_CONF")/.."
+          # 检查是否存在 Tauri 配置文件，若存在则用 tauri 打包，否则编译主 CLI / 核心
+          if [ -f "tauri.conf.json" ] || [ -d "src-tauri" ] || [ -f "ui/src-tauri/tauri.conf.json" ]; then
+            TAURI_CONF=$(find . -name "tauri.conf.json" | head -n 1)
+            if [ -n "$TAURI_CONF" ]; then
+              cd "$(dirname "$TAURI_CONF")/.."
+            fi
+            cargo tauri build --target x86_64-apple-darwin --release
+          else
+            echo "Building via cargo (Intel)..."
+            cargo build --release --target x86_64-apple-darwin --manifest-path core/aether/Cargo.toml --bin aether || cargo build --release --target x86_64-apple-darwin
           fi
-          cargo tauri build --target x86_64-apple-darwin --release
 
-      - name: Upload App Artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: msn-guard-macos-intel-ui
+          name: msn-guard-macos-intel
           path: |
             **/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
             **/target/x86_64-apple-darwin/release/bundle/macos/*.app
+            target/x86_64-apple-darwin/release/aether
           if-no-files-found: error
