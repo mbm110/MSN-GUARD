@@ -1,4 +1,4 @@
-name: Build MSN-GUARD Windows GUI
+name: Build MSN-GUARD Windows Core
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [ "main", "master" ]
 
 jobs:
-  build-windows-gui:
+  build:
     runs-on: windows-latest
 
     steps:
@@ -21,35 +21,19 @@ jobs:
           toolchain: stable
           targets: x86_64-pc-windows-msvc
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          # 移除了会导致报错的 cache: 'npm'
-
       - name: Install Build Dependencies (NASM & Perl)
         run: |
           choco install nasm -y
           choco install strawberryperl -y
           echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
 
-      - name: 1. Build aether.exe Core
+      - name: Build aether CLI
         run: |
           cargo build --release --manifest-path core/aether/Cargo.toml --bin aether
-          New-Item -ItemType Directory -Force -Path "src-tauri/binaries"
-          # 修改这里的源路径，指向正确的 core/aether/target/release/aether.exe
-          Copy-Item "core/aether/target/release/aether.exe" "src-tauri/binaries/aether-x86_64-pc-windows-msvc.exe"
-          
-      - name: 2. Build Frontend & Tauri GUI
-        run: |
-          npm install
-          npm run tauri build
 
-      - name: 3. Upload Windows Installer Artifacts
+      - name: Upload Binary
         uses: actions/upload-artifact@v4
         with:
-          name: MSN-GUARD-Windows-GUI-Installer
-          path: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
+          name: aether-windows-x64
+          path: "**/release/aether.exe"
           if-no-files-found: error
