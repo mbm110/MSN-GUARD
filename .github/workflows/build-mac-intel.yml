@@ -19,7 +19,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm' # 如果用 pnpm/yarn 可相应调整
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -29,8 +28,8 @@ jobs:
 
       - name: Install Frontend Dependencies & Build UI
         run: |
-          # 假设前端 UI 项目在 ui 目录或根目录下，根据实际路径调整
           cd ui
+          npm install --package-lock-only || npm init -y
           npm install
           npm run build
           cd ..
@@ -39,7 +38,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 假设使用 Tauri 或类似的打包工具
           cargo tauri build --target x86_64-apple-darwin --release
 
       - name: Upload App Artifact
