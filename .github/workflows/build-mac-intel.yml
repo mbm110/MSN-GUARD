@@ -15,24 +15,42 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           targets: x86_64-apple-darwin
 
-      - name: 1. Auto-Detect and Prepare UI Assets
+      - name: 1. Prepare UI Assets
         run: |
-          echo "=== 自动探测仓库中的前端 UI 资源 ==="
+          echo "=== 准备前端 UI 资源 ==="
           mkdir -p generated_ui
           
-          # 生成内置的可视化控制面板网页
-          echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>MSN-GUARD 控制面板</title><style>body{font-family:-apple-system,sans-serif;background:#f5f5f7;margin:0;padding:40px;color:#333;text-align:center;}.card{background:white;max-width:500px;margin:0 auto;padding:30px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.08);}h1{color:#0071e3;font-size:24px;margin-bottom:10px;}.status{display:inline-block;padding:6px 14px;background:#e1f5fe;color:#0288d1;border-radius:20px;font-weight:bold;margin:15px 0;}.btn{background:#0071e3;color:white;border:none;padding:10px 20px;border-radius:6px;font-size:16px;cursor:pointer;margin-top:10px;}</style></head><body><div class="card"><h1>MSN-GUARD 客户端</h1><p>Intel macOS 专用可视化面板</p><div class="status">核心运行中</div><br><button class="btn" onclick="alert(\'代理服务状态正常，规则已生效！\')">检查连接状态</button></div></body></html>' > generated_ui/index.html
+          cat << 'EOF' > generated_ui/index.html
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <meta charset="UTF-8">
+              <title>MSN-GUARD 控制面板</title>
+              <style>
+                  body { font-family: -apple-system, sans-serif; background: #f5f5f7; margin: 0; padding: 40px; color: #333; text-align: center; }
+                  .card { background: white; max-width: 500px; margin: 0 auto; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+                  h1 { color: #0071e3; font-size: 24px; margin-bottom: 10px; }
+                  .status { display: inline-block; padding: 6px 14px; background: #e1f5fe; color: #0288d1; border-radius: 20px; font-weight: bold; margin: 15px 0; }
+                  .btn { background: #0071e3; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-size: 16px; cursor: pointer; margin-top: 10px; }
+              </style>
+          </head>
+          <body>
+              <div class="card">
+                  <h1>MSN-GUARD 客户端</h1>
+                  <p>Intel macOS 专用可视化面板</p>
+                  <div class="status">核心运行中</div>
+                  <br>
+                  <button class="btn" onclick="alert('代理服务状态正常，规则已生效！')">检查连接状态</button>
+              </div>
+          </body>
+          </html>
+          EOF
 
       - name: 2. Build Rust Intel Core (aether)
         run: |
