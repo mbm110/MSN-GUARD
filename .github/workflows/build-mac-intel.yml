@@ -42,7 +42,6 @@ jobs:
               npm ci || npm install
             fi
             
-            # 检查是否有 build 脚本，有则执行
             if npm run | grep -q "build"; then
               npm run build
             fi
@@ -55,7 +54,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 检查是否存在 Tauri 配置文件，若存在则用 tauri 打包，否则编译主 CLI / 核心
           if [ -f "tauri.conf.json" ] || [ -d "src-tauri" ] || [ -f "ui/src-tauri/tauri.conf.json" ]; then
             TAURI_CONF=$(find . -name "tauri.conf.json" | head -n 1)
             if [ -n "$TAURI_CONF" ]; then
@@ -64,15 +62,15 @@ jobs:
             cargo tauri build --target x86_64-apple-darwin --release
           else
             echo "Building via cargo (Intel)..."
-            cargo build --release --target x86_64-apple-darwin --manifest-path core/aether/Cargo.toml --bin aether || cargo build --release --target x86_64-apple-darwin
+            cargo build --release --target x86_64-apple-darwin --manifest-path core/aether/Cargo.toml --bin aether
           fi
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: msn-guard-macos-intel
+          name: msn-guard-macos-intel-binary
           path: |
+            core/aether/target/x86_64-apple-darwin/release/aether
             **/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
             **/target/x86_64-apple-darwin/release/bundle/macos/*.app
-            target/x86_64-apple-darwin/release/aether
           if-no-files-found: error
