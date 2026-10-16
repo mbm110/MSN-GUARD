@@ -29,5 +29,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: aether-macos-intel
-          path: "target/x86_64-apple-darwin/release/aether"
+          path: "**/release/aether"
           if-no-files-found: error
