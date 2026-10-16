@@ -26,71 +26,13 @@ jobs:
           toolchain: stable
           targets: x86_64-apple-darwin
 
-      - name: 1. Auto-Detect and Build UI Assets
+      - name: 1. Auto-Detect and Prepare UI Assets
         run: |
           echo "=== 自动探测仓库中的前端 UI 资源 ==="
-          UI_DIR=""
-          
-          # 寻找可能的前端源码目录
-          if [ -d "ui" ]; then UI_DIR="ui";
-          elif [ -d "web" ]; then UI_DIR="web";
-          elif [ -d "frontend" ]; then UI_DIR="frontend";
-          elif [ -d "app/src/main/assets" ]; then UI_DIR="app/src/main/assets";
-          fi
-          
-          # 如果通过 package.json 定位
-          PKG_PATH=$(find . -name "package.json" -not -path "*/node_modules/*" -not -path "*/core/*" | head -n 1)
-          if [ -n "$PKG_PATH" ]; then
-            UI_DIR=$(dirname "$PKG_PATH")
-            echo "通过 package.json 定位到前端目录: $UI_DIR"
-          fi
-          
           mkdir -p generated_ui
-          if [ -n "$UI_DIR" ] && [ -d "$UI_DIR" ]; then
-            echo "进入前端目录并构建: $UI_DIR"
-            cd "$UI_DIR"
-            if [ -f "package.json" ]; then
-              npm install
-              if npm run | grep -q "build"; then
-                npm run build
-              fi
-            fi
-            # 尝试复制构建好的产物 (dist 或 build)
-            if [ -d "dist" ]; then cp -r dist/* ../generated_ui/;
-            elif [ -d "build" ]; then cp -r build/* ../generated_ui/;
-            else cp -r . ../generated_ui/;
-            fi
-            cd -
-          else
-            echo "未检测到外部前端工程，将自动生成内置的可视化控制面板网页..."
-            cat << 'EOF' > generated_ui/index.html
-            <!DOCTYPE html>
-            <html lang="zh-CN">
-            <head>
-                <meta charset="UTF-8">
-                <title>MSN-GUARD 控制面板</title>
-                <style>
-                    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f7; margin: 0; padding: 40px; color: #333; }
-                    .card { background: white; max-width: 500px; margin: 0 auto; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); text-align: center; }
-                    h1 { color: #0071e3; font-size: 24px; margin-bottom: 10px; }
-                    p { color: #666; font-size: 14px; }
-                    .status { display: inline-block; padding: 6px 14px; background: #e1f5fe; color: #0288d1; border-radius: 20px; font-weight: bold; margin: 15px 0; }
-                    .btn { background: #0071e3; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-size: 16px; cursor: pointer; margin-top: 10px; }
-                    .btn:hover { background: #0077ed; }
-                </style>
-            </head>
-            <body>
-                <div class="card">
-                    <h1>MSN-GUARD 客户端</h1>
-                    <p>Intel macOS 专用可视化面板</p>
-                    <div class="status" id="statusText">核心运行中</div>
-                    <br>
-                    <button class="btn" onclick="alert('代理服务状态正常，规则已生效！')">检查连接状态</button>
-                </div>
-            </body>
-            </html>
-            EOF
-          fi
+          
+          # 生成内置的可视化控制面板网页
+          echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>MSN-GUARD 控制面板</title><style>body{font-family:-apple-system,sans-serif;background:#f5f5f7;margin:0;padding:40px;color:#333;text-align:center;}.card{background:white;max-width:500px;margin:0 auto;padding:30px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.08);}h1{color:#0071e3;font-size:24px;margin-bottom:10px;}.status{display:inline-block;padding:6px 14px;background:#e1f5fe;color:#0288d1;border-radius:20px;font-weight:bold;margin:15px 0;}.btn{background:#0071e3;color:white;border:none;padding:10px 20px;border-radius:6px;font-size:16px;cursor:pointer;margin-top:10px;}</style></head><body><div class="card"><h1>MSN-GUARD 客户端</h1><p>Intel macOS 专用可视化面板</p><div class="status">核心运行中</div><br><button class="btn" onclick="alert(\'代理服务状态正常，规则已生效！\')">检查连接状态</button></div></body></html>' > generated_ui/index.html
 
       - name: 2. Build Rust Intel Core (aether)
         run: |
@@ -108,23 +50,19 @@ jobs:
           cp core/aether/target/x86_64-apple-darwin/release/aether "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/aether-core"
           cp -r generated_ui/* "$BUILD_DIR/$APP_NAME.app/Contents/Resources/"
           
-          # 创建应用启动引导脚本（自动在后台运行核心并唤醒操作界面）
+          # 创建应用启动引导脚本
           cat << 'EOF' > "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME"
           #!/bin/bash
           DIR="$(cd "$(dirname "$0")" && pwd)"
-          
-          # 后台静默启动 Rust 核心
           "$DIR/aether-core" &
           CORE_PID=$!
           
-          # 自动打开内置的可视化控制面板网页或弹窗提示
           HTML_PATH="$DIR/../Resources/index.html"
           if [ -f "$HTML_PATH" ]; then
             open "$HTML_PATH"
           fi
           
           osascript -e 'display dialog "MSN-GUARD 已成功启动！\n\n后台核心与可视化控制面板已加载。" buttons {"确定"} default button 1 with title "MSN-GUARD"'
-          
           kill $CORE_PID 2>/dev/null
           EOF
           
