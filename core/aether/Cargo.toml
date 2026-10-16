@@ -16,6 +16,10 @@ crate-type = ["lib", "staticlib", "cdylib"]
 name = "aether"
 path = "src/main.rs"
 
+[[bin]]
+name = "aether-gui"
+path = "src/gui.rs"
+
 [dependencies]
 quiche = { path = "../quiche/quiche", default-features = false, features = ["boringssl-boring-crate", "qlog"] }
 boring = "5.2"
@@ -56,6 +60,7 @@ tor-rtcompat = { version = "0.46", default-features = false, features = ["tokio"
 tokio-util = { version = "0.7", features = ["compat"], optional = true }
 liblzma = { version = "0.4", features = ["static"], optional = true }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"], optional = true }
+eframe = "0.29"
 
 [features]
 default = []
