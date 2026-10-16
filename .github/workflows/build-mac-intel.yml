@@ -35,11 +35,13 @@ jobs:
 
       - name: Install Frontend Dependencies & Build UI
         run: |
-          # 自动寻找 package.json 所在的目录并进入
-          UI_DIR=$(dirname "$(find . -name "package.json" | grep -v "core/" | head -n 1)")
-          if [ "$UI_DIR" = "." ] || [ -z "$UI_DIR" ]; then
-            # 如果没找到，尝试在常见子目录找
-            if [ -d "gui" ]; then UI_DIR="gui"; elif [ -d "frontend" ]; then UI_DIR="frontend"; else UI_DIR="ui"; fi
+          # 自动寻找 package.json 所在的目录（排除 core 目录）
+          PKG_PATH=$(find . -name "package.json" | grep -v "core/" | head -n 1)
+          if [ -n "$PKG_PATH" ]; then
+            UI_DIR=$(dirname "$PKG_PATH")
+          else
+            # 如果没找到，默认使用 app 目录
+            UI_DIR="app"
           fi
           echo "Found UI directory: $UI_DIR"
           cd "$UI_DIR"
@@ -55,9 +57,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAURI_DIR=$(dirname "$(find . -name "tauri.conf.json" | head -n 1)")
-          if [ -n "$TAURI_DIR" ] && [ "$TAURI_DIR" != "." ]; then
-            cd "$TAURI_DIR/.."
+          TAURI_CONF=$(find . -name "tauri.conf.json" | head -n 1)
+          if [ -n "$TAURI_CONF" ]; then
+            cd "$(dirname "$TAURI_CONF")/.."
           fi
           cargo tauri build --target x86_64-apple-darwin --release
 
