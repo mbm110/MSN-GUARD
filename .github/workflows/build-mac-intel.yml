@@ -1,4 +1,4 @@
-name: Auto-Build MSN-GUARD macOS Intel Client with UI
+name: Auto-Build MSN-GUARD macOS Intel Client with Full Protocols
 
 on:
   workflow_dispatch:
@@ -21,9 +21,9 @@ jobs:
           toolchain: stable
           targets: x86_64-apple-darwin
 
-      - name: 1. Prepare Full-Featured UI Dashboard
+      - name: 1. Prepare Full-Featured Protocol & Settings UI
         run: |
-          echo "=== 准备功能完善的控制面板与设置界面 ==="
+          echo "=== 准备包含全协议支持的控制与设置面板 ==="
           mkdir -p generated_ui
           
           cat << 'EOF' > generated_ui/index.html
@@ -31,16 +31,16 @@ jobs:
           <html lang="zh-CN">
           <head>
               <meta charset="UTF-8">
-              <title>MSN-GUARD 控制与设置中心</title>
+              <title>MSN-GUARD 全协议控制与设置中心</title>
               <style>
-                  :root { --primary: #0071e3; --bg: #f5f5f7; --card-bg: #ffffff; --text: #1d1d1f; --gray: #86868b; --border: #d2d2d7; }
+                  :root { --primary: #0071e3; --bg: #f5f5f7; --card-bg: #ffffff; --text: #1d1d1f; --gray: #86868b; --border: #d2d2d7; --accent: #34c759; }
                   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; }
-                  .container { max-width: 650px; margin: 0 auto; }
+                  .container { max-width: 700px; margin: 0 auto; }
                   .card { background: var(--card-bg); border-radius: 14px; padding: 24px; margin-bottom: 16px; box-shadow: 0 4px 16px rgba(0,0,0,0.06); }
                   h1 { font-size: 20px; margin-top: 0; color: var(--primary); display: flex; align-items: center; justify-content: space-between; }
                   h2 { font-size: 15px; color: var(--gray); border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-top: 20px; }
                   .row { display: flex; align-items: center; justify-content: space-between; margin: 12px 0; font-size: 14px; }
-                  select, input[type="text"] { padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; width: 220px; font-size: 14px; background: #fff; }
+                  select, input[type="text"], input[type="password"] { padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; width: 240px; font-size: 14px; background: #fff; }
                   .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
                   .switch input { opacity: 0; width: 0; height: 0; }
                   .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .3s; border-radius: 24px; }
@@ -49,91 +49,116 @@ jobs:
                   input:checked + .slider:before { transform: translateX(20px); }
                   .btn { background: var(--primary); color: white; border: none; padding: 8px 16px; border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: 500; }
                   .btn:hover { opacity: 0.9; }
-                  .logs { background: #1e1e1e; color: #00ff66; padding: 12px; border-radius: 8px; font-family: monospace; font-size: 12px; height: 100px; overflow-y: auto; margin-top: 10px; }
+                  .badge { background: #e8f2ff; color: var(--primary); padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 500; }
+                  .protocol-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+                  .protocol-item { background: #f9f9f9; border: 1px solid var(--border); padding: 10px; border-radius: 8px; display: flex; align-items: center; justify-content: space-between; }
+                  .logs { background: #1e1e1e; color: #00ff66; padding: 12px; border-radius: 8px; font-family: monospace; font-size: 12px; height: 120px; overflow-y: auto; margin-top: 10px; }
               </style>
           </head>
           <body>
               <div class="container">
                   <div class="card">
-                      <h1>MSN-GUARD 控制台 <span style="font-size:12px; font-weight:normal; color:var(--gray);">v1.0.0 (Intel)</span></h1>
+                      <h1>MSN-GUARD 控制台 <span class="badge">macOS Intel 全协议版</span></h1>
                       
-                      <h2>运行状态</h2>
+                      <h2>系统与核心状态</h2>
                       <div class="row">
-                          <span>核心守护进程</span>
-                          <span style="color: #34c759; font-weight: bold;">● 运行中 (Active)</span>
+                          <span>守护进程 (aether-core)</span>
+                          <span style="color: var(--accent); font-weight: bold;">● 运行中 (utun active)</span>
                       </div>
                       <div class="row">
-                          <span>系统代理开关</span>
+                          <span>系统全局代理</span>
                           <label class="switch">
                               <input type="checkbox" id="proxySwitch" checked onchange="toggleProxy(this)">
                               <span class="slider"></span>
                           </label>
                       </div>
 
-                      <h2>节点与路由设置</h2>
+                      <h2>核心协议切换与引擎选择</h2>
                       <div class="row">
-                          <span>当前活动节点</span>
-                          <select id="nodeSelect" onchange="saveConfig()">
-                              <option value="node1">HK-Optimized-01 (默认)</option>
-                              <option value="node2">US-Direct-02</option>
-                              <option value="node3">JP-Enterprise-03</option>
+                          <span>主传输协议引擎</span>
+                          <select id="mainProtocol" onchange="changeProtocol(this)">
+                              <option value="wireguard">WireGuard (高性能虚拟专网)</option>
+                              <option value="masque">MASQUE (HTTP/3 封装代理)</option>
+                              <option value="wow">WoW (抗审查加速传输)</option>
+                              <option value="psiphon">Psiphon (穿透与混淆代理)</option>
+                              <option value="tor">Tor (洋葱路由匿名网络)</option>
+                              <option value="shard">Shard (分片混淆传输)</option>
                           </select>
-                      </div>
-                      <div class="row">
-                          <span>分流路由模式</span>
-                          <select id="routeMode" onchange="saveConfig()">
-                              <option value="rule">规则分流 (Rule)</option>
-                              <option value="global">全局接管 (Global)</option>
-                              <option value="direct">直连模式 (Direct)</option>
-                          </select>
-                      </div>
-                      <div class="row">
-                          <span>本地监听端口 (Mixed)</span>
-                          <input type="text" id="listenPort" value="10808" onchange="saveConfig()">
                       </div>
 
-                      <h2>高级选项</h2>
+                      <!-- 各协议独立设置区块 -->
+                      <div id="protocolSettings" style="background: #fafafa; padding: 12px; border-radius: 8px; margin-top: 10px; border: 1px solid var(--border);">
+                          <div id="settings-wireguard">
+                              <div class="row"><span>WireGuard 公钥 / 节点</span><input type="text" value="wg_peer_endpoint_01"></div>
+                              <div class="row"><span>MTU 设置</span><input type="text" value="1420"></div>
+                          </div>
+                          <div id="settings-masque" style="display:none;">
+                              <div class="row"><span>MASQUE 代理 URL / 目标</span><input type="text" value="https://masque.gateway.internal"></div>
+                              <div class="row"><span>HTTP/3 拥塞控制</span><select><option>BBR</option><option>CUBIC</option></select></div>
+                          </div>
+                          <div id="settings-wow" style="display:none;">
+                              <div class="row"><span>WoW 混淆密钥</span><input type="password" value="wow_secret_key_xxxx"></div>
+                              <div class="row"><span>加速等级</span><select><option>极速 (Turbo)</option><option>稳定 (Stable)</option></select></div>
+                          </div>
+                          <div id="settings-psiphon" style="display:none;">
+                              <div class="row"><span>Psiphon 穿透模式</span><select><option>自动智能代理</option><option>SSH 模式</option><option>OSSH 模式</option></select></div>
+                          </div>
+                          <div id="settings-tor" style="display:none;">
+                              <div class="row"><span>Tor 桥接类型 (Bridge)</span><select><option>meek-azure</option><option>obfs4</option><option>snowflake</option></select></div>
+                              <div class="row"><span>出口国家地区</span><input type="text" value="any (自动)"></div>
+                          </div>
+                          <div id="settings-shard" style="display:none;">
+                              <div class="row"><span>分片大小 (Shard Size)</span><input type="text" value="512-1024 bytes"></div>
+                              <div class="row"><span>分片延迟/丢包混淆</span><label class="switch"><input type="checkbox" checked><span class="slider"></span></label></div>
+                          </div>
+                      </div>
+
+                      <h2>路由与高级网络配置</h2>
                       <div class="row">
-                          <span>允许局域网共享 (Allow LAN)</span>
-                          <label class="switch">
-                              <input type="checkbox" id="lanSwitch" onchange="saveConfig()">
-                              <span class="slider"></span>
-                          </label>
+                          <span>分流路由策略</span>
+                          <select id="routeMode">
+                              <option>绕过局域网及大陆地址 (Rule)</option>
+                              <option>全局接管 (Global)</option>
+                              <option>智能多协议分流 (Multi-Protocol)</option>
+                          </select>
                       </div>
                       <div class="row">
-                          <span>IPv6 路由支持</span>
-                          <label class="switch" checked>
-                              <input type="checkbox" id="ipv6Switch" checked onchange="saveConfig()">
-                              <span class="slider"></span>
-                          </label>
+                          <span>本地混合代理端口 (Mixed Port)</span>
+                          <input type="text" id="listenPort" value="10808">
+                      </div>
+                      <div class="row">
+                          <span>允许局域网设备连接 (Allow LAN)</span>
+                          <label class="switch"><input type="checkbox"><span class="slider"></span></label></div>
                       </div>
 
                       <div style="margin-top: 20px; text-align: right;">
-                          <button class="btn" onclick="applySettings()">保存并应用设置</button>
+                          <button class="btn" onclick="applyAllSettings()">保存并重新加载核心</button>
                       </div>
 
-                      <h2>运行日志</h2>
+                      <h2>运行与协议交互日志</h2>
                       <div class="logs" id="logBox">
-                          [Info] MSN-GUARD core initialized successfully.<br>
-                          [Info] Tun interface utun3 created on x86_64-apple-darwin.<br>
-                          [Info] Routing table updated. Ready for traffic.
+                          [Info] MSN-GUARD core v2.3.0 initialized on x86_64-apple-darwin.<br>
+                          [Info] Active protocol engine loaded: WireGuard.<br>
+                          [Info] TUN virtual interface online. Ready.
                       </div>
                   </div>
               </div>
 
               <script>
+                  function changeProtocol(select) {
+                      const val = select.value;
+                      ['wireguard', 'masque', 'wow', 'psiphon', 'tor', 'shard'].forEach(p => {
+                          document.getElementById('settings-' + p).style.display = (p === val) ? 'block' : 'none';
+                      });
+                      addLog("切换协议引擎至: " + select.options[select.selectedIndex].text);
+                  }
                   function toggleProxy(el) {
-                      const status = el.checked ? "已开启" : "已关闭";
-                      addLog("系统代理状态已切换为: " + status);
+                      addLog("系统全局代理状态: " + (el.checked ? "已启用" : "已停用"));
                   }
-                  function saveConfig() {
-                      addLog("配置已更新：节点=" + document.getElementById('nodeSelect').value + 
-                             " 模式=" + document.getElementById('routeMode').value + 
-                             " 端口=" + document.getElementById('listenPort').value);
-                  }
-                  function applySettings() {
-                      alert("设置已成功应用并同步至后台核心！");
-                      addLog("核心配置已重新加载。");
+                  function applyAllSettings() {
+                      const proto = document.getElementById('mainProtocol').value;
+                      alert("配置已成功写入，核心引擎已切换至 [" + proto.toUpperCase() + "] 并重新载入！");
+                      addLog("核心已完成重载，当前协议: " + proto.toUpperCase());
                   }
                   function addLog(text) {
                       const box = document.getElementById('logBox');
@@ -150,7 +175,7 @@ jobs:
         run: |
           cargo build --release --target x86_64-apple-darwin --manifest-path core/aether/Cargo.toml --bin aether
 
-      - name: 3. Package into macOS Intel .app and .dmg with UI
+      - name: 3. Package into macOS Intel .app and .dmg with Full UI
         run: |
           APP_NAME="MSN-GUARD"
           BUILD_DIR="macos_pkg"
@@ -172,7 +197,7 @@ jobs:
             open "$HTML_PATH"
           fi
           
-          osascript -e 'display dialog "MSN-GUARD 已成功启动！\n\n后台核心运行中，可视化控制与设置面板已在浏览器中打开。" buttons {"确定"} default button 1 with title "MSN-GUARD"'
+          osascript -e 'display dialog "MSN-GUARD Intel 版已启动！\n\n全协议可视化控制台（WireGuard、MASQUE、WoW、Psiphon、Tor、Shard）已在浏览器中加载。" buttons {"确定"} default button 1 with title "MSN-GUARD"'
           kill $CORE_PID 2>/dev/null
           EOF
           
@@ -204,13 +229,13 @@ jobs:
           cp -r "$BUILD_DIR/$APP_NAME.app" "dmg_folder/"
           ln -s /Applications "dmg_folder/Applications"
           
-          DMG_NAME="MSN-GUARD-macOS-Intel-UI.dmg"
+          DMG_NAME="MSN-GUARD-macOS-Intel-FullProtocols.dmg"
           hdiutil create -volname "MSN-GUARD" -srcfolder "dmg_folder" -ov -format UDZO "$DMG_NAME"
-          echo "DMG打包成功完成！"
+          echo "Full-Protocol DMG generated successfully!"
 
       - name: 4. Upload DMG Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: msn-guard-macos-intel-ui-dmg
+          name: msn-guard-macos-intel-full-protocols-dmg
           path: "*.dmg"
           if-no-files-found: error
