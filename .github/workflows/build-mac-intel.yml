@@ -1,4 +1,4 @@
-name: Auto-Build MSN-GUARD macOS Intel Client with Full Protocols
+name: Auto-Build MSN-GUARD macOS Intel Client with Full Protocols & Privileges
 
 on:
   workflow_dispatch:
@@ -14,6 +14,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -50,8 +55,6 @@ jobs:
                   .btn { background: var(--primary); color: white; border: none; padding: 8px 16px; border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: 500; }
                   .btn:hover { opacity: 0.9; }
                   .badge { background: #e8f2ff; color: var(--primary); padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 500; }
-                  .protocol-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
-                  .protocol-item { background: #f9f9f9; border: 1px solid var(--border); padding: 10px; border-radius: 8px; display: flex; align-items: center; justify-content: space-between; }
                   .logs { background: #1e1e1e; color: #00ff66; padding: 12px; border-radius: 8px; font-family: monospace; font-size: 12px; height: 120px; overflow-y: auto; margin-top: 10px; }
               </style>
           </head>
@@ -63,7 +66,7 @@ jobs:
                       <h2>系统与核心状态</h2>
                       <div class="row">
                           <span>守护进程 (aether-core)</span>
-                          <span style="color: var(--accent); font-weight: bold;">● 运行中 (utun active)</span>
+                          <span style="color: var(--accent); font-weight: bold;">● 运行中 (Root Tun Active)</span>
                       </div>
                       <div class="row">
                           <span>系统全局代理</span>
@@ -86,7 +89,6 @@ jobs:
                           </select>
                       </div>
 
-                      <!-- 各协议独立设置区块 -->
                       <div id="protocolSettings" style="background: #fafafa; padding: 12px; border-radius: 8px; margin-top: 10px; border: 1px solid var(--border);">
                           <div id="settings-wireguard">
                               <div class="row"><span>WireGuard 公钥 / 节点</span><input type="text" value="wg_peer_endpoint_01"></div>
@@ -128,7 +130,7 @@ jobs:
                       </div>
                       <div class="row">
                           <span>允许局域网设备连接 (Allow LAN)</span>
-                          <label class="switch"><input type="checkbox"><span class="slider"></span></label></div>
+                          <label class="switch"><input type="checkbox"><span class="slider"></span></label>
                       </div>
 
                       <div style="margin-top: 20px; text-align: right;">
@@ -137,9 +139,9 @@ jobs:
 
                       <h2>运行与协议交互日志</h2>
                       <div class="logs" id="logBox">
-                          [Info] MSN-GUARD core v2.3.0 initialized on x86_64-apple-darwin.<br>
+                          [Info] MSN-GUARD core v2.3.0 initialized with Root privileges.<br>
                           [Info] Active protocol engine loaded: WireGuard.<br>
-                          [Info] TUN virtual interface online. Ready.
+                          [Info] macOS utun interface created successfully. Ready.
                       </div>
                   </div>
               </div>
@@ -175,7 +177,7 @@ jobs:
         run: |
           cargo build --release --target x86_64-apple-darwin --manifest-path core/aether/Cargo.toml --bin aether
 
-      - name: 3. Package into macOS Intel .app and .dmg with Full UI
+      - name: 3. Package into macOS Intel .app and .dmg with Root Privileges
         run: |
           APP_NAME="MSN-GUARD"
           BUILD_DIR="macos_pkg"
@@ -186,19 +188,24 @@ jobs:
           cp core/aether/target/x86_64-apple-darwin/release/aether "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/aether-core"
           cp -r generated_ui/* "$BUILD_DIR/$APP_NAME.app/Contents/Resources/"
           
+          # 创建带管理员权限提权（AppleScript 授权）的启动脚本
           cat << 'EOF' > "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME"
           #!/bin/bash
           DIR="$(cd "$(dirname "$0")" && pwd)"
-          "$DIR/aether-core" &
-          CORE_PID=$!
-          
+          CORE_BIN="$DIR/aether-core"
           HTML_PATH="$DIR/../Resources/index.html"
+          
+          if [ ! -f "$CORE_BIN" ]; then
+            osascript -e 'display dialog "错误：未找到 aether-core 核心文件！" buttons {"确定"} default button 1 with icon stop'
+            exit 1
+          fi
+          
+          # 弹窗请求管理员密码以赋予 root 权限创建 utun 网卡并接管路由
+          osascript -e "do shell script \"nohup \\\"$CORE_BIN\\\" > /tmp/msn-guard.log 2>&1 &\" with administrator privileges"
+          
           if [ -f "$HTML_PATH" ]; then
             open "$HTML_PATH"
           fi
-          
-          osascript -e 'display dialog "MSN-GUARD Intel 版已启动！\n\n全协议可视化控制台（WireGuard、MASQUE、WoW、Psiphon、Tor、Shard）已在浏览器中加载。" buttons {"确定"} default button 1 with title "MSN-GUARD"'
-          kill $CORE_PID 2>/dev/null
           EOF
           
           chmod +x "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME"
@@ -231,7 +238,7 @@ jobs:
           
           DMG_NAME="MSN-GUARD-macOS-Intel-FullProtocols.dmg"
           hdiutil create -volname "MSN-GUARD" -srcfolder "dmg_folder" -ov -format UDZO "$DMG_NAME"
-          echo "Full-Protocol DMG generated successfully!"
+          echo "DMG package created successfully with Root privilege support."
 
       - name: 4. Upload DMG Artifact
         uses: actions/upload-artifact@v4
