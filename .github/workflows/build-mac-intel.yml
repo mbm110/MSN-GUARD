@@ -26,18 +26,39 @@ jobs:
           toolchain: stable
           targets: x86_64-apple-darwin
 
+      - name: List Repository Structure
+        run: |
+          echo "=== Root Directory ==="
+          ls -la
+          echo "=== Finding package.json ==="
+          find . -name "package.json"
+
       - name: Install Frontend Dependencies & Build UI
         run: |
-          cd ui
-          npm install --package-lock-only || npm init -y
+          # 自动寻找 package.json 所在的目录并进入
+          UI_DIR=$(dirname "$(find . -name "package.json" | grep -v "core/" | head -n 1)")
+          if [ "$UI_DIR" = "." ] || [ -z "$UI_DIR" ]; then
+            # 如果没找到，尝试在常见子目录找
+            if [ -d "gui" ]; then UI_DIR="gui"; elif [ -d "frontend" ]; then UI_DIR="frontend"; else UI_DIR="ui"; fi
+          fi
+          echo "Found UI directory: $UI_DIR"
+          cd "$UI_DIR"
+          
+          if [ ! -f "package-lock.json" ] && [ ! -f "yarn.lock" ] && [ ! -f "pnpm-lock.yaml" ]; then
+            npm install --package-lock-only || npm init -y
+          fi
           npm install
           npm run build
-          cd ..
+          cd -
 
       - name: Build Tauri / Desktop App (Intel)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          TAURI_DIR=$(dirname "$(find . -name "tauri.conf.json" | head -n 1)")
+          if [ -n "$TAURI_DIR" ] && [ "$TAURI_DIR" != "." ]; then
+            cd "$TAURI_DIR/.."
+          fi
           cargo tauri build --target x86_64-apple-darwin --release
 
       - name: Upload App Artifact
@@ -45,6 +66,6 @@ jobs:
         with:
           name: msn-guard-macos-intel-ui
           path: |
-            ui/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
-            ui/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app
+            **/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+            **/target/x86_64-apple-darwin/release/bundle/macos/*.app
           if-no-files-found: error
