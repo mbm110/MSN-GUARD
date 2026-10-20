@@ -38,7 +38,7 @@ jobs:
           toolchain: stable
           targets: x86_64-pc-windows-msvc
 
-      - name: Install build dependencies
+      - name: Install build tools
         run: |
           choco install cmake ninja -y --no-progress
           $cmakeBin = "${env:ProgramFiles}\CMake\bin"
@@ -47,11 +47,11 @@ jobs:
             "$cmakeBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           }
 
-      - name: Build Aether Windows CLI
+      - name: Build Aether CLI
         run: |
           cargo build --manifest-path core/aether/Cargo.toml --release --bin aether --features tor
 
-      - name: Build Aether Windows GUI
+      - name: Build Aether GUI
         run: |
           cargo build --manifest-path core/aether/Cargo.toml --release --bin aether-gui --features tor
 
@@ -60,8 +60,25 @@ jobs:
           $dist = "dist/windows-msn-guard"
           New-Item -ItemType Directory -Path $dist -Force | Out-Null
 
-          Copy-Item "core/target/release/aether.exe" "$dist\aether.exe"
-          Copy-Item "core/target/release/aether-gui.exe" "$dist\aether-gui.exe"
+          $cliBin = "core/aether/target/release/aether.exe"
+          $guiBin = "core/aether/target/release/aether-gui.exe"
+
+          if (!(Test-Path $cliBin)) {
+            $cliBin = "core/target/release/aether.exe"
+          }
+          if (!(Test-Path $guiBin)) {
+            $guiBin = "core/target/release/aether-gui.exe"
+          }
+
+          if (!(Test-Path $cliBin)) {
+            throw "aether.exe not found at expected output path"
+          }
+          if (!(Test-Path $guiBin)) {
+            throw "aether-gui.exe not found at expected output path"
+          }
+
+          Copy-Item $cliBin "$dist\aether.exe"
+          Copy-Item $guiBin "$dist\aether-gui.exe"
 
           $launcher = @'
           @echo off
@@ -79,17 +96,6 @@ jobs:
           exit /b %errorlevel%
           '@
           Set-Content -Path "$dist\start-msn-guard.cmd" -Encoding utf8 -Value $launcher
-
-          $launcherNoGui = @'
-          @echo off
-          setlocal
-          echo MSN-GUARD CLI launcher
-          echo.
-          echo Starting Aether CLI...
-          aether.exe --help
-          pause
-          '@
-          Set-Content -Path "$dist\run-aether-cli.cmd" -Encoding utf8 -Value $launcherNoGui
 
           $configJson = @'
           {
@@ -154,13 +160,6 @@ jobs:
           - start-msn-guard.cmd
           - msn-guard-config.example.json
           - msn-guard-env.example.txt
-
-          Quick start:
-          1. Double click start-msn-guard.cmd
-          2. Or run:
-             aether-gui.exe
-             or
-             aether.exe --help
 
           Supported profile knobs:
           - protocol: shard / masque / wg / gool / tor / psiphon
