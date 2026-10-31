@@ -8,9 +8,11 @@
 #   https://raw.githubusercontent.com/itsyebekhe/PSG/main/subscriptions/xray/mix
 #   https://github.com/Delta-Kronecker/V2ray-Config/raw/refs/heads/main/config/all_configs.txt
 #   https://raw.githubusercontent.com/mahsanet/MahsaFreeConfig/refs/heads/main/mtn/sub_1.txt
+#   https://raw.githubusercontent.com/iampedii/whitedns-sub/refs/heads/main/base64.txt
 #   https://openproxylist.com/v2ray/rawlist/text
 #   https://raw.githubusercontent.com/4n0nymou3/multi-proxy-config-fetcher/refs/heads/main/configs/proxy_configs_tested.txt
 #   https://raw.githubusercontent.com/roosterkid/openproxylist/main/V2RAY_RAW.txt
+#   https://raw.githubusercontent.com/iampedii/whitedns-sub/refs/heads/main/cloudflare-base64.txt
 #   https://raw.githubusercontent.com/arshiacomplus/v2rayExtractor/refs/heads/main/mix/sub.html
 #   https://raw.githubusercontent.com/ShadowException/VPN/refs/heads/main/configs/VPN-cat
 #   https://raw.githubusercontent.com/zieng2/wl/main/vless_universal.txt
