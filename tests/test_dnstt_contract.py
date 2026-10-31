@@ -27,7 +27,8 @@ assert 'DnsttBridges.advanceAfterFailure(context, dataDir)' in TOR
 assert 'val paths = DnsttResolverScanner.cachedPaths(dataDir)' in BRIDGES
 assert 'val batch = paths.drop(normalizedOffset).take(BATCH_SIZE)' in BRIDGES
 assert 'val pubkey = if (domain == DOMAIN_1) PUBKEY_1 else PUBKEY_2' in BRIDGES
-assert 'private const val BATCH_SIZE = 30' in BRIDGES
+assert 'private const val BATCH_SIZE = 1' in BRIDGES
+assert 'Probe and Tor must use the same single verified path' in BRIDGES
 assert 'DnsttBridges.reset(context)' in SCANNER
 assert 'currentProtocol.contains("TOR") && TorManager.selectedMode(this) == TorManager.TorMode.DNSTT' in VPN
 assert 'teardownService = !sealing && !pendingDnsttRetry' in VPN
@@ -71,7 +72,7 @@ assert 'process start failed' in SCANNER
 assert 'catch (_: java.io.IOException)' in SCANNER
 assert 'scanner log reader reach the process default exception handler' in SCANNER
 BUILD = (ROOT / "app/build.gradle.kts").read_text()
-assert 'versionCode = 434' in BUILD and 'versionName = "3.1.37"' in BUILD
+assert 'versionCode = 435' in BUILD and 'versionName = "3.1.38"' in BUILD
 assert 'val paths = DnsttResolverScanner.cachedPaths(dataDir)' in BRIDGES
 assert 'DNSTT resolver scan complete: ${cachedPaths(dataDir).size} verified path(s)' in SCANNER
 assert 'mode != TorMode.DNSTT && now - lastProgressMs.get() > STALL_TIMEOUT_S * 1_000' in TOR

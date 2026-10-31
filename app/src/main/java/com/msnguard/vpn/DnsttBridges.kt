@@ -5,7 +5,9 @@ import java.io.File
 
 /** DNSTT bridge lines used by Orbot for Iran, with ordered resolver caching. */
 internal object DnsttBridges {
-    private const val BATCH_SIZE = 30
+    // Probe and Tor must use the same single verified path. Sending 30
+    // simultaneous DNSTT sessions made Tor lose its relay TLS handshakes.
+    private const val BATCH_SIZE = 1
     private const val BATCH_OFFSET_PREF = "dnstt_bridge_batch_offset"
     const val PUBKEY_1 = "241169008830694749fe96bb070c4855c5bb5b9c47b3833ed7d88521ba30a43f"
     const val PUBKEY_2 = "a2fb71077eeaa54a02cda7a90be306af5d299ab21822a8b277d4eacbc9168631"
@@ -15,8 +17,8 @@ internal object DnsttBridges {
     fun lines(context: Context, dataDir: File): List<String> {
         val paths = DnsttResolverScanner.cachedPaths(dataDir)
         if (paths.isEmpty()) return emptyList()
-        // Tor can dial at most 30 DNSTT bridge lines at a time. Keep the
-        // discovery order, and advance to the next 30 verified paths on failure.
+        // Use the same one path that passed the end-to-end probe, then advance
+        // through the ordered cache after a failed Tor attempt.
         val offset = context.profiled().getInt(BATCH_OFFSET_PREF, 0).coerceAtLeast(0)
         val normalizedOffset = offset.takeIf { it < paths.size } ?: 0
         if (normalizedOffset != offset) context.profiled().edit().putInt(BATCH_OFFSET_PREF, 0).apply()
