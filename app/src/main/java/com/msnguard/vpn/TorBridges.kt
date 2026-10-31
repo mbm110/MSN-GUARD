@@ -56,9 +56,6 @@ internal object TorBridges {
     /**
      * Snowflake, configured entirely on the bridge line.
      *
-     * Unlike SlipNet — which bundles a separate gomobile Snowflake client with
-     * the broker settings compiled in — we drive lyrebird's built-in snowflake
-     * transport, so every parameter has to be passed here as SOCKS args.
      *
      * The STUN list is deliberately Google-free: `stun.l.google.com` is the
      * obvious one to block and is unreachable from Iran. Ports 443 and 10000

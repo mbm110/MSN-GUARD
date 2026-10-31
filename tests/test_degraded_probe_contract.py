@@ -12,6 +12,6 @@ assert "showDegraded()" not in carrier_branch
 carrier_start = UI.rfind('pingFailureStreak = 0', 0, UI.find('"Health probe failed but it left over the carrier link'))
 assert carrier_start >= 0
 assert 'not counting against the session' in carrier_branch
-assert 'versionCode = 435' in BUILD
-assert 'versionName = "3.1.38"' in BUILD
-print("PASS carrier-side probe failures do not set DEGRADED; version 3.1.38")
+assert 'versionCode = 436' in BUILD
+assert 'versionName = "3.1.39"' in BUILD
+print("PASS carrier-side probe failures do not set DEGRADED; version 3.1.39")

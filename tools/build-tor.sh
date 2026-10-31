@@ -9,8 +9,8 @@
 # Everything except Bionic libc/libm/libdl is linked statically, so the binary
 # has no runtime dependency on anything we would also have to ship.
 #
-# Approach adapted from SlipNet (github.com/anonvector/SlipNet, AGPL-3.0), which
-# MSN-GUARD is licence-compatible with. Rewritten for Linux/CI: GNU coreutils
+# The Android build uses a self-contained Tor layout. Rewritten for Linux/CI:
+# GNU coreutils
 # instead of BSD (sha256sum, stat -c, nproc), API level 26 to match minSdk, and
 # hashes pinned for every tarball.
 #

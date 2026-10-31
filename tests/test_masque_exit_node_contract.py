@@ -19,7 +19,7 @@ class MasqueExitNodeContractTest(unittest.TestCase):
 
     def test_custom_exit_requires_real_tcp_preflight_before_upstream(self):
         service = SERVICE.read_text()
-        probe = 'probeTcpThroughExit("api.cloudflareclient.com", 443)'
+        probe = 'probeTcpThroughExit("www.cloudflare.com", 443, 2_000)'
         upstream = 'warpExitUpstream = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"'
         self.assertIn(probe, service)
         self.assertIn("TCP preflight passed", service)
@@ -33,8 +33,8 @@ class MasqueExitNodeContractTest(unittest.TestCase):
 
     def test_version_is_experimental_and_incremented(self):
         text = BUILD.read_text()
-        self.assertIn("versionCode = 400", text)
-        self.assertIn('versionName = "3.1.3"', text)
+        self.assertIn("versionCode = 436", text)
+        self.assertIn('versionName = "3.1.39"', text)
 
     def test_custom_exit_clears_freedom_ech_on_main_and_mtu_retry_env(self):
         service = SERVICE.read_text()

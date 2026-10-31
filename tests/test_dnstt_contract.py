@@ -40,7 +40,7 @@ assert 'probePath(context, dataDir, ip, DnsttBridges.PUBKEY_1, DnsttBridges.DOMA
 assert 'probePath(context, dataDir, ip, DnsttBridges.PUBKEY_2, DnsttBridges.DOMAIN_2) -> DnsttBridges.DOMAIN_2' in SCANNER
 assert 'val args = "udp=$resolver:53;pubkey=$pubkey;domain=$domain"' in SCANNER
 assert 'fun cachedPaths(dataDir: File): List<Pair<String, String>>' in SCANNER
-assert 'appendCache(File(dataDir, PATHS_NAME), "$ip $domain")' in SCANNER
+assert 'appendCache(File(dataDir, PATHS_NAME), "$index $ip $domain")' in SCANNER
 assert 'File(dataDir, PATHS_NAME).delete()' in SCANNER
 assert 'val finished = (cachedPaths(dataDir).map { it.first } + readIps(rejected)).toHashSet()' in SCANNER
 assert 'if (ip in finished) continue' in SCANNER
@@ -65,15 +65,23 @@ assert 'process.errorStream.bufferedReader()' in SCANNER
 assert 'fields[2] == "socks5"' in SCANNER
 assert 'done.await(METHOD_TIMEOUT_MS, TimeUnit.MILLISECONDS)' in SCANNER
 assert 'FIRST_RESULT_TIMEOUT_MS = 15_000L' in SCANNER
-assert 'PROBE_TIMEOUT_MS = 2_500' in SCANNER
+assert 'PROBE_TIMEOUT_MS = 18_000' in SCANNER
+assert 'METHOD_TIMEOUT_MS = 10_000L' in SCANNER
 assert 'waiting for first verified path' in SCANNER
 assert 'doh=https://dns.google/dns-query' not in BRIDGES
 assert 'process start failed' in SCANNER
 assert 'catch (_: java.io.IOException)' in SCANNER
 assert 'scanner log reader reach the process default exception handler' in SCANNER
 BUILD = (ROOT / "app/build.gradle.kts").read_text()
-assert 'versionCode = 435' in BUILD and 'versionName = "3.1.38"' in BUILD
+assert 'versionCode = 436' in BUILD and 'versionName = "3.1.39"' in BUILD
+assert 'private const val PROBE_TIMEOUT_MS = 18_000' in SCANNER
+assert 'private const val METHOD_TIMEOUT_MS = 10_000L' in SCANNER
 assert 'val paths = DnsttResolverScanner.cachedPaths(dataDir)' in BRIDGES
+assert 'HEAD /generate_204 HTTP/1.1' in SCANNER
+assert 'Host: www.gstatic.com' in SCANNER
+assert 'code in 200..399' in SCANNER
+assert 'index to (ip to domain)' in SCANNER
+assert '.sortedBy { it.first }' in SCANNER
 assert 'DNSTT resolver scan complete: ${cachedPaths(dataDir).size} verified path(s)' in SCANNER
 assert 'mode != TorMode.DNSTT && now - lastProgressMs.get() > STALL_TIMEOUT_S * 1_000' in TOR
 assert 'DNSTT handshake:' in TOR

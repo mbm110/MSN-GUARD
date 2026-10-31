@@ -124,9 +124,6 @@ object TorManager {
      * link and costs an HTTP round trip per cell over meek. Not one rung
      * reported an error; all four reported a deadline.
      *
-     * SlipNet has no per-transport timeout at all — its `startClient` returns as
-     * soon as tor is spawned and the UI waits as long as the user tolerates.
-     * That is why it connects on this network while we declared failure.
      *
      * So bound the thing that actually distinguishes a blocked transport from a
      * slow one: absence of movement. 90s and not less, because the descriptor
@@ -550,16 +547,16 @@ object TorManager {
             // Two field devices reported tor dying at 0% with nothing in the log
             // but "exited". At `notice` tor is silent about everything it does
             // between reading the config and opening its first connection, which
-            // is exactly the window where these deaths happen. SlipNet ships
-            // `Log info stdout` and its logs name the failing step; ours did not.
+            // is exactly the window where these deaths happen. The reference
+            // configuration logs the failing step; ours did not.
             //
             // The volume does not reach the user: info lines are only kept in the
             // in-memory tail below and replayed into the 100-line in-app log when
             // a rung actually fails. A successful bootstrap records the same five
             // percentage lines it always did.
             appendLine("Log info stdout")
-            // Tor's own default is 0 (scrub addresses from logs). SlipNet sets
-            // this and it is why its logs name the bridge that failed while ours
+            // Tor's own default is 0 (scrub addresses from logs). The reference
+            // configuration sets this and it is why its logs name the bridge that failed while ours
             // said only "general SOCKS server failure". Our in-app log is 100
             // lines shown to one user about their own connection, so there is no
             // third party to protect — and without it a dead bridge is invisible.
@@ -806,7 +803,7 @@ object TorManager {
      * Only `state`/`lock` deletion policy lives here: see [keepTorState], the
      * caches are deliberately kept between attempts so a warm retry does not
      * re-download the consensus. The field log's 61%-at-30s Direct run was on a
-     * cold cache; SlipNet connects in seconds because it keeps that cache warm.
+     * cold cache; a warm persistent cache avoids repeating that work.
      */
     private fun attempt(context: Context, dataDir: File, mode: TorMode, timeoutSeconds: Long): Boolean {
         bootstrapPercent = 0
