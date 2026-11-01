@@ -8223,16 +8223,33 @@ class MainActivity : Activity() {
             styleFoxyButton(signInBtn, ready)
         }
 
-        sendCodeBtn = foxyActionButton("Send Code", false)
+        sendCodeBtn = foxyActionButton(Strings.t("Sign in with Firefox"), false)
         sendCodeBtn.setOnClickListener {
             if (pending == "active") {
                 onFoxySignOutClicked(chip, sendCodeBtn, signInBtn, code)
-            } else if (!sendReady) {
-                toastShort(Strings.t("Enter your Firefox email and password first"))
-                return@setOnClickListener
+            } else {
+                chip.text = Strings.t("Firefox sign-in opened")
+                sendCodeBtn.text = Strings.t("Opening…")
+                styleFoxyButton(sendCodeBtn, false)
+                com.msnguard.vpn.foxy.FoxyBrowserLogin.show(this) { result ->
+                    runOnUiThread {
+                        if (result.isSuccess) {
+                            chip.text = Strings.t("ACCOUNT: signed in")
+                            chip.setTextColor(0xFF6B5BD6.toInt())
+                            chip.background = roundedBackground(0xFFE7E2FF.toInt(), 11, 0xFFC9BFFF.toInt())
+                            sendCodeBtn.text = Strings.t("Sign Out")
+                            styleFoxyButton(sendCodeBtn, true, 2)
+                            signInBtn.text = Strings.t("Signed In ✓")
+                            styleFoxyButton(signInBtn, false, 3)
+                            fetchFoxyQuota(quotaRow)
+                        } else {
+                            chip.text = "SIGN-IN FAILED: ${result.exceptionOrNull()?.message ?: "unknown"}"
+                            sendCodeBtn.text = Strings.t("Sign in with Firefox")
+                            styleFoxyButton(sendCodeBtn, true)
+                        }
+                    }
+                }
             }
-            onFoxySendCodeClicked(emailField = email, passwordField = password, codeField = code,
-                chip = chip, sendBtn = sendCodeBtn, signInBtn = signInBtn, quotaRow = quotaRow)
         }
         signInBtn = foxyActionButton("Sign In", false)
         signInBtn.setOnClickListener {

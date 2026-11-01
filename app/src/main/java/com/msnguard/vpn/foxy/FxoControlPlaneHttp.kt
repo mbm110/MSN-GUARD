@@ -3,7 +3,9 @@ package com.msnguard.vpn.foxy
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import android.webkit.CookieManager
 import okhttp3.Request
 import com.msnguard.vpn.foxy.TlsClientHelloSplitter
 import java.io.FilterOutputStream
@@ -68,6 +70,32 @@ class SimpleCookieJar : CookieJar {
     }
 
     fun snapshotAll(): List<Cookie> = byDomain.values.flatten()
+
+    /** Copy cookies created by the Firefox WebView into the OkHttp flow jar. */
+    fun syncFromWebView() {
+        val manager = runCatching { CookieManager.getInstance() }.getOrNull() ?: return
+        val hosts = listOf(
+            "https://accounts.firefox.com",
+            "https://api.accounts.firefox.com",
+            "https://oauth.accounts.firefox.com",
+            "https://vpn.mozilla.org",
+        )
+        for (url in hosts) {
+            val header = runCatching { manager.getCookie(url) }.getOrNull().orEmpty()
+            val parsed = header.split(';').mapNotNull { raw ->
+                val at = raw.indexOf('=')
+                if (at <= 0) return@mapNotNull null
+                val name = raw.substring(0, at).trim()
+                val value = raw.substring(at + 1).trim()
+                runCatching {
+                    Cookie.Builder().name(name).value(value)
+                        .domain(url.substringAfter("https://").substringBefore('/'))
+                        .path("/").expiresAt(Long.MAX_VALUE).build()
+                }.getOrNull()
+            }
+            if (parsed.isNotEmpty()) saveFromResponse(url.toHttpUrl(), parsed)
+        }
+    }
 }
 
 private class SplitClientHelloSocket(

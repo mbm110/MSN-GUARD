@@ -7,6 +7,10 @@ object FoxySettings {
     /** Persisted location choice for the Foxy dial (null = Automatic). */
     const val COUNTRY_PREF_KEY = "foxy_selected_country"
     private const val COUNTRY_PREFS_FILE = "foxy_settings"
+    private const val TLS_SPLIT_PREF_KEY = "foxy_tls_split_mode"
+    private const val UPSTREAM_PROXY_PREF_KEY = "foxy_upstream_proxy_enabled"
+    private const val MTU_PREF_KEY = "foxy_mtu"
+    private const val MULTIPLEX_PREF_KEY = "foxy_multiplex_streams"
 
     private fun prefs(ctx: android.content.Context): android.content.SharedPreferences =
         ctx.getSharedPreferences(COUNTRY_PREFS_FILE, android.content.Context.MODE_PRIVATE)
@@ -20,7 +24,32 @@ object FoxySettings {
             .apply()
     }
 
-    // Defaults; wired to prefs later if the user needs them.
+    fun tlsSplitMode(ctx: android.content.Context): TlsSplitMode =
+        runCatching { TlsSplitMode.valueOf(prefs(ctx).getString(TLS_SPLIT_PREF_KEY, TlsSplitMode.OFF.name)!!) }
+            .getOrDefault(TlsSplitMode.OFF)
+
+    fun saveTlsSplitMode(ctx: android.content.Context, mode: TlsSplitMode) {
+        prefs(ctx).edit().putString(TLS_SPLIT_PREF_KEY, mode.name).apply()
+    }
+
+    fun upstreamProxyEnabled(ctx: android.content.Context): Boolean =
+        prefs(ctx).getBoolean(UPSTREAM_PROXY_PREF_KEY, false)
+
+    fun saveUpstreamProxyEnabled(ctx: android.content.Context, enabled: Boolean) {
+        prefs(ctx).edit().putBoolean(UPSTREAM_PROXY_PREF_KEY, enabled).apply()
+    }
+
+    fun mtu(ctx: android.content.Context): Int = prefs(ctx).getInt(MTU_PREF_KEY, 1400).coerceIn(1280, 1500)
+    fun saveMtu(ctx: android.content.Context, mtu: Int) {
+        prefs(ctx).edit().putInt(MTU_PREF_KEY, mtu.coerceIn(1280, 1500)).apply()
+    }
+
+    fun multiplexStreams(ctx: android.content.Context): Int = prefs(ctx).getInt(MULTIPLEX_PREF_KEY, 8).coerceIn(1, 64)
+    fun saveMultiplexStreams(ctx: android.content.Context, streams: Int) {
+        prefs(ctx).edit().putInt(MULTIPLEX_PREF_KEY, streams.coerceIn(1, 64)).apply()
+    }
+
+    // Compatibility defaults for existing call sites.
     fun tlsSplitMode(): TlsSplitMode = TlsSplitMode.OFF
     fun upstreamProxyEnabled(): Boolean = false
 }

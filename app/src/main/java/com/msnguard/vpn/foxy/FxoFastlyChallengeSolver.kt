@@ -16,7 +16,7 @@ class FastlyChallengeError(message: String) : Exception(message)
 
 private const val SOLVE_TIMEOUT_SECONDS = 60L
 
-private const val MAX_POST_BACK_ROUNDS = 3
+private const val MAX_POST_BACK_ROUNDS = 8
 
 private const val SOLVER_USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
@@ -33,7 +33,16 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
 
     private class NoChallengePage : Exception()
 
-    suspend fun solveAndInstall() = withContext(Dispatchers.IO) {
+    suspend fun solveAndInstall(
+        challengedBody: String? = null,
+        challengedOrigin: String? = null,
+        userAgent: String = SOLVER_USER_AGENT,
+    ) = withContext(Dispatchers.IO) {
+        if (!challengedBody.isNullOrBlank() && challengedBody.contains("/_fs-ch-")) {
+            val origin = challengedOrigin?.trimEnd('/') ?: "https://api.accounts.firefox.com"
+            solveChallengeBody(origin, challengedBody, userAgent)
+            return@withContext
+        }
         var lastError: Exception? = null
         for (base in listOf("https://api.accounts.firefox.com", "https://accounts.firefox.com")) {
             try {
@@ -51,6 +60,42 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
     private fun baseOrigin(prefixUrl: String): String {
         val idx = prefixUrl.indexOf("/_fs-ch-")
         return if (idx > 0) prefixUrl.substring(0, idx) else prefixUrl
+    }
+
+    private fun solveChallengeBody(origin: String, page: String, userAgent: String) {
+        val solverJar = SimpleCookieJar()
+        val solver = FoxyControlPlaneHttp.client.newBuilder().cookieJar(solverJar)
+            .connectTimeout(SOLVE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(SOLVE_TIMEOUT_SECONDS, TimeUnit.SECONDS).build()
+        val prefix = CHALLENGE_PREFIX_REGEX.find(page)?.value
+            ?: throw FastlyChallengeError("challenge asset prefix not found")
+        val prefixUrl = origin.trimEnd('/') + prefix
+        val script = fetchText(solver, "$prefixUrl/script.js?reload=true")
+        var (challenges, token) = parseChallengeInit(script)
+        repeat(MAX_POST_BACK_ROUNDS) {
+            val answers = JSONArray()
+            for (i in 0 until challenges.length()) {
+                answers.put(answerChallenge(solver, prefixUrl, token, challenges.getJSONObject(i)))
+            }
+            val body = JSONObject().put("token", token).put("data", answers)
+                .toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder().url("$prefixUrl/fst-post-back")
+                .header("Content-Type", "application/json").header("Accept", "application/json")
+                .header("User-Agent", userAgent).header("Origin", origin)
+                .post(body).build()
+            solver.newCall(request).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                if (!response.isSuccessful) throw FastlyChallengeError("challenge post-back returned HTTP ${response.code}")
+                val result = JSONObject(text)
+                if (result.optString("status") == "success") {
+                    installChallengeCookies(solverJar)
+                    return
+                }
+                challenges = result.optJSONArray("ch") ?: throw FastlyChallengeError("missing next challenge")
+                token = result.optString("tok").ifBlank { throw FastlyChallengeError("missing challenge token") }
+            }
+        }
+        throw FastlyChallengeError("Fastly challenge did not complete")
     }
 
     private fun solvePow(base: String, targetHex: String): String? {

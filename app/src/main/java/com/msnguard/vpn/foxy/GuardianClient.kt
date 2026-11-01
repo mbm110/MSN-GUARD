@@ -105,8 +105,8 @@ class GuardianClient(
         var response = FoxyControlPlaneHttp.client.newCall(buildRequest()).execute()
         var attempts = 1
         while (response.code == 406 && attempts < GUARDIAN_MAX_CHALLENGE_ATTEMPTS) {
-            response.close()
-            challengeSolver.solveAndInstall()
+            val challengedBody = response.use { it.body?.string().orEmpty() }
+            challengeSolver.solveAndInstall(challengedBody, endpoint.trimEnd('/'), MOZILLA_VPN_USER_AGENT)
             response = FoxyControlPlaneHttp.client.newCall(buildRequest()).execute()
             attempts++
         }

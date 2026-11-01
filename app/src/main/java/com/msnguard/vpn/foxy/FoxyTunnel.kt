@@ -305,6 +305,7 @@ object FoxyTunnel {
                     upstreamPort = cand.port,
                     bearerToken = pass.token,
                     edgeAddress = edge,
+                    tlsSplitMode = FoxySettings.tlsSplitMode(context),
                 )
                 s.connect()
                 return s

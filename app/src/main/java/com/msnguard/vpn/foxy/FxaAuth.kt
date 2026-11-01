@@ -35,6 +35,7 @@ class FxaRefreshFailure(
 ) : Exception(message, cause)
 
 private const val FXA_AUTH_SERVER = "https://api.accounts.firefox.com/v1"
+private const val FXA_OAUTH_SERVER = "https://oauth.accounts.firefox.com/v1"
 private const val FIREFOX_CLIENT_ID = "5882386c6d801776"
 private const val OAUTH_SCOPE = "profile https://identity.mozilla.com/apps/vpn"
 private const val PROTOCOL_VERSION = "identity.mozilla.com/picl/v1/"
@@ -58,6 +59,35 @@ class FxaAuthRepository(
 
     fun clearPendingSession() {
         tokenStore.pendingSessionToken = null
+    }
+
+    /** URL opened in the in-app Firefox Accounts sign-in page. */
+    fun browserLoginUrl(): String =
+        "https://accounts.firefox.com/?context=fx_desktop_v3&service=sync&action=email"
+
+    /** Build the FxA OAuth request used after the browser hands us sessionToken. */
+    fun browserOAuthRequest(sessionToken: String): Pair<String, String> {
+        val clean = sessionToken.trim().lowercase()
+        require(Regex("^[0-9a-f]{64}$").matches(clean)) { "Invalid Firefox session token" }
+        val url = "$FXA_AUTH_SERVER/oauth/token".toHttpUrl()
+        val body = JSONObject().apply {
+            put("client_id", FIREFOX_CLIENT_ID)
+            put("grant_type", "fxa-credentials")
+            put("scope", OAUTH_SCOPE)
+            put("access_type", "offline")
+        }.toString()
+        val (id, key) = deriveHawkCredentials(clean)
+        return hawkHeader("POST", url, id, key, body.toByteArray(Charsets.UTF_8)) to body
+    }
+
+    suspend fun completeBrowserSession(sessionToken: String): Result<Unit> = runCatching {
+        FoxyControlPlaneHttp.cookieJar.syncFromWebView()
+        val tokenData = oauthToken(sessionToken.trim().lowercase())
+        tokenStore.saveAuth(RuntimeAuth(
+            accessToken = tokenData.getString("access_token"),
+            refreshToken = tokenData.optString("refresh_token", "").ifBlank { null },
+            expiresAtEpochSeconds = expiryFrom(tokenData),
+        ))
     }
 
     companion object {
@@ -140,7 +170,7 @@ class FxaAuthRepository(
         }
 
         val tokenData = try {
-            fxaDo("POST", "/oauth/token", jsonBody = body)
+            fxaDoAt(FXA_OAUTH_SERVER, "POST", "/oauth/token", jsonBody = body)
         } catch (rejected: FxaApiError) {
             throw FxaRefreshFailure(
                 rejected.message ?: "FxA rejected the refresh token",
@@ -244,8 +274,16 @@ class FxaAuthRepository(
         path: String,
         sessionToken: String? = null,
         jsonBody: JSONObject,
+    ): JSONObject = fxaDoAt(FXA_AUTH_SERVER, method, path, sessionToken, jsonBody)
+
+    private suspend fun fxaDoAt(
+        baseUrl: String,
+        method: String,
+        path: String,
+        sessionToken: String? = null,
+        jsonBody: JSONObject,
     ): JSONObject = withContext(Dispatchers.IO) {
-        val url = "$FXA_AUTH_SERVER$path".toHttpUrl()
+        val url = "$baseUrl$path".toHttpUrl()
         val bodyBytes = jsonBody.toString().toByteArray(Charsets.UTF_8)
         var tokenId: String? = null
         var hmacKey: ByteArray? = null
@@ -268,8 +306,8 @@ class FxaAuthRepository(
         var response: Response = FoxyControlPlaneHttp.client.newCall(buildRequest()).execute()
         var attempts = 1
         while (response.code == 406 && attempts < FXA_MAX_CHALLENGE_ATTEMPTS) {
-            response.close()
-            challengeSolver.solveAndInstall()
+            val challengedBody = response.use { it.body?.string().orEmpty() }
+            challengeSolver.solveAndInstall(challengedBody, url.scheme + "://" + url.host, MOZILLA_VPN_USER_AGENT)
             response = FoxyControlPlaneHttp.client.newCall(buildRequest()).execute()
             attempts++
         }
