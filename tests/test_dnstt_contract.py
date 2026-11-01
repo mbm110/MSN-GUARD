@@ -29,14 +29,17 @@ assert 'val paths = DnsttResolverScanner.cachedPaths(dataDir)' in BRIDGES
 assert 'val batch = paths.drop(normalizedOffset).take(BATCH_SIZE)' in BRIDGES
 assert 'val pubkey = if (domain == DOMAIN_1) PUBKEY_1 else PUBKEY_2' in BRIDGES
 assert 'private const val BATCH_SIZE = 1' in BRIDGES
-assert 'Probe and Tor must use the same single verified path' in BRIDGES
 assert 'DnsttBridges.reset(context)' in SCANNER
 assert 'currentProtocol.contains("TOR") && TorManager.selectedMode(this) == TorManager.TorMode.DNSTT' in VPN
 assert 'teardownService = !sealing && !pendingDnsttRetry' in VPN
 assert 'val paths = DnsttResolverScanner.cachedPaths(dataDir)' in BRIDGES
 assert 'if (paths.isEmpty()) return emptyList()' in BRIDGES
 assert 'doh=https://' not in BRIDGES
-assert 'udp=$resolver:53 pubkey=$pubkey domain=$domain' in BRIDGES
+assert 'const val FINGERPRINT_1 = "A998F319ADB60EE344540EC4B21524CC484F96BE"' in BRIDGES
+assert 'const val FINGERPRINT_2 = "80EEFA4F4875ED2B7B5A86DF2D7588AD32E29F15"' in BRIDGES
+assert 'val fingerprint = if (domain == DOMAIN_1) FINGERPRINT_1 else FINGERPRINT_2' in BRIDGES
+assert 'dnstt 192.0.2.4:${index + 1} $fingerprint udp=$resolver:53 pubkey=$pubkey domain=$domain' in BRIDGES
+assert 'private const val BATCH_SIZE = 1' in BRIDGES
 assert 'probePath(context, dataDir, ip, DnsttBridges.PUBKEY_1, DnsttBridges.DOMAIN_1) -> DnsttBridges.DOMAIN_1' in SCANNER
 assert 'probePath(context, dataDir, ip, DnsttBridges.PUBKEY_2, DnsttBridges.DOMAIN_2) -> DnsttBridges.DOMAIN_2' in SCANNER
 assert 'val args = "udp=$resolver:53;pubkey=$pubkey;domain=$domain"' in SCANNER
@@ -74,7 +77,7 @@ assert 'process start failed' in SCANNER
 assert 'catch (_: java.io.IOException)' in SCANNER
 assert 'scanner log reader reach the process default exception handler' in SCANNER
 BUILD = (ROOT / "app/build.gradle.kts").read_text()
-assert 'versionCode = 437' in BUILD and 'versionName = "3.1.40"' in BUILD
+assert 'versionCode = 438' in BUILD and 'versionName = "3.1.41"' in BUILD
 assert 'private const val WORKERS = 20' in SCANNER
 assert 'private const val PREFILTER_WORKERS = 64' in SCANNER
 assert 'private const val PROBE_TIMEOUT_MS = 18_000' in SCANNER
