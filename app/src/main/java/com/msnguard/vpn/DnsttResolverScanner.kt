@@ -2,6 +2,8 @@ package com.msnguard.vpn
 
 import android.content.Context
 import java.io.File
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.CountDownLatch
@@ -19,7 +21,11 @@ internal object DnsttResolverScanner {
     private const val INPUT_ASSET = "dnstt-resolvers-ir.txt"
     // Each worker owns a native PT process. Keep concurrency bounded to avoid
     // starving Tor while it bootstraps.
-    private const val WORKERS = 40
+    // A PT process per worker is expensive. The reference scanners prefilter
+    // cheap resolver liveness first, then run a small number of full tunnels.
+    private const val WORKERS = 20
+    private const val PREFILTER_WORKERS = 64
+    private const val PREFILTER_TIMEOUT_MS = 2_000
     // The tunnel handshake and the first proxied request need their full
     // network budget. A short socket timeout can cache a false negative while
     // the native client is still completing Noise/KCP setup.
@@ -59,7 +65,8 @@ internal object DnsttResolverScanner {
             pathFile.delete()
             cache.delete()
             File(dataDir, PROGRESS_NAME).delete()
-            ConnectionLog.record("DNSTT cache format changed; discarded legacy paths and restarting probes")
+            File(dataDir, REJECTED_NAME).delete()
+            ConnectionLog.record("DNSTT cache format changed; discarded legacy paths, rejected results and progress")
         }
 
         val cached = cachedPaths(dataDir)
@@ -102,21 +109,29 @@ internal object DnsttResolverScanner {
                     if (ip in finished) continue
                     var stored = false
                     runCatching {
-                        val domain = probe(context, dataDir, ip)
-                        if (domain != null) {
-                            appendCache(File(dataDir, PATHS_NAME), "$index $ip $domain")
-                            appendCache(cache, ip)
-                            stored = true
-                            synchronized(firstResult) {
-                                if (firstResult[0] == null) {
-                                    firstResult[0] = ip
-                                    first.countDown()
-                                    ConnectionLog.record("DNSTT resolver #${index + 1}/${resolvers.size} healthy: $ip")
-                                }
-                            }
-                        } else {
+                        // Phase 1 is a cheap DNS liveness check. It prevents a
+                        // dead resolver from consuming a native DNSTT process;
+                        // only phase-1 survivors reach the full tunnel probe.
+                        if (!hasDnsResponse(ip)) {
                             appendRejected(File(dataDir, REJECTED_NAME), ip)
                             stored = true
+                        } else {
+                            val domain = probe(context, dataDir, ip)
+                            if (domain != null) {
+                                appendCache(File(dataDir, PATHS_NAME), "$index $ip $domain")
+                                appendCache(cache, ip)
+                                stored = true
+                                synchronized(firstResult) {
+                                    if (firstResult[0] == null) {
+                                        firstResult[0] = ip
+                                        first.countDown()
+                                        ConnectionLog.record("DNSTT resolver #${index + 1}/${resolvers.size} healthy: $ip")
+                                    }
+                                }
+                            } else {
+                                appendRejected(File(dataDir, REJECTED_NAME), ip)
+                                stored = true
+                            }
                         }
                     }.onFailure { error ->
                         if (running.get()) ConnectionLog.record("DNSTT resolver #${index + 1} probe error: ${error.message ?: "unknown"}")
@@ -320,47 +335,53 @@ internal object DnsttResolverScanner {
                 output.write(byteArrayOf(1, username.size.toByte())); output.write(username)
                 output.write(byteArrayOf(password.size.toByte())); output.write(password); output.flush()
                 check(input.read() == 1 && input.read() == 0)
-                val destination = "www.gstatic.com".toByteArray(Charsets.US_ASCII)
+                // Match the reference scanner's warmup contract: the SOCKS
+                // reply is the tunnel proof. A remote SOCKS failure is still a
+                // valid proof that bytes crossed DNSTT in both directions; an
+                // HTTP request to an arbitrary public host would incorrectly
+                // reject a working Tor OR bridge or a server with restricted
+                // destination ports.
+                val destination = "example.com".toByteArray(Charsets.US_ASCII)
                 output.write(byteArrayOf(5, 1, 0, 3, destination.size.toByte())); output.write(destination)
                 output.write(byteArrayOf(0, 80)); output.flush()
                 val version = input.read()
                 val reply = input.read()
                 val reserved = input.read()
                 val atyp = input.read()
-                check(version == 5 && reply == 0 && reserved == 0)
+                check(version == 5 && reply in 0..8 && reserved == 0)
                 when (atyp) {
-                    1 -> repeat(4) { input.read() }
-                    3 -> { val length = input.read(); repeat(length.coerceAtLeast(0)) { input.read() } }
-                    4 -> repeat(16) { input.read() }
+                    1 -> repeat(4) { check(input.read() >= 0) }
+                    3 -> { val length = input.read(); check(length >= 0); repeat(length) { check(input.read() >= 0) } }
+                    4 -> repeat(16) { check(input.read() >= 0) }
                     else -> error("invalid SOCKS5 address type")
                 }
                 check(input.read() >= 0 && input.read() >= 0)
-
-                // A SOCKS CONNECT reply only proves that the local bridge
-                // accepted a stream. The reference scanners perform a second
-                // end-to-end request through that stream. Do the same here so
-                // a resolver is cached only after bidirectional tunnel data has
-                // crossed the remote SOCKS server.
-                val request = "HEAD /generate_204 HTTP/1.1\r\n" +
-                    "Host: www.gstatic.com\r\n" +
-                    "Connection: close\r\n\r\n"
-                output.write(request.toByteArray(Charsets.US_ASCII))
-                output.flush()
-                val status = StringBuilder()
-                while (status.length < 256) {
-                    val value = input.read()
-                    check(value >= 0)
-                    status.append(value.toChar())
-                    if (status.endsWith("\r\n")) break
-                }
-                val statusLine = status.toString().trim()
-                check(statusLine.startsWith("HTTP/1.1 ") || statusLine.startsWith("HTTP/1.0 "))
-                val code = statusLine.split(' ').getOrNull(1)?.toIntOrNull() ?: 0
-                check(code in 200..399)
                 true
             }
         }.getOrDefault(false)
     }
+
+    /** Cheap phase-1 liveness probe, matching the reference two-stage scan. */
+    private fun hasDnsResponse(ip: String): Boolean = runCatching {
+        val query = byteArrayOf(
+            0x13, 0x37, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x07, 'e'.code.toByte(), 'x'.code.toByte(), 'a'.code.toByte(), 'm'.code.toByte(),
+            'p'.code.toByte(), 'l'.code.toByte(), 'e'.code.toByte(),
+            0x03, 'c'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte(), 0x00,
+            0x00, 0x01, 0x00, 0x01,
+        )
+        DatagramSocket().use { socket ->
+            socket.soTimeout = PREFILTER_TIMEOUT_MS
+            socket.send(DatagramPacket(query, query.size, InetSocketAddress(ip, 53)))
+            val response = ByteArray(512)
+            val packet = DatagramPacket(response, response.size)
+            socket.receive(packet)
+            packet.length >= 12 &&
+                response[0] == 0x13.toByte() && response[1] == 0x37.toByte() &&
+                (response[3].toInt() and 0x80) != 0
+        }
+    }.getOrDefault(false)
 
     private fun readIpsFromAsset(context: Context): List<String> = runCatching {
         context.assets.open(INPUT_ASSET).bufferedReader().useLines { lines ->

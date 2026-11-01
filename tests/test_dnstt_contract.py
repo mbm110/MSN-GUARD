@@ -19,7 +19,8 @@ RESOLVERS = ROOT / "app/src/main/assets/dnstt-resolvers-ir.txt"
 assert 'dnstt-working-resolvers-ir.txt' in SCANNER
 assert 'DNSTT_FRESH_SCAN_PREF' in SCANNER
 assert 'scanning 7629 resolvers in order' in SCANNER
-assert 'private const val WORKERS = 40' in SCANNER
+assert 'private const val WORKERS = 20' in SCANNER
+assert 'private const val PREFILTER_WORKERS = 64' in SCANNER
 assert 'fun awaitHealthy(context: Context, dataDir: File, cancelled: () -> Boolean)' in SCANNER
 assert TOR.index('DnsttResolverScanner.awaitHealthy(context, dataDir)') < TOR.index('val transports = transportsFor(context, mode)', TOR.index('private fun attempt('))
 assert 'if (resolver == null)' in TOR and 'Tor was not started' in TOR
@@ -73,13 +74,15 @@ assert 'process start failed' in SCANNER
 assert 'catch (_: java.io.IOException)' in SCANNER
 assert 'scanner log reader reach the process default exception handler' in SCANNER
 BUILD = (ROOT / "app/build.gradle.kts").read_text()
-assert 'versionCode = 436' in BUILD and 'versionName = "3.1.39"' in BUILD
+assert 'versionCode = 437' in BUILD and 'versionName = "3.1.40"' in BUILD
+assert 'private const val WORKERS = 20' in SCANNER
+assert 'private const val PREFILTER_WORKERS = 64' in SCANNER
 assert 'private const val PROBE_TIMEOUT_MS = 18_000' in SCANNER
 assert 'private const val METHOD_TIMEOUT_MS = 10_000L' in SCANNER
+assert 'private fun hasDnsResponse(ip: String): Boolean' in SCANNER
 assert 'val paths = DnsttResolverScanner.cachedPaths(dataDir)' in BRIDGES
-assert 'HEAD /generate_204 HTTP/1.1' in SCANNER
-assert 'Host: www.gstatic.com' in SCANNER
-assert 'code in 200..399' in SCANNER
+assert 'val destination = "example.com".toByteArray(Charsets.US_ASCII)' in SCANNER
+assert 'reply in 0..8' in SCANNER
 assert 'index to (ip to domain)' in SCANNER
 assert '.sortedBy { it.first }' in SCANNER
 assert 'DNSTT resolver scan complete: ${cachedPaths(dataDir).size} verified path(s)' in SCANNER
