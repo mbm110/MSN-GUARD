@@ -34,12 +34,6 @@ jobs:
           packages: "ndk;26.3.11579264 cmake;3.22.1"
           accept-android-sdk-licenses: "true"
 
-      - name: Setup Go for DNSTT
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-          cache: false
-
       - name: Install Rust and targets
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -73,29 +67,6 @@ jobs:
           else
             echo "hev source not present - skipping (legacy engine only)"
           fi
-
-      - name: Build standalone DNSTT transport
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
-          GOPROXY: https://proxy.golang.org,direct
-          GOSUMDB: sum.golang.org
-        run: |
-          chmod +x tools/build-dnstt.sh
-          for attempt in 1 2 3; do
-            tools/build-dnstt.sh && break
-            if [ "$attempt" = 3 ]; then exit 1; fi
-            rm -rf "$(go env GOPATH)/pkg/mod/cache/download/sumdb" \
-                   "$(go env GOPATH)/pkg/mod/cache/download/github.com/klauspost/reedsolomon"
-            sleep $((attempt * 10))
-          done
-          test -f app/src/main/jniLibs/arm64-v8a/libdnstt.so
-          test -f app/src/main/jniLibs/armeabi-v7a/libdnstt.so
-          test -f app/src/main/jniLibs/x86_64/libdnstt.so
-          # GitHub-hosted runners are disposable; cleanup must not turn a
-          # successful native build into a failed job because module-cache files
-          # may be read-only.
-          chmod -R u+w "$(go env GOPATH)/pkg/mod" 2>/dev/null || true
-          rm -rf "$(go env GOPATH)/pkg/mod" 2>/dev/null || true
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew

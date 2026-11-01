@@ -53,10 +53,6 @@ object TorManager {
 
     /** Preference key holding the user's choice of [TorMode]. */
     const val MODE_PREF = "tor_mode"
-    const val DNSTT_FRESH_SCAN_PREF = "tor_dnstt_fresh_scan"
-
-    fun requestDnsttFreshScan(context: Context) = DnsttResolverScanner.requestFreshScan(context)
-    fun stopDnsttScan() = DnsttResolverScanner.stopScan()
 
     /**
      * Whether Tor should ride inside a WARP tunnel (Tor-over-WARP).
@@ -166,7 +162,6 @@ object TorManager {
         OBFS4("obfs4", "obfs4", "Bridge that hides Tor's traffic shape"),
         MEEK("meek", "Meek", "Rides a CDN; slow but hard to block"),
         SNOWFLAKE("snowflake", "Snowflake", "Volunteer WebRTC proxies"),
-        DNSTT("dnstt", "DNS Tunnel", "DNS tunnel; slow, for essential apps"),
         MANUAL("manual", "Manual bridge", "Bridge lines you entered yourself");
 
         /** Localized at call time, not class-load, so a language switch refreshes it. */
@@ -197,7 +192,6 @@ object TorManager {
         Rung(TorMode.MEEK, BRIDGE_TIMEOUT_S),
         Rung(TorMode.OBFS4, BRIDGE_TIMEOUT_S),
         Rung(TorMode.SNOWFLAKE, BRIDGE_TIMEOUT_S),
-        Rung(TorMode.DNSTT, BRIDGE_TIMEOUT_S),
     )
 
     /**
@@ -248,7 +242,6 @@ object TorManager {
      */
     fun isChainable(context: Context, mode: TorMode): Boolean = when (mode) {
         TorMode.AUTO -> true
-        TorMode.DNSTT -> false
         TorMode.MANUAL -> manualIsChainable(context)
         else -> chainedLadder.any { it.mode == mode }
     }
@@ -392,7 +385,6 @@ object TorManager {
         TorMode.OBFS4 -> listOf("obfs4")
         TorMode.MEEK -> listOf("meek_lite")
         TorMode.SNOWFLAKE -> listOf("snowflake")
-        TorMode.DNSTT -> listOf("dnstt")
         TorMode.MANUAL -> TorManualBridges.transports(context)
     }
 
@@ -400,7 +392,6 @@ object TorManager {
         TorMode.OBFS4 -> TorBridges.OBFS4
         TorMode.MEEK -> TorBridges.MEEK
         TorMode.SNOWFLAKE -> TorBridges.SNOWFLAKE
-        TorMode.DNSTT -> DnsttBridges.lines(context, File(context.filesDir, "tor_data"))
         TorMode.MANUAL -> TorManualBridges.bridges(context).map { it.line }
         else -> emptyList()
     }
@@ -570,7 +561,7 @@ object TorManager {
             // enough for a three-hop handshake over it.
             appendLine(
                 "CircuitBuildTimeout " + when {
-                    mode == TorMode.MEEK || mode == TorMode.SNOWFLAKE || mode == TorMode.DNSTT -> 120
+                    mode == TorMode.MEEK || mode == TorMode.SNOWFLAKE -> 120
                     // Manual is judged by what was actually pasted: a webtunnel or
                     // meek_lite line pays an HTTP round trip per cell exactly like
                     // our own Meek rung does, so it needs the same allowance.
@@ -679,7 +670,7 @@ object TorManager {
     private fun startPt(context: Context, dataDir: File, transports: List<String>): Boolean {
         ptMethods.clear()
 
-        val binaryName = if (transports == listOf("dnstt")) "libdnstt.so" else "libobfs4proxy.so"
+        val binaryName = "libobfs4proxy.so"
         val binary = nativeFile(context, binaryName)
         if (!binary.exists()) {
             ConnectionLog.record("$TAG PT binary missing at ${binary.absolutePath}")
@@ -699,9 +690,6 @@ object TorManager {
             put("TOR_PT_STATE_LOCATION", stateDir.absolutePath + "/")
             put("TOR_PT_EXIT_ON_STDIN_CLOSE", "1")
             put("HOME", dataDir.absolutePath)
-            // DNSTT receives doh/pubkey/domain through Tor's managed-PT
-            // SOCKS username arguments from each Bridge line. It does not use
-            // TOR_PT_SERVER_TRANSPORT_OPTIONS (that variable is server-side).
             upstreamProxy?.let { proxy -> put("TOR_PT_PROXY", "socks5://$proxy") }
         }
 
@@ -815,15 +803,6 @@ object TorManager {
         // bridge descriptor they point at saves a handshake.
         keepTorState(dataDir, mode)
 
-        if (mode == TorMode.DNSTT) {
-            ConnectionLog.record("$TAG waiting for a verified DNSTT resolver before starting Tor")
-            val resolver = DnsttResolverScanner.awaitHealthy(context, dataDir) { stopping.get() }
-            if (resolver == null) {
-                ConnectionLog.record("$TAG DNS Tunnel: no verified resolver available; Tor was not started")
-                return false
-            }
-            ConnectionLog.record("$TAG DNS Tunnel: verified resolver selected")
-        }
         val transports = transportsFor(context, mode)
         if (transports.isNotEmpty() && !startPt(context, dataDir, transports)) {
             return false
@@ -929,10 +908,7 @@ object TorManager {
             if (stopping.get()) break
             if (!process.isAlive) break
             val now = System.currentTimeMillis()
-            // DNSTT's DNS round trips can hold the relay handshake at 10-14%
-            // without emitting another bootstrap percentage. Give this mode its
-            // full 300s rung budget; the 90s stall rule remains for other modes.
-            if (mode != TorMode.DNSTT && now - lastProgressMs.get() > STALL_TIMEOUT_S * 1_000) {
+            if (now - lastProgressMs.get() > STALL_TIMEOUT_S * 1_000) {
                 stalled = true
                 break
             }
@@ -985,16 +961,6 @@ object TorManager {
                     val flagged = tail.filter { it.contains("[warn]") || it.contains("[err]") }
                     val replay = if (flagged.isNotEmpty()) flagged.takeLast(6) else tail.takeLast(6)
                     replay.forEach { ConnectionLog.record("$TAG tor: ${it.take(160)}") }
-                }
-            }
-            // A DNSTT attempt can reach the relay yet fail during TLS or the
-            // Tor v3 handshake. Keep the actual warnings on failure so a probe
-            // that merely opened a stream is not mistaken for full bootstrap.
-            if (mode == TorMode.DNSTT && bootstrapPercent in 1..99) {
-                synchronized(rawTail) {
-                    rawTail.filter { it.contains("[warn]") || it.contains("[err]") }
-                        .takeLast(4)
-                        .forEach { ConnectionLog.record("$TAG DNSTT handshake: ${it.take(400)}") }
                 }
             }
             stopTorProcess()
@@ -1142,9 +1108,6 @@ object TorManager {
             if (stopping.get()) return false
             ConnectionLog.record("$TAG trying ${rung.mode.label} (${rung.timeoutSeconds}s)")
             if (!attempt(context, dataDir, rung.mode, rung.timeoutSeconds)) {
-                if (rung.mode == TorMode.DNSTT && !stopping.get()) {
-                    DnsttBridges.advanceAfterFailure(context, dataDir)
-                }
                 continue
             }
 

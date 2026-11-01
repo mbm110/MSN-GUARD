@@ -219,8 +219,6 @@ object Strings {
         "Connection degraded" to Triple("Connection degraded", "اتصال ضعیف شده است", "连接质量下降"),
         "Connection failed" to Triple("Connection failed", "اتصال ناموفق بود", "连接失败"),
         "Connection mode" to Triple("Connection mode", "حالت اتصال", "连接模式"),
-        "DNS Tunnel" to Triple("DNS Tunnel", "تونل DNS", "DNS 隧道"),
-        "DNS tunnel; slow, for essential apps" to Triple("DNS tunnel; slow, for essential apps", "تونل DNS؛ کند است و برای برنامه‌های ضروری است", "DNS 隧道；速度较慢，仅适合必要应用"),
         "Control saved MASQUE gateway discovery data" to Triple("Control saved MASQUE gateway discovery data", "مدیریت داده‌های ذخیره‌شده شناسایی درگاه‌های MASQUE", "管理已保存的 MASQUE 网关探测数据"),
         "Core" to Triple("Core", "هسته", "核心"),
         "Could not connect on this carrier. Try Wi-Fi or another SIM." to Triple("Could not connect on this carrier. Try Wi-Fi or another SIM.", "روی این اپراتور وصل نشد. وای‌فای یا سیم کارت دیگر را امتحان کن.", "当前运营商无法连接。请尝试 Wi-Fi 或其他 SIM 卡。"),

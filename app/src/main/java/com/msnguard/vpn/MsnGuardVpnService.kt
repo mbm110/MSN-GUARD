@@ -2290,11 +2290,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // Keeping the service alive is a precondition of the seal: stopSelf()
         // releases the blocking TUN's fd and the OS restores carrier networking,
         // which is the leak the switch exists to prevent.
-        // A DNSTT retry needs this service's scheduler to stay alive. Teardown
-        // used to shut it down before scheduleAutoReconnect could run.
-        val pendingDnsttRetry = willAutoReconnect() &&
-            currentProtocol.contains("TOR") && TorManager.selectedMode(this) == TorManager.TorMode.DNSTT
-        stopTunnel(notify = false, teardownService = !sealing && !pendingDnsttRetry)
+        stopTunnel(notify = false, teardownService = !sealing)
         // A quick reconnect owns the service: Psiphon, Tor, SHARD and the chain all
         // report a mid-teardown failure through here, and killing the service would
         // strand the restart the user just asked for — the same defect the native
@@ -2921,19 +2917,9 @@ ConnectionLog.record("MTU: $psiphonChainMtu for ${chainMethod.title} (chain)")
                 val address = Tun2SocksManager.selectPrivateAddress()
                 ConnectionLog.record("Tor: creating TUN before Tor starts")
                 val scannedTorMtu = MtuAutoScan.tunMtu(this, MtuConfig.Method.TOR, Tun2SocksManager.VPN_INTERFACE_MTU)
-                val dnsttSelected = TorManager.selectedMode(this) == TorManager.TorMode.DNSTT
-                val torMtu = if (dnsttSelected) {
-                    scannedTorMtu.coerceIn(
-                        DnsttResolverScanner.DNSTT_MIN_TUN_MTU,
-                        DnsttResolverScanner.DNSTT_MAX_TUN_MTU,
-                    )
-                } else scannedTorMtu
+                val torMtu = scannedTorMtu
                 currentTunMtu = torMtu
-                if (dnsttSelected) {
-                    ConnectionLog.record("MTU: DNSTT TUN MTU $torMtu applied (allowed range 512..1400)")
-                } else {
-                    ConnectionLog.record("MTU: $torMtu for Tor")
-                }
+                ConnectionLog.record("MTU: $torMtu for Tor")
                 tun = Builder()
                     .setSession("MSN-GUARD")
                     .setMtu(torMtu)
