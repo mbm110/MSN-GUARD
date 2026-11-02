@@ -82,7 +82,11 @@ jobs:
           ORG_GRADLE_PROJECT_org.gradle.java.installations.auto-download: 'false'
         run: |
           test -n "$MSN_IDENTITY_RELAY_HMAC" || { echo 'MSN_IDENTITY_RELAY_HMAC secret is required for relay builds' >&2; exit 1; }
-          ./gradlew assembleRelease -PaetheryKeystore=release.keystore
+          # AGP's ABI splitter has been failing nondeterministically inside
+          # IncrementalSplitterRunnable after compile/lint already passed.
+          # Serialize packaging so split APK writers cannot race, and retain
+          # the stacktrace if the packaging task itself fails again.
+          ./gradlew --no-parallel --max-workers=1 --stacktrace assembleRelease -PaetheryKeystore=release.keystore
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
