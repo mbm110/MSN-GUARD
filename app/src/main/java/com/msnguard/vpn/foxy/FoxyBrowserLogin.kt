@@ -121,7 +121,7 @@ object FoxyBrowserLogin {
                     FoxyControlPlaneHttp.cookieJar.syncFromWebView()
                     view.evaluateJavascript(HOOK, null)
                     view.evaluateJavascript("document.querySelector('input:not([type=hidden])')?.focus();", null)
-                    view.postDelayed { showSoftKeyboard(view) }
+                    view.postDelayed({ showSoftKeyboard(view) }, 150L)
                 }
             }
         }
@@ -136,7 +136,7 @@ object FoxyBrowserLogin {
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
                     WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE,
             )
-            decorView.postDelayed {
+            decorView.postDelayed({
                 web.requestFocusFromTouch()
                 web.requestFocus(View.FOCUS_DOWN)
                 web.post { showSoftKeyboard(web) }
