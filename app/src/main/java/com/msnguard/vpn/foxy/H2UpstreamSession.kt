@@ -329,7 +329,7 @@ class H2UpstreamSession(
                                     val announced = msg.settings().maxConcurrentStreams()
                                     if (announced != null) {
 
-                                        val limit = announced.coerceIn(1L, localMaxConcurrentStreams.coerceIn(1, 64).toLong()).toInt()
+                                        val limit = announced.coerceIn(0L, localMaxConcurrentStreams.coerceIn(1, 64).toLong()).toInt()
                                         if (limit != maxConcurrentStreams) {
                                             maxConcurrentStreams = limit
                                             FoxyLog.i(

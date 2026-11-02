@@ -38,6 +38,11 @@ class FoxyReferenceParityContract(unittest.TestCase):
         browser = (ROOT / "app/src/main/java/com/msnguard/vpn/foxy/FoxyBrowserLogin.kt").read_text()
         self.assertIn("isFocusableInTouchMode = true", browser)
         self.assertIn("FLAG_NOT_FOCUSABLE", browser)
+        self.assertIn("FLAG_ALT_FOCUSABLE_IM", browser)
+        # Do not steal focus from the HTML editor or autofill popup on each tap.
+        self.assertNotIn("override fun onTouchEvent", browser)
+        self.assertNotIn("override fun onCreateInputConnection", browser)
+        self.assertNotIn("showSoftInput", browser)
         self.assertIn("SOFT_INPUT_ADJUST_RESIZE", browser)
         self.assertIn("SOFT_INPUT_STATE_ALWAYS_VISIBLE", browser)
 

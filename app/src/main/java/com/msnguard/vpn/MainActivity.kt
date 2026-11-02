@@ -8298,7 +8298,7 @@ class MainActivity : Activity() {
                     com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.FIRST_BYTE -> Strings.t("First byte")
                     com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.SNI -> Strings.t("Before SNI")
                 } }.toTypedArray(), values.indexOf(com.msnguard.vpn.foxy.FoxySettings.tlsSplitMode(this))) { d, which ->
-                    com.msnguard.vpn.foxy.FoxySettings.saveTlsSplitMode(this, values[which]); d.dismiss(); closeFoxySettingScreen(); openFoxySettingScreen()
+                    com.msnguard.vpn.foxy.FoxySettings.saveTlsSplitMode(this, values[which]); d.dismiss(); foxySettingPage?.let(pageHost::removeView); foxySettingPage = null; openFoxySettingScreen()
                 }.setNegativeButton(Strings.t("Cancel"), null).show().also { mirrorDialog(it) }
         }
         tuningCard.addView(tlsRow, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
@@ -8308,7 +8308,7 @@ class MainActivity : Activity() {
             val values = listOf(4, 8, 16, 32, 64)
             AlertDialog.Builder(this).setTitle(Strings.t("Multiplex concurrency"))
                 .setSingleChoiceItems(values.map { "$it ${Strings.t("streams")}" }.toTypedArray(), values.indexOf(streams).coerceAtLeast(0)) { d, which ->
-                    com.msnguard.vpn.foxy.FoxySettings.saveMultiplexStreams(this, values[which]); d.dismiss(); closeFoxySettingScreen(); openFoxySettingScreen()
+                    com.msnguard.vpn.foxy.FoxySettings.saveMultiplexStreams(this, values[which]); d.dismiss(); foxySettingPage?.let(pageHost::removeView); foxySettingPage = null; openFoxySettingScreen()
                 }.setNegativeButton(Strings.t("Cancel"), null).show().also { mirrorDialog(it) }
         }
         tuningCard.addView(muxRow, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })

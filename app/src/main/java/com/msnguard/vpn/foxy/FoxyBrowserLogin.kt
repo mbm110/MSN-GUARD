@@ -108,7 +108,12 @@ object FoxyBrowserLogin {
         }
         web.webChromeClient = WebChromeClient()
         dialog.setOnShowListener {
-            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+            // AlertDialog may set ALT_FOCUSABLE_IM before the asynchronously
+            // loaded HTML exposes a text editor. Clear both IME blockers.
+            dialog.window?.clearFlags(
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM,
+            )
             dialog.window?.setSoftInputMode(
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
                     WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE,
