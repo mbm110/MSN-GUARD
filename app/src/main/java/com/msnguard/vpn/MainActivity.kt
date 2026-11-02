@@ -28,6 +28,9 @@ import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings as AndroidSettings
 import android.text.InputType
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.View
@@ -260,6 +263,8 @@ class MainActivity : Activity() {
     private var proxyPortRow: OrbitSettingsRow? = null
 
     private var showingLogs = false
+    /** Native core log position hidden by Clear on the Logs screen only. */
+    private var logCoreBaseline = ""
     private var showingScanner = false
     private var showingMode = false
     private var settingsPage: View? = null
@@ -2105,6 +2110,7 @@ class MainActivity : Activity() {
         // Held here rather than inside the refresh Runnable so Clear can null it
         // and force the next tick to repaint even if the text is unchanged.
         var renderedLogs: String? = null
+        logCoreBaseline = NativeCore.lastLog()
 
         // The three controls that replace the dead verbosity chips. Every one of
         // them changes something visible immediately, which is the whole test the
@@ -2153,7 +2159,11 @@ class MainActivity : Activity() {
             events.requestLayout()
         }
         val clearChip = toolChip(Strings.t("Clear")) {
+            // Clear only this screen's log sources. The native core has no public
+            // clear API, so advance the screen baseline instead of touching any
+            // gateway, identity, or transport cache.
             ConnectionLog.clear()
+            logCoreBaseline = NativeCore.lastLog()
             renderedLogs = null
             Toast.makeText(this, Strings.t("App log cleared"), Toast.LENGTH_SHORT).show()
         }
@@ -2200,11 +2210,16 @@ class MainActivity : Activity() {
                     val updatedLogs = connectionLogText(selectedLogTab)
                     if (updatedLogs != renderedLogs) {
                         val keepAtBottom = followLatest || renderedLogs == null
-                        events.text = updatedLogs
+                        val keepScrollY = scroll.scrollY
+                        events.text = colorizeLogText(updatedLogs)
                         renderedLogs = updatedLogs
-                        if (keepAtBottom) {
-                            scroll.post {
-                                scroll.scrollTo(0, (scroll.getChildAt(0)?.height ?: 0) - scroll.height)
+                        scroll.post {
+                            if (keepAtBottom) {
+                                scroll.scrollTo(0, ((scroll.getChildAt(0)?.height ?: 0) - scroll.height).coerceAtLeast(0))
+                            } else {
+                                // Refreshing the TextView must not throw a reader to
+                                // the top or bottom. Keep the exact viewport.
+                                scroll.scrollTo(0, keepScrollY.coerceAtLeast(0))
                             }
                         }
                     }
@@ -2359,13 +2374,47 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun colorizeLogText(raw: String): CharSequence {
+        val out = SpannableStringBuilder()
+        raw.split('\n').forEachIndexed { index, line ->
+            if (index > 0) out.append('\n')
+            val start = out.length
+            out.append(line)
+            val color = when {
+                line.contains("error", ignoreCase = true) ||
+                    line.contains("failed", ignoreCase = true) ||
+                    line.contains("exception", ignoreCase = true) -> palette.error
+                line.contains("warn", ignoreCase = true) -> palette.amber
+                line.contains("aether", ignoreCase = true) ||
+                    line.contains("core", ignoreCase = true) -> palette.violetText
+                line.contains("warp", ignoreCase = true) ||
+                    line.contains("masque", ignoreCase = true) ||
+                    line.contains("wireguard", ignoreCase = true) -> palette.mintText
+                line.contains("foxy", ignoreCase = true) ||
+                    line.contains("fxa", ignoreCase = true) -> palette.violet
+                line.contains("psiphon", ignoreCase = true) ||
+                    line.contains("tor", ignoreCase = true) -> palette.amberText
+                else -> INK
+            }
+            out.setSpan(ForegroundColorSpan(color), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        return out
+    }
+
     private fun connectionLogText(tab: LogTab = LogTab.ALL): String {
         val appEvents = ConnectionLog.snapshot()
         // The core's lines never pass through ConnectionLog.record(), so they are
         // coded here instead — otherwise the one thing the screen shows in plain
         // text is the transport's own address and port layout.
-        val coreEvents = NativeCore.lastLog().lineSequence()
-            .filter(String::isNotBlank)
+        val currentCore = NativeCore.lastLog()
+        val baselineLines = logCoreBaseline.lineSequence().toList()
+        val currentCoreLines = currentCore.lineSequence().filter(String::isNotBlank).toList()
+        val newCoreLines = if (baselineLines.isNotEmpty() && currentCore.startsWith(logCoreBaseline)) {
+            currentCoreLines.drop(baselineLines.size)
+        } else {
+            currentCoreLines
+        }
+        val coreEvents = newCoreLines
             .map(LogRedactor::redact)
             .toList()
         val events = when (tab) {
