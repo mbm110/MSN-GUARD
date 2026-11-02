@@ -32,12 +32,12 @@ object FoxyBrowserLogin {
     fun show(activity: Activity, onResult: (Result<Unit>) -> Unit) {
         val web = WebView(activity).apply {
             settings.javaScriptEnabled = true
-            settings.setSupportZoom(false)
-            settings.builtInZoomControls = false
-            isVerticalScrollBarEnabled = false
             settings.domStorageEnabled = true
             settings.loadWithOverviewMode = true
             settings.useWideViewPort = true
+            settings.setSupportZoom(false)
+            settings.builtInZoomControls = false
+            settings.javaScriptCanOpenWindowsAutomatically = false
             settings.userAgentString = userAgent
             isFocusable = true
             isFocusableInTouchMode = true
@@ -107,13 +107,26 @@ object FoxyBrowserLogin {
             }
         }
         web.webChromeClient = WebChromeClient()
+        dialog.setOnShowListener {
+            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+            dialog.window?.setSoftInputMode(
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE,
+            )
+            web.isFocusable = true
+            web.isFocusableInTouchMode = true
+            web.requestFocus()
+            web.loadUrl(repository.browserLoginUrl())
+        }
         dialog.setOnDismissListener {
             if (!finished) finish(Result.failure(IllegalStateException("Sign-in cancelled")))
         }
-        dialog.setOnShowListener { web.loadUrl(repository.browserLoginUrl()) }
         dialog.show()
         dialog.window?.apply {
-            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            setSoftInputMode(
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE,
+            )
             setLayout(
                 (activity.resources.displayMetrics.widthPixels * .96).toInt(),
                 (activity.resources.displayMetrics.heightPixels * .90).toInt(),
