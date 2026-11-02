@@ -35,8 +35,19 @@ class FoxyReferenceParityContract(unittest.TestCase):
         text = UI.read_text()
         self.assertIn('Strings.t("Sign in with Firefox")', text)
         self.assertNotIn('Strings.t("Send Code")', text)
-        self.assertNotIn('Strings.t("Password")', text)
-        self.assertNotIn('Strings.t("Verification code")', text)
+        browser = (ROOT / "app/src/main/java/com/msnguard/vpn/foxy/FoxyBrowserLogin.kt").read_text()
+        self.assertIn("onCheckIsTextEditor", browser)
+        self.assertIn("SOFT_INPUT_STATE_ALWAYS_VISIBLE", browser)
+
+    def test_country_ping_is_bounded_and_display_only(self):
+        ping = (ROOT / "app/src/main/java/com/msnguard/vpn/foxy/FoxyCountryPing.kt").read_text()
+        models = (ROOT / "app/src/main/java/com/msnguard/vpn/foxy/FoxyModels.kt").read_text()
+        self.assertIn("MAX_COUNTRIES_IN_FLIGHT", ping)
+        self.assertIn("TIMEOUT_MS", ping)
+        self.assertIn("pingMs", models)
+        self.assertIn("displayNameWithPing", models)
+        self.assertNotIn('Strings.t("Password")', UI.read_text())
+        self.assertNotIn('Strings.t("Verification code")', UI.read_text())
 
 
 if __name__ == "__main__":

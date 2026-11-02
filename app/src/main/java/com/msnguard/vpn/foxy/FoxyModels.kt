@@ -27,7 +27,11 @@ data class VpnCountry(
     val name: String,
     val code: String,
     val cities: List<VpnCity> = emptyList(),
-)
+    /** Latest measured TCP connect latency to the best usable server, -1 when unknown. */
+    val pingMs: Long = -1L,
+) {
+    fun displayNameWithPing(): String = if (pingMs > 0) "$name  ${pingMs}ms" else name
+}
 
 data class ProxyCandidate(
     val host: String,

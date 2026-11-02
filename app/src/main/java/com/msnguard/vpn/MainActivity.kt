@@ -8319,6 +8319,11 @@ class MainActivity : Activity() {
                     ConnectionLog.record("Foxy: server list fetch failed — " + (e.message ?: "unknown"))
                 }
             }
+            val measured = runCatching {
+                kotlinx.coroutines.runBlocking {
+                    com.msnguard.vpn.foxy.FoxyCountryPing.measure(countries)
+                }
+            }.getOrDefault(countries)
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (countries.isEmpty()) {
@@ -8328,9 +8333,9 @@ class MainActivity : Activity() {
                 val selected = com.msnguard.vpn.foxy.FoxySettings.selectedCountryCode(this)
                 // display-only alphabetical order — the saved value is the country
                 // CODE, never the index, so connect behavior is untouched
-                val sorted = countries.sortedBy { it.name.lowercase() }
-                val names = arrayOf("\u2699\uFE0F " + Strings.t("Automatic (recommended)")) +
-                    sorted.map { foxyFlag(it.code) + "  " + it.name }.toTypedArray()
+                val sorted = measured.sortedBy { it.name.lowercase() }
+                val names = arrayOf("⚙️ " + Strings.t("Automatic (recommended)")) +
+                                    sorted.map { foxyFlag(it.code) + "  " + it.displayNameWithPing() }.toTypedArray()
                 val checked = if (selected == null) 0 else
                     1 + sorted.indexOfFirst { it.code.equals(selected, true) }.coerceAtLeast(-1)
                 AlertDialog.Builder(this)
@@ -8347,7 +8352,7 @@ class MainActivity : Activity() {
                         (serverRow.findViewById<TextView>(android.R.id.text2) // not used; kept null-safe
                             ?: (serverRow.tag as? TextView)).apply {
                             this?.text = if (which == 0) Strings.t("Automatic (recommended)")
-                                else foxyFlag(sorted[which - 1].code) + "  " + sorted[which - 1].name
+                                else foxyFlag(sorted[which - 1].code) + "  " + sorted[which - 1].displayNameWithPing()
                         }
                         dialog.dismiss()
                     }
