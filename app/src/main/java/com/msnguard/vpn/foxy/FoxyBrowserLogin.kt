@@ -11,11 +11,7 @@ import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
-import android.view.MotionEvent
-import android.view.View
 import android.view.WindowManager
-import android.view.inputmethod.InputMethodManager
-import android.content.Context
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import org.json.JSONObject
@@ -34,9 +30,7 @@ object FoxyBrowserLogin {
 
     @SuppressLint("SetJavaScriptEnabled")
     fun show(activity: Activity, onResult: (Result<Unit>) -> Unit) {
-        val web = object : WebView(activity) {
-            override fun onCheckIsTextEditor(): Boolean = true
-        }.apply {
+        val web = WebView(activity).apply {
             settings.javaScriptEnabled = true
             settings.setSupportZoom(false)
             settings.builtInZoomControls = false
@@ -47,17 +41,6 @@ object FoxyBrowserLogin {
             settings.userAgentString = userAgent
             isFocusable = true
             isFocusableInTouchMode = true
-            isClickable = true
-            setOnFocusChangeListener { view, hasFocus ->
-                if (hasFocus) view.post { showSoftKeyboard(view) }
-            }
-            setOnTouchListener { view, event ->
-                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                    view.requestFocusFromTouch()
-                    view.post { showSoftKeyboard(view) }
-                }
-                false
-            }
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
         }
@@ -120,8 +103,6 @@ object FoxyBrowserLogin {
                     CookieManager.getInstance().flush()
                     FoxyControlPlaneHttp.cookieJar.syncFromWebView()
                     view.evaluateJavascript(HOOK, null)
-                    view.evaluateJavascript("document.querySelector('input:not([type=hidden])')?.focus();", null)
-                    view.postDelayed({ showSoftKeyboard(view) }, 150L)
                 }
             }
         }
@@ -132,27 +113,12 @@ object FoxyBrowserLogin {
         dialog.setOnShowListener { web.loadUrl(repository.browserLoginUrl()) }
         dialog.show()
         dialog.window?.apply {
-            setSoftInputMode(
-                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
-                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE,
-            )
-            decorView.postDelayed({
-                web.requestFocusFromTouch()
-                web.requestFocus(View.FOCUS_DOWN)
-                web.post { showSoftKeyboard(web) }
-            }, 350L)
+            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             setLayout(
                 (activity.resources.displayMetrics.widthPixels * .96).toInt(),
                 (activity.resources.displayMetrics.heightPixels * .90).toInt(),
             )
         }
-    }
-
-    private fun showSoftKeyboard(view: View) {
-        view.postDelayed({
-            val manager = view.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-            manager?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
-        }, 100L)
     }
 
     private class WebChannelBridge(

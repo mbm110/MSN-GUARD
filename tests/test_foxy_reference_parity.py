@@ -36,8 +36,9 @@ class FoxyReferenceParityContract(unittest.TestCase):
         self.assertIn('Strings.t("Sign in with Firefox")', text)
         self.assertNotIn('Strings.t("Send Code")', text)
         browser = (ROOT / "app/src/main/java/com/msnguard/vpn/foxy/FoxyBrowserLogin.kt").read_text()
-        self.assertIn("onCheckIsTextEditor", browser)
-        self.assertIn("SOFT_INPUT_STATE_ALWAYS_VISIBLE", browser)
+        self.assertIn("SOFT_INPUT_ADJUST_RESIZE", browser)
+        self.assertNotIn("setOnTouchListener", browser)
+        self.assertNotIn("SOFT_INPUT_STATE_ALWAYS_VISIBLE", browser)
 
     def test_country_ping_is_bounded_and_display_only(self):
         ping = (ROOT / "app/src/main/java/com/msnguard/vpn/foxy/FoxyCountryPing.kt").read_text()
