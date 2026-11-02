@@ -12,6 +12,15 @@ object Strings {
 
     private val table = mapOf(
         "Send Code" to Triple("Send Code", "ارسال کد", "Send Code"),
+        "Sign in with Firefox" to Triple("Sign in with Firefox", "ورود با حساب Firefox", "Sign in with Firefox"),
+        "Firefox sign-in opened" to Triple("Firefox sign-in opened", "صفحه ورود Firefox باز شد", "Firefox sign-in opened"),
+        "Opening…" to Triple("Opening…", "در حال باز کردن…", "Opening…"),
+        "Firefox sign-in pending" to Triple("Firefox sign-in pending", "ورود Firefox تکمیل نشده", "Firefox sign-in pending"),
+        "Firefox sign-in failed" to Triple("Firefox sign-in failed", "ورود به Firefox ناموفق بود", "Firefox sign-in failed"),
+        "Firefox sign-in cancelled" to Triple("Firefox sign-in cancelled", "ورود به Firefox لغو شد", "Firefox sign-in cancelled"),
+        "Firefox Accounts" to Triple("Firefox Accounts", "حساب Firefox", "Firefox Accounts"),
+        "Firefox Accounts handles email verification and security checks in the browser. Return to MSN after sign-in." to Triple("Firefox Accounts handles email verification and security checks in the browser. Return to MSN after sign-in.", "تأیید ایمیل و بررسی امنیتی داخل صفحه Firefox انجام می‌شود؛ بعد از ورود به MSN برگرد.", "Firefox Accounts handles email verification and security checks in the browser. Return to MSN after sign-in."),
+        "Sign in through Firefox Accounts in the browser window. Create or use your Firefox account there, complete any email or security verification, then return to MSN. Your password and verification code never enter MSN." to Triple("Sign in through Firefox Accounts in the browser window. Create or use your Firefox account there, complete any email or security verification, then return to MSN. Your password and verification code never enter MSN.", "ورود را داخل صفحه Firefox انجام بده. ساخت حساب، تأیید ایمیل و بررسی امنیتی همان‌جا انجام می‌شود؛ رمز و کد تأیید وارد MSN نمی‌شوند.", "Sign in through Firefox Accounts in the browser window. Create or use your Firefox account there, complete any email or security verification, then return to MSN. Your password and verification code never enter MSN."),
         "Resend Code" to Triple("Resend Code", "ارسال مجدد کد", "Resend Code"),
         "Sending…" to Triple("Sending…", "در حال ارسال…", "Sending…"),
         "Sign In" to Triple("Sign In", "ورود", "Sign In"),

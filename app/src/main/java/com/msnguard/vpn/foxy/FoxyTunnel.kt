@@ -181,7 +181,7 @@ object FoxyTunnel {
             // actually connects (the first candidate is often one this ISP
             // cannot reach at all), and carry the last failure upward when
             // none does.
-            val s = dialUpstream(pass)
+            val s = dialUpstream(context, pass)
             session = s
 
             val srv = LocalSocks5Server(
@@ -293,7 +293,7 @@ object FoxyTunnel {
      * candidate list, resolve each edge address, connect over H2 with the
      * freshly minted pass. Throws the LAST failure when every candidate failed.
      */
-    private suspend fun dialUpstream(pass: ProxyPass): UpstreamSession {
+    private suspend fun dialUpstream(context: Context, pass: ProxyPass): UpstreamSession {
         val list = dialCandidates ?: error("Foxy: no dial candidates")
         var lastErr: Exception? = null
         for (cand in list) {
@@ -343,7 +343,7 @@ object FoxyTunnel {
             if (socks == null) return false
             ConnectionLog.record("Foxy: redial ($why) — fetching a fresh pass…")
             val pass = mintPass(context)
-            val fresh = withTimeoutOrNull(REDIAL_CONNECT_TIMEOUT_MS) { dialUpstream(pass) }
+            val fresh = withTimeoutOrNull(REDIAL_CONNECT_TIMEOUT_MS) { dialUpstream(context, pass) }
             if (fresh == null) {
                 ConnectionLog.record("Foxy: redial ($why) timed out or failed — the watchdog retries")
                 return false

@@ -4,6 +4,15 @@ package com.msnguard.vpn
 internal object RussianStrings {
     private val table = mapOf(
         "Send Code" to "Отправить код",
+        "Sign in with Firefox" to "Войти через Firefox",
+        "Firefox sign-in opened" to "Открыта страница входа Firefox",
+        "Opening…" to "Открывается…",
+        "Firefox sign-in pending" to "Вход через Firefox не завершён",
+        "Firefox sign-in failed" to "Не удалось войти через Firefox",
+        "Firefox sign-in cancelled" to "Вход через Firefox отменён",
+        "Firefox Accounts" to "Firefox Accounts",
+        "Firefox Accounts handles email verification and security checks in the browser. Return to MSN after sign-in." to "Проверка почты и безопасности выполняется в браузере Firefox. После входа вернитесь в MSN.",
+        "Sign in through Firefox Accounts in the browser window. Create or use your Firefox account there, complete any email or security verification, then return to MSN. Your password and verification code never enter MSN." to "Войдите через Firefox Accounts в окне браузера. Пароль и код подтверждения не передаются в MSN.",
         "Resend Code" to "Отправить код повторно",
         "Sending…" to "Отправка…",
         "Sign In" to "Войти",

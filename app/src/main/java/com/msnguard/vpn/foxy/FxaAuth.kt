@@ -65,7 +65,42 @@ class FxaAuthRepository(
     fun browserLoginUrl(): String =
         "https://accounts.firefox.com/?context=fx_desktop_v3&service=sync&action=email"
 
-    /** Build the FxA OAuth request used after the browser hands us sessionToken. */
+    /** Same Hawk request as the reference browser flow. */
+    fun buildOAuthHawkHeader(sessionToken: String): Pair<String, String> {
+        val clean = sessionToken.trim().lowercase()
+        require(Regex("^[0-9a-f]{64}$").matches(clean)) { "Invalid Firefox session token" }
+        val url = "$FXA_AUTH_SERVER/oauth/token".toHttpUrl()
+        val body = JSONObject().apply {
+            put("client_id", FIREFOX_CLIENT_ID)
+            put("grant_type", "fxa-credentials")
+            put("scope", OAUTH_SCOPE)
+            put("access_type", "offline")
+        }.toString()
+        val (id, key) = deriveHawkCredentials(clean)
+        return hawkHeader("POST", url, id, key, body.toByteArray(Charsets.UTF_8)) to body
+    }
+
+    suspend fun completeBrowserLoginWithTokens(
+        accessToken: String,
+        refreshToken: String?,
+        expiresInSeconds: Long,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            require(accessToken.isNotBlank()) { "Firefox OAuth returned an empty access token" }
+            FoxyControlPlaneHttp.cookieJar.syncFromWebView()
+            tokenStore.saveAuth(RuntimeAuth(
+                accessToken = accessToken.trim(),
+                refreshToken = refreshToken?.trim()?.ifBlank { null },
+                expiresAtEpochSeconds = System.currentTimeMillis() / 1000 +
+                    expiresInSeconds.coerceAtLeast(DEFAULT_ACCESS_TOKEN_TTL_SECONDS.toLong()),
+            ))
+        }
+    }
+
+    suspend fun completeBrowserLogin(sessionToken: String): Result<Unit> =
+        completeBrowserSession(sessionToken)
+
+    /** Legacy request helper retained for tests and non-UI callers. */
     fun browserOAuthRequest(sessionToken: String): Pair<String, String> {
         val clean = sessionToken.trim().lowercase()
         require(Regex("^[0-9a-f]{64}$").matches(clean)) { "Invalid Firefox session token" }
@@ -266,7 +301,7 @@ class FxaAuthRepository(
             put("scope", OAUTH_SCOPE)
             put("access_type", "offline")
         }
-        return fxaDo("POST", "/oauth/token", sessionToken = sessionToken, jsonBody = body)
+        return fxaDoAt(FXA_OAUTH_SERVER, "POST", "/oauth/token", sessionToken, body)
     }
 
     private suspend fun fxaDo(
