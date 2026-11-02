@@ -30,23 +30,7 @@ object FoxyBrowserLogin {
 
     @SuppressLint("SetJavaScriptEnabled")
     fun show(activity: Activity, onResult: (Result<Unit>) -> Unit) {
-        val web = object : WebView(activity) {
-            override fun onCheckIsTextEditor(): Boolean = true
-
-            override fun onCreateInputConnection(outAttrs: android.view.inputmethod.EditorInfo?): android.view.inputmethod.InputConnection? {
-                val connection = super.onCreateInputConnection(outAttrs)
-                if (connection != null) post { showKeyboard(this) }
-                return connection
-            }
-
-            override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
-                val handled = super.onTouchEvent(event)
-                if (event.actionMasked == android.view.MotionEvent.ACTION_UP) {
-                    postDelayed({ showKeyboardForFocusedHtmlInput(this) }, 120L)
-                }
-                return handled
-            }
-        }.apply {
+        val web = WebView(activity).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.loadWithOverviewMode = true
@@ -147,21 +131,6 @@ object FoxyBrowserLogin {
                 (activity.resources.displayMetrics.widthPixels * .96).toInt(),
                 (activity.resources.displayMetrics.heightPixels * .90).toInt(),
             )
-        }
-    }
-
-    private fun showKeyboard(web: WebView) {
-        web.requestFocus()
-        val manager = web.context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
-            as? android.view.inputmethod.InputMethodManager
-        manager?.showSoftInput(web, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
-    }
-
-    private fun showKeyboardForFocusedHtmlInput(web: WebView) {
-        web.evaluateJavascript(
-            "document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);",
-        ) { focused ->
-            if (focused == "true") showKeyboard(web)
         }
     }
 
