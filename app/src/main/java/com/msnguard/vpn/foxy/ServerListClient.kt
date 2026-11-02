@@ -12,10 +12,45 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 
 private const val TAG = "ServerListClient"
+private const val MAX_REMOTE_BYTES = 2 * 1024 * 1024
+private const val MAX_CACHE_AGE_MS = 7L * 24 * 60 * 60 * 1000
+private const val MAX_COUNTRIES = 256
+private const val MAX_CITIES_PER_COUNTRY = 128
+private const val MAX_SERVERS_PER_CITY = 256
+private const val MAX_PROTOCOLS_PER_SERVER = 32
+private val SAFE_HOST = Regex("^[A-Za-z0-9.-]{1,253}$")
+
+private fun readBounded(input: java.io.InputStream, limit: Int): String {
+    val output = ByteArrayOutputStream()
+    val buffer = ByteArray(16 * 1024)
+    var total = 0
+    while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        total += count
+        if (total > limit) throw IOException("Remote Settings response is too large")
+        output.write(buffer, 0, count)
+    }
+    return output.toString(Charsets.UTF_8.name())
+}
+
+private fun validHost(host: String): Boolean =
+    host.isNotBlank() && SAFE_HOST.matches(host) && !host.startsWith(".") && !host.endsWith(".")
+
+private fun validPort(port: Int): Boolean = port in 1..65535
+
+private fun <T> distinctByStable(values: List<T>, key: (T) -> String): List<T> =
+    values.filter { key(it).isNotBlank() }.distinctBy(key)
+
+private fun stableServerKey(server: VpnServerNode): String =
+    "${server.hostname.lowercase()}:${server.port}:${server.protocols.joinToString("|") { it.name.lowercase() }}"
+
+private fun stableCountryKey(country: VpnCountry): String = country.code.trim().uppercase()
 
 private const val REMOTE_SETTINGS_URL =
     "https://firefox.settings.services.mozilla.com/v1/buckets/main/collections/vpn-serverlist/records"
@@ -38,7 +73,8 @@ class ServerListClient(
             if (!response.isSuccessful) {
                 throw IOException("Remote Settings fetch failed: HTTP ${response.code}")
             }
-            val raw = response.body?.string().orEmpty()
+            val body = response.body ?: throw IOException("Remote Settings response has no body")
+            val raw = body.byteStream().use { readBounded(it, MAX_REMOTE_BYTES) }
             val countries = parseRecords(raw)
             if (countries.isNotEmpty()) {
                 saveCache(raw)
@@ -51,8 +87,9 @@ class ServerListClient(
     fun loadCachedCountries(): List<VpnCountry> {
         val file = cacheFile ?: return emptyList()
         if (!file.exists() || !file.isFile) return emptyList()
+        if (System.currentTimeMillis() - file.lastModified() > MAX_CACHE_AGE_MS) return emptyList()
         return runCatching {
-            val raw = file.readText()
+            val raw = file.inputStream().use { readBounded(it, MAX_REMOTE_BYTES) }
             val parsed = parseRecords(raw)
             if (parsed.isNotEmpty()) {
                 FoxyLog.d(TAG, "loaded ${parsed.size} countries from local cache")
@@ -84,8 +121,8 @@ class ServerListClient(
         val body = JSONObject(rawJson)
         val records = body.optJSONArray("data") ?: JSONArray()
         val countries = mutableListOf<VpnCountry>()
-        for (i in 0 until records.length()) {
-            val record = records.getJSONObject(i)
+        for (i in 0 until minOf(records.length(), MAX_COUNTRIES)) {
+            val record = records.optJSONObject(i) ?: continue
             val countryJson = record.optJSONObject("country") ?: record
             val country = parseCountry(countryJson)
             // "Recomended Location" ( Mozilla's own REC pseudo-country, their
@@ -97,44 +134,68 @@ class ServerListClient(
                 countries.add(country)
             }
         }
-        return countries
+        return distinctByStable(countries, ::stableCountryKey)
     }
 
-    private fun parseCountry(json: JSONObject): VpnCountry = VpnCountry(
-        name = json.optString("name"),
-        code = json.optString("code"),
-        cities = buildList {
-            val cities = json.optJSONArray("cities") ?: JSONArray()
-            for (i in 0 until cities.length()) add(parseCity(cities.getJSONObject(i)))
-        },
-    )
+    private fun parseCountry(json: JSONObject): VpnCountry {
+        val cities = json.optJSONArray("cities") ?: JSONArray()
+        val parsedCities = buildList {
+            for (i in 0 until minOf(cities.length(), MAX_CITIES_PER_COUNTRY)) {
+                cities.optJSONObject(i)?.let { add(parseCity(it)) }
+            }
+        }
+        return VpnCountry(
+            name = json.optString("name").trim(),
+            code = json.optString("code").trim().uppercase(),
+            cities = distinctByStable(parsedCities) { it.code.uppercase() },
+        )
+    }
 
-    private fun parseCity(json: JSONObject): VpnCity = VpnCity(
-        name = json.optString("name"),
-        code = json.optString("code"),
-        servers = buildList {
-            val servers = json.optJSONArray("servers") ?: JSONArray()
-            for (i in 0 until servers.length()) add(parseServer(servers.getJSONObject(i)))
-        },
-    )
+    private fun parseCity(json: JSONObject): VpnCity {
+        val servers = json.optJSONArray("servers") ?: JSONArray()
+        val parsedServers = buildList {
+            for (i in 0 until minOf(servers.length(), MAX_SERVERS_PER_CITY)) {
+                servers.optJSONObject(i)?.let { parseServer(it)?.let(::add) }
+            }
+        }
+        return VpnCity(
+            name = json.optString("name").trim(),
+            code = json.optString("code").trim(),
+            servers = distinctByStable(parsedServers, ::stableServerKey),
+        )
+    }
 
-    private fun parseServer(json: JSONObject): VpnServerNode = VpnServerNode(
-        hostname = json.optString("hostname"),
-        port = json.optInt("port", 0),
-        quarantined = json.optBoolean("quarantined", false),
-        protocols = buildList {
-            val protocols = json.optJSONArray("protocols") ?: JSONArray()
-            for (i in 0 until protocols.length()) add(parseProtocol(protocols.getJSONObject(i)))
-        },
-    )
+    private fun parseServer(json: JSONObject): VpnServerNode? {
+        val hostname = json.optString("hostname").trim()
+        val port = json.optInt("port", 0)
+        if (!validHost(hostname) || !validPort(port)) return null
+        val protocols = json.optJSONArray("protocols") ?: JSONArray()
+        val parsedProtocols = buildList {
+            for (i in 0 until minOf(protocols.length(), MAX_PROTOCOLS_PER_SERVER)) {
+                protocols.optJSONObject(i)?.let { parseProtocol(it)?.let(::add) }
+            }
+        }
+        return VpnServerNode(
+            hostname = hostname,
+            port = port,
+            quarantined = json.optBoolean("quarantined", false),
+            protocols = distinctByStable(parsedProtocols) { "${it.name}:${it.host}:${it.port}" },
+        )
+    }
 
-    private fun parseProtocol(json: JSONObject): VpnProtocol = VpnProtocol(
-        name = json.optString("name"),
-        host = json.optString("host"),
-        port = json.optInt("port", 0),
-        scheme = json.optString("scheme"),
-        templateString = json.optString("templateString"),
-    )
+    private fun parseProtocol(json: JSONObject): VpnProtocol? {
+        val host = json.optString("host").trim()
+        val port = json.optInt("port", 0)
+        if (host.isNotBlank() && !validHost(host)) return null
+        if (port != 0 && !validPort(port)) return null
+        return VpnProtocol(
+            name = json.optString("name").trim(),
+            host = host,
+            port = port,
+            scheme = json.optString("scheme").trim(),
+            templateString = json.optString("templateString"),
+        )
+    }
 
     companion object {
 

@@ -21,13 +21,25 @@ class FxoTokenStore(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
 
+    class StorageException(message: String, cause: Throwable? = null) : IllegalStateException(message, cause)
+
     fun saveAuth(auth: RuntimeAuth) {
-        prefs.edit()
-            .putString(KEY_ACCESS_TOKEN, auth.accessToken)
-            .putString(KEY_REFRESH_TOKEN, auth.refreshToken)
-            .putLong(KEY_EXPIRES_AT, auth.expiresAtEpochSeconds)
-            .apply()
+        try {
+            val nextEpoch = prefs.getLong(KEY_SESSION_EPOCH, 0L) + 1L
+            check(prefs.edit()
+                .putString(KEY_ACCESS_TOKEN, auth.accessToken)
+                .putString(KEY_REFRESH_TOKEN, auth.refreshToken)
+                .putLong(KEY_EXPIRES_AT, auth.expiresAtEpochSeconds)
+                .putLong(KEY_SESSION_EPOCH, nextEpoch)
+                .commit()) { "Could not persist Firefox session" }
+        } catch (failure: Exception) {
+            FoxyLog.e(TAG, "could not persist the Firefox session", failure)
+            throw StorageException("Could not persist Firefox session", failure)
+        }
     }
+
+    fun sessionEpoch(): Long = runCatching { prefs.getLong(KEY_SESSION_EPOCH, 0L) }
+        .getOrElse { throw StorageException("Could not read Firefox session epoch", it) }
 
     fun loadAuth(): RuntimeAuth? = runCatching {
         val access = prefs.getString(KEY_ACCESS_TOKEN, null)?.takeIf { it.isNotBlank() } ?: return@runCatching null
@@ -82,6 +94,7 @@ class FxoTokenStore(context: Context) {
         private const val KEY_ACCESS_TOKEN = "access_token"
         private const val KEY_REFRESH_TOKEN = "refresh_token"
         private const val KEY_EXPIRES_AT = "expires_at"
+        private const val KEY_SESSION_EPOCH = "session_epoch"
         private const val KEY_PENDING_SESSION_TOKEN = "pending_session_token"
         private const val KEY_SAVED_EMAIL = "saved_email"
 
