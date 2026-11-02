@@ -3407,6 +3407,10 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
+            body.addView(navRow(Strings.t("SSTP servers"), sstpSummary()) { openSstpSettings() }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
             // FOXY — one row like Warp Setting; the dedicated page owns the
             // Firefox Accounts browser sign-in; MSN never collects the password or code.
             body.addView(navRow(Strings.t("Foxy Account & Setting"), foxyAccountSummary()) { openFoxySettingScreen() }, LinearLayout.LayoutParams(
@@ -6433,6 +6437,34 @@ class MainActivity : Activity() {
     // vs Exit-Node (VLESS Lithuania sidecar). Each transport keeps its own
     // Direct/Exit choice so Masque-Direct still means freedom even when WireGuard-Exit is set.
     private fun warpSettingSummary(): String = ""
+
+    private fun sstpSummary(): String {
+        val host = preferences().getString("sstp_host", null)
+        return host ?: Strings.t("Automatic server selection")
+    }
+
+    private fun openSstpSettings() {
+        val servers = SstpServerRepository.cached(this)
+        val options = mutableListOf(SstpServer("__refresh__", 0, "Update SSTP servers"), SstpServer("", 0, "Automatic")) + servers
+        showChoiceSheet(
+            title = Strings.t("SSTP servers"),
+            subtitle = Strings.t("Choose a server or Automatic"),
+            options = options,
+            selected = options.firstOrNull { it.host == preferences().getString("sstp_host", "") } ?: options.first(),
+            label = { if (it.host.isBlank()) Strings.t("Automatic") else "${it.country.ifBlank { "SSTP" }} · ${it.host}:${it.port}" },
+            description = { if (it.host.isBlank()) Strings.t("Try the fastest validated server") else Strings.t("Source: ${it.sources.joinToString()}") },
+        ) { chosen ->
+            if (chosen.host == "__refresh__") {
+                Thread {
+                    val updated = SstpServerRepository.refresh(this)
+                    runOnUiThread { toastShort(Strings.tf("SSTP list updated: %s servers", updated.size.toString())) }
+                }.start()
+            } else {
+                preferences().edit().putString("sstp_host", chosen.host).putInt("sstp_port", chosen.port).apply()
+                toastShort(Strings.t("Saved — applies on next connect"))
+            }
+        }
+    }
 
     private fun openWarpSettingScreen() {
         refreshWarpIdentityCards = null
@@ -9830,7 +9862,8 @@ class MainActivity : Activity() {
         WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel", true),
         MASQUE("MASQUE", "masque", "HTTP/3 or HTTP/2 tunnel", true),
         WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel", true),
-        PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel", true),
+        SSTP("SSTP", "sstp", "SSTP over TLS with PPP", true),
+        PSIPHON("psiphon", "Psiphon", "Anti-censorship tunnel", true),
         TOR("Tor", "tor", "Onion routing; slowest but hardest to block", true),
 
         /**

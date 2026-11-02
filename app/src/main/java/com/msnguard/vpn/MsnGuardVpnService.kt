@@ -260,6 +260,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private var unpinnedStoredConfig: String? = null
     private var currentProtocol = "Tunnel"
+    private var sstpSession: SstpSession? = null
 
     /**
      * In-place node swaps performed during this SHARD session.
@@ -3219,6 +3220,36 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         }, 1L, 1L, TimeUnit.SECONDS)
     }
 
+    private fun startSstpTunnel() {
+        worker.execute {
+            try {
+                val prefs = profiled()
+                var host = prefs.getString("sstp_host", "")?.trim().orEmpty()
+                var port = prefs.getInt("sstp_port", 443)
+                if (host.isBlank()) {
+                    val candidate = SstpServerRepository.cached(this).firstOrNull()
+                    if (candidate != null) { host = candidate.host; port = candidate.port }
+                }
+                val user = prefs.getString("sstp_user", "vpn") ?: "vpn"
+                val password = prefs.getString("sstp_password", "vpn") ?: "vpn"
+                if (host.isBlank()) error("No SSTP server selected")
+                val server = SstpServer(host, port)
+                sstpSession = SstpSession(this, this) { message ->
+                    ConnectionLog.record("sstp: $message")
+                    if (message.contains("PPP ready", ignoreCase = true)) {
+                        connected.set(true)
+                        sendStatus(STATUS_CONNECTED, "SSTP connected")
+                    }
+                }
+                sstpSession!!.start(server, user, password)
+                sendStatus(STATUS_CONNECTING, "Connecting SSTP…")
+            } catch (e: Exception) {
+                ConnectionLog.record("SSTP start failed: ${e.message}")
+                failAndStop(e.message ?: "SSTP start failed")
+            }
+        }
+    }
+
     private fun startShardTunnel() {
         worker.execute {
             try {
@@ -4899,6 +4930,11 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             return
         }
 
+        if (currentProtocol.contains("SSTP")) {
+            startSstpTunnel()
+            return
+        }
+
         if (currentProtocol.contains("SHARD")) {
             startShardTunnel()
             return
@@ -5584,6 +5620,8 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // every other app socket — protecting it here would strand the FxA
         // sign-in requests on the raw (filtered) network instead.
         com.msnguard.vpn.foxy.FoxyControlPlaneHttp.socketProtector = null
+        sstpSession?.stop()
+        sstpSession = null
         TorManager.stop()
         stopPsiphonTunnel()
         NativeCore.stop()
