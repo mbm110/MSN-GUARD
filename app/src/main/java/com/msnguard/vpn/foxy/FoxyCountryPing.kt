@@ -12,8 +12,8 @@ import java.net.Socket
 
 /** Measures the user's direct TCP latency to Foxy's candidate edge servers. */
 object FoxyCountryPing {
-    private const val TIMEOUT_MS = 2_500
-    private const val MAX_COUNTRIES_IN_FLIGHT = 6
+    private const val TIMEOUT_MS = 1_500
+    private const val MAX_COUNTRIES_IN_FLIGHT = 8
 
     suspend fun measure(countries: List<VpnCountry>): List<VpnCountry> = withContext(Dispatchers.IO) {
         coroutineScope {
