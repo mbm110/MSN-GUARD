@@ -48,6 +48,10 @@ class FoxyReferenceParityContract(unittest.TestCase):
         self.assertIn("TIMEOUT_MS", ping)
         self.assertIn("pingMs", models)
         self.assertIn("displayNameWithPing", models)
+        session = (ROOT / "app/src/main/java/com/msnguard/vpn/foxy/H2UpstreamSession.kt").read_text()
+        tunnel = (ROOT / "app/src/main/java/com/msnguard/vpn/foxy/FoxyTunnel.kt").read_text()
+        self.assertIn("localMaxConcurrentStreams", session)
+        self.assertIn("FoxySettings.multiplexStreams(context)", tunnel)
         self.assertNotIn('Strings.t("Password")', UI.read_text())
         self.assertNotIn('Strings.t("Verification code")', UI.read_text())
 

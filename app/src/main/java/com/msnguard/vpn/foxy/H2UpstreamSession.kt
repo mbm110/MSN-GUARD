@@ -135,6 +135,8 @@ class H2UpstreamSession(
     private val upstreamProxy: UpstreamProxyConfig? = null,
     private val edgeAddress: String? = null,
     private val tlsSplitMode: FoxySettings.TlsSplitMode = FoxySettings.TlsSplitMode.OFF,
+    /** Foxy-only local cap; peer SETTINGS can reduce it further. */
+    private val localMaxConcurrentStreams: Int = 8,
 ) : UpstreamSession {
 
     private val group = NioEventLoopGroup(1)
@@ -154,7 +156,7 @@ class H2UpstreamSession(
     @Volatile private var acceptingNewStreams = true
     private val activeStreams = AtomicInteger(0)
 
-    @Volatile private var maxConcurrentStreams = Int.MAX_VALUE
+    @Volatile private var maxConcurrentStreams = localMaxConcurrentStreams.coerceIn(1, 64)
 
     private val closed = AtomicBoolean(false)
 
@@ -327,7 +329,7 @@ class H2UpstreamSession(
                                     val announced = msg.settings().maxConcurrentStreams()
                                     if (announced != null) {
 
-                                        val limit = announced.coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
+                                        val limit = announced.coerceIn(1L, localMaxConcurrentStreams.coerceIn(1, 64).toLong()).toInt()
                                         if (limit != maxConcurrentStreams) {
                                             maxConcurrentStreams = limit
                                             FoxyLog.i(

@@ -5,6 +5,13 @@ internal object RussianStrings {
     private val table = mapOf(
         "Send Code" to "Отправить код",
         "Sign in with Firefox" to "Войти через Firefox",
+        "Anti-Censorship & Performance" to "Защита от цензуры и производительность",
+        "Disabled" to "Отключено",
+        "First byte" to "Первый байт",
+        "Before SNI" to "Перед SNI",
+        "Multiplex concurrency" to "Параллельность мультиплексирования",
+        "streams" to "потоков",
+        "These controls affect Foxy only. Changes apply on the next Foxy connection." to "Эти параметры влияют только на Foxy и применяются при следующем подключении Foxy.",
         "Firefox sign-in opened" to "Открыта страница входа Firefox",
         "Opening…" to "Открывается…",
         "Firefox sign-in pending" to "Вход через Firefox не завершён",

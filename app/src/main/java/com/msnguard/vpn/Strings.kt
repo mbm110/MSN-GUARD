@@ -13,6 +13,13 @@ object Strings {
     private val table = mapOf(
         "Send Code" to Triple("Send Code", "ارسال کد", "Send Code"),
         "Sign in with Firefox" to Triple("Sign in with Firefox", "ورود با حساب Firefox", "Sign in with Firefox"),
+        "Anti-Censorship & Performance" to Triple("Anti-Censorship & Performance", "ضد سانسور و کارایی", "反审查与性能"),
+        "Disabled" to Triple("Disabled", "غیرفعال", "已禁用"),
+        "First byte" to Triple("First byte", "بایت اول", "第一个字节"),
+        "Before SNI" to Triple("Before SNI", "قبل از SNI", "SNI 前"),
+        "Multiplex concurrency" to Triple("Multiplex concurrency", "هم‌زمانی مالتی‌پلکس", "多路复用并发数"),
+        "streams" to Triple("streams", "جریان", "流"),
+        "These controls affect Foxy only. Changes apply on the next Foxy connection." to Triple("These controls affect Foxy only. Changes apply on the next Foxy connection.", "این گزینه‌ها فقط روی Foxy اثر دارند و از اتصال بعدی اعمال می‌شوند.", "这些选项只影响 Foxy，并在下次 Foxy 连接时生效."),
         "Firefox sign-in opened" to Triple("Firefox sign-in opened", "صفحه ورود Firefox باز شد", "Firefox sign-in opened"),
         "Opening…" to Triple("Opening…", "در حال باز کردن…", "Opening…"),
         "Firefox sign-in pending" to Triple("Firefox sign-in pending", "ورود Firefox تکمیل نشده", "Firefox sign-in pending"),

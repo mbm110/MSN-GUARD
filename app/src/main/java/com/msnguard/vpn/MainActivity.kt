@@ -8274,6 +8274,47 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(14) })
 
+        // Foxy-only anti-censorship and performance controls. These settings
+        // are consumed by FoxyTunnel/H2UpstreamSession only.
+        val tuningCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+        }
+        tuningCard.addView(foxySectionHead(Strings.t("Anti-Censorship & Performance")))
+        val tlsRow = foxyInfoRow(
+            Strings.t("TLS fragmentation"),
+            when (com.msnguard.vpn.foxy.FoxySettings.tlsSplitMode(this)) {
+                com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.OFF -> Strings.t("Disabled")
+                com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.FIRST_BYTE -> Strings.t("First byte")
+                com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.SNI -> Strings.t("Before SNI")
+            }, INK, palette.neonViolet,
+        )
+        tlsRow.setOnClickListener {
+            val values = com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.entries
+            AlertDialog.Builder(this).setTitle(Strings.t("TLS fragmentation"))
+                .setSingleChoiceItems(values.map { when (it) {
+                    com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.OFF -> Strings.t("Disabled")
+                    com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.FIRST_BYTE -> Strings.t("First byte")
+                    com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.SNI -> Strings.t("Before SNI")
+                } }.toTypedArray(), values.indexOf(com.msnguard.vpn.foxy.FoxySettings.tlsSplitMode(this))) { d, which ->
+                    com.msnguard.vpn.foxy.FoxySettings.saveTlsSplitMode(this, values[which]); d.dismiss(); closeFoxySettingScreen(); openFoxySettingScreen()
+                }.setNegativeButton(Strings.t("Cancel"), null).show().also { mirrorDialog(it) }
+        }
+        tuningCard.addView(tlsRow, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
+        val streams = com.msnguard.vpn.foxy.FoxySettings.multiplexStreams(this)
+        val muxRow = foxyInfoRow(Strings.t("Multiplex concurrency"), "$streams ${Strings.t("streams")}", INK, palette.neonBlue)
+        muxRow.setOnClickListener {
+            val values = listOf(4, 8, 16, 32, 64)
+            AlertDialog.Builder(this).setTitle(Strings.t("Multiplex concurrency"))
+                .setSingleChoiceItems(values.map { "$it ${Strings.t("streams")}" }.toTypedArray(), values.indexOf(streams).coerceAtLeast(0)) { d, which ->
+                    com.msnguard.vpn.foxy.FoxySettings.saveMultiplexStreams(this, values[which]); d.dismiss(); closeFoxySettingScreen(); openFoxySettingScreen()
+                }.setNegativeButton(Strings.t("Cancel"), null).show().also { mirrorDialog(it) }
+        }
+        tuningCard.addView(muxRow, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
+        tuningCard.addView(label(Strings.t("These controls affect Foxy only. Changes apply on the next Foxy connection."), 11f, MUTED).apply { setPadding(dp(2), dp(12), 0, 0) })
+        content.addView(tuningCard, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) })
+
         scroll.addView(content, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ))

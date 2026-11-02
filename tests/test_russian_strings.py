@@ -21,7 +21,7 @@ class RussianStringsContract(unittest.TestCase):
         keys = [key for key, _ in RUSSIAN_ROWS]
         self.assertEqual(len(keys), len(set(keys)))
         self.assertEqual(set(keys), set(SOURCE_KEYS))
-        self.assertEqual(len(keys), 786)
+        self.assertEqual(len(keys), 793)
 
     def test_placeholders_and_russian_copy(self):
         for key, value in RUSSIAN_ROWS:
