@@ -6456,8 +6456,10 @@ class MainActivity : Activity() {
         ) { chosen ->
             if (chosen.host == "__refresh__") {
                 Thread {
-                    val updated = SstpServerRepository.refresh(this)
-                    runOnUiThread { toastShort(Strings.tf("SSTP list updated: %s servers", updated.size.toString())) }
+                    kotlinx.coroutines.runBlocking {
+                        val updated = SstpServerRepository.refresh(this@MainActivity)
+                        runOnUiThread { toastShort(Strings.tf("SSTP list updated: %s servers", updated.size.toString())) }
+                    }
                 }.start()
             } else {
                 preferences().edit().putString("sstp_host", chosen.host).putInt("sstp_port", chosen.port).apply()

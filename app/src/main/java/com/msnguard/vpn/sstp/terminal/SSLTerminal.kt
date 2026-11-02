@@ -199,8 +199,9 @@ internal class SSLTerminal(private val bridge: SharedBridge) {
         }
 
 
-        socket!!.soTimeout = 1_000
-        bridge.service.protectSocket(socket)
+        socket?.soTimeout = 1_000
+        val protectedSocket = socket ?: return false
+        if (!bridge.service.protectSocket(protectedSocket)) return false
         return true
     }
 
@@ -211,13 +212,6 @@ internal class SSLTerminal(private val bridge: SharedBridge) {
     internal fun getApplicationBufferSize(): Int {
         return engine.session.applicationBufferSize
     }
-
-    internal fun getSession(): SSLSession = engine.session
-
-    internal fun getServerCertificate(): java.security.cert.Certificate {
-        return engine.session.peerCertificates.first()
-    }
-
 
     internal fun receive(buffer: ByteBuffer): SSLEngineResult {
         var startPayload: Int
