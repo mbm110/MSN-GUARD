@@ -8356,13 +8356,11 @@ class MainActivity : Activity() {
                 description = { "" },
             ) { chosen ->
                 com.msnguard.vpn.foxy.FoxySettings.saveTlsSplitMode(this, chosen)
-                tlsRow.setValue(
-                    when (chosen) {
-                        com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.OFF -> Strings.t("Disabled")
-                        com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.FIRST_BYTE -> Strings.t("First byte")
-                        com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.SNI -> Strings.t("Before SNI")
-                    },
-                )
+                (tlsRow.tag as? TextView)?.text = when (chosen) {
+                    com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.OFF -> Strings.t("Disabled")
+                    com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.FIRST_BYTE -> Strings.t("First byte")
+                    com.msnguard.vpn.foxy.FoxySettings.TlsSplitMode.SNI -> Strings.t("Before SNI")
+                }
             }
         }
         tuningCard.addView(tlsRow, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
@@ -8379,7 +8377,7 @@ class MainActivity : Activity() {
                 description = { "" },
             ) { chosen ->
                 com.msnguard.vpn.foxy.FoxySettings.saveMultiplexStreams(this, chosen)
-                muxRow.setValue("$chosen ${Strings.t("streams")}")
+                (muxRow.tag as? TextView)?.text = "$chosen ${Strings.t("streams")}"
             }
         }
         tuningCard.addView(muxRow, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
