@@ -557,7 +557,9 @@ class MainActivity : Activity() {
             //
             // finish() is what super.onBackPressed() does for a root launcher
             // activity, so both paths now behave identically.
-            OnBackInvokedCallback { if (!handleBack()) finish() }.also { callback ->
+            OnBackInvokedCallback {
+                if (!com.msnguard.vpn.foxy.FoxyBrowserLogin.handleBack() && !handleBack()) finish()
+            }.also { callback ->
                 predictiveBackCallback = callback
                 onBackInvokedDispatcher.registerOnBackInvokedCallback(
                     OnBackInvokedDispatcher.PRIORITY_DEFAULT,
@@ -813,6 +815,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        com.msnguard.vpn.foxy.FoxyBrowserLogin.close()
         // The session ticker is a Handler post, not tied to a view, so it has to
         // be cancelled by hand. The dial's own animators already stop in
         // onDetachedFromWindow.
@@ -7925,6 +7928,7 @@ class MainActivity : Activity() {
         .toList()
 
     override fun onBackPressed() {
+        if (com.msnguard.vpn.foxy.FoxyBrowserLogin.handleBack()) return
         if (!handleBack()) super.onBackPressed()
     }
 

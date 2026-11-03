@@ -37,14 +37,13 @@ class FoxyReferenceParityContract(unittest.TestCase):
         self.assertNotIn('Strings.t("Send Code")', text)
         browser = (ROOT / "app/src/main/java/com/msnguard/vpn/foxy/FoxyBrowserLogin.kt").read_text()
         self.assertIn("isFocusableInTouchMode = true", browser)
-        self.assertIn("FLAG_NOT_FOCUSABLE", browser)
-        self.assertIn("FLAG_ALT_FOCUSABLE_IM", browser)
-        # Do not steal focus from the HTML editor or autofill popup on each tap.
+        self.assertIn("WindowInsets.Type.ime()", browser)
+        # Keep native HTML editor ownership; do not force an IME connection.
         self.assertNotIn("override fun onTouchEvent", browser)
         self.assertNotIn("override fun onCreateInputConnection", browser)
         self.assertNotIn("showSoftInput", browser)
         self.assertIn("SOFT_INPUT_ADJUST_RESIZE", browser)
-        self.assertIn("SOFT_INPUT_STATE_ALWAYS_VISIBLE", browser)
+        self.assertNotIn("SOFT_INPUT_STATE_ALWAYS_VISIBLE", browser)
 
     def test_country_ping_is_bounded_and_display_only(self):
         ping = (ROOT / "app/src/main/java/com/msnguard/vpn/foxy/FoxyCountryPing.kt").read_text()

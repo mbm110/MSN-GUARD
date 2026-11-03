@@ -3,7 +3,11 @@ package com.msnguard.vpn.foxy
 import com.msnguard.vpn.Strings
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.app.AlertDialog
+import android.view.View
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.ProgressBar
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -28,8 +32,28 @@ object FoxyBrowserLogin {
     private val userAgent =
         "Mozilla/5.0 (Android ${Build.VERSION.RELEASE.ifBlank { "14" }}; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0"
 
+    private var backAction: (() -> Unit)? = null
+    private var closeAction: (() -> Unit)? = null
+
+    fun handleBack(): Boolean {
+        val action = backAction ?: return false
+        action()
+        return true
+    }
+
+    fun close() { closeAction?.invoke() }
+
     @SuppressLint("SetJavaScriptEnabled")
     fun show(activity: Activity, onResult: (Result<Unit>) -> Unit) {
+        if (backAction != null) return
+        val host = activity.findViewById<ViewGroup>(android.R.id.content)
+        val oldSoftInputMode = activity.window.attributes.softInputMode
+        val density = activity.resources.displayMetrics.density
+        val page = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(if (com.msnguard.vpn.AppAppearance.isNight(activity)) 0xFF161622.toInt() else 0xFFF7F8FC.toInt())
+            isClickable = true
+        }
         val web = WebView(activity).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -45,22 +69,41 @@ object FoxyBrowserLogin {
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
         }
         var finished = false
+        var notifying = true
         fun finish(result: Result<Unit>) {
             if (finished) return
             finished = true
+            backAction = null
+            closeAction = null
+            activity.window.setSoftInputMode(oldSoftInputMode)
+            host.removeView(page)
             runCatching { CookieManager.getInstance().flush() }
             web.stopLoading()
+            web.removeJavascriptInterface("foxyWebChannel")
+            page.removeView(web)
             web.destroy()
-            onResult(result)
+            if (notifying && !activity.isDestroyed && !activity.isFinishing) onResult(result)
         }
         val repository = FxaAuthRepository(FxoTokenStore(activity.applicationContext))
-        val dialog = AlertDialog.Builder(activity)
-            .setTitle(Strings.t("Sign in with Firefox"))
-            .setView(web)
-            .setPositiveButton("Ok") { _, _ ->
-                finish(Result.failure(IllegalStateException("Sign-in cancelled")))
-            }
-            .create()
+        backAction = {
+            if (web.canGoBack()) web.goBack()
+            else finish(Result.failure(IllegalStateException("Sign-in cancelled")))
+        }
+        closeAction = {
+            notifying = false
+            finish(Result.failure(IllegalStateException("Sign-in cancelled")))
+        }
+        val header = TextView(activity).apply {
+            text = "‹  " + Strings.t("Sign in with Firefox")
+            textSize = 18f
+            setTextColor(if (com.msnguard.vpn.AppAppearance.isNight(activity)) 0xFFF5F5FA.toInt() else 0xFF202034.toInt())
+            setPadding((16 * density).toInt(), (16 * density).toInt(), (16 * density).toInt(), (16 * density).toInt())
+            setOnClickListener { handleBack() }
+        }
+        val progress = ProgressBar(activity, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100 }
+        page.addView(header, LinearLayout.LayoutParams(-1, -2))
+        page.addView(progress, LinearLayout.LayoutParams(-1, (3 * density).toInt()))
+        page.addView(web, LinearLayout.LayoutParams(-1, 0, 1f))
         val bridge = WebChannelBridge(
             web,
             repository,
@@ -106,37 +149,24 @@ object FoxyBrowserLogin {
                 }
             }
         }
-        web.webChromeClient = WebChromeClient()
-        dialog.setOnShowListener {
-            // AlertDialog may set ALT_FOCUSABLE_IM before the asynchronously
-            // loaded HTML exposes a text editor. Clear both IME blockers.
-            dialog.window?.clearFlags(
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM,
-            )
-            dialog.window?.setSoftInputMode(
-                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
-                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE,
-            )
-            web.isFocusable = true
-            web.isFocusableInTouchMode = true
-            web.requestFocus()
-            web.loadUrl(repository.browserLoginUrl())
+        web.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                progress.progress = newProgress
+                progress.visibility = if (newProgress < 100) View.VISIBLE else View.GONE
+            }
         }
-        dialog.setOnDismissListener {
-            if (!finished) finish(Result.failure(IllegalStateException("Sign-in cancelled")))
+        page.setOnApplyWindowInsetsListener { _, insets ->
+            val bottom = if (Build.VERSION.SDK_INT >= 30) {
+                insets.getInsets(android.view.WindowInsets.Type.ime() or android.view.WindowInsets.Type.systemBars()).bottom
+            } else insets.systemWindowInsetBottom
+            page.setPadding(insets.systemWindowInsetLeft, insets.systemWindowInsetTop,
+                insets.systemWindowInsetRight, bottom)
+            insets
         }
-        dialog.show()
-        dialog.window?.apply {
-            setSoftInputMode(
-                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
-                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE,
-            )
-            setLayout(
-                (activity.resources.displayMetrics.widthPixels * .96).toInt(),
-                (activity.resources.displayMetrics.heightPixels * .90).toInt(),
-            )
-        }
+        activity.window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        host.addView(page, ViewGroup.LayoutParams(-1, -1))
+        page.requestApplyInsets()
+        web.loadUrl(repository.browserLoginUrl())
     }
 
     private class WebChannelBridge(
