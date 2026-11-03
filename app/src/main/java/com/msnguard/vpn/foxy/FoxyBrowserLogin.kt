@@ -57,7 +57,7 @@ object FoxyBrowserLogin {
         val dialog = AlertDialog.Builder(activity)
             .setTitle(Strings.t("Sign in with Firefox"))
             .setView(web)
-            .setNegativeButton("Cancel") { _, _ ->
+            .setPositiveButton("Ok") { _, _ ->
                 finish(Result.failure(IllegalStateException("Sign-in cancelled")))
             }
             .create()
