@@ -366,7 +366,8 @@ class MainActivity : Activity() {
      * makes the receiver keep the failure message on screen.
      */
     private var suppressNextDisconnectedPaint = false
-    private var ipRequest = 0
+    @Volatile private var ipRequest = 0
+    @Volatile private var exitLookupAllowed = true
     @Volatile private var ipRefreshInFlight = false
     @Volatile private var ipRefreshPending = false
     /**
@@ -396,7 +397,7 @@ class MainActivity : Activity() {
     private var coreExitIp = ""
     private var coreExitCountry = ""
     /** Generation counter for country lookups, so a stale one cannot repaint. */
-    private var countryRequest = 0
+    @Volatile private var countryRequest = 0
     /**
      * The address the in-flight country lookup is about.
      *
@@ -446,7 +447,7 @@ class MainActivity : Activity() {
                     coreExitCountry = ""
                     // The core reports an exit only after the tunnel is stable.
                     // Do not start country work while the dial is still connecting.
-                    if (visualState == OrbitDialView.State.CONNECTING) return
+                    if (!exitLookupAllowed) return
                     // An in-flight HTTP lookup must not overwrite this with the
                     // carrier's address when it finishes late.
                     ipRequest++
@@ -1385,6 +1386,7 @@ class MainActivity : Activity() {
             }
             ConnectionLog.record("Tunnel moved no bytes in ${BYTE_WATCH_MS / 1000}s — reporting degraded")
             visualState = OrbitDialView.State.DEGRADED
+            exitLookupAllowed = false
             orbitDial.state = OrbitDialView.State.DEGRADED
             connectionTitle.setTextColor(AMBER_TEXT)
             connectionDetail.text = Strings.t("Tunnel is up but no traffic is passing")
@@ -1715,7 +1717,7 @@ class MainActivity : Activity() {
         // IP/flag lookups belong only to the stable disconnected or connected states.
         // Connecting must remain quiet; cancelling an in-flight request also prevents
         // a late carrier result from repainting the connection screen.
-        if (visualState == OrbitDialView.State.CONNECTING) {
+        if (!exitLookupAllowed) {
             ipRetryHandler.removeCallbacks(ipRetryRunnable)
             ipRequest++
             ipRefreshPending = false
@@ -1768,7 +1770,8 @@ class MainActivity : Activity() {
         Thread {
             val result = runCatching {
                 repeat(IP_FETCH_ATTEMPTS) { attempt ->
-                    runCatching { fetchPublicIp() }.getOrNull()?.let { return@runCatching it }
+                    check(exitLookupAllowed && request == ipRequest) { "IP lookup superseded" }
+                    runCatching { fetchPublicIp { exitLookupAllowed && request == ipRequest } }.getOrNull()?.let { return@runCatching it }
                     if (attempt + 1 < IP_FETCH_ATTEMPTS) Thread.sleep(IP_RETRY_DELAY_MS)
                 }
                 error("IP unavailable")
@@ -1829,9 +1832,10 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun fetchPublicIp(): Pair<String, String> {
+    private fun fetchPublicIp(allowed: () -> Boolean): Pair<String, String> {
         var failure: Throwable? = null
         for (url in IP_INFO_URLS) {
+            check(allowed()) { "IP lookup superseded" }
             try {
                 val connection = openTunnelConnection(url)
                 try {
@@ -1962,7 +1966,7 @@ class MainActivity : Activity() {
      * were verified returning IR for the two addresses above.
      */
     private fun resolveExitCountry(ip: String) {
-        if (ip.isBlank() || visualState == OrbitDialView.State.CONNECTING) return
+        if (ip.isBlank() || !exitLookupAllowed) return
         val request = ++countryRequest
         // The address this lookup is about. The core-measured path can compare
         // against coreExitIp, but the HTTP path (Tor and Psiphon, where the
@@ -1970,10 +1974,10 @@ class MainActivity : Activity() {
         // coreExitIp blank, so it needs its own record of what was asked.
         countryLookupIp = ip
         Thread {
-            val country = runCatching { fetchCountryFor(ip) }.getOrNull()
+            val country = runCatching { fetchCountryFor(ip) { exitLookupAllowed && request == countryRequest } }.getOrNull()
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                if (visualState == OrbitDialView.State.CONNECTING) return@runOnUiThread
+                if (!exitLookupAllowed) return@runOnUiThread
                 // A newer measurement (or a disconnect) superseded this lookup.
                 if (request != countryRequest || countryLookupIp != ip) return@runOnUiThread
                 if (country.isNullOrBlank()) return@runOnUiThread
@@ -1988,8 +1992,9 @@ class MainActivity : Activity() {
     }
 
     /** Two-letter country code for [ip], or null when no endpoint answers. */
-    private fun fetchCountryFor(ip: String): String? {
+    private fun fetchCountryFor(ip: String, allowed: () -> Boolean): String? {
         for (template in COUNTRY_LOOKUP_URLS) {
+            if (!allowed()) return null
             try {
                 val connection = (URL(template.format(ip)).openConnection() as HttpURLConnection)
                     .apply {
@@ -8844,6 +8849,11 @@ class MainActivity : Activity() {
     }
 
     private fun showConnectionProgress(title: String, detail: String) {
+        exitLookupAllowed = false
+        ipRequest++
+        countryRequest++
+        ipRefreshPending = false
+        ipRetryHandler.removeCallbacks(ipRetryRunnable)
         latencyRequest++
         chipLatency.text = Strings.t("Latency —")
         visualState = OrbitDialView.State.CONNECTING
@@ -8875,6 +8885,7 @@ class MainActivity : Activity() {
         // the whole bar the ladder was searching for. A no-op when no scan is running.
         completeAutoScan()
         visualState = OrbitDialView.State.CONNECTED
+        exitLookupAllowed = true
         orbitDial.state = visualState
         orbitDial.progressPercent = -1
         renderStatusLed()
@@ -8917,6 +8928,7 @@ class MainActivity : Activity() {
     private fun showDegraded() {
         if (!isTunnelActive()) return
         visualState = OrbitDialView.State.DEGRADED
+        exitLookupAllowed = false
         orbitDial.state = visualState
         renderStatusLed()
         // Amber, but the readable amber: this is text on the card, and on the
@@ -8936,6 +8948,7 @@ class MainActivity : Activity() {
         clearCoreExitIp()
         chipLatency.text = Strings.t("Latency —")
         visualState = OrbitDialView.State.FAILED
+        exitLookupAllowed = false
         orbitDial.state = visualState
         renderStatusLed()
         stopSessionTimer()
@@ -8953,6 +8966,7 @@ class MainActivity : Activity() {
         stopAutoPing()
         chipLatency.text = Strings.t("Latency —")
         visualState = OrbitDialView.State.DISCONNECTED
+        exitLookupAllowed = true
         orbitDial.state = visualState
         renderStatusLed()
         stopSessionTimer()
