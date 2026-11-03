@@ -88,6 +88,17 @@ jobs:
           # the stacktrace if the packaging task itself fails again.
           ./gradlew --no-parallel --max-workers=1 --stacktrace assembleRelease -PaetheryKeystore=release.keystore
 
+      - name: Verify APK signatures
+        run: |
+          SIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          for apk in app/build/outputs/apk/release/*.apk; do
+            "$SIGNER" verify --verbose --print-certs "$apk" > "$apk.signing.txt"
+            cat "$apk.signing.txt"
+            for scheme in 1 2 3; do
+              grep -q "Verified using v$scheme scheme.*: true" "$apk.signing.txt"
+            done
+          done
+
       - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
