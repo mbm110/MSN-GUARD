@@ -94,7 +94,10 @@ jobs:
           for apk in app/build/outputs/apk/release/*.apk; do
             "$SIGNER" verify --verbose --print-certs "$apk" > "$apk.signing.txt"
             cat "$apk.signing.txt"
-            for scheme in 1 2 3; do
+            "$SIGNER" verify --verbose --print-certs --min-sdk-version 23 --max-sdk-version 23 "$apk" > "$apk.v1.txt"
+            grep -q "Verified using v1 scheme.*: true" "$apk.v1.txt"
+            cat "$apk.v1.txt"
+            for scheme in 2 3; do
               grep -q "Verified using v$scheme scheme.*: true" "$apk.signing.txt"
             done
           done
