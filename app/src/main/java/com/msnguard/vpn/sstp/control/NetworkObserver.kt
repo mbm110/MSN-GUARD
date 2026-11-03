@@ -48,6 +48,15 @@ internal class NetworkObserver(val bridge: SharedBridge) {
     private fun updateSummary(properties: LinkProperties) {
         val summary = mutableListOf<String>()
 
+        bridge.sslTerminal!!.getSession().also {
+            if (!it.isValid) return
+
+            summary.add("[SSL/TLS Parameters]")
+            summary.add("PROTOCOL: ${it.protocol}")
+            summary.add("SUITE: ${it.cipherSuite}")
+        }
+        summary.add("")
+
         summary.add("[Assigned IP Address]")
         properties.linkAddresses.forEach {
             summary.add(it.address.hostAddress ?: "")
