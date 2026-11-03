@@ -27,10 +27,10 @@ object FoxyCountryPing {
     }
 
     private fun pingCountry(country: VpnCountry): Long {
-        val targets = country.cities.asSequence()
-            .flatMap { it.servers.asSequence() }
-            .filter { !it.quarantined && it.hostname.isNotBlank() && it.port in 1..65535 }
-            .map { it.hostname to it.port }
+        val targets = ServerListClient.candidatesForCountry(listOf(country), country.code)
+            .asSequence()
+            .filter { it.host.isNotBlank() && it.port in 1..65535 }
+            .map { it.host to it.port }
             .distinct()
             .take(3)
             .toList()
@@ -40,6 +40,9 @@ object FoxyCountryPing {
             runCatching {
                 Socket().use { socket ->
                     socket.tcpNoDelay = true
+                    socket.bind(InetSocketAddress(0))
+                    val protector = FoxyControlPlaneHttp.socketProtector
+                    check(protector == null || protector(socket)) { "Foxy ping socket protection failed" }
                     socket.connect(InetSocketAddress(host, port), TIMEOUT_MS)
                 }
             }.onSuccess {

@@ -44,7 +44,7 @@ object FoxySettings {
         prefs(ctx).edit().putInt(MTU_PREF_KEY, mtu.coerceIn(1280, 1500)).apply()
     }
 
-    fun multiplexStreams(ctx: android.content.Context): Int = prefs(ctx).getInt(MULTIPLEX_PREF_KEY, 8).coerceIn(1, 64)
+    fun multiplexStreams(ctx: android.content.Context): Int = prefs(ctx).getInt(MULTIPLEX_PREF_KEY, 32).coerceIn(1, 64)
     fun saveMultiplexStreams(ctx: android.content.Context, streams: Int) {
         prefs(ctx).edit().putInt(MULTIPLEX_PREF_KEY, streams.coerceIn(1, 64)).apply()
     }
