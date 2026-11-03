@@ -101,7 +101,8 @@ object MtuConfig {
     /** Persist [value] for [method]; returns false if out of range. */
     fun set(context: Context, method: Method, value: Int): Boolean {
         if (!isValid(value)) return false
-        context.profiled().edit().putInt(method.prefKey, value).apply()
+        MtuAutoScan.clearSessionValue(method)
+        context.profiled().edit().putInt(method.prefKey, value).commit()
         return true
     }
 

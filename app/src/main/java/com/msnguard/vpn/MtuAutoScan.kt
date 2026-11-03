@@ -48,6 +48,12 @@ object MtuAutoScan {
         context.profiled().edit().putBoolean(PREF, on).commit()
     }
 
+    /** Manual edits must be immediately visible to the settings screen. */
+    @Synchronized
+    fun clearSessionValue(method: MtuConfig.Method) {
+        session.remove(method)
+    }
+
     /**
      * Scan results for the CURRENT connect attempt. One method → one number;
      * cleared by [markSessionStart] at the top of every connect, so stale

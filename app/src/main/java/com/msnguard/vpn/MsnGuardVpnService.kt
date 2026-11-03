@@ -878,6 +878,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
 
         const val ACTION_CONNECT = "com.msnguard.vpn.CONNECT"
         const val ACTION_DISCONNECT = "com.msnguard.vpn.DISCONNECT"
+        const val ACTION_CANCEL_CONNECT = "com.msnguard.vpn.CANCEL_CONNECT"
         const val ACTION_PAUSE = "com.msnguard.vpn.PAUSE"
         const val ACTION_RECONNECT = "com.msnguard.vpn.RECONNECT"
         const val ACTION_NOTIFICATION_HEALTH = "com.msnguard.vpn.NOTIFICATION_HEALTH"
@@ -2397,6 +2398,15 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 paused.set(false)
                 reconnectAttempts = 0
                 startTunnel(config)
+            }
+            ACTION_CANCEL_CONNECT -> {
+                userInitiatedStop.set(true)
+                paused.set(false)
+                reconnectRequested.set(false)
+                cancelAutoReconnect()
+                stopRequested.set(true)
+                try { getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID) } catch (_: Exception) {}
+                stopTunnel()
             }
             ACTION_DISCONNECT -> {
                 // The one place that means "the user wants this off". Auto-reconnect
@@ -6878,9 +6888,14 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
     private fun startAsForeground() {
         val manager = getSystemService(NotificationManager::class.java)
         ensureNotificationChannel(manager)
+        val cancelIntent = Intent(this, MsnGuardVpnService::class.java).apply { action = ACTION_CANCEL_CONNECT }
+        val cancelPendingIntent = PendingIntent.getService(
+            this, 5, cancelIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(Strings.t("Connecting…"))
             .setContentText(prettyProtocol())
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, Strings.t("Cancel"), cancelPendingIntent)
             .setSmallIcon(R.drawable.ic_notification)
             .setLargeIcon(appBadge())
             .setColor(NOTIFICATION_ACCENT)
@@ -6956,6 +6971,12 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         }
         val disconnectPendingIntent = PendingIntent.getService(
             this, 1, disconnectIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val cancelConnectIntent = Intent(this, MsnGuardVpnService::class.java).apply {
+            action = ACTION_CANCEL_CONNECT
+        }
+        val cancelConnectPendingIntent = PendingIntent.getService(
+            this, 4, cancelConnectIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
         val reconnectIntent = Intent(this, MsnGuardVpnService::class.java).apply {
