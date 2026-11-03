@@ -444,6 +444,9 @@ class MainActivity : Activity() {
                 if (ip.isNotBlank()) {
                     coreExitIp = ip
                     coreExitCountry = ""
+                    // The core reports an exit only after the tunnel is stable.
+                    // Do not start country work while the dial is still connecting.
+                    if (visualState == OrbitDialView.State.CONNECTING) return
                     // An in-flight HTTP lookup must not overwrite this with the
                     // carrier's address when it finishes late.
                     ipRequest++
@@ -1709,6 +1712,15 @@ class MainActivity : Activity() {
     }
 
     private fun refreshPublicIp(resetRetry: Boolean = true) {
+        // IP/flag lookups belong only to the stable disconnected or connected states.
+        // Connecting must remain quiet; cancelling an in-flight request also prevents
+        // a late carrier result from repainting the connection screen.
+        if (visualState == OrbitDialView.State.CONNECTING) {
+            ipRetryHandler.removeCallbacks(ipRetryRunnable)
+            ipRequest++
+            ipRefreshPending = false
+            return
+        }
         // Any retry armed by a previous failure belongs to that attempt; this call
         // supersedes it.
         ipRetryHandler.removeCallbacks(ipRetryRunnable)
@@ -1950,7 +1962,7 @@ class MainActivity : Activity() {
      * were verified returning IR for the two addresses above.
      */
     private fun resolveExitCountry(ip: String) {
-        if (ip.isBlank()) return
+        if (ip.isBlank() || visualState == OrbitDialView.State.CONNECTING) return
         val request = ++countryRequest
         // The address this lookup is about. The core-measured path can compare
         // against coreExitIp, but the HTTP path (Tor and Psiphon, where the
@@ -1961,6 +1973,7 @@ class MainActivity : Activity() {
             val country = runCatching { fetchCountryFor(ip) }.getOrNull()
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
+                if (visualState == OrbitDialView.State.CONNECTING) return@runOnUiThread
                 // A newer measurement (or a disconnect) superseded this lookup.
                 if (request != countryRequest || countryLookupIp != ip) return@runOnUiThread
                 if (country.isNullOrBlank()) return@runOnUiThread
