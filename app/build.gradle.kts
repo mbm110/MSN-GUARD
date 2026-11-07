@@ -148,6 +148,7 @@ android {
     // Firefox-account auth + control plane (OkHttp + EncryptedSharedPreferences),
     // H2 CONNECT upstream (netti modules), ALPN h2 on API 26-28 (conscrypt).
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.squareup.okhttp3:okhttp-dnsoverhttps:4.12.0")
     implementation("io.netty:netty-handler:4.1.115.Final")
     implementation("io.netty:netty-codec-http2:4.1.115.Final")
     implementation("io.netty:netty-transport:4.1.115.Final")

@@ -5,6 +5,8 @@ import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.dnsoverhttps.DnsOverHttps
 import android.webkit.CookieManager
 import okhttp3.Request
 import com.msnguard.vpn.foxy.TlsClientHelloSplitter
@@ -19,13 +21,10 @@ import javax.net.SocketFactory
 
 private const val TAG = "ControlPlaneHttp"
 
-const val MOZILLA_VPN_USER_AGENT = "MozillaVPN/2.35.0 (sys:linux; iap:true)"
+const val MOZILLA_VPN_USER_AGENT = "MozillaVPN/2.24.0 (sys:android 14)"
 
-fun Request.Builder.applyMozillaVpnHeaders(): Request.Builder {
-    header("User-Agent", MOZILLA_VPN_USER_AGENT)
-    header("Accept", "application/json")
-    return this
-}
+fun Request.Builder.applyMozillaVpnHeaders(): Request.Builder =
+    FirefoxAccountHeaders.apply(this).header("Accept", "application/json")
 
 class SimpleCookieJar : CookieJar {
     private val byDomain = ConcurrentHashMap<String, MutableList<Cookie>>()
@@ -189,6 +188,26 @@ private class ProtectingSocketFactory : SocketFactory() {
 object FoxyControlPlaneHttp {
     val cookieJar = SimpleCookieJar()
 
+    private val bootstrapClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
+            .socketFactory(ProtectingSocketFactory())
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .callTimeout(10, TimeUnit.SECONDS)
+            .build()
+    }
+
+    private val bootstrapDoh: DnsOverHttps by lazy {
+        DnsOverHttps.Builder()
+            .client(bootstrapClient)
+            .url("https://1.1.1.1/dns-query".toHttpUrl())
+            .post(true)
+            .includeIPv6(true)
+            .bootstrapDnsHosts(listOf(InetAddress.getByName("1.1.1.1")))
+            .build()
+    }
+
     @Volatile
     var socketProtector: ((Socket) -> Boolean)? = null
 
@@ -197,8 +216,10 @@ object FoxyControlPlaneHttp {
 
     val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
             .cookieJar(cookieJar)
             .socketFactory(ProtectingSocketFactory())
+            .dns(bootstrapDoh)
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .callTimeout(30, TimeUnit.SECONDS)

@@ -46,6 +46,8 @@ object FoxyBrowserLogin {
     @SuppressLint("SetJavaScriptEnabled")
     fun show(activity: Activity, onResult: (Result<Unit>) -> Unit) {
         if (backAction != null) return
+        FoxyRemoteConfig.init(activity.applicationContext)
+        FoxyRemoteConfig.triggerRefresh()
         val host = activity.findViewById<ViewGroup>(android.R.id.content)
         val oldSoftInputMode = activity.window.attributes.softInputMode
         val density = activity.resources.displayMetrics.density

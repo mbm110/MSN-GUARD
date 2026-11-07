@@ -18,8 +18,6 @@ private const val SOLVE_TIMEOUT_SECONDS = 60L
 
 private const val MAX_POST_BACK_ROUNDS = 8
 
-private const val SOLVER_USER_AGENT =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
 private const val POW_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
@@ -36,7 +34,7 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
     suspend fun solveAndInstall(
         challengedBody: String? = null,
         challengedOrigin: String? = null,
-        userAgent: String = SOLVER_USER_AGENT,
+        userAgent: String = FirefoxAccountHeaders.controlPlaneUserAgent,
     ) = withContext(Dispatchers.IO) {
         if (!challengedBody.isNullOrBlank() && challengedBody.contains("/_fs-ch-")) {
             val origin = challengedOrigin?.trimEnd('/') ?: "https://api.accounts.firefox.com"
@@ -79,7 +77,7 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
             }
             val body = JSONObject().put("token", token).put("data", answers)
                 .toString().toRequestBody("application/json".toMediaType())
-            val request = Request.Builder().url("$prefixUrl/fst-post-back")
+            val request = FirefoxAccountHeaders.apply(Request.Builder().url("$prefixUrl/fst-post-back"), FoxyRemoteConfig.current.solver)
                 .header("Content-Type", "application/json").header("Accept", "application/json")
                 .header("User-Agent", userAgent).header("Origin", origin)
                 .post(body).build()
@@ -121,8 +119,8 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
         url: String,
         accept: String = HTML_ACCEPT,
     ): String {
-        val request = Request.Builder().url(url)
-            .header("User-Agent", SOLVER_USER_AGENT)
+        val request = FirefoxAccountHeaders.apply(Request.Builder().url(url), FoxyRemoteConfig.current.solver)
+            .header("User-Agent", userAgent)
             .header("Accept", accept)
             .build()
         client.newCall(request).execute().use { response ->
@@ -156,7 +154,7 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
             .url(patUrl)
             .header("Accept", "text/plain")
             .header("Content-Type", "application/json")
-            .header("User-Agent", SOLVER_USER_AGENT)
+            .header("User-Agent", userAgent)
             .header("Origin", baseOrigin(prefixUrl))
             .post(ByteArray(0).toRequestBody(null))
             .build()
@@ -259,7 +257,7 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
                 .url("$prefixUrl/fst-post-back")
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
-                .header("User-Agent", SOLVER_USER_AGENT)
+                .header("User-Agent", userAgent)
                 .header("Origin", baseOrigin(prefixUrl))
                 .post(postBody)
                 .build()

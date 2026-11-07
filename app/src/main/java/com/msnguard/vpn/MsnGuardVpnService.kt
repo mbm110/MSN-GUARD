@@ -2380,6 +2380,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // resolver itself. Cheap: one field write per start.
         AppLanguage.appContext = applicationContext
         AppContext.set(applicationContext)
+        com.msnguard.vpn.foxy.FoxyRemoteConfig.init(applicationContext)
+        com.msnguard.vpn.foxy.FoxyRemoteConfig.triggerRefresh()
         // Arm the ECH fallback roster: cached results are reused for
         // MAX_AGE_MS, a probe cycle only refreshes on a daemon thread.
         EchEndpointRoster.maybeProbe(applicationContext)

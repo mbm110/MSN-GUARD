@@ -68,19 +68,26 @@ class ServerListClient(
         get() = context?.let { File(it.filesDir, "vpn_serverlist_cache.json") }
 
     suspend fun fetchCountries(): List<VpnCountry> = withContext(Dispatchers.IO) {
-        val request = Request.Builder().url(REMOTE_SETTINGS_URL).applyMozillaVpnHeaders().build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("Remote Settings fetch failed: HTTP ${response.code}")
-            }
-            val body = response.body ?: throw IOException("Remote Settings response has no body")
-            val raw = body.byteStream().use { readBounded(it, MAX_REMOTE_BYTES) }
-            val countries = parseRecords(raw)
-            if (countries.isNotEmpty()) {
+        try {
+            val request = Request.Builder().url(REMOTE_SETTINGS_URL).applyMozillaVpnHeaders().build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("Remote Settings fetch failed: HTTP ${response.code}")
+                val body = response.body ?: throw IOException("Remote Settings response has no body")
+                val raw = body.byteStream().use { readBounded(it, MAX_REMOTE_BYTES) }
+                val countries = parseRecords(raw)
+                if (countries.isEmpty()) throw IOException("Remote Settings response contained no usable countries")
                 saveCache(raw)
+                FoxyLog.i(TAG, "fetched ${countries.size} countries from Remote Settings")
+                countries
             }
-            FoxyLog.i(TAG, "fetched ${countries.size} countries from Remote Settings")
-            countries
+        } catch (failure: Exception) {
+            val cached = loadCachedCountries()
+            if (cached.isNotEmpty()) {
+                FoxyLog.w(TAG, "Remote Settings unavailable; using verified local cache", failure)
+                cached
+            } else {
+                throw failure
+            }
         }
     }
 

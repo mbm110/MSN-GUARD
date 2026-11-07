@@ -96,7 +96,7 @@ class GuardianClient(
 
     private suspend fun authorizedRequest(method: String, url: String, accessToken: String): Response {
         fun buildRequest(): Request {
-            val builder = Request.Builder().url(url).applyMozillaVpnHeaders()
+            val builder = FirefoxAccountHeaders.apply(Request.Builder().url(url), FoxyRemoteConfig.current.guardian)
             builder.header("Content-Type", "application/json")
             builder.header("Authorization", "Bearer $accessToken")
             if (method == "POST") builder.post(ByteArray(0).toRequestBody(null))
@@ -106,10 +106,11 @@ class GuardianClient(
         var attempts = 1
         while (response.code == 406 && attempts < GUARDIAN_MAX_CHALLENGE_ATTEMPTS) {
             val challengedBody = response.use { it.body?.string().orEmpty() }
-            challengeSolver.solveAndInstall(challengedBody, url.substringBefore("/api/").trimEnd('/'), MOZILLA_VPN_USER_AGENT)
+            challengeSolver.solveAndInstall(challengedBody, url.substringBefore("/api/").trimEnd('/'), FirefoxAccountHeaders.controlPlaneUserAgent)
             response = FoxyControlPlaneHttp.client.newCall(buildRequest()).execute()
             attempts++
         }
+        if (response.code == 406) FoxyRemoteConfig.triggerRefresh()
         return response
     }
 }

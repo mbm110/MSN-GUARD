@@ -329,7 +329,7 @@ class FxaAuthRepository(
         }
 
         fun buildRequest(): Request {
-            val builder = Request.Builder().url(url).applyMozillaVpnHeaders()
+            val builder = FirefoxAccountHeaders.apply(Request.Builder().url(url))
             builder.header("Content-Type", "application/json")
             if (sessionToken != null) {
                 builder.header("Authorization", hawkHeader(method, url, tokenId!!, hmacKey!!, bodyBytes))
@@ -342,10 +342,11 @@ class FxaAuthRepository(
         var attempts = 1
         while (response.code == 406 && attempts < FXA_MAX_CHALLENGE_ATTEMPTS) {
             val challengedBody = response.use { it.body?.string().orEmpty() }
-            challengeSolver.solveAndInstall(challengedBody, url.scheme + "://" + url.host, MOZILLA_VPN_USER_AGENT)
+            challengeSolver.solveAndInstall(challengedBody, url.scheme + "://" + url.host, FirefoxAccountHeaders.controlPlaneUserAgent)
             response = FoxyControlPlaneHttp.client.newCall(buildRequest()).execute()
             attempts++
         }
+        if (response.code == 406) FoxyRemoteConfig.triggerRefresh()
 
         response.use { resp ->
             val text = resp.body?.string().orEmpty()
