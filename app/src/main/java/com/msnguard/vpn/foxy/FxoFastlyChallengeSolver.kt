@@ -117,6 +117,7 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
     private fun fetchText(
         client: OkHttpClient,
         url: String,
+        userAgent: String = FirefoxAccountHeaders.controlPlaneUserAgent,
         accept: String = HTML_ACCEPT,
     ): String {
         val request = FirefoxAccountHeaders.apply(Request.Builder().url(url), FoxyRemoteConfig.current.solver)

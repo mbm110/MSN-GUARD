@@ -135,7 +135,7 @@ object FoxyRemoteConfig {
         }
     }
 
-    fun triggerRefresh(client: OkHttpClient = ControlPlaneHttp.client) {
+    fun triggerRefresh(client: OkHttpClient = FoxyControlPlaneHttp.client) {
         val context = appContext ?: return
         if (!isRefreshing.compareAndSet(false, true)) return
         scope.launch {
@@ -147,7 +147,7 @@ object FoxyRemoteConfig {
         }
     }
 
-    suspend fun refresh(context: Context, client: OkHttpClient = ControlPlaneHttp.client) {
+    suspend fun refresh(context: Context, client: OkHttpClient = FoxyControlPlaneHttp.client) {
         withContext(Dispatchers.IO) {
             refreshMutex.withLock {
                 val fetchedJson =
