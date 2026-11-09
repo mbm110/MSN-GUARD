@@ -188,9 +188,12 @@ object ZeptunEngine : TunEngine {
             appendLine()
             appendLine("[handler.socks5]")
             appendLine("server = \"127.0.0.1:$socksPort\"")
-            appendLine("udp_mode = \"udp\"")
-            // Psiphon's go-socks rejects CONNECT/application bytes buffered during
-            // method negotiation. Keep Zeptun's default pipelining elsewhere.
+            // Psiphon's SOCKS listener accepts CONNECT only; UDP ASSOCIATE (0x03)
+            // is rejected. Keep UDP mode for ordinary Zeptun callers, but force
+            // TCP framing on the Psiphon path.
+            appendLine("udp_mode = \"${if (strictSocks) "tcp" else "udp"}\"")
+            // Psiphon's go-socks also rejects CONNECT/application bytes buffered
+            // during method negotiation. Keep Zeptun's default pipelining elsewhere.
             if (strictSocks) appendLine("pipeline = false")
             // pool_size 4 mirrors the default; enough for bursty browsing without
             // holding a socket per flow.

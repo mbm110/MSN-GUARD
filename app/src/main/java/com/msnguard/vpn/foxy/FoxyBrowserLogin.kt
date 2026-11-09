@@ -106,15 +106,6 @@ object FoxyBrowserLogin {
         page.addView(web, LinearLayout.LayoutParams(-1, 0, 1f))
         val bridge = WebChannelBridge(
             web,
-            repository,
-            onTokens = { access, refresh, expires ->
-                Thread {
-                    val result = kotlinx.coroutines.runBlocking {
-                        repository.completeBrowserLoginWithTokens(access, refresh, expires)
-                    }
-                    activity.runOnUiThread { finish(result) }
-                }.start()
-            },
             onSessionToken = { token ->
                 Thread {
                     val result = kotlinx.coroutines.runBlocking {
@@ -172,13 +163,10 @@ object FoxyBrowserLogin {
 
     private class WebChannelBridge(
         webView: WebView,
-        private val authRepository: FxaAuthRepository,
-        private val onTokens: (String, String?, Long) -> Unit,
         private val onSessionToken: (String) -> Unit,
     ) {
         private val webViewRef = WeakReference(webView)
         @Volatile private var pendingSessionToken: String? = null
-        @Volatile private var exchangeInProgress = false
 
         @JavascriptInterface
         fun onMessage(payload: String) = onMessage(payload, "https://accounts.firefox.com")
@@ -219,55 +207,10 @@ object FoxyBrowserLogin {
         @JavascriptInterface
         fun onSessionVerified() = pendingSessionToken?.let { notifySessionToken(it) }
 
-        @JavascriptInterface
-        fun onOAuthResult(status: Int, body: String) {
-            val token = pendingSessionToken
-            if (status in 200..299) {
-                runCatching {
-                    val json = JSONObject(body)
-                    onTokens(json.getString("access_token"), json.optString("refresh_token").ifBlank { null }, json.optLong("expires_in", 0L))
-                }.onFailure { token?.let(::fallbackSession) }
-            } else token?.let(::fallbackSession)
-        }
-
-        @JavascriptInterface
-        fun onOAuthError(error: String) {
-            FoxyLog.w("BrowserLogin", "in-browser OAuth exchange failed: $error")
-            pendingSessionToken?.let(::fallbackSession)
-        }
-
         private fun notifySessionToken(token: String) {
-            if (!tokenPattern.matches(token) || exchangeInProgress) return
+            if (!tokenPattern.matches(token) || token == pendingSessionToken) return
             pendingSessionToken = token
-            exchangeInProgress = true
-            runCatching {
-                CookieManager.getInstance().flush()
-                FoxyControlPlaneHttp.cookieJar.syncFromWebView()
-            }
-            val hawk = runCatching { authRepository.buildOAuthHawkHeader(token) }.getOrNull()
-            val view = webViewRef.get()
-            if (hawk == null || view == null) {
-                fallbackSession(token)
-                return
-            }
-            val script = """
-                (function() {
-                  fetch('https://api.accounts.firefox.com/v1/oauth/token', {
-                    method: 'POST',
-                    headers: {'Authorization': ${JSONObject.quote(hawk.first)}, 'Content-Type': 'application/json'},
-                    body: ${JSONObject.quote(hawk.second)}
-                  }).then(function(r) { return r.text().then(function(t) {
-                    foxyWebChannel.onOAuthResult(r.status, t);
-                  }); }).catch(function(e) {
-                    foxyWebChannel.onOAuthError(e ? (e.message || '' + e) : 'fetch_failed');
-                  });
-                })();
-            """.trimIndent()
-            view.post { runCatching { view.evaluateJavascript(script, null) }.onFailure { fallbackSession(token) } }
-        }
-
-        private fun fallbackSession(token: String) {
-            exchangeInProgress = false
+            runCatching { CookieManager.getInstance().flush() }
             webViewRef.get()?.post { onSessionToken(token) } ?: onSessionToken(token)
         }
 

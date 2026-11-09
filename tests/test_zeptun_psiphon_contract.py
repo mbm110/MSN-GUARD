@@ -18,6 +18,7 @@ class ZeptunPsiphonContract(unittest.TestCase):
         self.assertIn('strictSocks = false', engine)
         self.assertIn('strictSocks = true', engine)
         self.assertIn('if (strictSocks) appendLine("pipeline = false")', engine)
+        self.assertIn('if (strictSocks) "tcp" else "udp"', engine)
         self.assertIn('psiphon: Boolean = false', manager)
         self.assertIn('if (psiphon && engine === ZeptunEngine)', manager)
         self.assertIn('ZeptunEngine.startPsiphon(fd, socksPort, mtu, dnsOnly)', manager)
@@ -47,6 +48,8 @@ class ZeptunPsiphonContract(unittest.TestCase):
                     if not match or ('if (strictSocks)' in line and not strict):
                         continue
                     text = match[1].replace('\\"', '"')
+                    text = text.replace('${if (strictSocks) "tcp" else "udp"}',
+                                        'tcp' if strict else 'udp')
                     for name, value in {'rawFd': tun.fileno(), 'mtu': 1424,
                                         'upstream': '1.1.1.1', 'socksPort': 1819}.items():
                         text = text.replace('$' + name, str(value))

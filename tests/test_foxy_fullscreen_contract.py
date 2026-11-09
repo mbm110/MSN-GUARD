@@ -22,7 +22,7 @@ class FoxyFullscreenContract(unittest.TestCase):
         self.assertIn('FoxyBrowserLogin.handleBack()', MAIN)
 
     def test_auth_path_preserved(self):
-        for symbol in ['completeBrowserLoginWithTokens', 'completeBrowserLogin(token)',
+        for symbol in ['completeBrowserLogin(token)',
                        'addJavascriptInterface(bridge, "foxyWebChannel")',
                        'cookieJar.syncFromWebView()', 'web.canGoBack()']:
             self.assertIn(symbol, LOGIN)

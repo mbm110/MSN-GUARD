@@ -46,6 +46,9 @@ class Foxy202Contract(unittest.TestCase):
         self.assertIn('put("grant_type", "authorization_code")', auth)
         self.assertIn('"/oauth/authorization"', auth)
         self.assertIn('"/token"', auth)
+        browser = (FOXY / "FoxyBrowserLogin.kt").read_text()
+        self.assertNotIn("onOAuthResult", browser)
+        self.assertNotIn("api.accounts.firefox.com/v1/oauth/token", browser)
 
     def test_runtime_config_is_initialized_before_login_and_service_start(self):
         login = (FOXY / "FoxyBrowserLogin.kt").read_text()
