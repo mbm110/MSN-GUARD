@@ -119,8 +119,11 @@ class FxaAuthRepository(
             .get()
             .build()
         runCatching {
-            FoxyControlPlaneHttp.client.newCall(request).execute().use { r ->
-                r.code == 200 && r.body?.string()?.let { JSONObject(it).optBoolean("verified", false) } == true
+            FoxyControlPlaneHttp.client.newCall(request).execute().use { response ->
+                response.code == 200 &&
+                    response.body?.string()?.let { body ->
+                        JSONObject(body).optBoolean("verified", false)
+                    } == true
             }
         }.getOrDefault(false)
     }
