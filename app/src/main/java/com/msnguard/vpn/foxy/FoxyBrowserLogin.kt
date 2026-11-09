@@ -29,8 +29,6 @@ object FoxyBrowserLogin {
     private const val CMD_LOGIN = "fxaccounts:login"
     private val tokenPattern = Regex("^[0-9a-fA-F]{64}$")
     private val allowedHost = Regex("^(accounts|api|oauth)\\.firefox\\.com$|^([a-z0-9-]+\\.)*mozilla\\.org$")
-    private val userAgent =
-        "Mozilla/5.0 (Android ${Build.VERSION.RELEASE.ifBlank { "14" }}; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0"
 
     private var backAction: (() -> Unit)? = null
     private var closeAction: (() -> Unit)? = null
@@ -64,7 +62,7 @@ object FoxyBrowserLogin {
             settings.setSupportZoom(false)
             settings.builtInZoomControls = false
             settings.javaScriptCanOpenWindowsAutomatically = false
-            settings.userAgentString = userAgent
+            settings.userAgentString = FirefoxAccountHeaders.browserUserAgent
             isFocusable = true
             isFocusableInTouchMode = true
             CookieManager.getInstance().setAcceptCookie(true)
@@ -169,6 +167,7 @@ object FoxyBrowserLogin {
         host.addView(page, ViewGroup.LayoutParams(-1, -1))
         page.requestApplyInsets()
         web.loadUrl(repository.browserLoginUrl())
+        web.requestFocus(View.FOCUS_DOWN)
     }
 
     private class WebChannelBridge(
@@ -188,13 +187,15 @@ object FoxyBrowserLogin {
         fun onMessage(payload: String, originUrl: String) {
             val host = runCatching { Uri.parse(originUrl).host?.lowercase() }.getOrNull().orEmpty()
             if (!FoxyBrowserLogin.allowedHost.matches(host)) return
-            val message = runCatching { JSONObject(payload).optJSONObject("message") }.getOrNull() ?: return
+            val envelope = runCatching { JSONObject(payload) }.getOrNull() ?: return
+            val channelId = envelope.optString("id").ifBlank { CHANNEL_ID }
+            val message = envelope.optJSONObject("message") ?: return
             val command = message.optString("command")
             val data = message.optJSONObject("data") ?: JSONObject()
             val messageId = message.optString("messageId")
             when (command) {
-                CMD_FXA_STATUS -> reply(messageId, command, "{\"capabilities\":{},\"signedInUser\":null}")
-                CMD_CAN_LINK_ACCOUNT -> reply(messageId, command, "{\"ok\":true}")
+                CMD_FXA_STATUS -> reply(channelId, messageId, command, "{\"capabilities\":{},\"signedInUser\":null}")
+                CMD_CAN_LINK_ACCOUNT -> reply(channelId, messageId, command, "{\"ok\":true}")
                 CMD_LOGIN, "fxaccounts:oauth_login" -> {
                     val token = data.optString("sessionToken").ifBlank { data.optString("token") }.trim()
                     if (tokenPattern.matches(token)) {
@@ -202,7 +203,7 @@ object FoxyBrowserLogin {
                         val verified = !data.has("verified") || data.optBoolean("verified", true)
                         if (verified && data.optString("verificationReason").isBlank()) notifySessionToken(token)
                     }
-                    if (messageId.isNotBlank()) reply(messageId, command, "{\"ok\":true}")
+                    if (messageId.isNotBlank()) reply(channelId, messageId, command, "{\"ok\":true}")
                 }
                 else -> {
                     if (command.contains("verified", ignoreCase = true)) {
@@ -210,7 +211,7 @@ object FoxyBrowserLogin {
                             .ifBlank { pendingSessionToken.orEmpty() }.trim()
                         if (tokenPattern.matches(token)) notifySessionToken(token)
                     }
-                    if (messageId.isNotBlank()) reply(messageId, command, "{\"ok\":true}")
+                    if (messageId.isNotBlank()) reply(channelId, messageId, command, "{\"ok\":true}")
                 }
             }
         }
@@ -270,12 +271,12 @@ object FoxyBrowserLogin {
             webViewRef.get()?.post { onSessionToken(token) } ?: onSessionToken(token)
         }
 
-        private fun reply(messageId: String, command: String, data: String) {
+        private fun reply(channelId: String, messageId: String, command: String, data: String) {
             if (messageId.isBlank()) return
             val view = webViewRef.get() ?: return
             val script = "window.__foxyReply && window.__foxyReply(" +
-                "${JSONObject.quote(CHANNEL_ID)},${JSONObject.quote(messageId)}," +
-                "${JSONObject.quote(command)},${JSONObject.quote(data)});"
+                "${JSONObject.quote(channelId)},${JSONObject.quote(messageId)}," +
+                "${JSONObject.quote(command)},$data);"
             view.post { runCatching { view.evaluateJavascript(script, null) } }
         }
     }
@@ -284,20 +285,26 @@ object FoxyBrowserLogin {
         (function() {
           if (window.__foxyChannelHooked) return;
           window.__foxyChannelHooked = true;
-          function forward(detail) { try {
-            var h=window.location.hostname;
-            if(h!=='accounts.firefox.com' && h.indexOf('.firefox.com')===-1)return;
-            foxyWebChannel.onMessage(typeof detail==='string'?detail:JSON.stringify(detail),window.location.href);
-          } catch(e){} }
-          window.addEventListener('WebChannelMessageToChrome',function(e){forward(e.detail);});
-          document.addEventListener('WebChannelMessageToChrome',function(e){forward(e.detail);});
-          window.__foxyReply=function(i,m,c,d){try{var o={id:i,message:{messageId:m,command:c,data:JSON.parse(d)}};window.dispatchEvent(new CustomEvent('WebChannelMessageToContent',{detail:o}));document.dispatchEvent(new CustomEvent('WebChannelMessageToContent',{detail:JSON.stringify(o)}));}catch(e){}};
-          function u(a){return typeof a==='string'?a:(a&&(a.url||a.href))||'';}
-          function v(a){var s=u(a).toLowerCase();return s.indexOf('/verify')>=0||s.indexOf('/totp')>=0||s.indexOf('enter_code')>=0||s.indexOf('confirm_')>=0||s.indexOf('success')>=0||s.indexOf('/complete')>=0;}
-          if(window.fetch){var f=window.fetch;window.fetch=function(){var a=arguments[0];return f.apply(this,arguments).then(function(r){try{if(r.ok&&v(a))foxyWebChannel.onSessionVerified();}catch(e){}return r;});};}
-          if(window.XMLHttpRequest){var xo=XMLHttpRequest.prototype.open,xs=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.open=function(m,u){this.__foxyUrl=u;return xo.apply(this,arguments);};XMLHttpRequest.prototype.send=function(){this.addEventListener('load',function(){try{if(this.status>=200&&this.status<300&&v(this.__foxyUrl))foxyWebChannel.onSessionVerified();}catch(e){}});return xs.apply(this,arguments);};}
-          var p=history.pushState;if(p)history.pushState=function(){var r=p.apply(this,arguments);if(v(location.href))foxyWebChannel.onSessionVerified();return r;};
-          var q=history.replaceState;if(q)history.replaceState=function(){var r=q.apply(this,arguments);if(v(location.href))foxyWebChannel.onSessionVerified();return r;};
+          var send = function(o) {
+            try {
+              var host = window.location.hostname;
+              if (host !== 'accounts.firefox.com' && !host.endsWith('.firefox.com')) return;
+              var payload = typeof o === 'string' ? o : JSON.stringify(o);
+              foxyWebChannel.onMessage(payload, window.location.href);
+            } catch (e) {}
+          };
+          var onChannel = function(e) {
+            var d = e.detail;
+            if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) { return; } }
+            if (d && d.message) send(d);
+          };
+          window.addEventListener('WebChannelMessageToChrome', onChannel);
+          document.addEventListener('WebChannelMessageToChrome', onChannel);
+          window.__foxyReply = function(id, messageId, command, data) {
+            var detail = { id: id, message: { messageId: messageId, command: command, data: data } };
+            window.dispatchEvent(new CustomEvent('WebChannelMessageToContent', { detail: detail }));
+            document.dispatchEvent(new CustomEvent('WebChannelMessageToContent', { detail: detail }));
+          };
         })();
     """.trimIndent()
 }
