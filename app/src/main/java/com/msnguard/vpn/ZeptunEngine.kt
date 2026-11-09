@@ -110,7 +110,13 @@ object ZeptunEngine : TunEngine {
         return "1.1.1.1"
     }
 
-    override fun start(fd: ParcelFileDescriptor, socksPort: Int, mtu: Int, dnsOnly: Boolean): Boolean {
+    override fun start(fd: ParcelFileDescriptor, socksPort: Int, mtu: Int, dnsOnly: Boolean): Boolean =
+        start(fd, socksPort, mtu, dnsOnly, strictSocks = false)
+
+    fun startPsiphon(fd: ParcelFileDescriptor, socksPort: Int, mtu: Int, dnsOnly: Boolean): Boolean =
+        start(fd, socksPort, mtu, dnsOnly, strictSocks = true)
+
+    private fun start(fd: ParcelFileDescriptor, socksPort: Int, mtu: Int, dnsOnly: Boolean, strictSocks: Boolean): Boolean {
         if (running) return true
         val dup = try { fd.dup() } catch (e: Exception) {
             ConnectionLog.record("Zeptun: dup fd failed: ${e.message}")
@@ -183,6 +189,9 @@ object ZeptunEngine : TunEngine {
             appendLine("[handler.socks5]")
             appendLine("server = \"127.0.0.1:$socksPort\"")
             appendLine("udp_mode = \"udp\"")
+            // Psiphon's go-socks rejects CONNECT/application bytes buffered during
+            // method negotiation. Keep Zeptun's default pipelining elsewhere.
+            if (strictSocks) appendLine("pipeline = false")
             // pool_size 4 mirrors the default; enough for bursty browsing without
             // holding a socket per flow.
             appendLine("pool_size = 4")

@@ -62,10 +62,12 @@ object TunEngineManager {
     fun isRunning(ctx: Context): Boolean = try { current(ctx).isRunning } catch (_: Throwable) { LegacyEngine.isRunning }
 
     /** Start the engine selected in prefs. Falls back to legacy on link error. */
-    fun start(ctx: Context, fd: ParcelFileDescriptor, socksPort: Int, mtu: Int = Tun2SocksManager.VPN_INTERFACE_MTU, dnsOnly: Boolean = false): Boolean {
+    fun start(ctx: Context, fd: ParcelFileDescriptor, socksPort: Int, mtu: Int = Tun2SocksManager.VPN_INTERFACE_MTU, dnsOnly: Boolean = false, psiphon: Boolean = false): Boolean {
         val engine = current(ctx)
         return try {
-            val ok = engine.start(fd, socksPort, mtu, dnsOnly)
+            val ok = if (psiphon && engine === ZeptunEngine) {
+                ZeptunEngine.startPsiphon(fd, socksPort, mtu, dnsOnly)
+            } else engine.start(fd, socksPort, mtu, dnsOnly)
             if (!ok) {
                 ConnectionLog.record("TunEngine ${engine.label} start returned false, falling back to Legacy")
                 if (engine !== LegacyEngine) LegacyEngine.start(fd, socksPort, mtu, dnsOnly) else false

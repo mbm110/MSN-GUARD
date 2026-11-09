@@ -1346,7 +1346,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // Engine MTU = the TUN's MTU (currentTunMtu): the Psiphon onConnected
         // path has no local MTU variable in scope — plain and chained runs
         // land here — so it reads the connect-scoped field the builder wrote.
-        if (!TunEngineManager.start(this, tunFd, port, mtu = currentTunMtu)) {
+        if (!TunEngineManager.start(this, tunFd, port, mtu = currentTunMtu, psiphon = true)) {
             failAndStop(Strings.t("Could not start whole-device routing"))
             return
         }
