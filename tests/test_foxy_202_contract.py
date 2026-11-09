@@ -37,6 +37,16 @@ class Foxy202Contract(unittest.TestCase):
         self.assertIn("JSON.parse(d)", login.split("private val HOOK", 1)[1])
         self.assertIn("data: data", login.split("window.__foxyReply", 1)[1])
 
+    def test_browser_login_uses_verified_session_and_pkce_authorization_code(self):
+        auth = (FOXY / "FxaAuth.kt").read_text()
+        self.assertIn("recovery_email/status", auth)
+        self.assertIn("isSessionVerified(sessionToken)", auth)
+        self.assertIn('put("response_type", "code")', auth)
+        self.assertIn('put("code_challenge_method", "S256")', auth)
+        self.assertIn('put("grant_type", "authorization_code")', auth)
+        self.assertIn('"/oauth/authorization"', auth)
+        self.assertIn('"/token"', auth)
+
     def test_runtime_config_is_initialized_before_login_and_service_start(self):
         login = (FOXY / "FoxyBrowserLogin.kt").read_text()
         service = (ROOT / "app/src/main/java/com/msnguard/vpn/MsnGuardVpnService.kt").read_text()

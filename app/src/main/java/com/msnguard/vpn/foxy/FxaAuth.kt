@@ -15,6 +15,9 @@ import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.security.SecureRandom
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -98,7 +101,27 @@ class FxaAuthRepository(
     }
 
     suspend fun completeBrowserLogin(sessionToken: String): Result<Unit> =
-        completeBrowserSession(sessionToken)
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val clean = sessionToken.trim().replace(Regex("[\\s\\\"]"), "").lowercase()
+                require(Regex("^[0-9a-f]{64}$").matches(clean)) { "Invalid Firefox session token" }
+                completeLogin(clean)
+            }
+        }
+
+    private suspend fun isSessionVerified(sessionToken: String): Boolean = withContext(Dispatchers.IO) {
+        val clean = sessionToken.trim().replace(Regex("[\\s\\\"]"), "").lowercase()
+        if (!Regex("^[0-9a-f]{64}$").matches(clean)) return@withContext false
+        val url = "$FXA_AUTH_SERVER/recovery_email/status".toHttpUrl()
+        val (id, key) = deriveHawkCredentials(clean)
+        val request = Request.Builder().url(url).applyFirefoxHeaders()
+            .header("Authorization", hawkHeader("GET", url, id, key, ByteArray(0))).get().build()
+        runCatching {
+            FoxyControlPlaneHttp.client.newCall(request).awaitResponse().use { r ->
+                r.code == 200 && r.body?.let { JSONObject(it.string()).optBoolean("verified", false) } == true
+            }
+        }.getOrDefault(false)
+    }
 
     /** Legacy request helper retained for tests and non-UI callers. */
     fun browserOAuthRequest(sessionToken: String): Pair<String, String> {
@@ -266,7 +289,14 @@ class FxaAuthRepository(
     }
 
     private suspend fun completeLogin(sessionToken: String) {
-        val tokenData = oauthToken(sessionToken)
+        var verified = false
+        repeat(10) {
+            coroutineContext.ensureActive()
+            if (isSessionVerified(sessionToken)) { verified = true; return@repeat }
+            delay(1500L)
+        }
+        check(verified) { "Firefox account session is not verified yet" }
+        val tokenData = exchangeSessionWithOAuthCode(sessionToken)
         tokenStore.saveAuth(
             RuntimeAuth(
                 accessToken = tokenData.getString("access_token"),
@@ -275,6 +305,38 @@ class FxaAuthRepository(
             ),
         )
         clearPendingSession()
+    }
+
+    private suspend fun exchangeSessionWithOAuthCode(sessionToken: String): JSONObject = withContext(Dispatchers.IO) {
+        val secret = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        val verifier = Base64.encodeToString(secret, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        val challenge = Base64.encodeToString(
+            MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray(Charsets.US_ASCII)),
+            Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
+        )
+        val stateBytes = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        val state = Base64.encodeToString(stateBytes, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        val authorization = JSONObject().apply {
+            put("client_id", FIREFOX_CLIENT_ID)
+            put("response_type", "code")
+            put("scope", OAUTH_SCOPE)
+            put("state", state)
+            put("access_type", "offline")
+            put("code_challenge", challenge)
+            put("code_challenge_method", "S256")
+        }
+        val result = fxaDo("POST", "/oauth/authorization", sessionToken = sessionToken, jsonBody = authorization)
+        val code = result.optString("code")
+        check(code.isNotBlank() && result.optString("state") == state) { "Invalid Firefox OAuth authorization response" }
+        val tokenBody = JSONObject().apply {
+            put("client_id", FIREFOX_CLIENT_ID)
+            put("grant_type", "authorization_code")
+            put("code", code)
+            put("code_verifier", verifier)
+        }
+        val tokens = fxaDoAt(FXA_OAUTH_SERVER, "POST", "/token", null, tokenBody)
+        check(tokens.optString("access_token").isNotBlank()) { "Firefox OAuth response has no access token" }
+        tokens
     }
 
     private suspend fun loginAttempt(email: String, password: String, withVerificationMethod: Boolean = true): JSONObject {
