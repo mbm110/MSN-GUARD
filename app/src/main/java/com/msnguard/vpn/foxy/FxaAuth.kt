@@ -114,11 +114,13 @@ class FxaAuthRepository(
         if (!Regex("^[0-9a-f]{64}$").matches(clean)) return@withContext false
         val url = "$FXA_AUTH_SERVER/recovery_email/status".toHttpUrl()
         val (id, key) = deriveHawkCredentials(clean)
-        val request = Request.Builder().url(url).applyFirefoxHeaders()
-            .header("Authorization", hawkHeader("GET", url, id, key, ByteArray(0))).get().build()
+        val request = FirefoxAccountHeaders.apply(Request.Builder().url(url))
+            .header("Authorization", hawkHeader("GET", url, id, key, ByteArray(0)))
+            .get()
+            .build()
         runCatching {
-            FoxyControlPlaneHttp.client.newCall(request).awaitResponse().use { r ->
-                r.code == 200 && r.body?.let { JSONObject(it.string()).optBoolean("verified", false) } == true
+            FoxyControlPlaneHttp.client.newCall(request).execute().use { r ->
+                r.code == 200 && r.body?.string()?.let { JSONObject(it).optBoolean("verified", false) } == true
             }
         }.getOrDefault(false)
     }
