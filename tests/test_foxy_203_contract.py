@@ -38,6 +38,12 @@ console.log('WebChannel fixture passed');
         self.assertIn('if (result.isSuccess) finish(result)', source)
         self.assertNotIn('Thread {', source)
 
+    def test_control_plane_uses_reference_system_dns_default(self):
+        source = (FOXY / 'FxoControlPlaneHttp.kt').read_text()
+        self.assertIn('.dns(okhttp3.Dns.SYSTEM)', source)
+        self.assertIn('DIRECT_SYSTEM', source)
+        self.assertNotIn('.dns(bootstrapDoh)', source)
+
     def test_verification_exits_immediately_and_refresh_has_fastly_fallback(self):
         source = (FOXY / 'FxaAuth.kt').read_text()
         complete = source.split('private suspend fun completeLogin', 1)[1].split('private suspend fun exchangeSession', 1)[0]

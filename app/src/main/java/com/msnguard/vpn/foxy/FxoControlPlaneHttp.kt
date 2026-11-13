@@ -200,15 +200,50 @@ object FoxyControlPlaneHttp {
             .build()
     }
 
-    private val bootstrapDoh: DnsOverHttps by lazy {
-        DnsOverHttps.Builder()
-            .client(bootstrapClient)
-            .url("https://1.1.1.1/dns-query".toHttpUrl())
-            .post(true)
-            .includeIPv6(true)
-            .bootstrapDnsHosts(listOf(InetAddress.getByName("1.1.1.1")))
-            .build()
+    /**
+     * The reference Foxy client does not depend on one resolver.  A single
+     * blocked DoH endpoint made every control-plane hostname look unknown on
+     * the device, including the relayer itself.  Keep the literal bootstrap
+     * addresses and try the operators in order without recursive hostname DNS.
+     */
+    private val bootstrapDohResolvers: List<DnsOverHttps> by lazy {
+        listOf(
+            "1.1.1.1" to "https://1.1.1.1/dns-query",
+            "8.8.8.8" to "https://8.8.8.8/dns-query",
+            "9.9.9.9" to "https://9.9.9.9/dns-query",
+        ).map { (address, url) ->
+            DnsOverHttps.Builder()
+                .client(bootstrapClient)
+                .url(url.toHttpUrl())
+                .post(true)
+                .includeIPv6(true)
+                .bootstrapDnsHosts(listOf(InetAddress.getByName(address)))
+                .build()
+        }
     }
+
+    private val bootstrapDoh: okhttp3.Dns by lazy {
+        object : okhttp3.Dns {
+            override fun lookup(hostname: String): List<InetAddress> {
+                if (isIpLiteral(hostname)) return listOf(InetAddress.getByName(hostname))
+                var last: Throwable? = null
+                for (resolver in bootstrapDohResolvers) {
+                    try {
+                        val addresses = resolver.lookup(hostname)
+                        if (addresses.isNotEmpty()) return addresses
+                    } catch (failure: Throwable) {
+                        last = failure
+                    }
+                }
+                throw java.net.UnknownHostException(
+                    "No bootstrap DoH resolver answered for $hostname",
+                ).also { if (last != null) it.initCause(last) }
+            }
+        }
+    }
+
+    private fun isIpLiteral(hostname: String): Boolean =
+        runCatching { InetAddress.getByName(hostname).hostAddress == hostname }.getOrDefault(false)
 
     @Volatile
     var socketProtector: ((Socket) -> Boolean)? = null
@@ -222,7 +257,10 @@ object FoxyControlPlaneHttp {
             .addInterceptor(relayerInterceptor)
             .cookieJar(cookieJar)
             .socketFactory(ProtectingSocketFactory())
-            .dns(bootstrapDoh)
+            // Reference FoxyVPN defaults to DIRECT_SYSTEM for control-plane DNS.
+            // A fixed 1.1.1.1 bootstrap made both Mozilla and relayer hosts
+            // appear as UnknownHost when that resolver was unreachable.
+            .dns(okhttp3.Dns.SYSTEM)
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .callTimeout(30, TimeUnit.SECONDS)
