@@ -29,6 +29,8 @@ enum class SessionStatus {
     UNREACHABLE,
 }
 
+class FastlyBlockedException(cause: Throwable? = null) : Exception("Firefox Accounts challenge could not be completed", cause)
+
 class FxaApiError(message: String, val errno: Int?, val statusCode: Int?) : Exception(message)
 
 class FxaRefreshFailure(
@@ -38,7 +40,6 @@ class FxaRefreshFailure(
 ) : Exception(message, cause)
 
 private const val FXA_AUTH_SERVER = "https://api.accounts.firefox.com/v1"
-private const val FXA_OAUTH_SERVER = "https://oauth.accounts.firefox.com/v1"
 private const val FIREFOX_CLIENT_ID = "5882386c6d801776"
 private const val OAUTH_SCOPE = "profile https://identity.mozilla.com/apps/vpn"
 private const val PROTOCOL_VERSION = "identity.mozilla.com/picl/v1/"
@@ -66,13 +67,13 @@ class FxaAuthRepository(
 
     /** URL opened in the in-app Firefox Accounts sign-in page. */
     fun browserLoginUrl(): String =
-        "https://accounts.firefox.com/?context=fx_desktop_v3&service=sync&action=email"
+        FoxyRemoteConfig.current.endpoints.controlPlane.login
 
     /** Same Hawk request as the reference browser flow. */
     fun buildOAuthHawkHeader(sessionToken: String): Pair<String, String> {
         val clean = sessionToken.trim().lowercase()
         require(Regex("^[0-9a-f]{64}$").matches(clean)) { "Invalid Firefox session token" }
-        val url = "$FXA_AUTH_SERVER/oauth/token".toHttpUrl()
+        val url = FoxyRemoteConfig.current.endpoints.controlPlane.oauthToken.toHttpUrl()
         val body = JSONObject().apply {
             put("client_id", FIREFOX_CLIENT_ID)
             put("grant_type", "fxa-credentials")
@@ -112,7 +113,7 @@ class FxaAuthRepository(
     private suspend fun isSessionVerified(sessionToken: String): Boolean = withContext(Dispatchers.IO) {
         val clean = sessionToken.trim().replace(Regex("[\\s\\\"]"), "").lowercase()
         if (!Regex("^[0-9a-f]{64}$").matches(clean)) return@withContext false
-        val url = "$FXA_AUTH_SERVER/recovery_email/status".toHttpUrl()
+        val url = FoxyRemoteConfig.current.endpoints.controlPlane.recoveryStatus.toHttpUrl()
         val (id, key) = deriveHawkCredentials(clean)
         val request = FirefoxAccountHeaders.apply(Request.Builder().url(url))
             .header("Authorization", hawkHeader("GET", url, id, key, ByteArray(0)))
@@ -132,7 +133,7 @@ class FxaAuthRepository(
     fun browserOAuthRequest(sessionToken: String): Pair<String, String> {
         val clean = sessionToken.trim().lowercase()
         require(Regex("^[0-9a-f]{64}$").matches(clean)) { "Invalid Firefox session token" }
-        val url = "$FXA_AUTH_SERVER/oauth/token".toHttpUrl()
+        val url = FoxyRemoteConfig.current.endpoints.controlPlane.oauthToken.toHttpUrl()
         val body = JSONObject().apply {
             put("client_id", FIREFOX_CLIENT_ID)
             put("grant_type", "fxa-credentials")
@@ -233,7 +234,11 @@ class FxaAuthRepository(
         }
 
         val tokenData = try {
-            fxaDoAt(FXA_OAUTH_SERVER, "POST", "/oauth/token", jsonBody = body)
+            try {
+                fxaDoAt(FoxyRemoteConfig.current.endpoints.controlPlane.oauthToken, "POST", "", jsonBody = body)
+            } catch (_: FastlyBlockedException) {
+                fxaDoAt(FoxyRemoteConfig.current.endpoints.controlPlane.oauthFallback, "POST", "", jsonBody = body)
+            }
         } catch (rejected: FxaApiError) {
             throw FxaRefreshFailure(
                 rejected.message ?: "FxA rejected the refresh token",
@@ -295,13 +300,14 @@ class FxaAuthRepository(
 
     private suspend fun completeLogin(sessionToken: String) {
         var verified = false
-        repeat(10) {
+        for (attempt in 0 until 100) {
             coroutineContext.ensureActive()
-            if (isSessionVerified(sessionToken)) { verified = true; return@repeat }
-            delay(1500L)
+            if (isSessionVerified(sessionToken)) { verified = true; break }
+            delay(3000L)
         }
         check(verified) { "Firefox account session is not verified yet" }
         val tokenData = exchangeSessionWithOAuthCode(sessionToken)
+        coroutineContext.ensureActive()
         tokenStore.saveAuth(
             RuntimeAuth(
                 accessToken = tokenData.getString("access_token"),
@@ -330,7 +336,7 @@ class FxaAuthRepository(
             put("code_challenge", challenge)
             put("code_challenge_method", "S256")
         }
-        val result = fxaDo("POST", "/oauth/authorization", sessionToken = sessionToken, jsonBody = authorization)
+        val result = fxaDoAt(FoxyRemoteConfig.current.endpoints.controlPlane.authorization, "POST", "", sessionToken = sessionToken, jsonBody = authorization)
         val code = result.optString("code")
         check(code.isNotBlank() && result.optString("state") == state) { "Invalid Firefox OAuth authorization response" }
         val tokenBody = JSONObject().apply {
@@ -339,7 +345,7 @@ class FxaAuthRepository(
             put("code", code)
             put("code_verifier", verifier)
         }
-        val tokens = fxaDoAt(FXA_OAUTH_SERVER, "POST", "/token", null, tokenBody)
+        val tokens = fxaDoAt(FoxyRemoteConfig.current.endpoints.controlPlane.oauthToken, "POST", "", null, tokenBody)
         check(tokens.optString("access_token").isNotBlank()) { "Firefox OAuth response has no access token" }
         tokens
     }
@@ -368,7 +374,7 @@ class FxaAuthRepository(
             put("scope", OAUTH_SCOPE)
             put("access_type", "offline")
         }
-        return fxaDoAt(FXA_OAUTH_SERVER, "POST", "/oauth/token", sessionToken, body)
+        return fxaDoAt(FoxyRemoteConfig.current.endpoints.controlPlane.oauthToken, "POST", "", sessionToken, body)
     }
 
     private suspend fun fxaDo(
@@ -409,11 +415,22 @@ class FxaAuthRepository(
         var attempts = 1
         while (response.code == 406 && attempts < FXA_MAX_CHALLENGE_ATTEMPTS) {
             val challengedBody = response.use { it.body?.string().orEmpty() }
-            challengeSolver.solveAndInstall(challengedBody, url.scheme + "://" + url.host, FirefoxAccountHeaders.controlPlaneUserAgent)
+            try {
+                challengeSolver.solveAndInstall(challengedBody, url.scheme + "://" + url.host, FirefoxAccountHeaders.controlPlaneUserAgent)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: Exception) {
+                FoxyRemoteConfig.triggerRefresh()
+                throw FastlyBlockedException(failure)
+            }
             response = FoxyControlPlaneHttp.client.newCall(buildRequest()).execute()
             attempts++
         }
-        if (response.code == 406) FoxyRemoteConfig.triggerRefresh()
+        if (response.code == 406) {
+            response.close()
+            FoxyRemoteConfig.triggerRefresh()
+            throw FastlyBlockedException()
+        }
 
         response.use { resp ->
             val text = resp.body?.string().orEmpty()

@@ -29,7 +29,9 @@ class GuardianClient(
 ) {
 
     suspend fun fetchProxyPass(endpoint: String, accessToken: String): ProxyPass = withContext(Dispatchers.IO) {
-        val url = "${endpoint.trimEnd('/')}/api/v1/fpn/token"
+        val url = if (endpoint.isBlank() || endpoint.trimEnd('/') == GUARDIAN_ENDPOINT_DEFAULT)
+            FoxyRemoteConfig.current.endpoints.guardian.token
+        else "${endpoint.trimEnd('/')}/api/v1/fpn/token"
         authorizedRequest("GET", url, accessToken).use { resp ->
             when (resp.code) {
                 401, 403 -> throw TokenInvalidError("access token was rejected by Guardian")
@@ -54,7 +56,9 @@ class GuardianClient(
     }
 
     suspend fun fetchUserInfo(endpoint: String, accessToken: String): Entitlement = withContext(Dispatchers.IO) {
-        val url = "${endpoint.trimEnd('/')}/api/v1/fpn/status"
+        val url = if (endpoint.isBlank() || endpoint.trimEnd('/') == GUARDIAN_ENDPOINT_DEFAULT)
+            FoxyRemoteConfig.current.endpoints.guardian.status
+        else "${endpoint.trimEnd('/')}/api/v1/fpn/status"
         val entitlement = authorizedRequest("GET", url, accessToken).use { resp ->
             val text = resp.body?.string().orEmpty()
             if (resp.code != 200) {
@@ -72,7 +76,9 @@ class GuardianClient(
     }
 
     suspend fun activateGuardian(endpoint: String, accessToken: String): Entitlement = withContext(Dispatchers.IO) {
-        val url = "${endpoint.trimEnd('/')}/api/v1/fpn/activate"
+        val url = if (endpoint.isBlank() || endpoint.trimEnd('/') == GUARDIAN_ENDPOINT_DEFAULT)
+            FoxyRemoteConfig.current.endpoints.guardian.activate
+        else "${endpoint.trimEnd('/')}/api/v1/fpn/activate"
         authorizedRequest("POST", url, accessToken).use { resp ->
             val text = resp.body?.string().orEmpty()
             if (resp.code != 200) {

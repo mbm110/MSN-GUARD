@@ -18,6 +18,11 @@ import android.webkit.WebResourceRequest
 import android.view.WindowManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.lang.ref.WeakReference
 
@@ -68,11 +73,14 @@ object FoxyBrowserLogin {
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
         }
+        val loginScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        var completing = false
         var finished = false
         var notifying = true
         fun finish(result: Result<Unit>) {
             if (finished) return
             finished = true
+            loginScope.cancel()
             backAction = null
             closeAction = null
             activity.window.setSoftInputMode(oldSoftInputMode)
@@ -104,15 +112,26 @@ object FoxyBrowserLogin {
         page.addView(header, LinearLayout.LayoutParams(-1, -2))
         page.addView(progress, LinearLayout.LayoutParams(-1, (3 * density).toInt()))
         page.addView(web, LinearLayout.LayoutParams(-1, 0, 1f))
-        val bridge = WebChannelBridge(
+        lateinit var bridge: WebChannelBridge
+        bridge = WebChannelBridge(
             web,
             onSessionToken = { token ->
-                Thread {
-                    val result = kotlinx.coroutines.runBlocking {
-                        repository.completeBrowserLogin(token)
+                if (!finished && !completing) {
+                    completing = true
+                    loginScope.launch {
+                        val result = repository.completeBrowserLogin(token)
+                        completing = false
+                        if (!finished) {
+                            if (result.isSuccess) finish(result)
+                            else {
+                                bridge.retrySessionToken()
+                                android.widget.Toast.makeText(activity,
+                                    result.exceptionOrNull()?.message ?: "Sign-in failed. Please try again.",
+                                    android.widget.Toast.LENGTH_LONG).show()
+                            }
+                        }
                     }
-                    activity.runOnUiThread { finish(result) }
-                }.start()
+                }
             },
         )
         web.addJavascriptInterface(bridge, "foxyWebChannel")
@@ -167,6 +186,9 @@ object FoxyBrowserLogin {
     ) {
         private val webViewRef = WeakReference(webView)
         @Volatile private var pendingSessionToken: String? = null
+        @Volatile private var dispatchedSessionToken: String? = null
+
+        fun retrySessionToken() { dispatchedSessionToken = null }
 
         @JavascriptInterface
         fun onMessage(payload: String) = onMessage(payload, "https://accounts.firefox.com")
@@ -208,7 +230,8 @@ object FoxyBrowserLogin {
         fun onSessionVerified() = pendingSessionToken?.let { notifySessionToken(it) }
 
         private fun notifySessionToken(token: String) {
-            if (!tokenPattern.matches(token) || token == pendingSessionToken) return
+            if (!tokenPattern.matches(token) || token == dispatchedSessionToken) return
+            dispatchedSessionToken = token
             pendingSessionToken = token
             runCatching { CookieManager.getInstance().flush() }
             webViewRef.get()?.post { onSessionToken(token) } ?: onSessionToken(token)

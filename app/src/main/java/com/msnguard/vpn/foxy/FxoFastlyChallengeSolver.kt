@@ -2,6 +2,8 @@ package com.msnguard.vpn.foxy
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Cookie
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -29,6 +31,16 @@ private val INIT_CALL_REGEX = Regex("init\\((\\[[^\\]]*\\]),\\s*\"([^\"]+)\",\\s
 
 class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
 
+    private fun allowedHosts(): Set<String> {
+        val ep = FoxyRemoteConfig.current.endpoints
+        return (listOf(ep.controlPlane.login, ep.controlPlane.recoveryStatus,
+            ep.controlPlane.oauthToken, ep.controlPlane.oauthFallback,
+            ep.controlPlane.authorization, ep.controlPlane.sessionDestroy,
+            ep.guardian.token, ep.guardian.status, ep.guardian.activate, ep.serverList,
+            ep.productDetails).mapNotNull { runCatching { it.toHttpUrl().host }.getOrNull() } +
+            listOf("accounts.firefox.com", "api.accounts.firefox.com", "oauth.accounts.firefox.com")).toSet()
+    }
+
     private class NoChallengePage : Exception()
 
     suspend fun solveAndInstall(
@@ -38,6 +50,10 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
     ) = withContext(Dispatchers.IO) {
         if (!challengedBody.isNullOrBlank() && challengedBody.contains("/_fs-ch-")) {
             val origin = challengedOrigin?.trimEnd('/') ?: "https://api.accounts.firefox.com"
+            val url = runCatching { origin.toHttpUrl() }.getOrNull()
+            if (url == null || !url.isHttps || url.host !in allowedHosts()) {
+                throw FastlyChallengeError("untrusted challenge origin")
+            }
             solveChallengeBody(origin, challengedBody, userAgent)
             return@withContext
         }
@@ -221,9 +237,21 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
     private fun installChallengeCookies(solverJar: SimpleCookieJar) {
         val cookies = solverJar.snapshotAll()
         if (cookies.isEmpty()) throw FastlyChallengeError("challenge completed but no cookies were issued")
+        val hosts = allowedHosts()
         for (cookie in cookies) {
-            cookieJar.set(cookie.name, cookie.value, "firefox.com")
+            if (hosts.none { it == cookie.domain || it.endsWith(".${cookie.domain}") }) continue
+            for (host in hosts) {
+                val installed = Cookie.Builder().name(cookie.name).value(cookie.value)
+                    .hostOnlyDomain(host).path("/").expiresAt(cookie.expiresAt)
+                    .apply { if (cookie.secure) secure() }
+                    .apply { if (cookie.httpOnly) httpOnly() }.build()
+                cookieJar.saveFromResponse("https://$host/".toHttpUrl(), listOf(installed))
+                runCatching {
+                    android.webkit.CookieManager.getInstance().setCookie("https://$host/", installed.toString())
+                }
+            }
         }
+        runCatching { android.webkit.CookieManager.getInstance().flush() }
     }
 
     private fun solveOnHost(base: String) {

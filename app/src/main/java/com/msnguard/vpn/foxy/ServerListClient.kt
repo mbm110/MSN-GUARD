@@ -69,7 +69,7 @@ class ServerListClient(
 
     suspend fun fetchCountries(): List<VpnCountry> = withContext(Dispatchers.IO) {
         try {
-            val request = Request.Builder().url(REMOTE_SETTINGS_URL).applyMozillaVpnHeaders().build()
+            val request = Request.Builder().url(FoxyRemoteConfig.current.endpoints.serverList).applyMozillaVpnHeaders().build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) throw IOException("Remote Settings fetch failed: HTTP ${response.code}")
                 val body = response.body ?: throw IOException("Remote Settings response has no body")

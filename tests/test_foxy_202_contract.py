@@ -39,13 +39,13 @@ class Foxy202Contract(unittest.TestCase):
 
     def test_browser_login_uses_verified_session_and_pkce_authorization_code(self):
         auth = (FOXY / "FxaAuth.kt").read_text()
-        self.assertIn("recovery_email/status", auth)
+        self.assertIn("endpoints.controlPlane.recoveryStatus.toHttpUrl()", auth)
         self.assertIn("isSessionVerified(sessionToken)", auth)
         self.assertIn('put("response_type", "code")', auth)
         self.assertIn('put("code_challenge_method", "S256")', auth)
         self.assertIn('put("grant_type", "authorization_code")', auth)
-        self.assertIn('"/oauth/authorization"', auth)
-        self.assertIn('"/token"', auth)
+        self.assertIn("endpoints.controlPlane.authorization", auth)
+        self.assertIn("endpoints.controlPlane.oauthToken", auth)
         browser = (FOXY / "FoxyBrowserLogin.kt").read_text()
         self.assertNotIn("onOAuthResult", browser)
         self.assertNotIn("api.accounts.firefox.com/v1/oauth/token", browser)

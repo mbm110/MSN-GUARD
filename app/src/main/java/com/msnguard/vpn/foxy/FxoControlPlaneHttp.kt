@@ -188,6 +188,8 @@ private class ProtectingSocketFactory : SocketFactory() {
 object FoxyControlPlaneHttp {
     val cookieJar = SimpleCookieJar()
 
+    internal val relayerInterceptor = FoxyRelayerInterceptor { defaultRelayerConfig() }
+
     private val bootstrapClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
@@ -217,6 +219,7 @@ object FoxyControlPlaneHttp {
     val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
+            .addInterceptor(relayerInterceptor)
             .cookieJar(cookieJar)
             .socketFactory(ProtectingSocketFactory())
             .dns(bootstrapDoh)

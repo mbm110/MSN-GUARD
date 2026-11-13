@@ -29,8 +29,8 @@ android {
         applicationId = "com.msnguard.vpn"
         minSdk = 26
         targetSdk = 36
-        versionCode = 449
-        versionName = "3.2.0"
+        versionCode = 450
+        versionName = "3.2.1"
         // The encoded CI value is safe in generated Kotlin source. This is still extractable from an APK.
         val relaySecret = System.getenv("MSN_IDENTITY_RELAY_HMAC").orEmpty()
         val relayEncoded = Base64.getEncoder().encodeToString(relaySecret.toByteArray(Charsets.UTF_8))
@@ -143,6 +143,7 @@ android {
 }
 
     dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation("androidx.core:core-ktx:1.15.0")
     // Foxy transport (isolated package; nothing existing references these):
     // Firefox-account auth + control plane (OkHttp + EncryptedSharedPreferences),

@@ -13,6 +13,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
@@ -23,8 +24,40 @@ data class ComponentConfig(
     val protocols: List<Protocol> = listOf(Protocol.HTTP_2, Protocol.HTTP_1_1),
 )
 
+data class GuardianEndpoints(
+    val token: String = "https://vpn.mozilla.org/api/v1/fpn/token",
+    val status: String = "https://vpn.mozilla.org/api/v1/fpn/status",
+    val activate: String = "https://vpn.mozilla.org/api/v1/fpn/activate",
+)
+
+data class ControlPlaneEndpoints(
+    val oauthToken: String = "https://oauth.accounts.firefox.com/v1/token",
+    val oauthFallback: String = "https://api.accounts.firefox.com/v1/oauth/token",
+    val authorization: String = "https://api.accounts.firefox.com/v1/oauth/authorization",
+    val recoveryStatus: String = "https://api.accounts.firefox.com/v1/recovery_email/status",
+    val sessionDestroy: String = "https://api.accounts.firefox.com/v1/session/destroy",
+    val login: String = "https://accounts.firefox.com/?context=fx_desktop_v3&service=sync&action=email",
+)
+
+data class EndpointsConfig(
+    val guardian: GuardianEndpoints = GuardianEndpoints(),
+    val controlPlane: ControlPlaneEndpoints = ControlPlaneEndpoints(),
+    val serverList: String = "https://firefox.settings.services.mozilla.com/v1/buckets/main/collections/vpn-serverlist/records",
+    val productDetails: String = "https://product-details.mozilla.org/1.0/firefox_versions.json",
+    val exitCheck: String = "https://www.cloudflare.com/cdn-cgi/trace",
+    val latencyProbe: String = "https://www.gstatic.com/generate_204",
+)
+
+val DEFAULT_RELAYERS: Map<String, String> = emptyMap()
+val DEFAULT_RELAYER_ROUTES: Set<String> = setOf("guardian")
+val DEFAULT_FAILOVER_CODES: Set<Int> = setOf(451)
+
 data class RemoteConfig(
     val version: Int,
+    val endpoints: EndpointsConfig = EndpointsConfig(),
+    val relayerRoutes: Set<String> = DEFAULT_RELAYER_ROUTES,
+    val relayers: Map<String, String> = DEFAULT_RELAYERS,
+    val failoverCodes: Set<Int> = DEFAULT_FAILOVER_CODES,
     val controlPlane: ComponentConfig,
     val guardian: ComponentConfig,
     val solver: ComponentConfig,
@@ -91,6 +124,10 @@ private val DEFAULT_BROWSER =
 val DEFAULT_REMOTE_CONFIG =
     RemoteConfig(
         version = 1,
+        endpoints = EndpointsConfig(),
+        relayerRoutes = DEFAULT_RELAYER_ROUTES,
+        relayers = DEFAULT_RELAYERS,
+        failoverCodes = DEFAULT_FAILOVER_CODES,
         controlPlane = DEFAULT_CONTROL_PLANE,
         guardian = DEFAULT_GUARDIAN,
         solver = DEFAULT_SOLVER,
@@ -209,6 +246,93 @@ object FoxyRemoteConfig {
             val root = JSONObject(jsonString)
             val version = root.optInt("version", 1)
 
+            fun endpoint(obj: JSONObject, name: String, fallback: String): String {
+                val raw = obj.optString(name, "").trim()
+                val url = runCatching { raw.toHttpUrl() }.getOrNull()
+                return if (url != null && url.isHttps && url.username.isEmpty() &&
+                    url.password.isEmpty() && url.fragment == null) url.toString() else fallback
+            }
+
+            fun parseEndpoints(): EndpointsConfig {
+                val defaultEndpoints = EndpointsConfig()
+                val endpointsObj = root.optJSONObject("endpoints") ?: return defaultEndpoints
+                val guardianObj = endpointsObj.optJSONObject("guardian")
+                val guardian =
+                    if (guardianObj != null) {
+                        val d = defaultEndpoints.guardian
+                        GuardianEndpoints(
+                            token = endpoint(guardianObj, "token", d.token),
+                            status = endpoint(guardianObj, "status", d.status),
+                            activate = endpoint(guardianObj, "activate", d.activate),
+                        )
+                    } else defaultEndpoints.guardian
+
+                val cpObj = endpointsObj.optJSONObject("controlPlane")
+                val controlPlane =
+                    if (cpObj != null) {
+                        val d = defaultEndpoints.controlPlane
+                        ControlPlaneEndpoints(
+                            oauthToken = endpoint(cpObj, "oauthToken", d.oauthToken),
+                            oauthFallback = endpoint(cpObj, "oauthFallback", d.oauthFallback),
+                            authorization = endpoint(cpObj, "authorization", d.authorization),
+                            recoveryStatus = endpoint(cpObj, "recoveryStatus", d.recoveryStatus),
+                            sessionDestroy = endpoint(cpObj, "sessionDestroy", d.sessionDestroy),
+                            login = endpoint(cpObj, "login", d.login),
+                        )
+                    } else defaultEndpoints.controlPlane
+
+                return EndpointsConfig(
+                    guardian = guardian,
+                    controlPlane = controlPlane,
+                    serverList = endpoint(endpointsObj, "serverList", defaultEndpoints.serverList),
+                    productDetails = endpoint(endpointsObj, "productDetails", defaultEndpoints.productDetails),
+                    exitCheck = endpoint(endpointsObj, "exitCheck", defaultEndpoints.exitCheck),
+                    latencyProbe = endpoint(endpointsObj, "latencyProbe", defaultEndpoints.latencyProbe),
+                )
+            }
+
+            fun parseRelayers(): Map<String, String> {
+                val obj = root.optJSONObject("relayers") ?: return emptyMap()
+                val result = mutableMapOf<String, String>()
+                for (key in obj.keys()) {
+                    val raw = obj.optString(key, "").trim()
+                    if (raw.isNotEmpty()) {
+                        val url =
+                            if (raw.startsWith("http://", ignoreCase = true) || raw.startsWith("https://", ignoreCase = true)) {
+                                raw
+                            } else {
+                                "https://$raw"
+                            }
+                        if (isValidRelayerUrl(url)) result[key] = url
+                    }
+                }
+                return result
+            }
+
+            fun parseRelayerRoutes(): Set<String> {
+                val arr = root.optJSONArray("relayerRoutes") ?: return DEFAULT_RELAYER_ROUTES
+                val set = mutableSetOf<String>()
+                for (i in 0 until arr.length()) {
+                    val item = arr.optString(i, "").trim().lowercase()
+                    if (item.isNotEmpty()) {
+                        set.add(item)
+                    }
+                }
+                return if (set.isNotEmpty()) set else DEFAULT_RELAYER_ROUTES
+            }
+
+            fun parseFailoverCodes(): Set<Int> {
+                val arr = root.optJSONArray("failoverCodes") ?: return DEFAULT_FAILOVER_CODES
+                val set = mutableSetOf<Int>()
+                for (i in 0 until arr.length()) {
+                    val code = arr.optInt(i, -1)
+                    if (code in 100..599) {
+                        set.add(code)
+                    }
+                }
+                return if (set.isNotEmpty()) set else DEFAULT_FAILOVER_CODES
+            }
+
             fun parseComponent(name: String, default: ComponentConfig): ComponentConfig {
                 val obj = root.optJSONObject(name) ?: return default
                 val headersObj = obj.optJSONObject("headers")
@@ -245,6 +369,10 @@ object FoxyRemoteConfig {
 
             RemoteConfig(
                 version = version,
+                endpoints = parseEndpoints(),
+                relayerRoutes = parseRelayerRoutes(),
+                relayers = parseRelayers(),
+                failoverCodes = parseFailoverCodes(),
                 controlPlane = parseComponent("controlPlane", DEFAULT_CONTROL_PLANE),
                 guardian = parseComponent("guardian", DEFAULT_GUARDIAN),
                 solver = parseComponent("solver", DEFAULT_SOLVER),
