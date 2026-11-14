@@ -59,10 +59,9 @@ object LanternEngine {
     /** Blocking connect: call only from MsnGuardVpnService's worker thread. */
     fun connect(context: Context): Boolean {
         armForStart()
-        if (!startProcess(context)) return false
-        if (stopRequested) return false
-
         return try {
+            if (!startProcess(context)) return false
+            if (stopRequested) return false
             ConnectionLog.record("Lantern: waiting for public server configuration and auto-selection")
             val response = request(
                 method = "POST",
