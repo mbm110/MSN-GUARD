@@ -22,6 +22,6 @@ a complete dependency-license inventory and include any notices required by
 those licenses.
 
 MSN-GUARD is distributed under AGPL-3.0. Adding a GPL-3.0 component does not
-make copyleft obligations disappear merely because it is packaged as a
-separate AAR. Review combined-work compatibility, corresponding-source
+make copyleft obligations disappear merely because it is launched as a
+separate process. Review combined-work compatibility, corresponding-source
 availability, and all notices before publishing a release.
