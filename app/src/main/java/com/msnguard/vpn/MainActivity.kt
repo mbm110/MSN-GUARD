@@ -4389,6 +4389,7 @@ class MainActivity : Activity() {
      *    which is what the old "Psiphon only" wording was really describing.
      */
     private fun lanSharingCapable(): Boolean = when (selectedProtocol) {
+        Protocol.LANTERN -> false
         Protocol.PSIPHON -> true
         Protocol.TOR -> !CoreConfig.proxyOnly(this)
         // VPN mode only, and that is not a limitation — SHARD has no proxy mode at
@@ -5296,6 +5297,8 @@ class MainActivity : Activity() {
             // moment of the choice instead of letting the connect fail later.
             if (chosen == CoreConfig.TUNNEL_MODE_PROXY && selectedProtocol == Protocol.TOR) {
                 toastShort(Strings.t("Tor cannot run as a SOCKS proxy — pick another transport"))
+            } else if (chosen == CoreConfig.TUNNEL_MODE_PROXY && selectedProtocol == Protocol.LANTERN) {
+                toastShort(Strings.t("Lantern requires VPN mode — pick VPN to connect"))
             } else if (chosen == CoreConfig.TUNNEL_MODE_PROXY && selectedProtocol == Protocol.SHARD) {
                 // SHARD's refusal has a different cause — no byte counter in a proxy
                 // data path — but the same remedy, and it also has a better answer:
@@ -9784,6 +9787,8 @@ class MainActivity : Activity() {
     private fun socksPort(): Int =
         if (TunnelStatus.isActive() && TorManager.isTorActive) {
             TorManager.FRONT_SOCKS_PORT
+        } else if (TunnelStatus.isActive() && LanternEngine.isRunning) {
+            LanternEngine.SOCKS_PORT
         } else if (TunnelStatus.isActive() && com.msnguard.vpn.foxy.FoxyTunnel.isRunning) {
             // FOXY's listener is its own 1830 — the aether default below is a
             // closed socket on this transport, so every reachability probe was
@@ -9902,7 +9907,10 @@ class MainActivity : Activity() {
          * started for SHARD. The service branches on it before touching
          * NativeCore, the same way the Psiphon and Tor names do.
          */
-        SHARD("SHARD", "shard", "Public nodes, auto-selected; no setup", true);
+        SHARD("SHARD", "shard", "Public nodes, auto-selected; no setup", true),
+
+        /** Public Lantern servers via Radiance; MSN-GUARD owns the Android TUN. */
+        LANTERN("Lantern", "lantern", "Public Lantern servers; automatic selection", true);
 
         val label: String get() = Strings.t(enLabel)
         val description: String get() = Strings.t(enDescription)
