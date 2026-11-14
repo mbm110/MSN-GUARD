@@ -45,16 +45,18 @@ build_android() {
   local GOARCH="$2"
   local GOARM="$3"
   local CC="$4"
+  local CXX="${CC%-clang}-clang++"
+  test -x "$TOOLCHAIN/$CXX"
   local OUT="$ROOT_DIR/app/src/main/jniLibs/$ABI/liblantern.so"
 
   mkdir -p "$(dirname "$OUT")"
   echo "==> Building Lantern sidecar for $ABI ($GOARCH)"
   if [[ -n "$GOARM" ]]; then
-    env GOOS=android GOARCH="$GOARCH" GOARM="$GOARM" CGO_ENABLED=1 CC="$TOOLCHAIN/$CC" \
+    env GOOS=android GOARCH="$GOARCH" GOARM="$GOARM" CGO_ENABLED=1 CC="$TOOLCHAIN/$CC" CXX="$TOOLCHAIN/$CXX" \
       go build -trimpath -buildmode=pie -tags="$TAGS" -ldflags="$LDFLAGS" \
         -o "$OUT" ./cmd/lanternsidecar
   else
-    env GOOS=android GOARCH="$GOARCH" CGO_ENABLED=1 CC="$TOOLCHAIN/$CC" \
+    env GOOS=android GOARCH="$GOARCH" CGO_ENABLED=1 CC="$TOOLCHAIN/$CC" CXX="$TOOLCHAIN/$CXX" \
       go build -trimpath -buildmode=pie -tags="$TAGS" -ldflags="$LDFLAGS" \
         -o "$OUT" ./cmd/lanternsidecar
   fi
