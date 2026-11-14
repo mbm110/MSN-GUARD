@@ -3282,26 +3282,16 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 repostNotification()
                 startLanternTrafficPolling()
                 startWatchdog()
-            } catch (e: Exception) {
-                ConnectionLog.record("Lantern start failed: ${e.message}")
+            } catch (error: Throwable) {
+                ConnectionLog.record("Lantern start failed: ${error.message ?: error::class.java.simpleName}")
                 LanternEngine.cancelConnect()
                 LanternEngine.disconnectAsync()
-                TunEngineManager.stop(this)
-                tun?.close()
-                tun = null
-                vpnModeActive.set(false)
-                if (stopRequested.get() || userInitiatedStop.get()) return@execute
-                failAndStop(e.message ?: "Lantern start failed")
-            } catch (fatal: Throwable) {
-                ConnectionLog.record("Lantern fatal start failure: ${fatal.message ?: fatal::class.java.simpleName}")
-                LanternEngine.cancelConnect()
-                LanternEngine.disconnectAsync()
-                TunEngineManager.stop(this)
+                runCatching { TunEngineManager.stop(this) }
                 runCatching { tun?.close() }
                 tun = null
                 vpnModeActive.set(false)
                 if (stopRequested.get() || userInitiatedStop.get()) return@execute
-                failAndStop(fatal.message ?: "Lantern start failed")
+                failAndStop(error.message ?: "Lantern start failed")
             }
         }
     }
