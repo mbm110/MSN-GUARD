@@ -3,6 +3,8 @@ name: Build Android APK
 on:
   push:
     branches: [ master, shard-rewrite, feature/lantern-prototype ]
+  pull_request:
+    branches: [ master ]
   workflow_dispatch:
 
 jobs:
