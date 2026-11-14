@@ -234,7 +234,6 @@ object LanternEngine {
         }
     }
 
-    /** Cancel a blocking Radiance connect without killing the sidecar yet. */
     /** Cancel this exact attempt without terminating the sidecar yet. */
     fun cancelConnect(attempt: Long): Boolean = synchronized(generationLock) {
         if (generation.get() != attempt || stopRequested) return@synchronized false
