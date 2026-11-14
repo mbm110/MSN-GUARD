@@ -2,7 +2,9 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ master, shard-rewrite ]
+    branches: [ master, shard-rewrite, feature/lantern-prototype ]
+  pull_request:
+    branches: [ master ]
   workflow_dispatch:
 
 jobs:
@@ -31,8 +33,17 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: "ndk;26.3.11579264 cmake;3.22.1"
+          packages: "platforms;android-26 platforms;android-36 build-tools;36.0.0 ndk;26.3.11579264 cmake;3.22.1"
           accept-android-sdk-licenses: "true"
+
+      # Radiance is built as a separate novpn PIE sidecar, never a gomobile
+      # AAR (Psiphon already owns libgojni.so and go.Seq in this app).
+      - name: Set up Go for Lantern sidecar
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.10'
+          cache: true
+          cache-dependency-path: core/lanternbridge/go.sum
 
       - name: Install Rust and targets
         run: |

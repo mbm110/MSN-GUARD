@@ -4347,7 +4347,9 @@ class MainActivity : Activity() {
             // that cannot share in SOCKS mode is Tor, and the one combination that
             // cannot share at all is a WARP transport in VPN mode — where the core
             // binds no listener because it is driving the TUN directly.
-            return if (selectedProtocol == Protocol.TOR && CoreConfig.proxyOnly(this)) {
+            return if (selectedProtocol == Protocol.LANTERN) {
+                Strings.t("Lantern requires whole-device VPN mode; LAN proxy sharing is not available")
+            } else if (selectedProtocol == Protocol.TOR && CoreConfig.proxyOnly(this)) {
                 Strings.t("Tor cannot run as a SOCKS proxy — set Tunnel type to VPN")
             } else if (selectedProtocol == Protocol.SHARD) {
                 Strings.t("SHARD shares from VPN mode — set Tunnel type to VPN")
@@ -4389,6 +4391,7 @@ class MainActivity : Activity() {
      *    which is what the old "Psiphon only" wording was really describing.
      */
     private fun lanSharingCapable(): Boolean = when (selectedProtocol) {
+        Protocol.LANTERN -> false
         Protocol.PSIPHON -> true
         Protocol.TOR -> !CoreConfig.proxyOnly(this)
         // VPN mode only, and that is not a limitation — SHARD has no proxy mode at
@@ -5296,6 +5299,8 @@ class MainActivity : Activity() {
             // moment of the choice instead of letting the connect fail later.
             if (chosen == CoreConfig.TUNNEL_MODE_PROXY && selectedProtocol == Protocol.TOR) {
                 toastShort(Strings.t("Tor cannot run as a SOCKS proxy — pick another transport"))
+            } else if (chosen == CoreConfig.TUNNEL_MODE_PROXY && selectedProtocol == Protocol.LANTERN) {
+                toastShort(Strings.t("Lantern requires VPN mode — pick VPN to connect"))
             } else if (chosen == CoreConfig.TUNNEL_MODE_PROXY && selectedProtocol == Protocol.SHARD) {
                 // SHARD's refusal has a different cause — no byte counter in a proxy
                 // data path — but the same remedy, and it also has a better answer:
@@ -9784,6 +9789,10 @@ class MainActivity : Activity() {
     private fun socksPort(): Int =
         if (TunnelStatus.isActive() && TorManager.isTorActive) {
             TorManager.FRONT_SOCKS_PORT
+        } else if (TunnelStatus.isActive() &&
+            selectedProtocol == Protocol.LANTERN && LanternEngine.isRunning
+        ) {
+            LanternEngine.SOCKS_PORT
         } else if (TunnelStatus.isActive() && com.msnguard.vpn.foxy.FoxyTunnel.isRunning) {
             // FOXY's listener is its own 1830 — the aether default below is a
             // closed socket on this transport, so every reachability probe was
@@ -9873,7 +9882,7 @@ class MainActivity : Activity() {
         // are built from `Protocol.entries`, so this list decides what a first-time
         // user reaches for — and the first cell is what most of them will tap.
         //
-        // WireGuard leads on purpose: it is the cheapest handshake of the six and it
+        // WireGuard leads on purpose: it is the cheapest handshake among the eight and it
         // either works immediately or fails immediately, which is the right first
         // move for a user who does not know what any of these words mean. MASQUE
         // follows because it survives the carriers WireGuard is blocked on, and the
@@ -9902,7 +9911,10 @@ class MainActivity : Activity() {
          * started for SHARD. The service branches on it before touching
          * NativeCore, the same way the Psiphon and Tor names do.
          */
-        SHARD("SHARD", "shard", "Public nodes, auto-selected; no setup", true);
+        SHARD("SHARD", "shard", "Public nodes, auto-selected; no setup", true),
+
+        /** Public Lantern servers via Radiance; MSN-GUARD owns the Android TUN. */
+        LANTERN("Lantern", "lantern", "Public Lantern servers; automatic selection", true);
 
         val label: String get() = Strings.t(enLabel)
         val description: String get() = Strings.t(enDescription)
