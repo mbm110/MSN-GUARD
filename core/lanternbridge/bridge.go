@@ -21,6 +21,7 @@ var state struct {
 	mu          sync.RWMutex
 	backend       *backend.LocalBackend
 	connectCancel context.CancelFunc
+	connectID     uint64
 	lastErr       string
 	trafficMu   sync.Mutex
 	trafficSeen map[string]byteTotals
@@ -90,12 +91,16 @@ func Connect(timeoutSeconds int64) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
 	state.mu.Lock()
+	state.connectID++
+	connectID := state.connectID
 	state.connectCancel = cancel
 	state.mu.Unlock()
 	defer func() {
 		cancel()
 		state.mu.Lock()
-		state.connectCancel = nil
+		if state.connectID == connectID {
+			state.connectCancel = nil
+		}
 		state.mu.Unlock()
 	}()
 
