@@ -3288,6 +3288,14 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 tun = null
                 vpnModeActive.set(false)
                 failAndStop(e.message ?: "Lantern start failed")
+            } catch (fatal: Throwable) {
+                ConnectionLog.record("Lantern fatal start failure: ${fatal.message ?: fatal::class.java.simpleName}")
+                LanternEngine.disconnect()
+                TunEngineManager.stop(this)
+                runCatching { tun?.close() }
+                tun = null
+                vpnModeActive.set(false)
+                failAndStop(fatal.message ?: "Lantern start failed")
             }
         }
     }
