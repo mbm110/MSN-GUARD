@@ -73,7 +73,7 @@ func Init(dataDir, logDir, socksAddress string) error {
 
 // Connect waits for Radiance's current public configuration and connects using
 // its automatic server selector. No private server credentials are required.
-func Connect(timeoutSeconds int) error {
+func Connect(timeoutSeconds int64) error {
 	b := currentBackend()
 	if b == nil {
 		return errors.New("Radiance is not initialized")
@@ -104,6 +104,9 @@ func Connect(timeoutSeconds int) error {
 func Disconnect() error {
 	b := currentBackend()
 	if b == nil {
+		return nil
+	}
+	if b.VPNStatus() == vpn.Disconnected {
 		return nil
 	}
 	_ = TrafficJSON() // capture the last active-connection counters before close
