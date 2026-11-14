@@ -107,19 +107,6 @@ object LanternEngine {
         }
     }
 
-    /** Synchronous variant for controlled worker-thread cleanup only. */
-    fun disconnect() {
-        if (!initialized) return
-        cancelConnect()
-        try {
-            Lanternbridge.disconnect()
-            ConnectionLog.record("Lantern: Radiance tunnel disconnected")
-        } catch (error: Throwable) {
-            ConnectionLog.record("Lantern: disconnect error: ${error.message}")
-            Log.w(TAG, "Radiance disconnect failed", error)
-        }
-    }
-
     private fun awaitPendingDisconnect() {
         val pending = synchronized(this) { disconnectThread }
         pending?.join(30_000L)
