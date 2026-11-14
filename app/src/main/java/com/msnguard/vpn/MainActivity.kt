@@ -4347,7 +4347,9 @@ class MainActivity : Activity() {
             // that cannot share in SOCKS mode is Tor, and the one combination that
             // cannot share at all is a WARP transport in VPN mode — where the core
             // binds no listener because it is driving the TUN directly.
-            return if (selectedProtocol == Protocol.TOR && CoreConfig.proxyOnly(this)) {
+            return if (selectedProtocol == Protocol.LANTERN) {
+                Strings.t("Lantern requires whole-device VPN mode; LAN proxy sharing is not available")
+            } else if (selectedProtocol == Protocol.TOR && CoreConfig.proxyOnly(this)) {
                 Strings.t("Tor cannot run as a SOCKS proxy — set Tunnel type to VPN")
             } else if (selectedProtocol == Protocol.SHARD) {
                 Strings.t("SHARD shares from VPN mode — set Tunnel type to VPN")
