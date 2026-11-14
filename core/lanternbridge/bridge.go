@@ -32,12 +32,13 @@ var state struct {
 // listener; MSN-GUARD remains the sole owner of Android's VpnService and TUN.
 func Init(dataDir, logDir, socksAddress string) error {
 	state.mu.Lock()
-	defer state.mu.Unlock()
 
 	if state.backend != nil {
+		state.mu.Unlock()
 		return nil
 	}
 	if dataDir == "" || logDir == "" {
+		state.mu.Unlock()
 		return errors.New("Radiance data and log directories are required")
 	}
 	if socksAddress == "" {
@@ -58,12 +59,14 @@ func Init(dataDir, logDir, socksAddress string) error {
 	})
 	if err != nil {
 		cancel()
-		setLastError(err)
+		state.lastErr = err.Error()
+		state.mu.Unlock()
 		return fmt.Errorf("initialize Radiance: %w", err)
 	}
 
 	state.backend = b
-	setLastError(nil)
+	state.lastErr = ""
+	state.mu.Unlock()
 	b.Start()
 	return nil
 }
