@@ -20,6 +20,7 @@ type byteTotals struct {
 var state struct {
 	mu          sync.RWMutex
 	backend       *backend.LocalBackend
+	backendCancel context.CancelFunc
 	connectCancel context.CancelFunc
 	connectID     uint64
 	lastErr       string
@@ -67,6 +68,7 @@ func Init(dataDir, logDir, socksAddress string) error {
 	}
 
 	state.backend = b
+	state.backendCancel = cancel
 	state.lastErr = ""
 	state.mu.Unlock()
 	b.Start()
@@ -113,8 +115,6 @@ func Connect(timeoutSeconds int64) error {
 	return nil
 }
 
-// Disconnect stops the Radiance tunnel but keeps its backend initialized so a
-// later reconnect does not repeat global process initialization.
 // CancelConnect interrupts a connection attempt without waiting for the
 // backend's tunnel lock. It is safe to call from Android's service main thread.
 func CancelConnect() {
@@ -126,6 +126,8 @@ func CancelConnect() {
 	}
 }
 
+// Disconnect stops the Radiance tunnel but keeps its backend initialized so a
+// later reconnect does not repeat global process initialization.
 func Disconnect() error {
 	b := currentBackend()
 	if b == nil {
@@ -249,8 +251,13 @@ func Shutdown() {
 	CancelConnect()
 	state.mu.Lock()
 	b := state.backend
+	cancel := state.backendCancel
 	state.backend = nil
+	state.backendCancel = nil
 	state.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if b != nil {
 		b.Close()
 	}
