@@ -178,10 +178,12 @@ func TrafficJSON() string {
 func currentTrafficJSON() string {
 	state.trafficMu.Lock()
 	defer state.trafficMu.Unlock()
-	encoded, _ := json.Marshal(map[string]int64{
-		"tx": state.completedUp,
-		"rx": state.completedDn,
-	})
+	up, down := state.completedUp, state.completedDn
+	for _, active := range state.trafficSeen {
+		up += active.up
+		down += active.down
+	}
+	encoded, _ := json.Marshal(map[string]int64{"tx": up, "rx": down})
 	return string(encoded)
 }
 
