@@ -9882,7 +9882,7 @@ class MainActivity : Activity() {
         // are built from `Protocol.entries`, so this list decides what a first-time
         // user reaches for — and the first cell is what most of them will tap.
         //
-        // WireGuard leads on purpose: it is the cheapest handshake of the six and it
+        // WireGuard leads on purpose: it is the cheapest handshake among the eight and it
         // either works immediately or fails immediately, which is the right first
         // move for a user who does not know what any of these words mean. MASQUE
         // follows because it survives the carriers WireGuard is blocked on, and the
