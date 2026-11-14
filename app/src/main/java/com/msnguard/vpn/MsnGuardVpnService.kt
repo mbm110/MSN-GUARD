@@ -3319,12 +3319,14 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 if (!LanternEngine.cancelConnect(attempt)) return@execute
                 ConnectionLog.record("Lantern start failed: $detail")
                 synchronized(lanternLifecycleLock) {
+                    if (!LanternEngine.isStoppingAttempt(attempt)) return@execute
                     runCatching { TunEngineManager.stop(this) }
                     LanternEngine.disconnectAsync(attempt)
                     runCatching { tun?.close() }
                     tun = null
                     vpnModeActive.set(false)
                 }
+                if (!LanternEngine.isStoppingAttempt(attempt)) return@execute
                 if (stopRequested.get() || userInitiatedStop.get()) return@execute
                 failAndStop(detail)
             }
