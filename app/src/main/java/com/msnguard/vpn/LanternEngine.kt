@@ -218,7 +218,7 @@ object LanternEngine {
         }
     }
 
-    /** Cancel a blocking connect and signal the sidecar to shut down. */
+    /** Cancel a blocking Radiance connect without killing the sidecar yet. */
     fun cancelConnect() {
         stopRequested = true
         running.set(false)
@@ -245,6 +245,7 @@ object LanternEngine {
             if (proc == null) return
             val oldLogThread = logThread
             logThread = null
+            runCatching { proc.destroy() }
             val thread = Thread({
                 try {
                     if (proc.isAlive && !proc.waitFor(3, TimeUnit.SECONDS)) {
