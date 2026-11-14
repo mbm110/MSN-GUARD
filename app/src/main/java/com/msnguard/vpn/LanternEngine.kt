@@ -138,6 +138,9 @@ object LanternEngine {
 
             if (stopRequested) {
                 started.destroy()
+                runCatching {
+                    if (!started.waitFor(3, TimeUnit.SECONDS)) started.destroyForcibly()
+                }
                 return false
             }
             process = started
