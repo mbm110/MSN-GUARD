@@ -286,6 +286,7 @@ object LanternEngine {
     }
 
     private fun stopProcessLocked() {
+        running.set(false)
         synchronized(processLock) {
             val proc = process
             process = null
