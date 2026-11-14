@@ -191,6 +191,8 @@ private class PsiphonStrategy(
 
 class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.HostService {
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
+    /** Serializes Lantern's TUN/Hev start and stop transitions. */
+    private val lanternLifecycleLock = Any()
 
     /**
      * The exit-country geo verdict gets its own thread, NOT [worker].
