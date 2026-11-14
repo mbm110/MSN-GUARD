@@ -3285,8 +3285,8 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             } catch (error: Throwable) {
                 ConnectionLog.record("Lantern start failed: ${error.message ?: error::class.java.simpleName}")
                 LanternEngine.cancelConnect()
-                LanternEngine.disconnectAsync()
                 runCatching { TunEngineManager.stop(this) }
+                LanternEngine.disconnectAsync()
                 runCatching { tun?.close() }
                 tun = null
                 vpnModeActive.set(false)
