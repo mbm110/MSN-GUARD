@@ -79,6 +79,7 @@ object LanternEngine {
             if (!response.optBoolean("ok")) {
                 error(response.optString("error").ifBlank { "Radiance could not connect to a public server" })
             }
+            if (!isCurrent(attempt)) return false
 
             running.set(true)
             val deadline = android.os.SystemClock.elapsedRealtime() + 10_000L
