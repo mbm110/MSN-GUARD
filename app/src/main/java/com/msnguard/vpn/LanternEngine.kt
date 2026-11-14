@@ -54,7 +54,7 @@ object LanternEngine {
             Lanternbridge.connect(CONNECT_TIMEOUT_SECONDS)
             val deadline = android.os.SystemClock.elapsedRealtime() + 10_000L
             while (android.os.SystemClock.elapsedRealtime() < deadline) {
-                if (isSocksReady()) {
+                if (isRunning && isSocksReady()) {
                     lastError = ""
                     ConnectionLog.record("Lantern: public server connected; local SOCKS listener is ready")
                     return true
