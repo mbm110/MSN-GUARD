@@ -155,6 +155,7 @@ val buildLanternBridge = tasks.register<Exec>("buildLanternBridge") {
     environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
     environment("ANDROID_SDK_ROOT", android.sdkDirectory.absolutePath)
     environment("ANDROID_NDK_HOME", "${android.sdkDirectory.absolutePath}/ndk/26.3.11579264")
+    environment("ANDROID_NDK_ROOT", "${android.sdkDirectory.absolutePath}/ndk/26.3.11579264")
     inputs.dir(rootProject.file("core/lanternbridge"))
     inputs.file(buildScript)
     outputs.file(file("libs/lanternbridge.aar"))
