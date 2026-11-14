@@ -3231,6 +3231,81 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         }, 1L, 1L, TimeUnit.SECONDS)
     }
 
+    /**
+     * Public Lantern transport. Radiance runs as a novpn local proxy; this
+     * service remains the only Android VpnService and owns the one device TUN.
+     * The existing shared Hev engine forwards device packets to Radiance's
+     * loopback mixed SOCKS listener. No existing transport is modified.
+     */
+    private fun startLanternTunnel() {
+        worker.execute {
+            try {
+                if (proxyMode) error("Lantern requires whole-device VPN mode")
+                val address = Tun2SocksManager.selectPrivateAddress()
+                val mtu = Tun2SocksManager.VPN_INTERFACE_MTU
+                currentTunMtu = mtu
+                TunEngineManager.syncPrivateAddress(address)
+                ConnectionLog.record("Lantern: creating the app-owned Android TUN")
+                tun = Builder()
+                    .setSession("MSN-GUARD — Lantern")
+                    .setMtu(mtu)
+                    .addAddress(address.ipAddress, address.prefixLength)
+                    .addRoute("0.0.0.0", 0)
+                    .addRoute(address.subnet, address.prefixLength)
+                    // Hev's synthetic mapdns address resolves names inside the
+                    // tunnel and forwards DNS through Radiance's SOCKS UDP path.
+                    .addDnsServer(java.net.InetAddress.getByName(HevEngine.MAP_DNS_ADDRESS))
+                    .applyLanAccess(tun = address)
+                    .applyIranBypass()
+                    .applySplitTunneling()
+                    .establish() ?: error("Android could not establish the Lantern VPN interface")
+                vpnModeActive.set(true)
+
+                sendStatus(STATUS_CONNECTING, Strings.t("Starting Lantern public servers…"), 15)
+                if (!LanternEngine.connect(this)) {
+                    error(LanternEngine.errorMessage().ifBlank { "Could not connect to public Lantern servers" })
+                }
+
+                sendStatus(STATUS_CONNECTING, Strings.t("Starting device routing…"), 75)
+                activeSocksPort = LanternEngine.SOCKS_PORT
+                if (!HevEngine.start(tun!!, LanternEngine.SOCKS_PORT, mtu, dnsOnly = false)) {
+                    error("Could not start the Hev device-routing engine for Lantern")
+                }
+
+                currentVpnIp = ""
+                TunnelStatus.isProxyMode = false
+                TunnelStatus.isNativeTunMode = false
+                sendStatus(STATUS_CONNECTED, Strings.t("Lantern connected"))
+                ConnectionLog.record("Lantern: connected — device TUN → Hev → Radiance SOCKS 127.0.0.1:${LanternEngine.SOCKS_PORT}")
+                repostNotification()
+                startLanternTrafficPolling()
+                startWatchdog()
+            } catch (e: Exception) {
+                ConnectionLog.record("Lantern start failed: ${e.message}")
+                LanternEngine.disconnect()
+                TunEngineManager.stop(this)
+                tun?.close()
+                tun = null
+                vpnModeActive.set(false)
+                failAndStop(e.message ?: "Lantern start failed")
+            }
+        }
+    }
+
+    /** Feeds Radiance's cumulative connection counters into the normal traffic UI. */
+    private fun startLanternTrafficPolling() {
+        torTrafficTask?.cancel(false)
+        torTrafficTask = ladderScheduler.scheduleAtFixedRate({
+            try {
+                if (!LanternEngine.isRunning) return@scheduleAtFixedRate
+                if (!shouldSampleTraffic()) return@scheduleAtFixedRate
+                val (tx, rx) = LanternEngine.trafficCounters()
+                updateTrafficNotification(tx, rx)
+            } catch (_: Exception) {
+            }
+        }, 1L, 1L, TimeUnit.SECONDS)
+    }
+
     private fun startShardTunnel() {
         worker.execute {
             try {
@@ -3693,8 +3768,14 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // tun2socks, so demanding it would report a healthy proxy as dead on the
         // first watchdog tick and auto-reconnect would loop forever.
         val needsRouting = psiphonVpnMode || currentProtocol.contains("TOR") ||
-            currentProtocol.contains("SHARD")
+            currentProtocol.contains("SHARD") || currentProtocol.contains("LANTERN")
         if (needsRouting && !TunEngineManager.isRunningAny) return "device routing stopped"
+
+        if (currentProtocol.contains("LANTERN")) {
+            if (!LanternEngine.isRunning) return "the Lantern/Radiance tunnel stopped"
+            if (!LanternEngine.isSocksReady()) return "the Lantern SOCKS listener stopped"
+            return null
+        }
 
         // SHARD: three things can die independently, and they are reported in the
         // order that decides what the caller does about it — the two repairable ones
@@ -4903,6 +4984,18 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             return
         }
 
+        // Lantern's novpn Radiance build supplies a loopback proxy only; the
+        // Android TUN and its lifecycle stay entirely inside this service.
+        if (currentProtocol.contains("LANTERN")) {
+            if (proxyMode) {
+                connected.set(false)
+                failAndStop("Lantern requires VPN mode — switch Tunnel type back to VPN")
+                return
+            }
+            startLanternTunnel()
+            return
+        }
+
         // SHARD before TOR and PSIPHON for the same reason those two come before
         // the core: the Rust core is never started on this path, so it must not
         // fall through to NativeCore.attach().
@@ -5581,6 +5674,9 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // that is being torn down, then stop Psiphon itself.
         SmartDnsFront.stop()
         TunEngineManager.stop(this)
+        // The Lantern backend owns its outbound connections, not the Android
+        // TUN. Stop it only after device routing has stopped feeding its proxy.
+        LanternEngine.disconnect()
         stopTrafficPolling()
         stopWarpTrafficPolling()
         // Foxy's app-layer sockets (local SOCKS + H2 session) must come down on
@@ -5651,6 +5747,19 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             if (notify) sendStatus(STATUS_DISCONNECTED)
             // A reconnect re-enters startTunnel() on the worker thread, so the
             // service must survive; only a real disconnect stops it.
+            if (teardownService) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+            return
+        }
+
+        if (currentProtocol.contains("LANTERN")) {
+            vpnModeActive.set(false)
+            tun?.close()
+            tun = null
+            connected.set(false)
+            if (notify) sendStatus(STATUS_DISCONNECTED)
             if (teardownService) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
