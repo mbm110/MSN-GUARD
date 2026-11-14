@@ -212,10 +212,8 @@ object LanternEngine {
                 .put("path", path)
                 .put("token", token)
             if (body != null) request.put("body", body)
-            socket.outputStream.use { output ->
-                output.write((request.toString() + "\n").toByteArray(Charsets.UTF_8))
-                output.flush()
-            }
+            socket.outputStream.write((request.toString() + "\n").toByteArray(Charsets.UTF_8))
+            socket.outputStream.flush()
             val response = BufferedReader(InputStreamReader(socket.inputStream)).readLine()
             check(!response.isNullOrBlank()) { "Lantern sidecar returned an empty control response" }
             JSONObject(response)
