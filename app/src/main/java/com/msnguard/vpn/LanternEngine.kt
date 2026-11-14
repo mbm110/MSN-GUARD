@@ -13,6 +13,7 @@ import java.net.Socket
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Public Lantern transport backed by a separate Android PIE executable.
@@ -31,6 +32,7 @@ object LanternEngine {
     private const val CONTROL_READY_TIMEOUT_MS = 10_000L
 
     private val running = AtomicBoolean(false)
+    private val generation = AtomicLong(0L)
     private val processLock = Any()
 
     @Volatile private var stopRequested = false
@@ -51,16 +53,22 @@ object LanternEngine {
     }
 
     /** Clear the previous stop latch before a fresh connection attempt. */
-    fun armForStart() {
+    fun armForStart(): Long {
         stopRequested = false
         lastError = ""
+        return generation.incrementAndGet()
     }
 
+    /** True only while this exact queued/start attempt still owns the engine. */
+    fun isCurrent(attempt: Long): Boolean =
+        generation.get() == attempt && !stopRequested
+
     /** Blocking connect: call only from MsnGuardVpnService's worker thread. */
-    fun connect(context: Context): Boolean {
+    fun connect(context: Context, attempt: Long): Boolean {
         return try {
-            if (!startProcess(context)) return false
-            if (stopRequested) return false
+            if (!isCurrent(attempt)) return false
+            if (!startProcess(context, attempt)) return false
+            if (!isCurrent(attempt)) return false
             ConnectionLog.record("Lantern: waiting for public server configuration and auto-selection")
             val response = request(
                 method = "POST",
@@ -75,7 +83,7 @@ object LanternEngine {
             running.set(true)
             val deadline = android.os.SystemClock.elapsedRealtime() + 10_000L
             while (android.os.SystemClock.elapsedRealtime() < deadline) {
-                if (stopRequested) return false
+                if (!isCurrent(attempt)) return false
                 if (isRunning && isSocksReady()) {
                     lastError = ""
                     ConnectionLog.record("Lantern: public server connected; local SOCKS listener is ready")
@@ -85,6 +93,7 @@ object LanternEngine {
             }
             error("Radiance reported connected but its loopback SOCKS listener did not open")
         } catch (error: Throwable) {
+            if (!isCurrent(attempt)) return false
             lastError = error.message ?: error.javaClass.simpleName
             ConnectionLog.record("Lantern: connect failed: $lastError")
             Log.e(TAG, "Radiance connect failed", error)
@@ -92,10 +101,10 @@ object LanternEngine {
         }
     }
 
-    private fun startProcess(context: Context): Boolean {
+    private fun startProcess(context: Context, attempt: Long): Boolean {
         awaitPreviousStop()
         synchronized(processLock) {
-            if (stopRequested) return false
+            if (!isCurrent(attempt)) return false
             if (process?.isAlive == true) return true
 
             val bin = binary(context)
@@ -136,7 +145,7 @@ object LanternEngine {
                 return false
             }
 
-            if (stopRequested) {
+            if (!isCurrent(attempt)) {
                 started.destroy()
                 runCatching {
                     if (!started.waitFor(3, TimeUnit.SECONDS)) started.destroyForcibly()
@@ -167,13 +176,13 @@ object LanternEngine {
             }
         }
 
-        return awaitControlReady()
+        return awaitControlReady(attempt)
     }
 
-    private fun awaitControlReady(): Boolean {
+    private fun awaitControlReady(attempt: Long): Boolean {
         val deadline = android.os.SystemClock.elapsedRealtime() + CONTROL_READY_TIMEOUT_MS
         while (android.os.SystemClock.elapsedRealtime() < deadline) {
-            if (stopRequested) return false
+            if (!isCurrent(attempt)) return false
             if (process?.isAlive != true) {
                 lastError = "Lantern sidecar exited before its control API became ready"
                 return false
@@ -220,6 +229,7 @@ object LanternEngine {
 
     /** Cancel a blocking Radiance connect without killing the sidecar yet. */
     fun cancelConnect() {
+        generation.incrementAndGet()
         stopRequested = true
         running.set(false)
         if (process?.isAlive == true) {
