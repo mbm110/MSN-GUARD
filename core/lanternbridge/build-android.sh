@@ -17,6 +17,7 @@ if [[ ! -d "$ANDROID_NDK_HOME" ]]; then
   echo "Android NDK not found: $ANDROID_NDK_HOME" >&2
   exit 2
 fi
+export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
 
 GO_VERSION="go1.26.10"
 GOMOBILE_VERSION="v0.0.0-20260908204917-8b95e45f8d3e"
