@@ -143,12 +143,13 @@ android {
 }
 
 
-// Lantern/Radiance is built as a separate novpn Go library. It exposes only a
-// loopback SOCKS inbound; Android VpnService and the device TUN stay owned by
-// MSN-GUARD. The generated AAR is picked up by the existing app/libs fileTree.
-val buildLanternBridge = tasks.register<Exec>("buildLanternBridge") {
+// Lantern/Radiance is a separate Android PIE executable, not a gomobile AAR.
+// This avoids colliding with Psiphon's existing libgojni.so and go.Seq classes.
+// The sidecar binds only a loopback SOCKS listener; MSN-GUARD remains the sole
+// owner of Android VpnService and the device TUN.
+val buildLanternSidecar = tasks.register<Exec>("buildLanternSidecar") {
     group = "build"
-    description = "Builds the isolated Lantern/Radiance Android bridge"
+    description = "Builds the isolated Lantern/Radiance Android sidecar binaries"
     val buildScript = rootProject.file("core/lanternbridge/build-android.sh")
     commandLine("bash", buildScript.absolutePath)
     workingDir(rootProject.projectDir)
@@ -158,11 +159,15 @@ val buildLanternBridge = tasks.register<Exec>("buildLanternBridge") {
     environment("ANDROID_NDK_ROOT", "${android.sdkDirectory.absolutePath}/ndk/26.3.11579264")
     inputs.dir(rootProject.file("core/lanternbridge"))
     inputs.file(buildScript)
-    outputs.file(file("libs/lanternbridge.aar"))
+    outputs.files(
+        file("src/main/jniLibs/arm64-v8a/liblantern.so"),
+        file("src/main/jniLibs/armeabi-v7a/liblantern.so"),
+        file("src/main/jniLibs/x86_64/liblantern.so"),
+    )
 }
 
 tasks.named("preBuild").configure {
-    dependsOn(buildLanternBridge)
+    dependsOn(buildLanternSidecar)
 }
 
     dependencies {
