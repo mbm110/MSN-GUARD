@@ -224,9 +224,11 @@ object LanternEngine {
     fun cancelConnect() {
         stopRequested = true
         running.set(false)
-        try {
-            process?.destroy()
-        } catch (_: Throwable) {
+        if (process?.isAlive == true) {
+            // Cancel the blocking ConnectVPN call without stopping the SOCKS
+            // process yet. stopTunnel tears down Hev/TUN first, then
+            // disconnectAsync terminates the sidecar.
+            runCatching { request("POST", "/cancel", timeoutMs = 300) }
         }
     }
 
