@@ -3315,13 +3315,12 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 // A stale worker belongs to a stopped/replaced attempt. The
                 // corresponding stop path owns cleanup; never let this worker
                 // close the TUN or sidecar of a newer session.
-                if (!LanternEngine.isCurrent(attempt)) return@execute
                 val detail = error.message ?: error::class.java.simpleName
+                if (!LanternEngine.cancelConnect(attempt)) return@execute
                 ConnectionLog.record("Lantern start failed: $detail")
-                LanternEngine.cancelConnect()
                 synchronized(lanternLifecycleLock) {
                     runCatching { TunEngineManager.stop(this) }
-                    LanternEngine.disconnectAsync()
+                    LanternEngine.disconnectAsync(attempt)
                     runCatching { tun?.close() }
                     tun = null
                     vpnModeActive.set(false)
