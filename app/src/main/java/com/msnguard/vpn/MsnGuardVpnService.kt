@@ -3284,7 +3284,8 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 startWatchdog()
             } catch (e: Exception) {
                 ConnectionLog.record("Lantern start failed: ${e.message}")
-                LanternEngine.disconnect()
+                LanternEngine.cancelConnect()
+                LanternEngine.disconnectAsync()
                 TunEngineManager.stop(this)
                 tun?.close()
                 tun = null
@@ -5660,6 +5661,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
 
     private fun stopTunnel(notify: Boolean = true, teardownService: Boolean = true) {
         stopRequested.set(true)
+        if (currentProtocol.contains("LANTERN")) LanternEngine.cancelConnect()
         // The watchdog must go first: it is what turns a teardown into a
         // reconnect, and leaving it armed while we dismantle the data path would
         // make it fire on the wreckage of a session that is deliberately ending.
@@ -5687,7 +5689,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // Lantern's backend owns its outbound connections, not the Android
         // TUN. Keep this teardown hook scoped to the new transport so the seven
         // pre-existing transports never call into the Lantern bridge.
-        if (currentProtocol.contains("LANTERN")) LanternEngine.disconnect()
+        if (currentProtocol.contains("LANTERN")) LanternEngine.disconnectAsync()
         stopTrafficPolling()
         stopWarpTrafficPolling()
         // Foxy's app-layer sockets (local SOCKS + H2 session) must come down on
