@@ -9789,7 +9789,9 @@ class MainActivity : Activity() {
     private fun socksPort(): Int =
         if (TunnelStatus.isActive() && TorManager.isTorActive) {
             TorManager.FRONT_SOCKS_PORT
-        } else if (TunnelStatus.isActive() && LanternEngine.isRunning) {
+        } else if (TunnelStatus.isActive() &&
+            selectedProtocol == Protocol.LANTERN && LanternEngine.isRunning
+        ) {
             LanternEngine.SOCKS_PORT
         } else if (TunnelStatus.isActive() && com.msnguard.vpn.foxy.FoxyTunnel.isRunning) {
             // FOXY's listener is its own 1830 — the aether default below is a
