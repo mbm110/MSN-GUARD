@@ -30,7 +30,8 @@ LDFLAGS="-s -w -checklinkname=0 -extldflags '-Wl,-z,max-page-size=16384 -Wl,-z,r
 export PATH="$(go env GOPATH)/bin:$PATH"
 cd "$BRIDGE_DIR"
 
-go mod download
+go mod download github.com/getlantern/radiance@v0.0.0-20261114050550-0f837799e530
+go mod tidy
 go mod verify
 # Compile the Radiance dependency graph and run only our local bridge/sidecar
 # tests. Do not run upstream integration tests or contact public Lantern servers
