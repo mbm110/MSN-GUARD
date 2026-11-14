@@ -3240,18 +3240,19 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
      * loopback mixed SOCKS listener. No existing transport is modified.
      */
     private fun startLanternTunnel() {
-        // Latch a fresh start before queueing work; a user stop that arrives
-        // before the worker runs must not be cleared by the queued task.
-        LanternEngine.armForStart()
+        // Latch a fresh attempt before queueing work. A stop or a newer attempt
+        // invalidates this token, so an old worker cannot tear down a new session.
+        val attempt = LanternEngine.armForStart()
         worker.execute {
             try {
+                if (!LanternEngine.isCurrent(attempt)) return@execute
                 if (proxyMode) error("Lantern requires whole-device VPN mode")
                 val address = Tun2SocksManager.selectPrivateAddress()
                 val mtu = Tun2SocksManager.VPN_INTERFACE_MTU
                 currentTunMtu = mtu
                 TunEngineManager.syncPrivateAddress(address)
-                ConnectionLog.record("Lantern: creating the app-owned Android TUN")
-                tun = Builder()
+
+                val builder = Builder()
                     .setSession("MSN-GUARD — Lantern")
                     .setMtu(mtu)
                     .addAddress(address.ipAddress, address.prefixLength)
@@ -3265,38 +3266,68 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     .applyLanAccess(tun = address)
                     .applyIranBypass()
                     .applySplitTunneling()
-                    .establish() ?: error("Android could not establish the Lantern VPN interface")
-                vpnModeActive.set(true)
 
+                ConnectionLog.record("Lantern: creating the app-owned Android TUN")
+                val establishedTun = synchronized(lanternLifecycleLock) {
+                    if (!LanternEngine.isCurrent(attempt)) return@execute
+                    val fd = builder.establish()
+                        ?: error("Android could not establish the Lantern VPN interface")
+                    if (!LanternEngine.isCurrent(attempt)) {
+                        runCatching { fd.close() }
+                        return@execute
+                    }
+                    tun = fd
+                    vpnModeActive.set(true)
+                    fd
+                }
+
+                if (!LanternEngine.isCurrent(attempt)) return@execute
                 sendStatus(STATUS_CONNECTING, Strings.t("Starting Lantern public servers…"), 15)
-                if (!LanternEngine.connect(this)) {
+                if (!LanternEngine.connect(this, attempt)) {
+                    if (!LanternEngine.isCurrent(attempt)) return@execute
                     error(LanternEngine.errorMessage().ifBlank { "Could not connect to public Lantern servers" })
                 }
+                if (!LanternEngine.isCurrent(attempt)) return@execute
 
                 sendStatus(STATUS_CONNECTING, Strings.t("Starting device routing…"), 75)
                 activeSocksPort = LanternEngine.SOCKS_PORT
-                if (!HevEngine.start(tun!!, LanternEngine.SOCKS_PORT, mtu, dnsOnly = false)) {
+                val hevStarted = synchronized(lanternLifecycleLock) {
+                    if (!LanternEngine.isCurrent(attempt)) return@execute
+                    HevEngine.start(establishedTun, LanternEngine.SOCKS_PORT, mtu, dnsOnly = false)
+                }
+                if (!LanternEngine.isCurrent(attempt)) return@execute
+                if (!hevStarted) {
                     error("Could not start the Hev device-routing engine for Lantern")
                 }
 
-                currentVpnIp = ""
-                TunnelStatus.isProxyMode = false
-                TunnelStatus.isNativeTunMode = false
-                sendStatus(STATUS_CONNECTED, Strings.t("Lantern connected"))
-                ConnectionLog.record("Lantern: connected — device TUN → Hev → Radiance SOCKS 127.0.0.1:${LanternEngine.SOCKS_PORT}")
-                repostNotification()
-                startLanternTrafficPolling()
-                startWatchdog()
+                synchronized(lanternLifecycleLock) {
+                    if (!LanternEngine.isCurrent(attempt)) return@execute
+                    currentVpnIp = ""
+                    TunnelStatus.isProxyMode = false
+                    TunnelStatus.isNativeTunMode = false
+                    sendStatus(STATUS_CONNECTED, Strings.t("Lantern connected"))
+                    ConnectionLog.record("Lantern: connected — device TUN → Hev → Radiance SOCKS 127.0.0.1:${LanternEngine.SOCKS_PORT}")
+                    repostNotification()
+                    startLanternTrafficPolling()
+                    startWatchdog()
+                }
             } catch (error: Throwable) {
-                ConnectionLog.record("Lantern start failed: ${error.message ?: error::class.java.simpleName}")
+                // A stale worker belongs to a stopped/replaced attempt. The
+                // corresponding stop path owns cleanup; never let this worker
+                // close the TUN or sidecar of a newer session.
+                if (!LanternEngine.isCurrent(attempt)) return@execute
+                val detail = error.message ?: error::class.java.simpleName
+                ConnectionLog.record("Lantern start failed: $detail")
                 LanternEngine.cancelConnect()
-                runCatching { TunEngineManager.stop(this) }
-                LanternEngine.disconnectAsync()
-                runCatching { tun?.close() }
-                tun = null
-                vpnModeActive.set(false)
+                synchronized(lanternLifecycleLock) {
+                    runCatching { TunEngineManager.stop(this) }
+                    LanternEngine.disconnectAsync()
+                    runCatching { tun?.close() }
+                    tun = null
+                    vpnModeActive.set(false)
+                }
                 if (stopRequested.get() || userInitiatedStop.get()) return@execute
-                failAndStop(error.message ?: "Lantern start failed")
+                failAndStop(detail)
             }
         }
     }
