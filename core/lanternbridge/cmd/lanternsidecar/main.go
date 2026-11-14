@@ -47,8 +47,15 @@ func run() error {
 		return errors.New("Lantern SOCKS and control listeners must bind to loopback only")
 	}
 
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
 	if err := lanternbridge.Init(*dataDir, *logDir, *socksAddress); err != nil {
 		return fmt.Errorf("initialize Radiance: %w", err)
+	}
+	if signalCtx.Err() != nil {
+		lanternbridge.Shutdown()
+		return nil
 	}
 
 	mux := http.NewServeMux()
@@ -144,9 +151,6 @@ func run() error {
 		WriteTimeout:      310 * time.Second,
 		IdleTimeout:       15 * time.Second,
 	}
-
-	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
 
 	serverErr := make(chan error, 1)
 	go func() {
