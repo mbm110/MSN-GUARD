@@ -2,60 +2,82 @@ package com.msnguard.vpn
 
 import android.content.Context
 import android.util.Log
-import com.msnguard.lantern.Lanternbridge
 import org.json.JSONObject
+import java.io.BufferedReader
 import java.io.File
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.URL
+import java.security.SecureRandom
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Isolated adapter for the public Lantern/Radiance engine.
+ * Public Lantern transport backed by a separate Android PIE executable.
  *
- * Radiance is built with its novpn tag and binds only a loopback mixed
+ * Radiance is built with its novpn tag and exposes a loopback-only mixed
  * HTTP/SOCKS listener. This app remains the only owner of Android VpnService
- * and the device TUN. The existing Hev engine forwards that TUN to this SOCKS
- * listener; no second Android VPN service is created.
+ * and the device TUN. The existing Hev engine forwards that TUN to the local
+ * SOCKS listener. A separate process is intentional: Psiphon's gomobile AAR
+ * already owns libgojni.so and go.Seq classes, so another gomobile AAR would
+ * collide with it.
  */
 object LanternEngine {
     const val SOCKS_PORT = 1831
+    private const val CONTROL_PORT = 1832
     private const val TAG = "LanternEngine"
     private const val CONNECT_TIMEOUT_SECONDS = 180L
+    private const val CONTROL_READY_TIMEOUT_MS = 10_000L
 
-    @Volatile private var initialized = false
+    private val running = AtomicBoolean(false)
+    private val processLock = Any()
+
+    @Volatile private var stopRequested = false
+    @Volatile private var process: Process? = null
+    @Volatile private var logThread: Thread? = null
+    @Volatile private var stopThread: Thread? = null
+    @Volatile private var controlToken = ""
     @Volatile private var lastError = ""
-    @Volatile private var disconnectThread: Thread? = null
 
-    @Synchronized
-    fun initialize(context: Context): Boolean {
-        if (initialized) return true
-        return try {
-            val root = File(context.applicationContext.filesDir, "lantern-radiance")
-            val data = File(root, "data")
-            val logs = File(root, "logs")
-            check(data.mkdirs() || data.isDirectory) { "Could not create Lantern data directory" }
-            check(logs.mkdirs() || logs.isDirectory) { "Could not create Lantern log directory" }
-            Lanternbridge.init(data.absolutePath, logs.absolutePath, "127.0.0.1:$SOCKS_PORT")
-            initialized = true
-            lastError = ""
-            ConnectionLog.record("Lantern: Radiance initialized (novpn, loopback SOCKS $SOCKS_PORT)")
-            true
-        } catch (error: Throwable) {
-            lastError = error.message ?: error.javaClass.simpleName
-            ConnectionLog.record("Lantern: initialization failed: $lastError")
-            Log.e(TAG, "Radiance initialization failed", error)
-            false
-        }
+    private fun binary(context: Context): File =
+        File(context.applicationInfo.nativeLibraryDir, "liblantern.so")
+
+    private fun newControlToken(): String {
+        val bytes = ByteArray(32)
+        SecureRandom().nextBytes(bytes)
+        return bytes.joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
-    /** Blocking call: invoke only from MsnGuardVpnService's worker thread. */
+    /** Clear the previous stop latch before a fresh connection attempt. */
+    fun armForStart() {
+        stopRequested = false
+        lastError = ""
+    }
+
+    /** Blocking connect: call only from MsnGuardVpnService's worker thread. */
     fun connect(context: Context): Boolean {
-        if (!initialize(context)) return false
+        armForStart()
+        if (!startProcess(context)) return false
+        if (stopRequested) return false
+
         return try {
-            awaitPendingDisconnect()
             ConnectionLog.record("Lantern: waiting for public server configuration and auto-selection")
-            Lanternbridge.connect(CONNECT_TIMEOUT_SECONDS)
+            val response = request(
+                method = "POST",
+                path = "/connect",
+                body = JSONObject().put("timeout_seconds", CONNECT_TIMEOUT_SECONDS),
+                timeoutMs = 190_000,
+            )
+            if (!response.optBoolean("ok")) {
+                error(response.optString("error").ifBlank { "Radiance could not connect to a public server" })
+            }
+
+            running.set(true)
             val deadline = android.os.SystemClock.elapsedRealtime() + 10_000L
             while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                if (stopRequested) return false
                 if (isRunning && isSocksReady()) {
                     lastError = ""
                     ConnectionLog.record("Lantern: public server connected; local SOCKS listener is ready")
@@ -65,58 +87,197 @@ object LanternEngine {
             }
             error("Radiance reported connected but its loopback SOCKS listener did not open")
         } catch (error: Throwable) {
-            lastError = runCatching { Lanternbridge.lastError() }
-                .getOrNull()
-                ?.takeIf { it.isNotBlank() }
-                ?: (error.message ?: error.javaClass.simpleName)
+            lastError = error.message ?: error.javaClass.simpleName
             ConnectionLog.record("Lantern: connect failed: $lastError")
             Log.e(TAG, "Radiance connect failed", error)
             false
         }
     }
 
-    /** Cancel a possibly blocking connect attempt; safe to call from onStartCommand. */
-    fun cancelConnect() {
-        if (!initialized) return
-        runCatching { Lanternbridge.cancelConnect() }
-    }
+    private fun startProcess(context: Context): Boolean {
+        awaitPreviousStop()
+        synchronized(processLock) {
+            if (stopRequested) return false
+            if (process?.isAlive == true) return true
 
-    /**
-     * Disconnect on a dedicated thread. Radiance may wait for in-flight dials;
-     * Android's service main thread must not wait for that teardown.
-     */
-    fun disconnectAsync() {
-        if (!initialized) return
-        cancelConnect()
-        synchronized(this) {
-            if (disconnectThread?.isAlive == true) return
-            disconnectThread = Thread({
+            val bin = binary(context)
+            if (!bin.exists()) {
+                lastError = "Lantern sidecar binary is missing at ${bin.absolutePath}"
+                ConnectionLog.record("Lantern: $lastError")
+                return false
+            }
+
+            val root = File(context.applicationContext.filesDir, "lantern-radiance")
+            val data = File(root, "data")
+            val logs = File(root, "logs")
+            if (!(data.mkdirs() || data.isDirectory) || !(logs.mkdirs() || logs.isDirectory)) {
+                lastError = "Could not create Lantern private data/log directories"
+                return false
+            }
+
+            val token = newControlToken()
+            val builder = ProcessBuilder(
+                bin.absolutePath,
+                "--data-dir", data.absolutePath,
+                "--log-dir", logs.absolutePath,
+                "--socks-address", "127.0.0.1:$SOCKS_PORT",
+                "--control-address", "127.0.0.1:$CONTROL_PORT",
+                "--control-token", token,
+            )
+            builder.directory(root)
+            builder.redirectErrorStream(true)
+            builder.environment()["HOME"] = context.filesDir.absolutePath
+
+            val started = try {
+                builder.start()
+            } catch (error: Throwable) {
+                lastError = "Could not start Lantern sidecar: ${error.message}"
+                ConnectionLog.record("Lantern: $lastError")
+                Log.e(TAG, "Sidecar exec failed", error)
+                return false
+            }
+
+            if (stopRequested) {
+                started.destroy()
+                return false
+            }
+            process = started
+            controlToken = token
+            running.set(false)
+
+            logThread = Thread({
                 try {
-                    Lanternbridge.disconnect()
-                    ConnectionLog.record("Lantern: Radiance tunnel disconnected")
-                } catch (error: Throwable) {
-                    ConnectionLog.record("Lantern: disconnect error: ${error.message}")
-                    Log.w(TAG, "Radiance disconnect failed", error)
-                } finally {
-                    synchronized(this) { disconnectThread = null }
+                    BufferedReader(InputStreamReader(started.inputStream)).forEachLine { line ->
+                        if (line.isNotBlank()) {
+                            val lower = line.lowercase()
+                            if (lower.contains("error") || lower.contains("warn") || lower.contains("connected")) {
+                                if (lower.contains("error")) lastError = line.take(500)
+                                ConnectionLog.record("Lantern/Radiance: ${line.take(700)}")
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
                 }
-            }, "lantern-disconnect").apply {
+            }, "lantern-log").apply {
                 isDaemon = true
                 start()
             }
         }
+
+        return awaitControlReady()
     }
 
-    private fun awaitPendingDisconnect() {
-        val pending = synchronized(this) { disconnectThread }
-        pending?.join(30_000L)
-        check(pending?.isAlive != true) { "Previous Lantern session is still shutting down" }
+    private fun awaitControlReady(): Boolean {
+        val deadline = android.os.SystemClock.elapsedRealtime() + CONTROL_READY_TIMEOUT_MS
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            if (stopRequested) return false
+            if (process?.isAlive != true) {
+                lastError = "Lantern sidecar exited before its control API became ready"
+                return false
+            }
+            val ready = runCatching {
+                request("GET", "/health", timeoutMs = 500).optBoolean("ok")
+            }.getOrDefault(false)
+            if (ready) {
+                ConnectionLog.record("Lantern: sidecar control API ready on 127.0.0.1:$CONTROL_PORT")
+                return true
+            }
+            Thread.sleep(120L)
+        }
+        lastError = "Lantern sidecar control API did not become ready"
+        return false
+    }
+
+    private fun request(
+        method: String,
+        path: String,
+        body: JSONObject? = null,
+        timeoutMs: Int = 700,
+    ): JSONObject {
+        val token = controlToken
+        check(token.isNotBlank()) { "Lantern control token is unavailable" }
+        val connection = (URL("http://127.0.0.1:$CONTROL_PORT$path").openConnection() as HttpURLConnection)
+        try {
+            connection.requestMethod = method
+            connection.connectTimeout = timeoutMs
+            connection.readTimeout = timeoutMs
+            connection.setRequestProperty("Authorization", "Bearer $token")
+            connection.setRequestProperty("Accept", "application/json")
+            if (body != null) {
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+            }
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            if (text.isBlank()) error("Lantern control API returned HTTP $code with no body")
+            return JSONObject(text)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    /** Cancel a blocking connect and signal the sidecar to shut down. */
+    fun cancelConnect() {
+        stopRequested = true
+        running.set(false)
+        try {
+            process?.destroy()
+        } catch (_: Throwable) {
+        }
+    }
+
+    /**
+     * Stop the process off the Android service main thread. Android's native
+     * library extraction grants execute permission to lib*.so when legacy
+     * packaging is enabled; this file is executed, never dlopen'd.
+     */
+    fun disconnectAsync() {
+        cancelConnect()
+        synchronized(processLock) {
+            val proc = process
+            process = null
+            controlToken = ""
+            if (proc == null) return
+            val oldLogThread = logThread
+            logThread = null
+            val thread = Thread({
+                try {
+                    if (proc.isAlive && !proc.waitFor(3, TimeUnit.SECONDS)) {
+                        proc.destroyForcibly()
+                        proc.waitFor(2, TimeUnit.SECONDS)
+                    }
+                } catch (_: Exception) {
+                    try { proc.destroyForcibly() } catch (_: Exception) {}
+                }
+                try { oldLogThread?.join(500L) } catch (_: Exception) {}
+                synchronized(processLock) {
+                    if (stopThread === Thread.currentThread()) stopThread = null
+                }
+            }, "lantern-stop").apply { isDaemon = true }
+            stopThread = thread
+            thread.start()
+        }
+    }
+
+    private fun awaitPreviousStop() {
+        val pending = stopThread
+        if (pending != null && pending.isAlive) {
+            pending.join(4_000L)
+            check(!pending.isAlive) { "Previous Lantern process is still shutting down" }
+        }
     }
 
     val isRunning: Boolean
-        get() = initialized && runCatching {
-            Lanternbridge.status().equals("connected", ignoreCase = true)
-        }.getOrDefault(false)
+        get() {
+            if (!running.get() || process?.isAlive != true) return false
+            return runCatching {
+                request("GET", "/status", timeoutMs = 350)
+                    .optString("status")
+                    .equals("connected", ignoreCase = true)
+            }.getOrDefault(false)
+        }
 
     fun isSocksReady(): Boolean = try {
         Socket().use { socket ->
@@ -129,22 +290,20 @@ object LanternEngine {
 
     /** Cumulative byte counters from Radiance's active connection tracker. */
     fun trafficCounters(): Pair<Long, Long> = try {
-        val json = JSONObject(Lanternbridge.trafficJSON())
+        val json = request("GET", "/traffic", timeoutMs = 700)
         json.optLong("tx", 0L) to json.optLong("rx", 0L)
     } catch (_: Throwable) {
         0L to 0L
     }
 
     fun errorMessage(): String = lastError.ifBlank {
-        runCatching { Lanternbridge.lastError() }.getOrNull().orEmpty()
+        runCatching { request("GET", "/status", timeoutMs = 500).optString("error") }
+            .getOrNull()
+            .orEmpty()
     }
 
-    /** Process-lifetime cleanup hook; not used for ordinary disconnects. */
-    @Synchronized
+    /** Process-lifetime cleanup hook. */
     fun shutdown() {
-        if (!initialized) return
-        runCatching { Lanternbridge.shutdown() }
-        initialized = false
-        lastError = ""
+        disconnectAsync()
     }
 }
