@@ -23,6 +23,7 @@ object LanternEngine {
 
     @Volatile private var initialized = false
     @Volatile private var lastError = ""
+    @Volatile private var disconnectThread: Thread? = null
 
     @Synchronized
     fun initialize(context: Context): Boolean {
@@ -50,6 +51,7 @@ object LanternEngine {
     fun connect(context: Context): Boolean {
         if (!initialize(context)) return false
         return try {
+            awaitPendingDisconnect()
             ConnectionLog.record("Lantern: waiting for public server configuration and auto-selection")
             Lanternbridge.connect(CONNECT_TIMEOUT_SECONDS)
             val deadline = android.os.SystemClock.elapsedRealtime() + 10_000L
@@ -73,9 +75,42 @@ object LanternEngine {
         }
     }
 
-    /** Stop only the Radiance tunnel; keep its backend ready for a reconnect. */
+    /** Cancel a possibly blocking connect attempt; safe to call from onStartCommand. */
+    fun cancelConnect() {
+        if (!initialized) return
+        runCatching { Lanternbridge.cancelConnect() }
+    }
+
+    /**
+     * Disconnect on a dedicated thread. Radiance may wait for in-flight dials;
+     * Android's service main thread must not wait for that teardown.
+     */
+    fun disconnectAsync() {
+        if (!initialized) return
+        cancelConnect()
+        synchronized(this) {
+            if (disconnectThread?.isAlive == true) return
+            disconnectThread = Thread({
+                try {
+                    Lanternbridge.disconnect()
+                    ConnectionLog.record("Lantern: Radiance tunnel disconnected")
+                } catch (error: Throwable) {
+                    ConnectionLog.record("Lantern: disconnect error: ${error.message}")
+                    Log.w(TAG, "Radiance disconnect failed", error)
+                } finally {
+                    synchronized(this) { disconnectThread = null }
+                }
+            }, "lantern-disconnect").apply {
+                isDaemon = true
+                start()
+            }
+        }
+    }
+
+    /** Synchronous variant for controlled worker-thread cleanup only. */
     fun disconnect() {
         if (!initialized) return
+        cancelConnect()
         try {
             Lanternbridge.disconnect()
             ConnectionLog.record("Lantern: Radiance tunnel disconnected")
@@ -83,6 +118,12 @@ object LanternEngine {
             ConnectionLog.record("Lantern: disconnect error: ${error.message}")
             Log.w(TAG, "Radiance disconnect failed", error)
         }
+    }
+
+    private fun awaitPendingDisconnect() {
+        val pending = synchronized(this) { disconnectThread }
+        pending?.join(30_000L)
+        check(pending?.isAlive != true) { "Previous Lantern session is still shutting down" }
     }
 
     val isRunning: Boolean
