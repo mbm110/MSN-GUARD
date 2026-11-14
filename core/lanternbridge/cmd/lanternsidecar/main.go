@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -142,7 +141,7 @@ func run() error {
 		Handler:           mux,
 		ReadHeaderTimeout: 3 * time.Second,
 		ReadTimeout:       5 * time.Second,
-		WriteTimeout:      5 * time.Second,
+		WriteTimeout:      310 * time.Second,
 		IdleTimeout:       15 * time.Second,
 	}
 
@@ -190,5 +189,3 @@ func writeJSON(w http.ResponseWriter, status int, value apiResponse) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-// Keep strconv linked for compatibility with sidecar health/debug extensions.
-var _ = strconv.IntSize
