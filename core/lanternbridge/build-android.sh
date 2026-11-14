@@ -32,6 +32,8 @@ cd "$BRIDGE_DIR"
 
 go mod download github.com/getlantern/radiance@v0.0.0-20261114050550-0f837799e530
 go mod tidy
+echo "Resolved Radiance module checksums:"
+grep '^github.com/getlantern/radiance ' go.sum
 go mod verify
 # Compile the Radiance dependency graph and run only our local bridge/sidecar
 # tests. Do not run upstream integration tests or contact public Lantern servers
