@@ -64,6 +64,10 @@ object LanternEngine {
     fun isCurrent(attempt: Long): Boolean =
         generation.get() == attempt && !stopRequested
 
+    /** True while this attempt's own failure/stop cleanup still owns the engine. */
+    fun isStoppingAttempt(attempt: Long): Boolean =
+        generation.get() == attempt + 1L && stopRequested
+
     /** Blocking connect: call only from MsnGuardVpnService's worker thread. */
     fun connect(context: Context, attempt: Long): Boolean {
         return try {
