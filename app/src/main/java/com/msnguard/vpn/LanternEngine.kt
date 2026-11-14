@@ -58,7 +58,6 @@ object LanternEngine {
 
     /** Blocking connect: call only from MsnGuardVpnService's worker thread. */
     fun connect(context: Context): Boolean {
-        armForStart()
         return try {
             if (!startProcess(context)) return false
             if (stopRequested) return false
