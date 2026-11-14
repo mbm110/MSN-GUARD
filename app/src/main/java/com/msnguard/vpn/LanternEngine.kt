@@ -263,7 +263,7 @@ object LanternEngine {
     private fun awaitPreviousStop() {
         val pending = stopThread
         if (pending != null && pending.isAlive) {
-            pending.join(4_000L)
+            pending.join(6_000L)
             check(!pending.isAlive) { "Previous Lantern process is still shutting down" }
         }
     }
