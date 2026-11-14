@@ -56,6 +56,7 @@ object LanternEngine {
     /** Clear the previous stop latch before a fresh connection attempt. */
     fun armForStart(): Long = synchronized(generationLock) {
         stopRequested = false
+        running.set(false)
         lastError = ""
         generation.incrementAndGet()
     }
