@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -13,11 +12,19 @@ import (
 	"github.com/getlantern/radiance/vpn"
 )
 
+type byteTotals struct {
+	up   int64
+	down int64
+}
+
 var state struct {
-	mu      sync.RWMutex
-	backend *backend.LocalBackend
-	cancel  context.CancelFunc
-	lastErr string
+	mu          sync.RWMutex
+	backend     *backend.LocalBackend
+	lastErr     string
+	trafficMu   sync.Mutex
+	trafficSeen map[string]byteTotals
+	completedUp int64
+	completedDn int64
 }
 
 // Init initializes Radiance once for this app process. The novpn build tag
@@ -51,13 +58,12 @@ func Init(dataDir, logDir, socksAddress string) error {
 	})
 	if err != nil {
 		cancel()
-		state.lastErr = err.Error()
+		setLastError(err)
 		return fmt.Errorf("initialize Radiance: %w", err)
 	}
 
 	state.backend = b
-	state.cancel = cancel
-	state.lastErr = ""
+	setLastError(nil)
 	b.Start()
 	return nil
 }
@@ -81,6 +87,7 @@ func Connect(timeoutSeconds int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 
+	resetTraffic()
 	err := b.ConnectVPN(ctx, vpn.AutoSelectTag)
 	setLastError(err)
 	if err != nil {
@@ -96,6 +103,7 @@ func Disconnect() error {
 	if b == nil {
 		return nil
 	}
+	_ = TrafficJSON() // capture the last active-connection counters before close
 	err := b.DisconnectVPN()
 	setLastError(err)
 	if err != nil {
@@ -113,22 +121,63 @@ func Status() string {
 	return string(b.VPNStatus())
 }
 
-// ThroughputJSON returns Radiance's most recent global throughput sample.
-// Values in global.up and global.down are bits per second.
-func ThroughputJSON() string {
+// TrafficJSON returns cumulative byte totals as {"tx":...,"rx":...}.
+// Radiance exposes active connection byte counters; this wrapper retains the
+// last observed totals when a connection closes between polling intervals.
+func TrafficJSON() string {
 	b := currentBackend()
 	if b == nil {
-		return "{}"
+		return "{\"tx\":0,\"rx\":0}"
 	}
-	snapshot, err := b.VPNThroughput()
+	connections, err := b.VPNConnections()
 	if err != nil {
-		return "{}"
+		return currentTrafficJSON()
 	}
-	encoded, err := json.Marshal(snapshot)
+
+	current := make(map[string]byteTotals, len(connections))
+	var liveUp, liveDown int64
+	for _, connection := range connections {
+		v := byteTotals{up: connection.Uplink, down: connection.Downlink}
+		current[connection.ID] = v
+		liveUp += v.up
+		liveDown += v.down
+	}
+
+	state.trafficMu.Lock()
+	for id, previous := range state.trafficSeen {
+		if _, stillActive := current[id]; !stillActive {
+			state.completedUp += previous.up
+			state.completedDn += previous.down
+		}
+	}
+	state.trafficSeen = current
+	up := state.completedUp + liveUp
+	down := state.completedDn + liveDown
+	state.trafficMu.Unlock()
+
+	encoded, err := json.Marshal(map[string]int64{"tx": up, "rx": down})
 	if err != nil {
-		return "{}"
+		return "{\"tx\":0,\"rx\":0}"
 	}
 	return string(encoded)
+}
+
+func currentTrafficJSON() string {
+	state.trafficMu.Lock()
+	defer state.trafficMu.Unlock()
+	encoded, _ := json.Marshal(map[string]int64{
+		"tx": state.completedUp,
+		"rx": state.completedDn,
+	})
+	return string(encoded)
+}
+
+func resetTraffic() {
+	state.trafficMu.Lock()
+	state.trafficSeen = make(map[string]byteTotals)
+	state.completedUp = 0
+	state.completedDn = 0
+	state.trafficMu.Unlock()
 }
 
 // LastError returns the last initialization/connect/disconnect error, if any.
@@ -154,6 +203,13 @@ func setLastError(err error) {
 	}
 }
 
-// Keep os linked in the mobile build so environment overrides remain available
-// to downstream Radiance components that read process environment directly.
-var _ = os.Getenv
+// Shutdown releases the backend when the Android application process exits.
+func Shutdown() {
+	state.mu.Lock()
+	b := state.backend
+	state.backend = nil
+	state.mu.Unlock()
+	if b != nil {
+		b.Close()
+	}
+}
