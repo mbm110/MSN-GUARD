@@ -5690,11 +5690,16 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
 
     private fun stopTunnel(notify: Boolean = true, teardownService: Boolean = true) {
         stopRequested.set(true)
-        if (currentProtocol.contains("LANTERN")) LanternEngine.cancelConnect()
+        val stoppingLantern = currentProtocol.contains("LANTERN")
+        if (stoppingLantern) LanternEngine.cancelConnect()
         // The watchdog must go first: it is what turns a teardown into a
         // reconnect, and leaving it armed while we dismantle the data path would
         // make it fire on the wreckage of a session that is deliberately ending.
-        stopWatchdog()
+        if (stoppingLantern) {
+            synchronized(lanternLifecycleLock) { stopWatchdog() }
+        } else {
+            stopWatchdog()
+        }
         stopTorProgressPolling()
         // Clear the session stamp here, not in sendStatus: the reconnect path and
         // onDestroy both call stopTunnel(notify = false), so relying on the
@@ -5714,12 +5719,22 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // Order matters: stop routing first so no more packets enter a tunnel
         // that is being torn down, then stop Psiphon itself.
         SmartDnsFront.stop()
-        TunEngineManager.stop(this)
-        // Lantern's backend owns its outbound connections, not the Android
-        // TUN. Keep this teardown hook scoped to the new transport so the seven
-        // pre-existing transports never call into the Lantern bridge.
-        if (currentProtocol.contains("LANTERN")) LanternEngine.disconnectAsync()
-        stopTrafficPolling()
+        if (stoppingLantern) {
+            // Keep the complete Lantern TUN/Hev/sidecar teardown atomic with
+            // respect to a worker that may still be establishing the TUN.
+            synchronized(lanternLifecycleLock) {
+                TunEngineManager.stop(this)
+                LanternEngine.disconnectAsync()
+                stopTrafficPolling()
+                runCatching { tun?.close() }
+                tun = null
+                vpnModeActive.set(false)
+                connected.set(false)
+            }
+        } else {
+            TunEngineManager.stop(this)
+            stopTrafficPolling()
+        }
         stopWarpTrafficPolling()
         // Foxy's app-layer sockets (local SOCKS + H2 session) must come down on
         // every disconnect path — they are not owned by NativeCore/TunEngine.
@@ -5796,11 +5811,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             return
         }
 
-        if (currentProtocol.contains("LANTERN")) {
-            vpnModeActive.set(false)
-            tun?.close()
-            tun = null
-            connected.set(false)
+        if (stoppingLantern) {
             if (notify) sendStatus(STATUS_DISCONNECTED)
             if (teardownService) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
