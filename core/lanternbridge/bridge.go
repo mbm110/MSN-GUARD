@@ -110,6 +110,13 @@ func Disconnect() error {
 		return nil
 	}
 	_ = TrafficJSON() // capture the last active-connection counters before close
+	state.trafficMu.Lock()
+	for _, previous := range state.trafficSeen {
+		state.completedUp += previous.up
+		state.completedDn += previous.down
+	}
+	state.trafficSeen = make(map[string]byteTotals)
+	state.trafficMu.Unlock()
 	err := b.DisconnectVPN()
 	setLastError(err)
 	if err != nil {
