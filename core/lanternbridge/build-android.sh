@@ -32,13 +32,13 @@ go install "golang.org/x/mobile/cmd/gobind@$GOMOBILE_VERSION"
 mkdir -p "$ROOT_DIR/app/libs"
 cd "$BRIDGE_DIR"
 go mod download
-go test -tags=novpn,with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme ./...
+go test -tags=novpn,with_gvisor,with_quic,with_wireguard,with_utls,with_grpc ./...
 
 GOOS=android gomobile bind -v \
   -androidapi=26 \
   -target=android/arm,android/arm64,android/amd64 \
   -javapkg=com.msnguard.lantern \
-  -tags=novpn,with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme \
+  -tags=novpn,with_gvisor,with_quic,with_wireguard,with_utls,with_grpc \
   -trimpath \
   -ldflags="-w -s -checklinkname=0" \
   -o="$ROOT_DIR/app/libs/lanternbridge.aar" \
