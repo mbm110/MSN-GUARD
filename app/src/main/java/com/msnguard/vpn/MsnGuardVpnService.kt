@@ -5682,9 +5682,10 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // that is being torn down, then stop Psiphon itself.
         SmartDnsFront.stop()
         TunEngineManager.stop(this)
-        // The Lantern backend owns its outbound connections, not the Android
-        // TUN. Stop it only after device routing has stopped feeding its proxy.
-        LanternEngine.disconnect()
+        // Lantern's backend owns its outbound connections, not the Android
+        // TUN. Keep this teardown hook scoped to the new transport so the seven
+        // pre-existing transports never call into the Lantern bridge.
+        if (currentProtocol.contains("LANTERN")) LanternEngine.disconnect()
         stopTrafficPolling()
         stopWarpTrafficPolling()
         // Foxy's app-layer sockets (local SOCKS + H2 session) must come down on
