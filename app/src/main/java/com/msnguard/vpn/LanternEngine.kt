@@ -1,7 +1,6 @@
 package com.msnguard.vpn
 
 import android.content.Context
-import android.net.LocalSocketAddress
 import android.util.Log
 import com.msnguard.lantern.Lanternbridge
 import org.json.JSONObject
@@ -20,7 +19,7 @@ import java.net.Socket
 object LanternEngine {
     const val SOCKS_PORT = 1831
     private const val TAG = "LanternEngine"
-    private const val CONNECT_TIMEOUT_SECONDS = 180
+    private const val CONNECT_TIMEOUT_SECONDS = 180L
 
     @Volatile private var initialized = false
     @Volatile private var lastError = ""
