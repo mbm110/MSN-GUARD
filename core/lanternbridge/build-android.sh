@@ -32,7 +32,10 @@ cd "$BRIDGE_DIR"
 
 go mod download
 go mod verify
-go test -tags="$TAGS" ./...
+# Compile the Radiance dependency graph and run only our local bridge/sidecar
+# tests. Do not run upstream integration tests or contact public Lantern servers
+# as a side effect of building the Android APK.
+go test -tags="$TAGS" ./ ./cmd/lanternsidecar
 
 build_android() {
   local ABI="$1"
