@@ -33,6 +33,7 @@ object LanternEngine {
 
     private val running = AtomicBoolean(false)
     private val generation = AtomicLong(0L)
+    private val generationLock = Any()
     private val processLock = Any()
 
     @Volatile private var stopRequested = false
@@ -53,10 +54,10 @@ object LanternEngine {
     }
 
     /** Clear the previous stop latch before a fresh connection attempt. */
-    fun armForStart(): Long {
+    fun armForStart(): Long = synchronized(generationLock) {
         stopRequested = false
         lastError = ""
-        return generation.incrementAndGet()
+        generation.incrementAndGet()
     }
 
     /** True only while this exact queued/start attempt still owns the engine. */
@@ -229,14 +230,28 @@ object LanternEngine {
     }
 
     /** Cancel a blocking Radiance connect without killing the sidecar yet. */
-    fun cancelConnect() {
+    /** Cancel this exact attempt without terminating the sidecar yet. */
+    fun cancelConnect(attempt: Long): Boolean = synchronized(generationLock) {
+        if (generation.get() != attempt || stopRequested) return@synchronized false
         generation.incrementAndGet()
         stopRequested = true
         running.set(false)
+        cancelSidecarConnectLocked()
+        true
+    }
+
+    /** Invalidate any current attempt; used by the authoritative service stop path. */
+    fun cancelConnect() = synchronized(generationLock) {
+        generation.incrementAndGet()
+        stopRequested = true
+        running.set(false)
+        cancelSidecarConnectLocked()
+    }
+
+    private fun cancelSidecarConnectLocked() {
         if (process?.isAlive == true) {
-            // Cancel the blocking ConnectVPN call without stopping the SOCKS
-            // process yet. stopTunnel tears down Hev/TUN first, then
-            // disconnectAsync terminates the sidecar.
+            // Cancel ConnectVPN without stopping the SOCKS process yet. The
+            // service tears down Hev/TUN first, then disconnectAsync terminates it.
             runCatching { request("POST", "/cancel", timeoutMs = 300) }
         }
     }
@@ -247,7 +262,26 @@ object LanternEngine {
      * packaging is enabled; this file is executed, never dlopen'd.
      */
     fun disconnectAsync() {
-        cancelConnect()
+        synchronized(generationLock) {
+            if (!stopRequested) {
+                generation.incrementAndGet()
+                stopRequested = true
+                running.set(false)
+                cancelSidecarConnectLocked()
+            }
+            stopProcessLocked()
+        }
+    }
+
+    /** Stop only if the attempt that requested teardown still owns this generation. */
+    fun disconnectAsync(attempt: Long) {
+        synchronized(generationLock) {
+            if (generation.get() != attempt + 1L || !stopRequested) return
+            stopProcessLocked()
+        }
+    }
+
+    private fun stopProcessLocked() {
         synchronized(processLock) {
             val proc = process
             process = null
