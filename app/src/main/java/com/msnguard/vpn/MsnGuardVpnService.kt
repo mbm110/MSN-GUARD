@@ -5723,7 +5723,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             // Keep the complete Lantern TUN/Hev/sidecar teardown atomic with
             // respect to a worker that may still be establishing the TUN.
             synchronized(lanternLifecycleLock) {
-                TunEngineManager.stop(this)
+                runCatching { TunEngineManager.stop(this) }
                 LanternEngine.disconnectAsync()
                 stopTrafficPolling()
                 runCatching { tun?.close() }
