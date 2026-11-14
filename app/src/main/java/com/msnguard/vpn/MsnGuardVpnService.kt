@@ -3238,6 +3238,9 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
      * loopback mixed SOCKS listener. No existing transport is modified.
      */
     private fun startLanternTunnel() {
+        // Latch a fresh start before queueing work; a user stop that arrives
+        // before the worker runs must not be cleared by the queued task.
+        LanternEngine.armForStart()
         worker.execute {
             try {
                 if (proxyMode) error("Lantern requires whole-device VPN mode")
