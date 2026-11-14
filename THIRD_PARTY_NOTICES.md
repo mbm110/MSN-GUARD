@@ -8,15 +8,9 @@
 - License text: [licenses/RADIANCE-GPL-3.0.txt](licenses/RADIANCE-GPL-3.0.txt)
 - Go module pin: `github.com/getlantern/radiance v0.0.0-20261114050550-0f837799e530`
 
-The Android bridge is built with Radiance's `novpn` build tag. This removes
+The Android sidecar is built with Radiance's `novpn` build tag. This removes
 Radiance's TUN inbound and exposes a loopback-only mixed HTTP/SOCKS listener;
 MSN-GUARD remains the sole owner of Android's VpnService and device TUN.
-
-## Go mobile binding
-
-- Project: https://github.com/golang/mobile
-- Pinned tool version: `v0.0.0-20260908204917-8b95e45f8d3e`
-- License: BSD 3-Clause (see the upstream project for the complete notice).
 
 ## Dependency compliance
 
