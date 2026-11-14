@@ -19,8 +19,9 @@ type byteTotals struct {
 
 var state struct {
 	mu          sync.RWMutex
-	backend     *backend.LocalBackend
-	lastErr     string
+	backend       *backend.LocalBackend
+	connectCancel context.CancelFunc
+	lastErr       string
 	trafficMu   sync.Mutex
 	trafficSeen map[string]byteTotals
 	completedUp int64
@@ -88,7 +89,15 @@ func Connect(timeoutSeconds int64) error {
 		timeoutSeconds = 300
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
-	defer cancel()
+	state.mu.Lock()
+	state.connectCancel = cancel
+	state.mu.Unlock()
+	defer func() {
+		cancel()
+		state.mu.Lock()
+		state.connectCancel = nil
+		state.mu.Unlock()
+	}()
 
 	resetTraffic()
 	err := b.ConnectVPN(ctx, vpn.AutoSelectTag)
@@ -101,11 +110,23 @@ func Connect(timeoutSeconds int64) error {
 
 // Disconnect stops the Radiance tunnel but keeps its backend initialized so a
 // later reconnect does not repeat global process initialization.
+// CancelConnect interrupts a connection attempt without waiting for the
+// backend's tunnel lock. It is safe to call from Android's service main thread.
+func CancelConnect() {
+	state.mu.RLock()
+	cancel := state.connectCancel
+	state.mu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 func Disconnect() error {
 	b := currentBackend()
 	if b == nil {
 		return nil
 	}
+	CancelConnect()
 	if b.VPNStatus() == vpn.Disconnected {
 		return nil
 	}
@@ -220,6 +241,7 @@ func setLastError(err error) {
 
 // Shutdown releases the backend when the Android application process exits.
 func Shutdown() {
+	CancelConnect()
 	state.mu.Lock()
 	b := state.backend
 	state.backend = nil
