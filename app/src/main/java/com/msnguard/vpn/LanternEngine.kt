@@ -26,7 +26,6 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 object LanternEngine {
     const val SOCKS_PORT = 1831
-    private const val CONTROL_PORT = 1832
     private const val TAG = "LanternEngine"
     private const val CONNECT_TIMEOUT_SECONDS = 180L
     private const val CONTROL_READY_TIMEOUT_MS = 10_000L
@@ -184,7 +183,7 @@ object LanternEngine {
                 request("GET", "/health", timeoutMs = 500).optBoolean("ok")
             }.getOrDefault(false)
             if (ready) {
-                ConnectionLog.record("Lantern: sidecar control API ready on 127.0.0.1:$CONTROL_PORT")
+                ConnectionLog.record("Lantern: private sidecar control socket ready")
                 return true
             }
             Thread.sleep(120L)
