@@ -18,16 +18,16 @@ type byteTotals struct {
 }
 
 var state struct {
-	mu          sync.RWMutex
+	mu            sync.RWMutex
 	backend       *backend.LocalBackend
 	backendCancel context.CancelFunc
 	connectCancel context.CancelFunc
 	connectID     uint64
 	lastErr       string
-	trafficMu   sync.Mutex
-	trafficSeen map[string]byteTotals
-	completedUp int64
-	completedDn int64
+	trafficMu     sync.Mutex
+	trafficSeen   map[string]byteTotals
+	completedUp   int64
+	completedDn   int64
 }
 
 // Init initializes Radiance once for this app process. The novpn build tag
