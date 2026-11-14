@@ -12,6 +12,12 @@ The Android sidecar is built with Radiance's `novpn` build tag. This removes
 Radiance's TUN inbound and exposes a loopback-only mixed HTTP/SOCKS listener;
 MSN-GUARD remains the sole owner of Android's VpnService and device TUN.
 
+## Go toolchain runtime
+
+- Project: https://go.dev/
+- Build toolchain: Go 1.26.10
+- License: BSD 3-Clause; see [licenses/GO-BSD-3-CLAUSE.txt](licenses/GO-BSD-3-CLAUSE.txt).
+
 ## Dependency compliance
 
 Radiance brings its own transitive Go dependencies. Their versions are pinned
