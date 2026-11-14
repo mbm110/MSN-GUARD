@@ -10,36 +10,57 @@ if [[ -z "$ANDROID_HOME" ]]; then
 fi
 
 NDK_VERSION="26.3.11579264"
-if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
-  export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
-fi
+export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk/$NDK_VERSION}"
+export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
 if [[ ! -d "$ANDROID_NDK_HOME" ]]; then
   echo "Android NDK not found: $ANDROID_NDK_HOME" >&2
   exit 2
 fi
-export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
 
-GO_VERSION="go1.26.10"
-GOMOBILE_VERSION="v0.0.0-20260908204917-8b95e45f8d3e"
-export GOTOOLCHAIN="$GO_VERSION"
+TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+if [[ ! -x "$TOOLCHAIN/aarch64-linux-android26-clang" ]]; then
+  echo "Android NDK clang toolchain not found under $TOOLCHAIN" >&2
+  exit 2
+fi
+
+export GOTOOLCHAIN="go1.26.10"
+TAGS="novpn,with_gvisor,with_quic,with_wireguard,with_utls,with_grpc"
+LDFLAGS="-s -w -checklinkname=0 -extldflags '-Wl,-z,max-page-size=16384 -Wl,-z,relro -Wl,-z,now'"
+
 export PATH="$(go env GOPATH)/bin:$PATH"
-
-go install "golang.org/x/mobile/cmd/gomobile@$GOMOBILE_VERSION"
-gomobile init
-# gomobile init installs gobind@latest; restore the pinned version afterwards.
-go install "golang.org/x/mobile/cmd/gobind@$GOMOBILE_VERSION"
-
-mkdir -p "$ROOT_DIR/app/libs"
 cd "$BRIDGE_DIR"
-go mod download
-go test -tags=novpn,with_gvisor,with_quic,with_wireguard,with_utls,with_grpc ./...
 
-GOOS=android gomobile bind -v \
-  -androidapi=26 \
-  -target=android/arm,android/arm64,android/amd64 \
-  -javapkg=com.msnguard.lantern \
-  -tags=novpn,with_gvisor,with_quic,with_wireguard,with_utls,with_grpc \
-  -trimpath \
-  -ldflags="-w -s -checklinkname=0" \
-  -o="$ROOT_DIR/app/libs/lanternbridge.aar" \
-  .
+go mod download
+go mod verify
+go test -tags="$TAGS" ./...
+
+build_android() {
+  local ABI="$1"
+  local GOARCH="$2"
+  local GOARM="$3"
+  local CC="$4"
+  local OUT="$ROOT_DIR/app/src/main/jniLibs/$ABI/liblantern.so"
+
+  mkdir -p "$(dirname "$OUT")"
+  echo "==> Building Lantern sidecar for $ABI ($GOARCH)"
+  if [[ -n "$GOARM" ]]; then
+    env GOOS=android GOARCH="$GOARCH" GOARM="$GOARM" CGO_ENABLED=1 CC="$TOOLCHAIN/$CC" \
+      go build -trimpath -buildmode=pie -tags="$TAGS" -ldflags="$LDFLAGS" \
+        -o "$OUT" ./cmd/lanternsidecar
+  else
+    env GOOS=android GOARCH="$GOARCH" CGO_ENABLED=1 CC="$TOOLCHAIN/$CC" \
+      go build -trimpath -buildmode=pie -tags="$TAGS" -ldflags="$LDFLAGS" \
+        -o "$OUT" ./cmd/lanternsidecar
+  fi
+
+  "$TOOLCHAIN/llvm-strip" --strip-unneeded "$OUT" || true
+  test -s "$OUT"
+  ls -lh "$OUT"
+}
+
+build_android arm64-v8a   arm64 ""  aarch64-linux-android26-clang
+build_android armeabi-v7a arm   7   armv7a-linux-androideabi26-clang
+build_android x86_64      amd64 ""  x86_64-linux-android26-clang
+
+echo "Lantern sidecar binaries built:"
+ls -lh "$ROOT_DIR"/app/src/main/jniLibs/*/liblantern.so
