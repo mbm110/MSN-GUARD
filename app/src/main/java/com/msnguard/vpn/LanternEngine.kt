@@ -1,15 +1,15 @@
 package com.msnguard.vpn
 
 import android.content.Context
+import android.net.LocalSocket
+import android.net.LocalSocketAddress
 import android.util.Log
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
-import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.net.URL
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -39,6 +39,7 @@ object LanternEngine {
     @Volatile private var logThread: Thread? = null
     @Volatile private var stopThread: Thread? = null
     @Volatile private var controlToken = ""
+    @Volatile private var controlSocketPath = ""
     @Volatile private var lastError = ""
 
     private fun binary(context: Context): File =
@@ -115,12 +116,13 @@ object LanternEngine {
             }
 
             val token = newControlToken()
+            val controlPath = File(root, "control.sock").absolutePath
             val builder = ProcessBuilder(
                 bin.absolutePath,
                 "--data-dir", data.absolutePath,
                 "--log-dir", logs.absolutePath,
                 "--socks-address", "127.0.0.1:$SOCKS_PORT",
-                "--control-address", "127.0.0.1:$CONTROL_PORT",
+                "--control-socket", controlPath,
                 "--control-token", token,
             )
             builder.directory(root)
@@ -145,6 +147,7 @@ object LanternEngine {
             }
             process = started
             controlToken = token
+            controlSocketPath = controlPath
             running.set(false)
 
             logThread = Thread({
@@ -197,26 +200,25 @@ object LanternEngine {
         timeoutMs: Int = 700,
     ): JSONObject {
         val token = controlToken
-        check(token.isNotBlank()) { "Lantern control token is unavailable" }
-        val connection = (URL("http://127.0.0.1:$CONTROL_PORT$path").openConnection() as HttpURLConnection)
-        try {
-            connection.requestMethod = method
-            connection.connectTimeout = timeoutMs
-            connection.readTimeout = timeoutMs
-            connection.setRequestProperty("Authorization", "Bearer $token")
-            connection.setRequestProperty("Accept", "application/json")
-            if (body != null) {
-                connection.doOutput = true
-                connection.setRequestProperty("Content-Type", "application/json")
-                connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        val socketPath = controlSocketPath
+        check(token.isNotBlank() && socketPath.isNotBlank()) {
+            "Lantern control socket is unavailable"
+        }
+        return LocalSocket().use { socket ->
+            socket.soTimeout = timeoutMs
+            socket.connect(LocalSocketAddress(socketPath, LocalSocketAddress.Namespace.FILESYSTEM))
+            val request = JSONObject()
+                .put("method", method)
+                .put("path", path)
+                .put("token", token)
+            if (body != null) request.put("body", body)
+            socket.outputStream.use { output ->
+                output.write((request.toString() + "\n").toByteArray(Charsets.UTF_8))
+                output.flush()
             }
-            val code = connection.responseCode
-            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            if (text.isBlank()) error("Lantern control API returned HTTP $code with no body")
-            return JSONObject(text)
-        } finally {
-            connection.disconnect()
+            val response = BufferedReader(InputStreamReader(socket.inputStream)).readLine()
+            check(!response.isNullOrBlank()) { "Lantern sidecar returned an empty control response" }
+            JSONObject(response)
         }
     }
 
@@ -243,6 +245,7 @@ object LanternEngine {
             val proc = process
             process = null
             controlToken = ""
+            controlSocketPath = ""
             if (proc == null) return
             val oldLogThread = logThread
             logThread = null
