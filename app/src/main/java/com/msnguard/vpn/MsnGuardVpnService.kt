@@ -3293,7 +3293,8 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 failAndStop(e.message ?: "Lantern start failed")
             } catch (fatal: Throwable) {
                 ConnectionLog.record("Lantern fatal start failure: ${fatal.message ?: fatal::class.java.simpleName}")
-                LanternEngine.disconnect()
+                LanternEngine.cancelConnect()
+                LanternEngine.disconnectAsync()
                 TunEngineManager.stop(this)
                 runCatching { tun?.close() }
                 tun = null
