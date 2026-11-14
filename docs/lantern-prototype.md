@@ -44,9 +44,8 @@ Required build components:
 
 The app's `preBuild` task generates the sidecar binaries before APK packaging.
 The app launches `liblantern.so` with `ProcessBuilder`; it never loads the
-binary into the app process. A token-protected control API binds only to
-127.0.0.1:1832, while Radiance's mixed SOCKS listener binds only to
-127.0.0.1:1831.
+binary into the app process. A per-process-token-protected control channel uses an app-private Unix-domain
+socket, while Radiance's mixed SOCKS listener binds only to 127.0.0.1:1831.
 
 ## Scope and safeguards
 
