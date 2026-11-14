@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BRIDGE_DIR="$ROOT_DIR/core/lanternbridge"
-ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 if [[ -z "$ANDROID_HOME" ]]; then
   echo "ANDROID_HOME or ANDROID_SDK_ROOT must point to the Android SDK" >&2
   exit 2
@@ -24,8 +24,9 @@ export GOTOOLCHAIN="$GO_VERSION"
 export PATH="$(go env GOPATH)/bin:$PATH"
 
 go install "golang.org/x/mobile/cmd/gomobile@$GOMOBILE_VERSION"
-go install "golang.org/x/mobile/cmd/gobind@$GOMOBILE_VERSION"
 gomobile init
+# gomobile init installs gobind@latest; restore the pinned version afterwards.
+go install "golang.org/x/mobile/cmd/gobind@$GOMOBILE_VERSION"
 
 mkdir -p "$ROOT_DIR/app/libs"
 cd "$BRIDGE_DIR"
