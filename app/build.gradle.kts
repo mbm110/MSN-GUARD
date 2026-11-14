@@ -13,6 +13,27 @@ val targetAbis = (project.findProperty("targetAbi") as String?)
     ?: listOf("arm64-v8a", "armeabi-v7a", "x86_64")
 val releaseKeystore = project.findProperty("aetheryKeystore") as String?
 
+// Lantern/Radiance is built as a separate novpn Go library. It exposes only a
+// loopback SOCKS inbound; Android VpnService and the device TUN stay owned by
+// MSN-GUARD. The generated AAR is picked up by the existing app/libs fileTree.
+val buildLanternBridge = tasks.register<Exec>("buildLanternBridge") {
+    group = "build"
+    description = "Builds the isolated Lantern/Radiance Android bridge"
+    val buildScript = rootProject.file("core/lanternbridge/build-android.sh")
+    commandLine("bash", buildScript.absolutePath)
+    workingDir(rootProject.projectDir)
+    environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
+    environment("ANDROID_SDK_ROOT", android.sdkDirectory.absolutePath)
+    environment("ANDROID_NDK_HOME", "${android.sdkDirectory.absolutePath}/ndk/26.3.11579264")
+    inputs.dir(rootProject.file("core/lanternbridge"))
+    inputs.file(buildScript)
+    outputs.file(file("libs/lanternbridge.aar"))
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(buildLanternBridge)
+}
+
 kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
