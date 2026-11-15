@@ -49,6 +49,8 @@ var state struct {
 	connectCancel context.CancelFunc
 	connectID     uint64
 	lastErr       string
+	initialized   bool
+	initErr       error
 	trafficMu     sync.Mutex
 	trafficSeen   map[string]byteTotals
 	completedUp   int64
@@ -61,9 +63,9 @@ var state struct {
 func Init(dataDir, logDir, socksAddress string) error {
 	state.mu.Lock()
 
-	if state.backend != nil {
+	if state.backend != nil || state.initialized {
 		state.mu.Unlock()
-		return nil
+		return state.initErr
 	}
 	if dataDir == "" || logDir == "" {
 		state.mu.Unlock()
@@ -76,6 +78,9 @@ func Init(dataDir, logDir, socksAddress string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	device, err := persistentDeviceID(dataDir)
 	if err != nil {
+		state.initErr = err
+		state.initialized = true
+		state.mu.Unlock()
 		return err
 	}
 	b, err := backend.NewLocalBackend(ctx, backend.Options{
@@ -93,23 +98,34 @@ func Init(dataDir, logDir, socksAddress string) error {
 	if err != nil {
 		cancel()
 		state.lastErr = err.Error()
+		state.initErr = fmt.Errorf("initialize Radiance: %w", err)
+		state.initialized = true
 		state.mu.Unlock()
-		return fmt.Errorf("initialize Radiance: %w", err)
+		return state.initErr
 	}
 
 	state.backend = b
 	state.backendCancel = cancel
 	state.lastErr = ""
+	state.initialized = true
+	state.initErr = nil
 	state.mu.Unlock()
-	// Start asynchronously. The sidecar must publish its control socket before
-	// Radiance begins network/config work; otherwise a blocked first config fetch
-	// makes the Android control handshake appear dead.
+	// Start asynchronously. The control socket is already live, so the Android
+	// service can report precise config/account errors instead of timing out
+	// while Radiance performs its first network prewarm.
 	go b.Start()
 	return nil
 }
 
 // Connect waits for Radiance's current public configuration and connects using
 // its automatic server selector. No private server credentials are required.
+// Ready reports whether Radiance finished initialization and can serve control requests.
+func Ready() bool {
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	return state.backend != nil && state.initErr == nil
+}
+
 func Connect(timeoutSeconds int64) error {
 	b := currentBackend()
 	if b == nil {

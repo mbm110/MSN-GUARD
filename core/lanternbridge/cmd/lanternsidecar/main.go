@@ -63,37 +63,39 @@ func run() error {
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 
-	if err := lanternbridge.Init(*dataDir, *logDir, *socksAddress); err != nil {
-		return fmt.Errorf("initialize Radiance: %w", err)
-	}
-	if signalCtx.Err() != nil {
-		lanternbridge.Shutdown()
-		return nil
-	}
-
+	// Publish the private control socket before Radiance initialization. NewLocalBackend
+	// may load settings and start its first network prewarm; Android must still be
+	// able to query /health and receive the real initialization error.
 	if err := os.MkdirAll(filepath.Dir(*controlSocket), 0700); err != nil {
-		lanternbridge.Shutdown()
 		return fmt.Errorf("create control socket directory: %w", err)
 	}
 	_ = os.Remove(*controlSocket)
 	listener, err := net.Listen("unix", *controlSocket)
 	if err != nil {
-		lanternbridge.Shutdown()
 		return fmt.Errorf("listen on control socket: %w", err)
 	}
 	if err := os.Chmod(*controlSocket, 0600); err != nil {
 		_ = listener.Close()
 		_ = os.Remove(*controlSocket)
-		lanternbridge.Shutdown()
 		return fmt.Errorf("secure control socket: %w", err)
 	}
-
 	serverErr := make(chan error, 1)
 	go func() {
 		serverErr <- serveControl(listener, *controlToken)
 	}()
+	log.Printf("Lantern sidecar control socket ready; SOCKS=%s control-socket=%s", *socksAddress, *controlSocket)
 
-	log.Printf("Lantern sidecar ready; SOCKS=%s control-socket=%s", *socksAddress, *controlSocket)
+	if err := lanternbridge.Init(*dataDir, *logDir, *socksAddress); err != nil {
+		_ = listener.Close()
+		_ = os.Remove(*controlSocket)
+		return fmt.Errorf("initialize Radiance: %w", err)
+	}
+	if signalCtx.Err() != nil {
+		lanternbridge.Shutdown()
+		_ = listener.Close()
+		_ = os.Remove(*controlSocket)
+		return nil
+	}
 
 	select {
 	case <-signalCtx.Done():
@@ -146,7 +148,11 @@ func handleControl(conn net.Conn, token string) {
 
 	switch {
 	case request.Method == "GET" && request.Path == "/health":
-		_ = writeControl(conn, controlResponse{OK: true, Status: "ready"})
+		if lanternbridge.Ready() {
+			_ = writeControl(conn, controlResponse{OK: true, Status: "ready"})
+		} else {
+			_ = writeControl(conn, controlResponse{OK: false, Status: lanternbridge.Status(), Error: lanternbridge.LastError()})
+		}
 
 	case request.Method == "POST" && request.Path == "/connect":
 		timeoutSeconds := int64(180)

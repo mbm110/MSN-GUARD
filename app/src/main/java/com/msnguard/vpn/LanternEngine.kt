@@ -210,9 +210,13 @@ object LanternEngine {
                 lastError = "Lantern sidecar exited before its control API became ready"
                 return false
             }
-            val ready = runCatching {
-                request("GET", "/health", timeoutMs = 500).optBoolean("ok")
-            }.getOrDefault(false)
+            val health = runCatching {
+                request("GET", "/health", timeoutMs = 1500)
+            }
+            val ready = health.getOrNull()?.optBoolean("ok") == true
+            if (!ready && health.isFailure) {
+                lastError = "Lantern control /health failed: ${health.exceptionOrNull()?.message}"
+            }
             if (ready) {
                 ConnectionLog.record("Lantern: private sidecar control socket ready")
                 return true
