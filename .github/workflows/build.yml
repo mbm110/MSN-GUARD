@@ -97,7 +97,7 @@ jobs:
           # IncrementalSplitterRunnable after compile/lint already passed.
           # Serialize packaging so split APK writers cannot race, and retain
           # the stacktrace if the packaging task itself fails again.
-          ./gradlew --no-parallel --max-workers=1 --stacktrace testReleaseUnitTest assembleRelease -PaetheryKeystore=release.keystore
+          ./gradlew --no-parallel --max-workers=1 --stacktrace -Dorg.gradle.workers.max=1 testReleaseUnitTest assembleRelease -PaetheryKeystore=release.keystore
 
       - name: Verify APK signatures
         run: |
