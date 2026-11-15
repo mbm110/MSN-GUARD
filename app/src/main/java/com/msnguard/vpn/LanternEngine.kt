@@ -109,6 +109,7 @@ object LanternEngine {
     }
 
     private fun startProcess(context: Context, attempt: Long): Boolean {
+        val startupOutput = java.util.ArrayDeque<String>()
         awaitPreviousStop()
         synchronized(processLock) {
             if (!isCurrent(attempt)) return false
@@ -142,6 +143,9 @@ object LanternEngine {
             builder.directory(root)
             builder.redirectErrorStream(true)
             builder.environment()["HOME"] = context.filesDir.absolutePath
+            // Executed PIEs do not inherit the app's Java native-loader namespace.
+            // Make packaged dependencies visible to Android's executable linker.
+            builder.environment()["LD_LIBRARY_PATH"] = context.applicationInfo.nativeLibraryDir
 
             val started = try {
                 builder.start()
@@ -168,6 +172,10 @@ object LanternEngine {
                 try {
                     BufferedReader(InputStreamReader(started.inputStream)).forEachLine { line ->
                         if (line.isNotBlank()) {
+                            synchronized(startupOutput) {
+                                if (startupOutput.size >= 12) startupOutput.removeFirst()
+                                startupOutput.addLast(line.replace(token, "[REDACTED]").take(500))
+                            }
                             val lower = line.lowercase()
                             if (lower.contains("error") || lower.contains("warn") || lower.contains("connected")) {
                                 if (lower.contains("error")) lastError = line.take(500)
@@ -183,7 +191,15 @@ object LanternEngine {
             }
         }
 
-        return awaitControlReady(attempt)
+        val ready = awaitControlReady(attempt)
+        if (!ready && isCurrent(attempt) && process?.isAlive != true) {
+            logThread?.join(500L)
+            val output = synchronized(startupOutput) { startupOutput.joinToString(" | ") }
+            val exit = runCatching { process?.exitValue() }.getOrNull()
+            lastError = "Lantern sidecar exited (code=$exit) before control ready: $output"
+            ConnectionLog.record(lastError)
+        }
+        return ready
     }
 
     private fun awaitControlReady(attempt: Long): Boolean {
