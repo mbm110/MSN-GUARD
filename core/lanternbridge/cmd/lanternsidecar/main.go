@@ -84,7 +84,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listen on control socket: %w", err)
 	}
-	// Abstract sockets have no filesystem inode, so chmod(2) cannot apply.
+	// Abstract sockets have no filesystem inode, so chmod cannot apply.
 	// Filesystem sockets still receive the restrictive mode.
 	if !strings.HasPrefix(*controlSocket, "@") {
 		if err := os.Chmod(*controlSocket, 0600); err != nil {
