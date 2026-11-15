@@ -59,6 +59,14 @@ func run() error {
 	if len(*controlSocket) > 100 {
 		return errors.New("control socket path is too long for Android Unix sockets")
 	}
+	controlAddress := *controlSocket
+	controlNetwork := "unix"
+	if strings.HasPrefix(controlAddress, "@") {
+		// Go's unix listener uses a leading NUL for Linux abstract sockets;
+		// Android LocalSocket uses the corresponding '@' address notation.
+		controlAddress = "\x00" + strings.TrimPrefix(controlAddress, "@")
+		controlNetwork = "unix"
+	}
 
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
@@ -66,11 +74,13 @@ func run() error {
 	// Publish the private control socket before Radiance initialization. NewLocalBackend
 	// may load settings and start its first network prewarm; Android must still be
 	// able to query /health and receive the real initialization error.
-	if err := os.MkdirAll(filepath.Dir(*controlSocket), 0700); err != nil {
-		return fmt.Errorf("create control socket directory: %w", err)
+	if !strings.HasPrefix(*controlSocket, "@") {
+		if err := os.MkdirAll(filepath.Dir(*controlSocket), 0700); err != nil {
+			return fmt.Errorf("create control socket directory: %w", err)
+		}
+		_ = os.Remove(*controlSocket)
 	}
-	_ = os.Remove(*controlSocket)
-	listener, err := net.Listen("unix", *controlSocket)
+	listener, err := net.Listen(controlNetwork, controlAddress)
 	if err != nil {
 		return fmt.Errorf("listen on control socket: %w", err)
 	}

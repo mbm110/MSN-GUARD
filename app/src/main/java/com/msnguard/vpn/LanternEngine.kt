@@ -131,7 +131,14 @@ object LanternEngine {
             }
 
             val token = newControlToken()
-            val controlPath = File(root, "control.sock").absolutePath
+            // Use an abstract Unix socket. Android LocalSocket's filesystem
+            // namespace and Go's filesystem listener do not reliably address
+            // the same socket under Android's SELinux/runtime path handling;
+            // the sidecar was alive while every Java /health connect reported
+            // "socket not created". Abstract sockets stay inside the kernel
+            // and are private to this app UID through the random token.
+            val controlName = "msn_lantern_${token.take(20)}"
+            val controlPath = "@$controlName"
             val builder = ProcessBuilder(
                 bin.absolutePath,
                 "--data-dir", data.absolutePath,
@@ -247,7 +254,12 @@ object LanternEngine {
         }
         return LocalSocket().use { socket ->
             socket.soTimeout = timeoutMs
-            socket.connect(LocalSocketAddress(socketPath, LocalSocketAddress.Namespace.FILESYSTEM))
+            val namespace = if (socketPath.startsWith("@")) {
+                LocalSocketAddress.Namespace.ABSTRACT
+            } else {
+                LocalSocketAddress.Namespace.FILESYSTEM
+            }
+            socket.connect(LocalSocketAddress(socketPath.removePrefix("@"), namespace))
             val request = JSONObject()
                 .put("method", method)
                 .put("path", path)
