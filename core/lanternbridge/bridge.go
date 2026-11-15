@@ -13,13 +13,33 @@ import (
 	"time"
 
 	"github.com/getlantern/radiance/backend"
-	"github.com/getlantern/radiance/common/deviceid"
 	"github.com/getlantern/radiance/vpn"
 )
 
 type byteTotals struct {
 	up   int64
 	down int64
+}
+
+func persistentDeviceID(dataDir string) (string, error) {
+	path := filepath.Join(dataDir, ".lanternsecrets", ".deviceid")
+	if existing, err := os.ReadFile(path); err == nil && len(existing) > 0 {
+		return string(existing), nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return "", fmt.Errorf("create Lantern device identity directory: %w", err)
+	}
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate Lantern device ID: %w", err)
+	}
+	raw[6] = (raw[6] & 0x0f) | 0x40
+	raw[8] = (raw[8] & 0x3f) | 0x80
+	id := fmt.Sprintf("%s-%s-%s-%s-%s", hex.EncodeToString(raw[0:4]), hex.EncodeToString(raw[4:6]), hex.EncodeToString(raw[6:8]), hex.EncodeToString(raw[8:10]), hex.EncodeToString(raw[10:16]))
+	if err := os.WriteFile(path, []byte(id), 0600); err != nil {
+		return "", fmt.Errorf("persist Lantern device ID: %w", err)
+	}
+	return id, nil
 }
 
 var state struct {
@@ -54,9 +74,9 @@ func Init(dataDir, logDir, socksAddress string) error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	device := deviceid.Get(dataDir)
-	if device == "" {
-		return errors.New("Radiance device ID is empty")
+	device, err := persistentDeviceID(dataDir)
+	if err != nil {
+		return err
 	}
 	b, err := backend.NewLocalBackend(ctx, backend.Options{
 		DataDir:                  dataDir,
