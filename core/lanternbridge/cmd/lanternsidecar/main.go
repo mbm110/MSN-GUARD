@@ -148,11 +148,12 @@ func handleControl(conn net.Conn, token string) {
 
 	switch {
 	case request.Method == "GET" && request.Path == "/health":
-		if lanternbridge.Ready() {
-			_ = writeControl(conn, controlResponse{OK: true, Status: "ready"})
-		} else {
-			_ = writeControl(conn, controlResponse{OK: false, Status: lanternbridge.Status(), Error: lanternbridge.LastError()})
-		}
+		// Control readiness is deliberately independent from Lantern's network
+		// prewarm/config fetch. MLM's proven wrapper starts the core, publishes
+		// its local listeners, then tests the data path separately. Returning
+		// false here while Radiance is fetching config made Android abort at the
+		// 10-second control deadline and never reach /connect.
+		_ = writeControl(conn, controlResponse{OK: true, Status: "ready"})
 
 	case request.Method == "POST" && request.Path == "/connect":
 		timeoutSeconds := int64(180)
