@@ -101,7 +101,10 @@ func Init(dataDir, logDir, socksAddress string) error {
 	state.backendCancel = cancel
 	state.lastErr = ""
 	state.mu.Unlock()
-	b.Start()
+	// Start asynchronously. The sidecar must publish its control socket before
+	// Radiance begins network/config work; otherwise a blocked first config fetch
+	// makes the Android control handshake appear dead.
+	go b.Start()
 	return nil
 }
 
