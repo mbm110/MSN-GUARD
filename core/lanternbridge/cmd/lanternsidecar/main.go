@@ -59,39 +59,24 @@ func run() error {
 	if len(*controlSocket) > 100 {
 		return errors.New("control socket path is too long for Android Unix sockets")
 	}
-	controlAddress := *controlSocket
-	controlNetwork := "unix"
-	if strings.HasPrefix(controlAddress, "@") {
-		// Go's unix listener uses a leading NUL for Linux abstract sockets;
-		// Android LocalSocket uses the corresponding '@' address notation.
-		controlAddress = "\x00" + strings.TrimPrefix(controlAddress, "@")
-		controlNetwork = "unix"
-	}
-
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 
 	// Publish the private control socket before Radiance initialization. NewLocalBackend
 	// may load settings and start its first network prewarm; Android must still be
 	// able to query /health and receive the real initialization error.
-	if !strings.HasPrefix(*controlSocket, "@") {
-		if err := os.MkdirAll(filepath.Dir(*controlSocket), 0700); err != nil {
-			return fmt.Errorf("create control socket directory: %w", err)
-		}
-		_ = os.Remove(*controlSocket)
+	if err := os.MkdirAll(filepath.Dir(*controlSocket), 0700); err != nil {
+		return fmt.Errorf("create control socket directory: %w", err)
 	}
-	listener, err := net.Listen(controlNetwork, controlAddress)
+	_ = os.Remove(*controlSocket)
+	listener, err := net.Listen("unix", *controlSocket)
 	if err != nil {
 		return fmt.Errorf("listen on control socket: %w", err)
 	}
-	// Abstract sockets have no filesystem inode, so chmod cannot apply.
-	// Filesystem sockets still receive the restrictive mode.
-	if !strings.HasPrefix(*controlSocket, "@") {
-		if err := os.Chmod(*controlSocket, 0600); err != nil {
-			_ = listener.Close()
-			_ = os.Remove(*controlSocket)
-			return fmt.Errorf("secure control socket: %w", err)
-		}
+	if err := os.Chmod(*controlSocket, 0600); err != nil {
+		_ = listener.Close()
+		_ = os.Remove(*controlSocket)
+		return fmt.Errorf("secure control socket: %w", err)
 	}
 	serverErr := make(chan error, 1)
 	go func() {
