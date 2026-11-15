@@ -98,7 +98,7 @@ func run() error {
 	go func() {
 		serverErr <- serveControl(listener, *controlToken)
 	}()
-	log.Printf("Lantern sidecar control socket ready; SOCKS=%s control-socket=%s", *socksAddress, *controlSocket)
+	log.Printf("Lantern sidecar control socket ready; SOCKS=%s control-socket=%s", *socksAddress, listener.Addr().String())
 
 	if err := lanternbridge.Init(*dataDir, *logDir, *socksAddress); err != nil {
 		_ = listener.Close()

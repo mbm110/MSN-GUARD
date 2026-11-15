@@ -9,7 +9,6 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.net.InetSocketAddress
-import java.net.ServerSocket
 import java.net.Socket
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
@@ -132,14 +131,11 @@ object LanternEngine {
             }
 
             val token = newControlToken()
-            // Use a loopback TCP control port allocated by the app. Android's
-            // LocalSocket/Go Unix namespace mapping has failed on-device even
-            // when the Go process was alive; both sides can address 127.0.0.1
-            // reliably, while the random token authenticates each request.
-            val probe = ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))
-            val controlPort = probe.localPort
-            probe.close()
-            val controlPath = "127.0.0.1:$controlPort"
+            // Let the sidecar bind an ephemeral loopback port atomically and
+            // publish the selected port in its ready log. Reserving a port in
+            // Java and closing it before Go binds created a race: Android then
+            // reported "socket not created" although the process was alive.
+            val controlPath = "127.0.0.1:0"
             val builder = ProcessBuilder(
                 bin.absolutePath,
                 "--data-dir", data.absolutePath,
@@ -184,6 +180,10 @@ object LanternEngine {
                                 if (startupOutput.size >= 12) startupOutput.removeFirst()
                                 startupOutput.addLast(line.replace(token, "[REDACTED]").take(500))
                             }
+                            Regex("control-socket=127\\.0\\.0\\.1:(\\d+)").find(line)?.groupValues?.getOrNull(1)?.let { port ->
+                                controlSocketPath = "127.0.0.1:$port"
+                                ConnectionLog.record("Lantern: sidecar control port selected $port")
+                            }
                             val lower = line.lowercase()
                             if (lower.contains("error") || lower.contains("warn") || lower.contains("connected")) {
                                 if (lower.contains("error")) lastError = line.take(500)
@@ -217,6 +217,10 @@ object LanternEngine {
             if (process?.isAlive != true) {
                 lastError = "Lantern sidecar exited before its control API became ready"
                 return false
+            }
+            if (controlSocketPath == "127.0.0.1:0") {
+                Thread.sleep(120L)
+                continue
             }
             val health = runCatching {
                 request("GET", "/health", timeoutMs = 1500)
