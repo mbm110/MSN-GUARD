@@ -2,13 +2,18 @@ package lanternbridge
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/getlantern/radiance/backend"
+	"github.com/getlantern/radiance/common/deviceid"
 	"github.com/getlantern/radiance/vpn"
 )
 
@@ -49,10 +54,15 @@ func Init(dataDir, logDir, socksAddress string) error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	device := deviceid.Get(dataDir)
+	if device == "" {
+		return errors.New("Radiance device ID is empty")
+	}
 	b, err := backend.NewLocalBackend(ctx, backend.Options{
 		DataDir:                  dataDir,
 		LogDir:                   logDir,
 		Locale:                   "en",
+		DeviceID:                 device,
 		LogLevel:                 "info",
 		TelemetryConsent:         false,
 		PreserveTelemetryConsent: false,
