@@ -1,5 +1,10 @@
 name: Lantern Android startup diagnostic
 on:
+  push:
+    branches: [feature/lantern-prototype]
+    paths:
+      - '.github/workflows/lantern-startup.yml'
+      - 'scripts/lantern-startup-smoke.py'
   workflow_dispatch:
     inputs:
       artifact_run:
@@ -18,7 +23,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: apks
-          run-id: ${{ inputs.artifact_run }}
+          run-id: ${{ inputs.artifact_run || '43667193358' }}
           github-token: ${{ github.token }}
           path: diagnostic-apks
       - name: Enable KVM
