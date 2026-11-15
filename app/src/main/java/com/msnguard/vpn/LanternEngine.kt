@@ -135,7 +135,7 @@ object LanternEngine {
             // Dedicated loopback control port. A fixed contract removes the
             // startup race and avoids parsing a child log before probing health.
             // It is separate from Lantern SOCKS and authenticated by the token.
-            val controlPath = "127.0.0.1:$CONTROL_PORT"
+            val controlPath = "127.0.0.1:0"
             val builder = ProcessBuilder(
                 bin.absolutePath,
                 "--data-dir", data.absolutePath,

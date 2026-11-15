@@ -46,7 +46,7 @@ func run() error {
 	dataDir := flag.String("data-dir", "", "private Radiance data directory")
 	logDir := flag.String("log-dir", "", "private Radiance log directory")
 	socksAddress := flag.String("socks-address", "127.0.0.1:1831", "loopback mixed SOCKS/HTTP listener")
-	controlSocket := flag.String("control-socket", "127.0.0.1:1832", "app-private loopback control endpoint")
+	controlSocket := flag.String("control-socket", "127.0.0.1:0", "app-private loopback control endpoint")
 	controlToken := flag.String("control-token", "", "random per-process bearer token")
 	flag.Parse()
 
@@ -97,6 +97,15 @@ func run() error {
 			return fmt.Errorf("secure control socket: %w", err)
 		}
 	}
+	if controlNetwork == "tcp" {
+		// The loopback listener is private to the app UID on Android. The
+		// bearer token remains mandatory, and the actual selected port is
+		// reported so Java can follow an ephemeral port without collisions.
+		if addr, ok := listener.Addr().(*net.TCPAddr); ok {
+			log.Printf("Lantern control endpoint: 127.0.0.1:%d", addr.Port)
+		}
+	}
+
 	serverErr := make(chan error, 1)
 	go func() {
 		serverErr <- serveControl(listener, *controlToken)
