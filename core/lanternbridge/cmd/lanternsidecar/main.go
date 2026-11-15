@@ -84,10 +84,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listen on control socket: %w", err)
 	}
-	if err := os.Chmod(*controlSocket, 0600); err != nil {
-		_ = listener.Close()
-		_ = os.Remove(*controlSocket)
-		return fmt.Errorf("secure control socket: %w", err)
+	// Abstract sockets have no filesystem inode, so chmod(2) cannot apply.
+	// Filesystem sockets still receive the restrictive mode.
+	if !strings.HasPrefix(*controlSocket, "@") {
+		if err := os.Chmod(*controlSocket, 0600); err != nil {
+			_ = listener.Close()
+			_ = os.Remove(*controlSocket)
+			return fmt.Errorf("secure control socket: %w", err)
+		}
 	}
 	serverErr := make(chan error, 1)
 	go func() {
