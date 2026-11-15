@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicLong
  */
 object LanternEngine {
     const val SOCKS_PORT = 1831
+    private const val CONTROL_PORT = 1832
     private const val TAG = "LanternEngine"
     private const val CONNECT_TIMEOUT_SECONDS = 180L
     private const val CONTROL_READY_TIMEOUT_MS = 10_000L
@@ -131,11 +132,10 @@ object LanternEngine {
             }
 
             val token = newControlToken()
-            // Let the sidecar bind an ephemeral loopback port atomically and
-            // publish the selected port in its ready log. Reserving a port in
-            // Java and closing it before Go binds created a race: Android then
-            // reported "socket not created" although the process was alive.
-            val controlPath = "127.0.0.1:0"
+            // Dedicated loopback control port. A fixed contract removes the
+            // startup race and avoids parsing a child log before probing health.
+            // It is separate from Lantern SOCKS and authenticated by the token.
+            val controlPath = "127.0.0.1:$CONTROL_PORT"
             val builder = ProcessBuilder(
                 bin.absolutePath,
                 "--data-dir", data.absolutePath,
@@ -217,10 +217,6 @@ object LanternEngine {
             if (process?.isAlive != true) {
                 lastError = "Lantern sidecar exited before its control API became ready"
                 return false
-            }
-            if (controlSocketPath == "127.0.0.1:0") {
-                Thread.sleep(120L)
-                continue
             }
             val health = runCatching {
                 request("GET", "/health", timeoutMs = 1500)
