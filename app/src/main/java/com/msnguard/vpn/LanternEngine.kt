@@ -213,9 +213,16 @@ object LanternEngine {
             val health = runCatching {
                 request("GET", "/health", timeoutMs = 1500)
             }
-            val ready = health.getOrNull()?.optBoolean("ok") == true
-            if (!ready && health.isFailure) {
-                lastError = "Lantern control /health failed: ${health.exceptionOrNull()?.message}"
+            val response = health.getOrNull()
+            val ready = response?.optBoolean("ok") == true
+            if (!ready) {
+                val detail = if (health.isFailure) {
+                    health.exceptionOrNull()?.message ?: "unknown socket error"
+                } else {
+                    "response=${response?.toString()?.take(400) ?: "empty"}"
+                }
+                lastError = "Lantern control /health not ready: $detail"
+                ConnectionLog.record("Lantern: /health not ready: $detail")
             }
             if (ready) {
                 ConnectionLog.record("Lantern: private sidecar control socket ready")
