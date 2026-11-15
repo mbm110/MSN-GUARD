@@ -48,8 +48,11 @@ build_android() {
   local CXX="${CC%-clang}-clang++"
   test -x "$TOOLCHAIN/$CXX"
   local OUT="$ROOT_DIR/app/src/main/jniLibs/$ABI/liblantern.so"
+  local LIBCXX="$($TOOLCHAIN/$CC --print-file-name=libc++_shared.so)"
 
   mkdir -p "$(dirname "$OUT")"
+  test -s "$LIBCXX"
+  cp "$LIBCXX" "$ROOT_DIR/app/src/main/jniLibs/$ABI/libc++_shared.so"
   echo "==> Building Lantern sidecar for $ABI ($GOARCH)"
   if [[ -n "$GOARM" ]]; then
     env GOOS=android GOARCH="$GOARCH" GOARM="$GOARM" CGO_ENABLED=1 CC="$TOOLCHAIN/$CC" CXX="$TOOLCHAIN/$CXX" \
