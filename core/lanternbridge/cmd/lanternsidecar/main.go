@@ -56,14 +56,19 @@ func run() error {
 	if !isLoopbackAddress(*socksAddress) {
 		return errors.New("Lantern SOCKS listener must bind to loopback only")
 	}
-	if len(*controlSocket) > 100 {
+	controlNetwork := "unix"
+	controlAddress := *controlSocket
+	if strings.Contains(controlAddress, ":") {
+		if !isLoopbackAddress(controlAddress) {
+			return errors.New("Lantern control listener must bind to loopback only")
+		}
+		controlNetwork = "tcp"
+	}
+	if controlNetwork == "unix" && len(controlAddress) > 100 {
 		return errors.New("control socket path is too long for Android Unix sockets")
 	}
-	controlAddress := *controlSocket
 	abstract := strings.HasPrefix(controlAddress, "@")
 	if abstract {
-		// Linux abstract sockets use a leading NUL in Go. Android's
-		// LocalSocket API addresses the same namespace without that NUL.
 		controlAddress = "\x00" + strings.TrimPrefix(controlAddress, "@")
 	}
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -72,17 +77,17 @@ func run() error {
 	// Publish the private control socket before Radiance initialization. NewLocalBackend
 	// may load settings and start its first network prewarm; Android must still be
 	// able to query /health and receive the real initialization error.
-	if !abstract {
+	if controlNetwork == "unix" && !abstract {
 		if err := os.MkdirAll(filepath.Dir(*controlSocket), 0700); err != nil {
 			return fmt.Errorf("create control socket directory: %w", err)
 		}
 		_ = os.Remove(*controlSocket)
 	}
-	listener, err := net.Listen("unix", controlAddress)
+	listener, err := net.Listen(controlNetwork, controlAddress)
 	if err != nil {
 		return fmt.Errorf("listen on control socket: %w", err)
 	}
-	if !abstract {
+	if controlNetwork == "unix" && !abstract {
 		if err := os.Chmod(*controlSocket, 0600); err != nil {
 			_ = listener.Close()
 			_ = os.Remove(*controlSocket)

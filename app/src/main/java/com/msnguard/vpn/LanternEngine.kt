@@ -9,6 +9,7 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.net.Socket
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
@@ -131,11 +132,14 @@ object LanternEngine {
             }
 
             val token = newControlToken()
-            // Keep the socket in the app-private directory. The directory is
-            // mode 0700 and the bearer token authenticates every request; avoid
-            // chmod because Android's abstract/filesystem socket behavior made
-            // the sidecar exit before Java could reach /health.
-            val controlPath = File(root, "control-${token.take(20)}.sock").absolutePath
+            // Use a loopback TCP control port allocated by the app. Android's
+            // LocalSocket/Go Unix namespace mapping has failed on-device even
+            // when the Go process was alive; both sides can address 127.0.0.1
+            // reliably, while the random token authenticates each request.
+            val probe = ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))
+            val controlPort = probe.localPort
+            probe.close()
+            val controlPath = "127.0.0.1:$controlPort"
             val builder = ProcessBuilder(
                 bin.absolutePath,
                 "--data-dir", data.absolutePath,
@@ -251,6 +255,23 @@ object LanternEngine {
         }
         return LocalSocket().use { socket ->
             socket.soTimeout = timeoutMs
+            if (socketPath.startsWith("127.0.0.1:")) {
+                val port = socketPath.substringAfter(':').toInt()
+                Socket().use { tcp ->
+                    tcp.soTimeout = timeoutMs
+                    tcp.connect(InetSocketAddress("127.0.0.1", port), timeoutMs)
+                    val request = JSONObject()
+                        .put("method", method)
+                        .put("path", path)
+                        .put("token", token)
+                    if (body != null) request.put("body", body)
+                    tcp.outputStream.write((request.toString() + "\n").toByteArray(Charsets.UTF_8))
+                    tcp.outputStream.flush()
+                    val response = BufferedReader(InputStreamReader(tcp.inputStream)).readLine()
+                    check(!response.isNullOrBlank()) { "Lantern sidecar returned an empty control response" }
+                    return JSONObject(response)
+                }
+            }
             val namespace = if (socketPath.startsWith("@")) {
                 LocalSocketAddress.Namespace.ABSTRACT
             } else {
