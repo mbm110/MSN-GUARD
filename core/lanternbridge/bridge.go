@@ -92,7 +92,12 @@ func Init(dataDir, logDir, socksAddress string) error {
 		TelemetryConsent:         false,
 		PreserveTelemetryConsent: false,
 		EnvOverrides: map[string]string{
-			"RADIANCE_SOCKS_ADDRESS": socksAddress,
+			// Radiance must use its SOCKS inbound here. MSN-GUARD owns the
+			// Android VpnService/TUN and Hev forwards that TUN to this port;
+			// without this flag Radiance starts sing-box's netlink TUN path,
+			// which Android rejects with "netlink socket ... banned".
+			"RADIANCE_USE_SOCKS_PROXY": "true",
+			"RADIANCE_SOCKS_ADDRESS":   socksAddress,
 		},
 	})
 	if err != nil {
