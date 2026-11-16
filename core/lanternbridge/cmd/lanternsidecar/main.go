@@ -58,18 +58,17 @@ func run() error {
 	}
 	controlNetwork := "unix"
 	controlAddress := *controlSocket
-	if strings.Contains(controlAddress, ":") {
+	abstract := strings.HasPrefix(controlAddress, "@")
+	if abstract {
+		controlAddress = "\x00" + strings.TrimPrefix(controlAddress, "@")
+	} else if strings.Contains(controlAddress, ":") {
 		if !isLoopbackAddress(controlAddress) {
 			return errors.New("Lantern control listener must bind to loopback only")
 		}
 		controlNetwork = "tcp"
 	}
-	if controlNetwork == "unix" && len(controlAddress) > 100 {
+	if controlNetwork == "unix" && !abstract && len(controlAddress) > 100 {
 		return errors.New("control socket path is too long for Android Unix sockets")
-	}
-	abstract := strings.HasPrefix(controlAddress, "@")
-	if abstract {
-		controlAddress = "\x00" + strings.TrimPrefix(controlAddress, "@")
 	}
 	if controlNetwork == "tcp" {
 		abstract = false
@@ -102,7 +101,10 @@ func run() error {
 		// bearer token remains mandatory, and the actual selected port is
 		// reported so Java can follow an ephemeral port without collisions.
 		if addr, ok := listener.Addr().(*net.TCPAddr); ok {
-			log.Printf("Lantern control endpoint: 127.0.0.1:%d", addr.Port)
+			// Machine-readable marker consumed by LanternEngine before the
+			// first health request. The port is otherwise unknowable when :0
+			// is used and the old client repeatedly connected to port 0.
+			log.Printf("LANTERN_CONTROL_PORT=%d", addr.Port)
 		}
 	}
 

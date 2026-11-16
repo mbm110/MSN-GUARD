@@ -132,10 +132,10 @@ object LanternEngine {
             }
 
             val token = newControlToken()
-            // Dedicated loopback control port. A fixed contract removes the
-            // startup race and avoids parsing a child log before probing health.
-            // It is separate from Lantern SOCKS and authenticated by the token.
-            val controlPath = "127.0.0.1:0"
+            // Use Linux's abstract Unix namespace. It avoids Android's VPN
+            // routing and SELinux filesystem-socket behavior entirely. The
+            // random token is also the per-process capability.
+            val controlPath = "@msn_lantern_${token.take(20)}"
             val builder = ProcessBuilder(
                 bin.absolutePath,
                 "--data-dir", data.absolutePath,
@@ -180,11 +180,7 @@ object LanternEngine {
                                 if (startupOutput.size >= 12) startupOutput.removeFirst()
                                 startupOutput.addLast(line.replace(token, "[REDACTED]").take(500))
                             }
-                            Regex("control-socket=127\\.0\\.0\\.1:(\\d+)").find(line)?.groupValues?.getOrNull(1)?.let { port ->
-                                controlSocketPath = "127.0.0.1:$port"
-                                ConnectionLog.record("Lantern: sidecar control port selected $port")
-                            }
-                            val lower = line.lowercase()
+                                            val lower = line.lowercase()
                             if (lower.contains("error") || lower.contains("warn") || lower.contains("connected")) {
                                 if (lower.contains("error")) lastError = line.take(500)
                                 ConnectionLog.record("Lantern/Radiance: ${line.take(700)}")

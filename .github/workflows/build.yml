@@ -113,12 +113,6 @@ jobs:
             done
           done
 
-      - name: Upload APKs
-        uses: actions/upload-artifact@v4
-        with:
-          name: apks
-          path: app/build/outputs/apk/release/*.apk
-
       - name: Rename versioned APKs
         run: |
           VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
@@ -128,6 +122,12 @@ jobs:
             abi=$(basename "$apk" | sed 's/^app-//; s/-release\.apk$//')
             mv "$apk" "app/build/outputs/apk/release/MSN-GUARD-v${VERSION}-${abi}.apk"
           done
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: apks-v${{ env.APP_VERSION }}
+          path: app/build/outputs/apk/release/MSN-GUARD-v${{ env.APP_VERSION }}-*.apk
 
       - name: Upload ARM64 APK only
         uses: actions/upload-artifact@v4
