@@ -43,6 +43,7 @@ object LanternEngine {
     @Volatile private var stopThread: Thread? = null
     @Volatile private var controlToken = ""
     @Volatile private var controlSocketPath = ""
+    @Volatile private var sidecarPort: Int = 0
     @Volatile private var lastError = ""
 
     private fun binary(context: Context): File =
@@ -136,7 +137,7 @@ object LanternEngine {
             // abstract LocalSocket and Go's abstract Unix listener did not
             // establish a working handshake on the target device. The bearer
             // token remains the per-process capability.
-            val controlPath = "127.0.0.1:1832"
+            val controlPath = "127.0.0.1:0"
             val builder = ProcessBuilder(
                 bin.absolutePath,
                 "--data-dir", data.absolutePath,
@@ -170,7 +171,8 @@ object LanternEngine {
             }
             process = started
             controlToken = token
-            controlSocketPath = controlPath
+            controlSocketPath = ""
+            sidecarPort = 0
             running.set(false)
 
             logThread = Thread({
@@ -181,7 +183,16 @@ object LanternEngine {
                                 if (startupOutput.size >= 12) startupOutput.removeFirst()
                                 startupOutput.addLast(line.replace(token, "[REDACTED]").take(500))
                             }
-                                            val lower = line.lowercase()
+                                            val portMatch = Regex("LANTERN_CONTROL_PORT=(\\d+)").find(line)
+                            if (portMatch != null) {
+                                val port = portMatch.groupValues[1].toIntOrNull() ?: 0
+                                if (port in 1..65535) {
+                                    sidecarPort = port
+                                    controlSocketPath = "127.0.0.1:$port"
+                                    ConnectionLog.record("Lantern: sidecar control port selected $port")
+                                }
+                            }
+                            val lower = line.lowercase()
                             if (lower.contains("error") || lower.contains("warn") || lower.contains("connected")) {
                                 if (lower.contains("error")) lastError = line.take(500)
                                 ConnectionLog.record("Lantern/Radiance: ${line.take(700)}")
@@ -214,6 +225,14 @@ object LanternEngine {
             if (process?.isAlive != true) {
                 lastError = "Lantern sidecar exited before its control API became ready"
                 return false
+            }
+            // The sidecar binds port 0 and publishes the selected port on
+            // stdout. Do not probe a stale/empty endpoint while that marker is
+            // still in flight; that was the source of repeated "socket not
+            // created" messages on otherwise live Radiance processes.
+            if (controlSocketPath.isBlank()) {
+                Thread.sleep(120L)
+                continue
             }
             val health = runCatching {
                 request("GET", "/health", timeoutMs = 1500)
