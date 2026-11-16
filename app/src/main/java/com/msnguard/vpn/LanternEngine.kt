@@ -269,36 +269,37 @@ object LanternEngine {
         check(token.isNotBlank() && socketPath.isNotBlank()) {
             "Lantern control socket is unavailable"
         }
+        val request = JSONObject()
+            .put("method", method)
+            .put("path", path)
+            .put("token", token)
+        if (body != null) request.put("body", body)
+
+        // The current sidecar uses an ephemeral loopback TCP listener. Do not
+        // construct or close an unused LocalSocket on this path: Android's
+        // LocalSocket reports "socket not created" for that unused object,
+        // masking a valid TCP control connection as a readiness failure.
+        if (socketPath.startsWith("127.0.0.1:")) {
+            val port = socketPath.substringAfter(':').toInt()
+            return Socket().use { tcp ->
+                tcp.soTimeout = timeoutMs
+                tcp.connect(InetSocketAddress("127.0.0.1", port), timeoutMs)
+                tcp.outputStream.write((request.toString() + "\n").toByteArray(Charsets.UTF_8))
+                tcp.outputStream.flush()
+                val response = BufferedReader(InputStreamReader(tcp.inputStream)).readLine()
+                check(!response.isNullOrBlank()) { "Lantern sidecar returned an empty control response" }
+                JSONObject(response)
+            }
+        }
+
         return LocalSocket().use { socket ->
             socket.soTimeout = timeoutMs
-            if (socketPath.startsWith("127.0.0.1:")) {
-                val port = socketPath.substringAfter(':').toInt()
-                Socket().use { tcp ->
-                    tcp.soTimeout = timeoutMs
-                    tcp.connect(InetSocketAddress("127.0.0.1", port), timeoutMs)
-                    val request = JSONObject()
-                        .put("method", method)
-                        .put("path", path)
-                        .put("token", token)
-                    if (body != null) request.put("body", body)
-                    tcp.outputStream.write((request.toString() + "\n").toByteArray(Charsets.UTF_8))
-                    tcp.outputStream.flush()
-                    val response = BufferedReader(InputStreamReader(tcp.inputStream)).readLine()
-                    check(!response.isNullOrBlank()) { "Lantern sidecar returned an empty control response" }
-                    return JSONObject(response)
-                }
-            }
             val namespace = if (socketPath.startsWith("@")) {
                 LocalSocketAddress.Namespace.ABSTRACT
             } else {
                 LocalSocketAddress.Namespace.FILESYSTEM
             }
             socket.connect(LocalSocketAddress(socketPath.removePrefix("@"), namespace))
-            val request = JSONObject()
-                .put("method", method)
-                .put("path", path)
-                .put("token", token)
-            if (body != null) request.put("body", body)
             socket.outputStream.write((request.toString() + "\n").toByteArray(Charsets.UTF_8))
             socket.outputStream.flush()
             val response = BufferedReader(InputStreamReader(socket.inputStream)).readLine()
