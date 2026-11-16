@@ -46,7 +46,7 @@ func run() error {
 	dataDir := flag.String("data-dir", "", "private Radiance data directory")
 	logDir := flag.String("log-dir", "", "private Radiance log directory")
 	socksAddress := flag.String("socks-address", "127.0.0.1:1831", "loopback mixed SOCKS/HTTP listener")
-	controlSocket := flag.String("control-socket", "127.0.0.1:0", "app-private loopback control endpoint")
+	controlSocket := flag.String("control-socket", "127.0.0.1:1832", "app-private loopback control endpoint")
 	controlToken := flag.String("control-token", "", "random per-process bearer token")
 	flag.Parse()
 

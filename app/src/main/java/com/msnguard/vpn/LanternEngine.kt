@@ -132,10 +132,11 @@ object LanternEngine {
             }
 
             val token = newControlToken()
-            // Use Linux's abstract Unix namespace. It avoids Android's VPN
-            // routing and SELinux filesystem-socket behavior entirely. The
-            // random token is also the per-process capability.
-            val controlPath = "@msn_lantern_${token.take(20)}"
+            // Use a dedicated loopback TCP control endpoint. Android's
+            // abstract LocalSocket and Go's abstract Unix listener did not
+            // establish a working handshake on the target device. The bearer
+            // token remains the per-process capability.
+            val controlPath = "127.0.0.1:1832"
             val builder = ProcessBuilder(
                 bin.absolutePath,
                 "--data-dir", data.absolutePath,
