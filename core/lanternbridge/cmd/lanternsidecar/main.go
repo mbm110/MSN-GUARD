@@ -33,6 +33,8 @@ type controlResponse struct {
 	Error  string `json:"error,omitempty"`
 	Tx     int64  `json:"tx,omitempty"`
 	Rx     int64  `json:"rx,omitempty"`
+	// Data carries endpoint-specific payloads (e.g. the server list) as JSON.
+	Data json.RawMessage `json:"data,omitempty"`
 }
 
 func main() {
@@ -229,6 +231,47 @@ func handleControl(conn net.Conn, token string) {
 		}
 		_ = json.Unmarshal([]byte(lanternbridge.TrafficJSON()), &totals)
 		_ = writeControl(conn, controlResponse{OK: true, Tx: totals.Tx, Rx: totals.Rx})
+
+	case request.Method == "GET" && request.Path == "/servers":
+		_ = writeControl(conn, controlResponse{
+			OK:     true,
+			Status: lanternbridge.Status(),
+			Data:   json.RawMessage(lanternbridge.ServersJSON()),
+		})
+
+	case request.Method == "POST" && request.Path == "/select":
+		var body struct {
+			Tag string `json:"tag"`
+		}
+		if len(request.Body) > 0 {
+			_ = json.Unmarshal(request.Body, &body)
+		}
+		if err := lanternbridge.SelectServer(body.Tag); err != nil {
+			_ = writeControl(conn, controlResponse{
+				OK: false, Status: lanternbridge.Status(), Error: err.Error(),
+			})
+			return
+		}
+		_ = writeControl(conn, controlResponse{
+			OK:     true,
+			Status: lanternbridge.Status(),
+			Data:   json.RawMessage(lanternbridge.ServersJSON()),
+		})
+
+	case request.Method == "POST" && request.Path == "/ping":
+		// Blocking probe of every server (up to ~60s); the connection deadline
+		// above already covers it.
+		if err := lanternbridge.PingServers(); err != nil {
+			_ = writeControl(conn, controlResponse{
+				OK: false, Status: lanternbridge.Status(), Error: err.Error(),
+			})
+			return
+		}
+		_ = writeControl(conn, controlResponse{
+			OK:     true,
+			Status: lanternbridge.Status(),
+			Data:   json.RawMessage(lanternbridge.ServersJSON()),
+		})
 
 	default:
 		_ = writeControl(conn, controlResponse{OK: false, Error: "unknown control request"})

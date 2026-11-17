@@ -96,6 +96,7 @@ object LanternEngine {
                 if (isRunning && isSocksReady()) {
                     lastError = ""
                     ConnectionLog.record("Lantern: public server connected; local SOCKS listener is ready")
+                    applyDeferredSelection(context)
                     return true
                 }
                 Thread.sleep(150L)
@@ -194,8 +195,14 @@ object LanternEngine {
                             }
                             val lower = line.lowercase()
                             if (lower.contains("error") || lower.contains("warn") || lower.contains("connected")) {
-                                if (lower.contains("error")) lastError = line.take(500)
-                                ConnectionLog.record("Lantern/Radiance: ${line.take(700)}")
+                                // Spam gate: radiance/sing-box repeat identical errors
+                                // (e.g. "missing fakeip record" per connection) with only
+                                // ids/durations varying. Cap repeats so the in-app log
+                                // stays readable; the full stream still reaches logcat.
+                                if (shouldEmitSidecarLine(lower)) {
+                                    if (lower.contains("error")) lastError = line.take(500)
+                                    ConnectionLog.record("Lantern/Radiance: ${line.take(700)}")
+                                }
                             }
                         }
                     }
@@ -433,5 +440,110 @@ object LanternEngine {
     /** Process-lifetime cleanup hook. */
     fun shutdown() {
         disconnectAsync()
+    }
+
+    // ---- Server selection & probe surface for the settings screen ----
+
+    /** Current server list + ping data; null when the sidecar is not running. */
+    fun serversSnapshot(timeoutMs: Int = 2_000): JSONObject? {
+        if (controlToken.isBlank() || controlSocketPath.isBlank()) return null
+        return runCatching { request("GET", "/servers", timeoutMs = timeoutMs) }.getOrNull()
+    }
+
+    /** Select a server by tag ("" = automatic fastest). Returns an error or null on success. */
+    fun selectServer(tag: String): String? {
+        if (controlToken.isBlank() || controlSocketPath.isBlank()) return "Lantern is not connected"
+        val response = runCatching {
+            request("POST", "/select", JSONObject().put("tag", tag), timeoutMs = 4_000)
+        }.getOrNull()
+        // A null response means the sidecar is down: the caller keeps the
+        // stored preference and it is applied right after the next connect.
+        response ?: return "Lantern is not connected"
+        return if (response.optBoolean("ok")) null
+        else response.optString("error").ifBlank { "server selection failed" }
+    }
+
+    /** Re-probe every server's latency. Returns an error or null on success. */
+    fun refreshServerPings(): String? {
+        if (controlToken.isBlank() || controlSocketPath.isBlank()) return "Lantern is not connected"
+        val response = runCatching {
+            request("POST", "/ping", JSONObject(), timeoutMs = 95_000)
+        }.getOrNull()
+        return if (response != null && response.optBoolean("ok")) null
+        else response?.optString("error")?.ifBlank { "server probe failed" } ?: "server probe failed"
+    }
+
+    /** The stored server choice ("" = auto), shared with the settings screen. */
+    const val SELECTED_SERVER_PREF = "lantern_selected_server"
+
+    fun storedServerSelection(context: Context): String =
+        context.profiled().getString(SELECTED_SERVER_PREF, "") ?: ""
+
+    fun storeServerSelection(context: Context, tag: String) {
+        context.profiled().edit().putString(SELECTED_SERVER_PREF, tag).apply()
+    }
+
+    /**
+     * Apply the stored server choice right after a successful connect, when the
+     * sidecar can act on it. Selections made while disconnected only persist
+     * the preference; this is where they take effect.
+     */
+    private fun applyDeferredSelection(context: Context) {
+        val tag = storedServerSelection(context)
+        if (tag.isBlank()) return // auto needs no deferred apply
+        val error = selectServer(tag)
+        if (error != null) {
+            ConnectionLog.record("Lantern: deferred server selection failed: $error")
+        } else {
+            ConnectionLog.record("Lantern: pinned server selection applied after connect")
+        }
+    }
+
+    // ---- Sidecar log spam gate ----
+
+    /**
+     * Collapses per-line noise into one key: digit runs (timestamps, ids,
+     * durations, ports, versions) become '#', bracketed values (domains,
+     * addresses) become '[]'. The real spam — "no available network
+     * interface" / "missing fakeip record for <ip>" — repeats with only
+     * those parts varying, so it lands on a single key.
+     */
+    private val sidecarDigitsRegex = Regex("\\d+")
+
+    private val sidecarBracketRegex = Regex("\\[[^\\]]{0,60}\\]")
+
+    /** Window start (elapsed ms) per normalized message; pruned to stay bounded. */
+    private val logRepeatWindow = HashMap<String, Long>()
+
+    private val logRepeatCounts = HashMap<String, Int>()
+
+    /**
+     * Rate-limit repeated identical sidecar lines. The first three
+     * occurrences of a message inside a 60-second window are logged; further
+     * repeats are suppressed until the window rolls over. The raw stream is
+     * unaffected — this only gates the in-app connection log.
+     */
+    private fun shouldEmitSidecarLine(lower: String): Boolean = synchronized(logRepeatWindow) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val key = sidecarBracketRegex
+            .replace(sidecarDigitsRegex.replace(lower, "#"), "[]")
+            .take(140)
+        val start = logRepeatWindow[key]
+        if (start == null || now - start > 60_000L) {
+            if (logRepeatWindow.size >= 48) {
+                val oldest = logRepeatWindow.entries.minByOrNull { it.value }?.key
+                if (oldest != null) {
+                    logRepeatWindow.remove(oldest)
+                    logRepeatCounts.remove(oldest)
+                }
+            }
+            logRepeatWindow[key] = now
+            logRepeatCounts[key] = 1
+            true
+        } else {
+            val count = (logRepeatCounts[key] ?: 0) + 1
+            logRepeatCounts[key] = count
+            count <= 3
+        }
     }
 }

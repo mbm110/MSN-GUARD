@@ -893,6 +893,14 @@ object Strings {
         "Freedom — direct" to Triple("Freedom — direct", "آزادی — مستقیم", "自由 — 直连"),
         "Through your V2Ray config" to Triple("Through your V2Ray config", "از طریق کانفیگ V2Ray شما", "通过你的 V2Ray 配置"),
         "Freedom — dial direct" to Triple("Freedom — dial direct", "آزادی — اتصال مستقیم", "自由 — 直连拨号"),
+        // Lantern settings section.
+        "LANTERN" to Triple("LANTERN", "لنترن", "LANTERN"),
+        "Refresh server pings" to Triple("Refresh server pings", "تازه‌سازی پینگ سرورها", "刷新服务器延迟"),
+        "Pick the Lantern server to use" to Triple("Pick the Lantern server to use", "سرور لنترن را انتخاب کن", "选择要使用的 Lantern 服务器"),
+        "Connect with Lantern once, then pick a server here" to Triple("Connect with Lantern once, then pick a server here", "یک بار با لنترن وصل شو، بعد اینجا سرور انتخاب کن", "先连接一次 Lantern，然后在这里选择服务器"),
+        "Auto - Lantern picks and follows the fastest server" to Triple("Auto - Lantern picks and follows the fastest server", "خودکار — لنترن سریع‌ترین سرور را انتخاب و دنبال می‌کند", "自动 — Lantern 选择并跟随最快的服务器"),
+        "no ping" to Triple("no ping", "بدون پینگ", "无延迟数据"),
+        "current" to Triple("current", "فعلی", "当前"),
     )
 
     /** Translate [key] into the active language, falling back to English. */

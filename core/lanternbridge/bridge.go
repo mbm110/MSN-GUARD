@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/getlantern/radiance/backend"
+	"github.com/getlantern/radiance/common/settings"
 	"github.com/getlantern/radiance/vpn"
 )
 
@@ -320,3 +321,104 @@ func Shutdown() {
 		b.Close()
 	}
 }
+
+// ---- Server selection & probe surface for the app's Lantern settings ----
+
+// lanternServer is one selectable Lantern server as the app's settings screen
+// sees it. The server list itself comes from Radiance's config handler and is
+// refreshed by Lantern's own background config updates — nothing here pins it.
+type lanternServer struct {
+	Tag     string `json:"tag"`
+	Type    string `json:"type"`
+	City    string `json:"city"`
+	Country string `json:"country"`
+	// PingMs is the last successful probe latency in milliseconds; Probed
+	// distinguishes "measured, fast" from "never answered".
+	PingMs uint32 `json:"ping_ms"`
+	Probed bool   `json:"probed"`
+}
+
+type serversSnapshot struct {
+	Status   string          `json:"status"`
+	Servers  []lanternServer `json:"servers"`
+	Auto     bool            `json:"auto"`
+	Selected string          `json:"selected"`
+	Current  string          `json:"current"`
+}
+
+// ServersJSON lists the current servers with their last probe latency, plus
+// the selection state (auto vs pinned) and the currently active server.
+func ServersJSON() string {
+	b := currentBackend()
+	if b == nil {
+		return mustJSON(serversSnapshot{Status: string(vpn.Disconnected)})
+	}
+	snapshot := serversSnapshot{
+		Status:  string(b.VPNStatus()),
+		Servers: []lanternServer{},
+		// AutoConnect is Radiance's own switch between its continuous
+		// probe-and-rank auto selection and a user-pinned server.
+		Auto: settings.GetBool(settings.AutoConnectKey),
+	}
+	for _, srv := range b.AllServers() {
+		if srv == nil {
+			continue
+		}
+		entry := lanternServer{
+			Tag:     srv.Tag,
+			Type:    srv.Type,
+			City:    srv.Location.City,
+			Country: srv.Location.Country,
+		}
+		if h := srv.SelectionHistory; h != nil && h.LastSuccessDelayMs > 0 {
+			entry.PingMs = h.LastSuccessDelayMs
+			entry.Probed = true
+		}
+		snapshot.Servers = append(snapshot.Servers, entry)
+	}
+	if !snapshot.Auto {
+		if sel, exists, err := b.SelectedServer(); err == nil && sel != nil && exists {
+			snapshot.Selected = sel.Tag
+		}
+	}
+	if tag, err := b.CurrentAutoSelectedServer(); err == nil {
+		snapshot.Current = tag
+	}
+	return mustJSON(snapshot)
+}
+
+// SelectServer switches the live tunnel to the given server tag. The empty
+// string restores automatic (fastest) selection. The backend persists the
+// choice, so it also survives restarts.
+func SelectServer(tag string) error {
+	b := currentBackend()
+	if b == nil {
+		return errors.New("Radiance is not initialized")
+	}
+	if err := b.SelectServer(tag); err != nil {
+		return fmt.Errorf("select Lantern server: %w", err)
+	}
+	return nil
+}
+
+// PingServers refreshes every server's latency by running Radiance's offline
+// URL tests. The fresh results also re-seed the auto-selection ranking.
+func PingServers() error {
+	b := currentBackend()
+	if b == nil {
+		return errors.New("Radiance is not initialized")
+	}
+	if err := b.RunOfflineURLTests(); err != nil {
+		return fmt.Errorf("probe Lantern servers: %w", err)
+	}
+	return nil
+}
+
+func mustJSON(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "{}"
+	}
+	return string(encoded)
+}
+
