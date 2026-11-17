@@ -4536,7 +4536,10 @@ class MainActivity : Activity() {
     /** One entry of the sidecar's /servers snapshot. */
     private data class LanternServerOption(
         val tag: String,
+        /** Display name: flag + numbered city (or country/tag fallback). */
         val title: String,
+        val city: String,
+        val country: String,
         val pingMs: Long,
         val probed: Boolean,
     )
@@ -4549,6 +4552,59 @@ class MainActivity : Activity() {
 
     /** Tag of the server the tunnel is currently actually using, per the sidecar. */
     private var lanternCurrentTag: String = ""
+
+    /**
+     * Last snapshot persisted by [parseLanternSnapshot], so the picker still
+     * lists servers/countries while Lantern is disconnected (the sidecar only
+     * runs while connected; without this cache the sheet would show nothing).
+     */
+    private val lanternServersCachePref = "lantern_servers_cache_json"
+
+    /**
+     * Country name to ISO code, for the flag emoji. Lantern's server metadata
+     * carries only the country NAME, not its code; this covers every country
+     * currently present in Lantern's server pool.
+     */
+    private val lanternCountryCodes = mapOf(
+        "Germany" to "DE", "Netherlands" to "NL", "United States" to "US",
+        "United Kingdom" to "GB", "Singapore" to "SG", "Japan" to "JP",
+        "Hong Kong" to "HK", "France" to "FR", "Canada" to "CA",
+        "India" to "IN", "Brazil" to "BR", "Switzerland" to "CH",
+        "Spain" to "ES", "Italy" to "IT", "Turkey" to "TR",
+        "United Arab Emirates" to "AE", "Poland" to "PL", "Sweden" to "SE",
+        "Norway" to "NO", "Denmark" to "DK", "Finland" to "FI",
+        "Ireland" to "IE", "Belgium" to "BE", "Austria" to "AT",
+        "Romania" to "RO", "Czech Republic" to "CZ", "Ukraine" to "UA",
+        "Russia" to "RU", "Mexico" to "MX", "Argentina" to "AR",
+        "Chile" to "CL", "Colombia" to "CO", "South Africa" to "ZA",
+        "Nigeria" to "NG", "Kenya" to "KE", "Egypt" to "EG",
+        "Indonesia" to "ID", "Vietnam" to "VN", "Thailand" to "TH",
+        "Malaysia" to "MY", "South Korea" to "KR", "Taiwan" to "TW",
+        "Australia" to "AU", "New Zealand" to "NZ", "Israel" to "IL",
+        "Portugal" to "PT", "Greece" to "GR", "Hungary" to "HU",
+        "Bulgaria" to "BG", "Serbia" to "RS", "Latvia" to "LV",
+        "Estonia" to "EE", "Lithuania" to "LT", "Saudi Arabia" to "SA",
+        "Qatar" to "QA", "Kazakhstan" to "KZ", "Azerbaijan" to "AZ",
+        "Armenia" to "AM", "Georgia" to "GE", "Moldova" to "MD",
+        "Slovakia" to "SK", "Slovenia" to "SI", "Croatia" to "HR",
+        "Philippines" to "PH", "Pakistan" to "PK", "Bangladesh" to "BD",
+        "Sri Lanka" to "LK", "Nepal" to "NP", "Kuwait" to "KW",
+        "Oman" to "OM", "Bahrain" to "BH", "Jordan" to "JO",
+        "Morocco" to "MA", "Tunisia" to "TN", "Algeria" to "DZ",
+        "Peru" to "PE", "Uruguay" to "UY", "Venezuela" to "VE",
+        "Ecuador" to "EC", "Bolivia" to "BO", "Paraguay" to "PY",
+        "Iceland" to "IS", "Luxembourg" to "LU", "Malta" to "MT",
+        "Cyprus" to "CY", "Albania" to "AL", "Montenegro" to "ME",
+        "North Macedonia" to "MK", "Bosnia and Herzegovina" to "BA",
+    )
+
+    /** Regional-indicator flag emoji for an ISO code; empty when unknown. */
+    private fun lanternFlag(country: String): String {
+        val code = lanternCountryCodes[country.trim()] ?: return ""
+        val sb = StringBuilder(2)
+        for (c in code) sb.append(Character.toChars(0x1F1E6 + (c.uppercaseChar() - 'A')))
+        return sb.toString()
+    }
 
     /**
      * Label for the server row. Shows the pinned server when one is stored,
@@ -4566,9 +4622,20 @@ class MainActivity : Activity() {
      * Parse a /servers snapshot into the picker cache: server list, auto
      * state, currently active tag. Shared by the open-and-show flow and the
      * post-refresh reload so both stay in sync.
+     *
+     * Offline behavior: when the sidecar is down (Lantern disconnected) the
+     * caller passes null and the last persisted snapshot is reused, so the
+     * picker still shows servers and countries — pings then reflect the last
+     * connected session until the next connect refreshes them.
      */
-    private fun parseLanternSnapshot(snapshot: JSONObject?) {
-        if (snapshot == null) return
+    private fun parseLanternSnapshot(raw: JSONObject?) {
+        val snapshot = raw ?: run {
+            val cached = preferences().getString(lanternServersCachePref, null) ?: return
+            runCatching { JSONObject(cached) }.getOrNull() ?: return
+        }
+        if (raw != null) {
+            preferences().edit().putString(lanternServersCachePref, snapshot.toString()).apply()
+        }
         lanternAutoSelected = snapshot.optBoolean("auto", true)
         lanternCurrentTag = snapshot.optString("current", "")
         val list = snapshot.optJSONArray("servers") ?: return
@@ -4580,15 +4647,37 @@ class MainActivity : Activity() {
             servers.add(
                 LanternServerOption(
                     tag = tag,
-                    title = entry.optString("city", "").ifBlank {
-                        entry.optString("country", "").ifBlank { tag }
-                    },
+                    title = "", // assigned below, after sort + numbering
+                    city = entry.optString("city", ""),
+                    country = entry.optString("country", ""),
                     pingMs = entry.optLong("ping_ms", 0),
                     probed = entry.optBoolean("probed", false),
                 ),
             )
         }
-        lanternServersCache = servers
+        // Fastest first; servers that never answered a probe keep their
+        // relative order at the end of the list.
+        servers.sortWith(compareBy({ !it.probed }, { it.pingMs }))
+        // Number repeated cities in ping order, like the official app
+        // ("Frankfurt 1", "Frankfurt 2", ...); a unique city stays unnumbered.
+        val totals = HashMap<String, Int>()
+        for (server in servers) {
+            val key = "${server.city}|${server.country}"
+            totals[key] = (totals[key] ?: 0) + 1
+        }
+        val seen = HashMap<String, Int>()
+        val numbered = servers.map { server ->
+            val key = "${server.city}|${server.country}"
+            seen[key] = (seen[key] ?: 0) + 1
+            val base = server.city.ifBlank { server.country.ifBlank { server.tag } }
+            val flag = lanternFlag(server.country)
+            val name = when {
+                server.city.isNotBlank() && (totals[key] ?: 0) > 1 -> "$base ${seen[key]}"
+                else -> base
+            }
+            server.copy(title = if (flag.isBlank()) name else "$flag $name")
+        }
+        lanternServersCache = numbered
     }
 
     /** Fetch the server list off the UI thread; [after] runs on the UI thread. */
@@ -4609,16 +4698,18 @@ class MainActivity : Activity() {
      * next connect and only offers Automatic.
      */
     private fun chooseLanternServer(after: (() -> Unit)? = null) {
-        // Every open triggers a fresh probe round in the background; the
-        // results land in the cache for this sheet's descriptions where the
-        // snapshot raced, and for the next open.
+        // Every open triggers a fresh probe round in the background while the
+        // sidecar is up; disconnected opens reuse the persisted list without
+        // logging a probe failure.
         Thread {
-            val refreshError = LanternEngine.refreshServerPings()
-            ConnectionLog.record(
-                if (refreshError == null) "Lantern: server pings refreshed"
-                else "Lantern: ping refresh failed: $refreshError",
-            )
-            parseLanternSnapshot(LanternEngine.serversSnapshot(timeoutMs = 3_000))
+            if (LanternEngine.isRunning()) {
+                val refreshError = LanternEngine.refreshServerPings()
+                ConnectionLog.record(
+                    if (refreshError == null) "Lantern: server pings refreshed"
+                    else "Lantern: ping refresh failed: $refreshError",
+                )
+                parseLanternSnapshot(LanternEngine.serversSnapshot(timeoutMs = 3_000))
+            }
         }.apply { isDaemon = true; start() }
         // Meanwhile build the sheet from the current snapshot so it opens
         // immediately with live values.
@@ -4644,7 +4735,8 @@ class MainActivity : Activity() {
                     } else {
                         val ping = if (option.probed) "${option.pingMs} ms" else Strings.t("no ping")
                         val current = if (option.tag == lanternCurrentTag) " · ${Strings.t("current")}" else ""
-                        "$ping$current"
+                        val where = option.country.ifBlank { option.city }
+                        if (where.isBlank()) "$ping$current" else "$where · $ping$current"
                     }
                 },
                 scrollable = true,
