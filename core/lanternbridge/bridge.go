@@ -91,6 +91,10 @@ func Init(dataDir, logDir, socksAddress string) error {
 		LogLevel:                 "info",
 		TelemetryConsent:         false,
 		PreserveTelemetryConsent: false,
+		// The Android sidecar has no gomobile bindings, so it supplies a pure-Go
+		// platform interface; without one sing-box builds a netlink network
+		// monitor that Android bans for unprivileged apps.
+		PlatformInterface: newPlatformInterface(),
 		EnvOverrides: map[string]string{
 			// Radiance must use its SOCKS inbound here. MSN-GUARD owns the
 			// Android VpnService/TUN and Hev forwards that TUN to this port;
