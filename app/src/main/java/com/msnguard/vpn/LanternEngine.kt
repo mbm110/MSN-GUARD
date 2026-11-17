@@ -447,7 +447,9 @@ object LanternEngine {
     /** Current server list + ping data; null when the sidecar is not running. */
     fun serversSnapshot(timeoutMs: Int = 2_000): JSONObject? {
         if (controlToken.isBlank() || controlSocketPath.isBlank()) return null
-        return runCatching { request("GET", "/servers", timeoutMs = timeoutMs) }.getOrNull()
+        // The control response wraps the payload in "data".
+        return runCatching { request("GET", "/servers", timeoutMs = timeoutMs) }
+            .getOrNull()?.optJSONObject("data")
     }
 
     /** Select a server by tag ("" = automatic fastest). Returns an error or null on success. */

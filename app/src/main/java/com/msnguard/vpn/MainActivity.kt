@@ -233,9 +233,8 @@ class MainActivity : Activity() {
     private var tunEngineRow: OrbitSettingsRow? = null
     private var psiphonModeRow: OrbitSettingsRow? = null
     private var cdnEdgeIpsRow: OrbitSettingsRow? = null
-    /** Lantern settings rows: server picker + ping refresh, like the Psiphon ones. */
+    /** Lantern settings rows: server picker, like the Psiphon ones. */
     private var lanternServerRow: OrbitSettingsRow? = null
-    private var lanternPingRow: OrbitSettingsRow? = null
     private var cdnSniRow: OrbitSettingsRow? = null
 
     /** LAN-sharing switch; its subtitle carries the live proxy address. */
@@ -3695,25 +3694,15 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
 
-        // Lantern section, mirroring the Psiphon/Shard layout: a server picker
-        // and a ping refresh. The server list is NOT static — it comes from
-        // the Lantern sidecar, which keeps it updated from Lantern's own config
-        // feed, so entries appear and disappear exactly like the official app.
-        // When Lantern is disconnected the sidecar is not running and there is
-        // nothing to list: the rows then say so and still let the user pick
-        // "Automatic", which is stored and applied on the next connect.
+        // Lantern section, mirroring the Psiphon/Shard layout. Opening the
+        // server picker refreshes pings automatically (no separate button):
+        // Lantern keeps probing every server in the background, and each open
+        // also re-reads the latest probe results and re-ranks by them.
         content.addView(expandableSection(Strings.t("LANTERN"), id = "LANTERN") { body ->
             lanternServerRow = navRow(Strings.t("Server"), lanternServerLabel()) {
                 chooseLanternServer { lanternServerRow?.setValue(lanternServerLabel()) }
             }
             body.addView(lanternServerRow, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(8) })
-            lanternPingRow = navRow(Strings.t("Refresh server pings"), lanternPingLabel()) {
-                refreshLanternPings { lanternPingRow?.setValue(lanternPingLabel()) }
-            }
-            body.addView(lanternPingRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
@@ -4573,58 +4562,65 @@ class MainActivity : Activity() {
     }
 
     /**
-     * Ping row label: latest known probe state. "-" while nothing is known
-     * (disconnected, or no probe finished yet).
+     * Parse a /servers snapshot into the picker cache: server list, auto
+     * state, currently active tag. Shared by the open-and-show flow and the
+     * post-refresh reload so both stay in sync.
      */
-    private fun lanternPingLabel(): String {
-        val probed = lanternServersCache.count { it.probed }
-        return if (probed == 0) "-" else "$probed"
+    private fun parseLanternSnapshot(snapshot: JSONObject?) {
+        if (snapshot == null) return
+        lanternAutoSelected = snapshot.optBoolean("auto", true)
+        lanternCurrentTag = snapshot.optString("current", "")
+        val list = snapshot.optJSONArray("servers") ?: return
+        val servers = mutableListOf<LanternServerOption>()
+        for (i in 0 until list.length()) {
+            val entry = list.optJSONObject(i) ?: continue
+            val tag = entry.optString("tag", "")
+            if (tag.isBlank()) continue
+            servers.add(
+                LanternServerOption(
+                    tag = tag,
+                    title = entry.optString("city", "").ifBlank {
+                        entry.optString("country", "").ifBlank { tag }
+                    },
+                    pingMs = entry.optLong("ping_ms", 0),
+                    probed = entry.optBoolean("probed", false),
+                ),
+            )
+        }
+        lanternServersCache = servers
     }
 
     /** Fetch the server list off the UI thread; [after] runs on the UI thread. */
     private fun loadLanternServers(after: (List<LanternServerOption>) -> Unit) {
         Thread {
-            val snapshot = LanternEngine.serversSnapshot()
-            val servers = mutableListOf<LanternServerOption>()
-            var auto = true
-            var current = ""
-            if (snapshot != null) {
-                auto = snapshot.optBoolean("auto", true)
-                current = snapshot.optString("current", "")
-                val list = snapshot.optJSONArray("servers")
-                if (list != null) {
-                    for (i in 0 until list.length()) {
-                        val entry = list.optJSONObject(i) ?: continue
-                        val tag = entry.optString("tag", "")
-                        if (tag.isBlank()) continue
-                        servers.add(
-                            LanternServerOption(
-                                tag = tag,
-                                title = entry.optString("city", "").ifBlank {
-                                    entry.optString("country", "").ifBlank { tag }
-                                },
-                                pingMs = entry.optLong("ping_ms", 0),
-                                probed = entry.optBoolean("probed", false),
-                            ),
-                        )
-                    }
-                }
-            }
-            lanternServersCache = servers
-            lanternAutoSelected = auto
-            lanternCurrentTag = current
-            runOnUiThread { after(servers) }
+            parseLanternSnapshot(LanternEngine.serversSnapshot())
+            runOnUiThread { after(lanternServersCache) }
         }.apply { isDaemon = true; start() }
     }
 
     /**
-     * Server picker sheet. Only reachable entries are listed — a server that
-     * never answered a probe shows "no ping" and is still selectable (the
-     * official app behaves the same way), but "Automatic" always stays first.
+     * Server picker sheet. Opening it automatically refreshes every server's
+     * ping (Radiance re-probes and re-ranks; no separate refresh button) while
+     * the sheet itself shows the latest known values right away. A server that
+     * never answered a probe shows "no ping" and is still selectable — the
+     * official app behaves the same way — and "Automatic" always stays first.
      * With the sidecar down the sheet explains that the list refreshes on the
      * next connect and only offers Automatic.
      */
     private fun chooseLanternServer(after: (() -> Unit)? = null) {
+        // Every open triggers a fresh probe round in the background; the
+        // results land in the cache for this sheet's descriptions where the
+        // snapshot raced, and for the next open.
+        Thread {
+            val refreshError = LanternEngine.refreshServerPings()
+            ConnectionLog.record(
+                if (refreshError == null) "Lantern: server pings refreshed"
+                else "Lantern: ping refresh failed: $refreshError",
+            )
+            parseLanternSnapshot(LanternEngine.serversSnapshot(timeoutMs = 3_000))
+        }.apply { isDaemon = true; start() }
+        // Meanwhile build the sheet from the current snapshot so it opens
+        // immediately with live values.
         loadLanternServers { servers ->
             val options = listOf<LanternServerOption?>(null) + servers.map { it as LanternServerOption? }
             val selectedTag = LanternEngine.storedServerSelection(this)
@@ -4666,42 +4662,6 @@ class MainActivity : Activity() {
                 after?.invoke()
             }
         }
-    }
-
-    /** Re-probe all servers through the sidecar; refreshes pings and auto ranking. */
-    private fun refreshLanternPings(after: (() -> Unit)? = null) {
-        Thread {
-            val error = LanternEngine.refreshServerPings()
-            ConnectionLog.record(
-                if (error == null) "Lantern: server pings refreshed"
-                else "Lantern: ping refresh failed: $error",
-            )
-            // Pull the refreshed numbers so the picker shows the new values.
-            LanternEngine.serversSnapshot(timeoutMs = 2_000)?.let { snapshot ->
-                val list = snapshot.optJSONArray("servers")
-                if (list != null) {
-                    val servers = mutableListOf<LanternServerOption>()
-                    for (i in 0 until list.length()) {
-                        val entry = list.optJSONObject(i) ?: continue
-                        val tag = entry.optString("tag", "")
-                        if (tag.isBlank()) continue
-                        servers.add(
-                            LanternServerOption(
-                                tag = tag,
-                                title = entry.optString("city", "").ifBlank {
-                                    entry.optString("country", "").ifBlank { tag }
-                                },
-                                pingMs = entry.optLong("ping_ms", 0),
-                                probed = entry.optBoolean("probed", false),
-                            ),
-                        )
-                    }
-                    lanternServersCache = servers
-                    lanternCurrentTag = snapshot.optString("current", "")
-                }
-            }
-            runOnUiThread { after?.invoke() }
-        }.apply { isDaemon = true; start() }
     }
 
     private fun refreshPsiphonModeRows() {
