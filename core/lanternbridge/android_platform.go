@@ -216,7 +216,7 @@ func (p *androidPlatform) LookupUser(string) (*box.PlatformUser, error) {
 	return nil, errUnsupported
 }
 func (p *androidPlatform) LookupSFTPServer() (string, error)      { return "", errUnsupported }
-func (p *androidPlatform) ReadSystemSSHHostKey() ([]byte, error)  { return nil, errUnsupported }
+func (p *androidPlatform) ReadSystemSSHHostKey() (string, error) { return "", errUnsupported }
 func (p *androidPlatform) TailscaleHostname() string              { return "" }
 func (p *androidPlatform) UsePlatformBridge() bool                { return false }
 func (p *androidPlatform) CreateBridge(*box.BridgeOptions) (box.BridgeSession, error) {
