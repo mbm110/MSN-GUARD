@@ -475,6 +475,39 @@ object LanternEngine {
         else response?.optString("error")?.ifBlank { "server probe failed" } ?: "server probe failed"
     }
 
+    /** True when the control endpoint answers /health. */
+    private fun controlAlive(timeoutMs: Int): Boolean =
+        controlToken.isNotBlank() && controlSocketPath.isNotBlank() &&
+            runCatching { request("GET", "/health", timeoutMs = timeoutMs) }.isSuccess
+
+    /**
+     * Boot the sidecar WITHOUT connecting the tunnel — official-app parity:
+     * the Lantern core runs while its VPN is off, so the server list and live
+     * pings stay available offline. Idempotent: a live sidecar (connected or
+     * list-only) is reused, and connect() reuses a list-only sidecar because
+     * startProcess is a no-op while the process is alive.
+     */
+    fun ensureSidecar(context: Context): Boolean {
+        if (controlAlive(800)) return true
+        // Another start (a connect or an earlier list boot) may be in flight;
+        // wait for its control API instead of racing it with a new attempt.
+        if (process?.isAlive == true) {
+            val deadline = android.os.SystemClock.elapsedRealtime() + 15_000L
+            while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                if (process?.isAlive != true) break
+                if (controlSocketPath.isNotBlank() && controlAlive(1500)) return true
+                Thread.sleep(200L)
+            }
+            return controlAlive(1500)
+        }
+        val attempt = armForStart()
+        if (!startProcess(context, attempt)) return false
+        // Control readiness only — no /connect, no TUN. Radiance fetches its
+        // config and probes servers directly (the app is outside the VPN), so
+        // /servers and /ping answer with live data.
+        return awaitControlReady(attempt)
+    }
+
     /** The stored server choice ("" = auto), shared with the settings screen. */
     const val SELECTED_SERVER_PREF = "lantern_selected_server"
 

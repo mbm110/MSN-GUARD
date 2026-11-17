@@ -4678,12 +4678,28 @@ class MainActivity : Activity() {
             server.copy(title = if (flag.isBlank()) name else "$flag $name")
         }
         lanternServersCache = numbered
+        ConnectionLog.record(
+            "Lantern: server list loaded (${numbered.size} servers, ${if (raw != null) "live" else "cached"})"
+        )
     }
 
     /** Fetch the server list off the UI thread; [after] runs on the UI thread. */
     private fun loadLanternServers(after: (List<LanternServerOption>) -> Unit) {
         Thread {
-            parseLanternSnapshot(LanternEngine.serversSnapshot())
+            var snapshot = LanternEngine.serversSnapshot()
+            if (snapshot == null) {
+                val cacheEmpty = preferences().getString(lanternServersCachePref, null).isNullOrBlank()
+                if (cacheEmpty) {
+                    // First offline open with nothing cached yet: boot the
+                    // Lantern core list-only (no tunnel), like the official
+                    // app whose core runs while its VPN is off.
+                    ConnectionLog.record("Lantern: starting the core for the offline server list")
+                    if (LanternEngine.ensureSidecar(this@MainActivity)) {
+                        snapshot = LanternEngine.serversSnapshot(timeoutMs = 5_000)
+                    }
+                }
+            }
+            parseLanternSnapshot(snapshot)
             runOnUiThread { after(lanternServersCache) }
         }.apply { isDaemon = true; start() }
     }
@@ -4698,11 +4714,13 @@ class MainActivity : Activity() {
      * next connect and only offers Automatic.
      */
     private fun chooseLanternServer(after: (() -> Unit)? = null) {
-        // Every open triggers a fresh probe round in the background while the
-        // sidecar is up; disconnected opens reuse the persisted list without
-        // logging a probe failure.
+        // Every open triggers a fresh probe round in the background; while
+        // connected it runs through the live tunnel, and while disconnected
+        // the core boots list-only so pings still refresh offline.
         Thread {
-            if (LanternEngine.isRunning) {
+            // Connected: re-probe through the live tunnel. Disconnected: boot
+            // the core list-only (official-app parity) so pings still refresh.
+            if (LanternEngine.isRunning || LanternEngine.ensureSidecar(this@MainActivity)) {
                 val refreshError = LanternEngine.refreshServerPings()
                 ConnectionLog.record(
                     if (refreshError == null) "Lantern: server pings refreshed"
