@@ -15,6 +15,7 @@ package lanternbridge
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <arpa/inet.h>
