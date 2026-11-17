@@ -4,7 +4,10 @@ package lanternbridge
 
 import (
 	"errors"
+	"fmt"
 	"net"
+	"os"
+	"strings"
 	"time"
 
 	box "github.com/sagernet/sing-box/experimental/libbox"
@@ -38,12 +41,31 @@ func (p *androidPlatform) PostServiceClose()     {}
 // connect (no packet leaves the device) and report it, then re-check
 // periodically so Wi-Fi/mobile switches are picked up.
 func (p *androidPlatform) StartDefaultInterfaceMonitor(listener box.InterfaceUpdateListener) error {
+	platformLog("interface monitor starting")
+	// Report the first result synchronously: the router dispatches its
+	// initial interface update right after box start, and every outbound
+	// dial fails with tun.ErrNoRoute while DefaultInterface() is nil.
+	last := int32(-1)
+	if ifIndex, name, ok, detail := detectDefaultInterface(); ok {
+		listener.UpdateDefaultInterface(name, ifIndex, false, false)
+		last = ifIndex
+		platformLog("initial default interface: " + name)
+	} else {
+		platformLog("initial detection failed: " + detail)
+	}
 	go func() {
-		last := int32(-1)
 		for {
-			if ifIndex, name, ok := detectDefaultInterface(); ok && ifIndex != last {
-				listener.UpdateDefaultInterface(name, ifIndex, false, false)
-				last = ifIndex
+			if ifIndex, name, ok, detail := detectDefaultInterface(); ok {
+				if ifIndex != last {
+					listener.UpdateDefaultInterface(name, ifIndex, false, false)
+					platformLog("default interface changed: " + name)
+					last = ifIndex
+				}
+			} else if last == -1 {
+				// Only complain while we have nothing to report; once a
+				// working interface is known, transient probe failures are
+				// not worth logging every poll.
+				platformLog("detection failed: " + detail)
 			}
 			select {
 			case <-p.stop:
@@ -55,31 +77,61 @@ func (p *androidPlatform) StartDefaultInterfaceMonitor(listener box.InterfaceUpd
 	return nil
 }
 
-func (p *androidPlatform) CloseDefaultInterfaceMonitor(box.InterfaceUpdateListener) error {
-	select {
-	case <-p.stop:
-	default:
-		close(p.stop)
-	}
-	return nil
+func platformLog(message string) {
+	// Sidecar stderr is piped into the app connection log.
+	fmt.Fprintln(os.Stderr, "lantern/platform: "+message)
 }
 
-func detectDefaultInterface() (int32, string, bool) {
-	// 192.0.2.1 is TEST-NET-1 (RFC 5737): the kernel picks a route without
-	// sending anything. The VPN's own TUN does not apply to this app (the
-	// service excludes its own package), so this is the physical default.
-	conn, err := net.Dial("udp", "192.0.2.1:53")
-	if err != nil {
-		return -1, "", false
-	}
-	local := conn.LocalAddr().(*net.UDPAddr).IP
-	_ = conn.Close()
+func detectDefaultInterface() (int32, string, bool, string) {
+	// TEST-NET / real-target UDP connects: the kernel resolves the route and
+	// source address without emitting a packet. The VPN's own TUN does not
+	// apply to this app (the service excludes its own package), so this is
+	// the physical default route.
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return -1, "", false
+		return -1, "", false, "enumerate interfaces: " + err.Error()
 	}
+	for _, target := range []string{"192.0.2.1:53", "198.51.100.1:53", "8.8.8.8:53"} {
+		conn, err := net.Dial("udp", target)
+		if err != nil {
+			continue
+		}
+		local := conn.LocalAddr().(*net.UDPAddr).IP
+		_ = conn.Close()
+		for _, ifce := range ifaces {
+			if ifce.Flags&net.FlagUp == 0 || ifce.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			if isTunnelInterface(ifce.Name) {
+				// Binding outbound dials to the VPN TUN would loop traffic
+				// back through the proxy chain. Skip it even if the kernel
+				// currently routes via TUN (exclusion misconfig); the
+				// physical-interface fallback below takes over.
+				continue
+			}
+			addrs, err := ifce.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, addr := range addrs {
+				ipNet, ok := addr.(*net.IPNet)
+				if !ok {
+					continue
+				}
+				if ipNet.IP.Equal(local) {
+					return int32(ifce.Index), ifce.Name, true, ""
+				}
+			}
+		}
+	}
+	// No usable kernel route (offline, or restricted routing): still report
+	// the best physical candidate so outbounds have an interface to bind to
+	// instead of failing every dial with ErrNoRoute.
 	for _, ifce := range ifaces {
 		if ifce.Flags&net.FlagUp == 0 || ifce.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		if isTunnelInterface(ifce.Name) {
 			continue
 		}
 		addrs, err := ifce.Addrs()
@@ -91,12 +143,26 @@ func detectDefaultInterface() (int32, string, bool) {
 			if !ok {
 				continue
 			}
-			if ipNet.IP.Equal(local) {
-				return int32(ifce.Index), ifce.Name, true
+			if ipNet.IP.To4() != nil && !ipNet.IP.IsLoopback() {
+				return int32(ifce.Index), ifce.Name, true, "fallback: " + ifce.Name
 			}
 		}
 	}
-	return -1, "", false
+	return -1, "", false, "no up non-tunnel interface with an IPv4 address"
+}
+
+// isTunnelInterface guards against binding outbounds to the VPN's own TUN.
+func isTunnelInterface(name string) bool {
+	return strings.HasPrefix(name, "tun") || strings.HasPrefix(name, "tap")
+}
+
+func (p *androidPlatform) CloseDefaultInterfaceMonitor(box.InterfaceUpdateListener) error {
+	select {
+	case <-p.stop:
+	default:
+		close(p.stop)
+	}
+	return nil
 }
 
 // GetInterfaces feeds sing-box's NetworkInterfaces() path, which the wrapper
