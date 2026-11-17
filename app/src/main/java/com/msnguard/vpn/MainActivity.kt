@@ -4702,7 +4702,7 @@ class MainActivity : Activity() {
         // sidecar is up; disconnected opens reuse the persisted list without
         // logging a probe failure.
         Thread {
-            if (LanternEngine.isRunning()) {
+            if (LanternEngine.isRunning) {
                 val refreshError = LanternEngine.refreshServerPings()
                 ConnectionLog.record(
                     if (refreshError == null) "Lantern: server pings refreshed"
