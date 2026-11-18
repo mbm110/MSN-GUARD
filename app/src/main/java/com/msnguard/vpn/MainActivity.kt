@@ -6181,7 +6181,7 @@ class MainActivity : Activity() {
         label: (T) -> String,
         description: (T) -> String,
         onSelected: (T) -> Unit,
-    ) = showChoiceSheet(title, subtitle, options, selected, label, description, false, null, onSelected)
+    ) = showChoiceSheet(title, subtitle, options, selected, label, description, scrollable = false, refuse = null, onDismiss = null, onSelected = onSelected)
 
     /**
      * @param scrollable caps the option list at 55% of the screen and scrolls it.
