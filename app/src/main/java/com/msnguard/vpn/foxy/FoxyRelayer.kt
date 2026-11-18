@@ -1,9 +1,9 @@
 package com.msnguard.vpn.foxy
 
-import java.util.Base64
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
@@ -54,51 +54,54 @@ internal class FoxyRelayerInterceptor(
         }
 
         var directException: Exception? = null
-        var directFailureResponse: Response? = null
+        var directFailoverCode: Int? = null
         try {
             val directResponse = chain.withConnectTimeout(DIRECT_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS).proceed(request)
             if (directResponse.isSuccessful || directResponse.code !in config.failoverCodes) {
                 return directResponse
             }
             FoxyLog.i("Relayer", "Direct connection returned status ${directResponse.code}, starting relayer failover")
-            // Buffer only a bounded error body, then release the connection before retrying.
-            directFailureResponse = directResponse.newBuilder()
-                .body(directResponse.peekBody(65_536L)).build()
+            directFailoverCode = directResponse.code
             directResponse.close()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            FoxyLog.i("Relayer", "Direct connection failed (${e::class.java.simpleName}), starting relayer failover")
+            FoxyLog.i("Relayer", "Direct connection failed (${e.message ?: e::class.java.simpleName}), starting relayer failover")
             directException = e
         }
 
         for (relayerUrl in candidates) {
             try {
-                FoxyLog.i("Relayer", "Attempting request via configured relayer")
+                FoxyLog.i("Relayer", "Attempting request via $relayerUrl")
                 val relayed = buildRelayedRequest(request, relayerUrl)
                 val response = chain.proceed(relayed)
+                val relayError = response.header("X-Relay-Error")
+                if (relayError != null) {
+                    FoxyLog.w("Relayer", "Relayer $relayerUrl refused: $relayError")
+                    response.close()
+                    continue
+                }
                 if (response.code !in config.failoverCodes) {
-                    FoxyLog.i("Relayer", "Relayer returned status ${response.code}")
-                    directFailureResponse?.close()
+                    FoxyLog.i("Relayer", "Request succeeded via $relayerUrl (status ${response.code})")
                     return response
                 }
-                FoxyLog.w("Relayer", "Relayer returned failover status ${response.code}")
+                FoxyLog.w("Relayer", "Relayer $relayerUrl returned failover status ${response.code}")
                 response.close()
             } catch (e: Exception) {
-                if (e is CancellationException) { directFailureResponse?.close(); throw e }
-                FoxyLog.w("Relayer", "Relayer failed (${e::class.java.simpleName})")
+                if (e is CancellationException) throw e
+                FoxyLog.w("Relayer", "Relayer $relayerUrl failed (${e.message ?: e::class.java.simpleName})")
             }
         }
 
         FoxyLog.w("Relayer", "All candidate relayers failed for request")
-        if (directFailureResponse != null) {
-            return directFailureResponse
-        }
         if (directException != null) {
             when (directException) {
                 is IOException -> throw directException
                 is RuntimeException -> throw directException
                 else -> throw IOException(directException)
             }
+        }
+        if (directFailoverCode != null) {
+            throw IOException("Direct request failed with HTTP $directFailoverCode and all candidate relayers failed")
         }
         return chain.proceed(request)
     }
@@ -119,7 +122,7 @@ internal class FoxyRelayerInterceptor(
             val list = mutableListOf<String>()
             config.availableRelayers.values.forEach { url ->
                 val trimmed = url.trim()
-                if (isValidRelayerUrl(trimmed) && !list.contains(trimmed)) list.add(trimmed)
+                if (trimmed.isNotBlank() && !list.contains(trimmed)) list.add(trimmed)
             }
             return list
         }
@@ -138,18 +141,22 @@ internal class FoxyRelayerInterceptor(
 
     private fun buildRelayedRequest(originalRequest: Request, relayerBaseUrl: String): Request {
         val originalUrl = originalRequest.url.toString()
-        val b64 = Base64.getUrlEncoder().encodeToString(originalUrl.toByteArray(Charsets.UTF_8))
         val rawBase = relayerBaseUrl.trim()
         val base = if (rawBase.startsWith("http://", ignoreCase = true) || rawBase.startsWith("https://", ignoreCase = true)) {
             rawBase
         } else {
             "https://$rawBase"
         }
-        val relayerUrl = when {
-            base.endsWith("?url=") -> "$base$b64"
-            base.endsWith("&url=") -> "$base$b64"
-            base.contains("?") -> "${base}&url=$b64"
-            else -> "${base.trimEnd('/')}/?url=$b64"
+        val targetHttpUrl = base.toHttpUrlOrNull()
+        val relayerUrl: String = if (targetHttpUrl != null) {
+            targetHttpUrl.newBuilder()
+                .setQueryParameter("url", originalUrl)
+                .build()
+                .toString()
+        } else {
+            val sep = if (base.contains("?")) "&" else "?"
+            val encoded = java.net.URLEncoder.encode(originalUrl, "UTF-8")
+            "$base${sep}url=$encoded"
         }
         return originalRequest.newBuilder()
             .url(relayerUrl)
@@ -162,13 +169,15 @@ internal class FoxyRelayerInterceptor(
             "guardian" ->
                 urlStr == ep.guardian.token ||
                     urlStr == ep.guardian.status ||
-                    urlStr == ep.guardian.activate
+                    urlStr == ep.guardian.activate ||
+                    urlStr.contains("/api/v1/fpn/")
             "fxa" ->
                 urlStr == ep.controlPlane.oauthToken ||
                     urlStr == ep.controlPlane.oauthFallback ||
                     urlStr == ep.controlPlane.authorization ||
                     urlStr == ep.controlPlane.recoveryStatus ||
-                    urlStr == ep.controlPlane.sessionDestroy
+                    urlStr == ep.controlPlane.sessionDestroy ||
+                    urlStr.contains("accounts.firefox.com")
             "config" ->
                 urlStr.contains("FoxyConfig") || urlStr.contains("foxy_config")
             "server_list" ->
