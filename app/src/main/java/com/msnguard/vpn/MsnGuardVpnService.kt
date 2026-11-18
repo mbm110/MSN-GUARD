@@ -2754,6 +2754,28 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         // with no activity alive — the rotation is the service's
                         // job, not the card's.
                         evaluateExitCountry(ip)
+                        // Notification label: resolve the exit country HERE as
+                        // well, not only from the activity. A tile connect with
+                        // the app closed (or a slow activity lookup) used to leave
+                        // currentCountry blank for the whole session, so the
+                        // notification row never named the country. Psiphon
+                        // reports its own region via onConnectedServerRegion;
+                        // this covers the WARP/MASQUE/Tor/Lantern/Foxy family.
+                        if (currentCountry.isBlank()) {
+                            val labelGeneration = sessionGeneration
+                            runCatching {
+                                exitGeoExecutor.execute {
+                                    if (labelGeneration != sessionGeneration) return@execute
+                                    val actual = ExitGeo.countryOf(ip)
+                                    if (labelGeneration != sessionGeneration) return@execute
+                                    if (!actual.isNullOrBlank() && currentCountry.isBlank()) {
+                                        currentCountry = PsiphonRegions.name(actual)
+                                        ConnectionLog.record("Exit country: $currentCountry ($actual)")
+                                        repostNotification()
+                                    }
+                                }
+                            }
+                        }
                         repostNotification()
                     }
                 }
@@ -7208,13 +7230,6 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             currentCountry
         }
         val subtitle = if (country.isNotBlank()) "$method • $country" else method
-        // The exit IP belongs next to the method/country: the service already
-        // tracks it (ACTION_NOTIFICATION_IP kept currentVpnIp fresh) but it was
-        // never rendered anywhere — dead extras only. Showing it here matches
-        // the main screen's IP+country display and makes the row useful while
-        // the app is closed.
-        val exitIp = currentVpnIp.trim()
-        val fullSubtitle = if (exitIp.isNotBlank()) "$subtitle • $exitIp" else subtitle
 
         // Proxy mode must not claim "VPN connected": nothing is tunnelled device-wide,
         // and a user who reads that and then finds Chrome on their real IP would be
@@ -7234,7 +7249,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
 
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
-            .setContentText(fullSubtitle)
+            .setContentText(subtitle)
             .setSmallIcon(R.drawable.ic_notification)
             .setLargeIcon(appBadge())
             // Tints the small icon and the header text in the app's own accent,
