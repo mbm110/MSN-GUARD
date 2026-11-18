@@ -1,6 +1,7 @@
 package com.msnguard.vpn.foxy
 
 import android.util.Base64
+import com.msnguard.vpn.ConnectionLog
 import com.msnguard.vpn.foxy.RuntimeAuth
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -237,9 +238,21 @@ class FxaAuthRepository(
                 )
             }
         } catch (rejected: FxaApiError) {
+            val permanent = rejected.isPermanentRefreshRejection()
+            if (permanent) {
+                // The refresh token is dead for good (errno 108 / invalid_grant):
+                // every future Foxy connect would fail in mintPass while the UI
+                // kept claiming "signed in", and the watchdog re-queried FxA every
+                // few seconds forever. Clear the store so signInStatus() flips to
+                // null, the UI shows signed-out, and the connect gate sends the
+                // user back to the sign-in page (v3.2.27 audit).
+                tokenStore.clearSession()
+                ConnectionLog.record("Foxy: refresh token permanently rejected — signed out (sign in again)")
+                FoxyLog.w(TAG, "refresh token permanently rejected; local session cleared", rejected)
+            }
             throw FxaRefreshFailure(
                 rejected.message ?: "FxA rejected the refresh token",
-                permanent = rejected.isPermanentRefreshRejection(),
+                permanent = permanent,
                 cause = rejected,
             )
         } catch (cancellation: CancellationException) {
@@ -355,7 +368,14 @@ class FxaAuthRepository(
             ),
         )
         clearPendingSession()
-        destroySession(sessionToken)
+        // NonCancellable: cancellation landing exactly between saveAuth and the
+        // server-side session destroy (user hit Back at that instant) used to
+        // leave the FxA session alive on Mozilla's servers with the user never
+        // shown as signed in (v3.2.27 audit). The tokens are already saved —
+        // the destroy MUST run.
+        withContext(kotlinx.coroutines.NonCancellable) {
+            destroySession(sessionToken)
+        }
     }
 
     /** Straight fxa-credentials grant against the OAuth token endpoint —
@@ -551,7 +571,12 @@ class FxaAuthRepository(
                         currentUrl = candidateFallback
                     } else if (fallbackResp.code == 400) {
                         val fbText = fallbackResp.body?.string().orEmpty()
-                        val isInvalid = fbText.contains("108") || fbText.contains("invalid_grant", ignoreCase = true)
+                        // Parse errno properly: a substring "108" match used to
+                        // fire on ANY response containing the number (e.g. a
+                        // timestamp), misclassifying ordinary failures as a
+                        // permanent invalid-grant rejection.
+                        val fbErrno = try { JSONObject(fbText).optInt("errno", -1) } catch (_: Exception) { -1 }
+                        val isInvalid = fbErrno == 108 || fbText.contains("invalid_grant", ignoreCase = true)
                         if (isInvalid) {
                             response.close()
                             response = fallbackResp

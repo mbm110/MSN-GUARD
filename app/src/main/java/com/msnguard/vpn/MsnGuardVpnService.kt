@@ -2387,6 +2387,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // Arm the ECH fallback roster: cached results are reused for
         // MAX_AGE_MS, a probe cycle only refreshes on a daemon thread.
         EchEndpointRoster.maybeProbe(applicationContext)
+        // startForeground contract for REDELIVERED intents: after Android kills
+        // the process, START_REDELIVER_INTENT re-delivers the LAST intent. If
+        // that is not ACTION_CONNECT (a health probe, a pause…), no code path
+        // below ever calls startForeground for the restarted service → crash
+        // with ForegroundServiceDidNotStartInTimeException. Only the redelivery
+        // flag is handled here on purpose: normal in-process action sends must
+        // not promote the service to foreground (v3.2.27 audit).
+        if ((flags and android.app.Service.START_FLAG_REDELIVERY) != 0 &&
+            intent?.action != ACTION_CONNECT
+        ) {
+            startAsForeground()
+        }
         when (intent?.action) {
             ACTION_CONNECT -> intent.getStringExtra(EXTRA_CONFIG)?.let { config ->
                 // A fresh user-initiated connect clears both the "user switched it
@@ -2562,6 +2574,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // site, unlike the process-killing rejection the v1.9.3 crash had.
         exitGeoExecutor.shutdownNow()
         worker.shutdownNow()
+        // List-only sidecar from the offline server picker: if no Lantern
+        // tunnel ever went live, the bare Radiance process must not outlive
+        // the service. Guarded by tunnelAttemptActive/running inside the
+        // engine, so a real Lantern session is never touched here.
+        LanternEngine.stopIdleListOnly()
         super.onDestroy()
     }
 
@@ -4742,6 +4759,11 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
      * there is no longer a `vpnMode` parameter to branch on.
      */
     private fun startTunnel(config: String) {
+        // Satisfy the startForeground contract BEFORE any early return: a tile
+        // tap on an already-live (Foxy-invisible) session used to reach this
+        // guard and bounce without ever calling startForeground for the
+        // startForegroundService that brought us here.
+        startAsForeground()
         if (!connected.compareAndSet(false, true)) return
         // Claims the service for this session. Every worker below captures the value
         // it saw here, so a teardown block that runs late can recognise that a newer
@@ -7186,6 +7208,13 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             currentCountry
         }
         val subtitle = if (country.isNotBlank()) "$method • $country" else method
+        // The exit IP belongs next to the method/country: the service already
+        // tracks it (ACTION_NOTIFICATION_IP kept currentVpnIp fresh) but it was
+        // never rendered anywhere — dead extras only. Showing it here matches
+        // the main screen's IP+country display and makes the row useful while
+        // the app is closed.
+        val exitIp = currentVpnIp.trim()
+        val fullSubtitle = if (exitIp.isNotBlank()) "$subtitle • $exitIp" else subtitle
 
         // Proxy mode must not claim "VPN connected": nothing is tunnelled device-wide,
         // and a user who reads that and then finds Chrome on their real IP would be
@@ -7205,7 +7234,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
 
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
-            .setContentText(subtitle)
+            .setContentText(fullSubtitle)
             .setSmallIcon(R.drawable.ic_notification)
             .setLargeIcon(appBadge())
             // Tints the small icon and the header text in the app's own accent,
@@ -7765,6 +7794,18 @@ object ConnectionLog {
         if (versionStamp.isNotEmpty() && previous != versionStamp) {
             runCatching { stampFile.writeText(versionStamp) }
         }
+        // Restore the in-memory buffer from the mirror: after the process is
+        // killed (tile connect, always-on VPN) the log screen used to open
+        // EMPTY even though the file held the whole dead session — only
+        // COPY/SHARE read it. Same freshness rules as bind: a mirror from
+        // another version is already gone, so whatever is here is ours.
+        if (entries.isEmpty() && file.exists()) {
+            runCatching {
+                val lines = file.useLines { seq -> seq.filter { it.isNotBlank() }.toList() }
+                val tail = if (lines.size > MAX_ENTRIES) lines.takeLast(MAX_ENTRIES) else lines
+                tail.forEach { entries.addLast(it) }
+            }
+        }
     }
 
     @Synchronized
@@ -7778,6 +7819,20 @@ object ConnectionLog {
         if (entries.size == MAX_ENTRIES) entries.removeFirst()
         entries.addLast(line)
         runCatching { sink?.appendText(line + "\n") }
+            // Cap the mirror OUTSIDE bind() too: bind only runs when the
+            // activity opens, so a long service-only session (tile connect,
+            // always-on VPN) grew connection.log without limit. Rotate at
+            // MAX_FILE_BYTES by keeping the newer half.
+            .also {
+                val f = sink
+                if (f != null && f.exists() && f.length() > MAX_FILE_BYTES) {
+                    runCatching {
+                        val lines = f.useLines { seq -> seq.toList() }
+                        val keep = lines.drop(lines.size / 2)
+                        f.writeText(keep.joinToString("\n", postfix = "\n"))
+                    }
+                }
+            }
     }
 
     @Synchronized

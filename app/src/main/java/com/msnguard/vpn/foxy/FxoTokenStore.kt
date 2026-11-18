@@ -93,6 +93,22 @@ class FxoTokenStore(context: Context) {
         prefs.edit().clear().apply()
     }
 
+    /**
+     * Session-only wipe for an automatic sign-out: tokens, expiry, epoch and
+     * any pending verification session go, but the saved email hint stays for
+     * the next sign-in. [clear] remains the full wipe used by explicit
+     * user-driven paths.
+     */
+    fun clearSession() {
+        prefs.edit()
+            .remove(KEY_ACCESS_TOKEN)
+            .remove(KEY_REFRESH_TOKEN)
+            .remove(KEY_EXPIRES_AT)
+            .remove(KEY_SESSION_EPOCH)
+            .remove(KEY_PENDING_SESSION_TOKEN)
+            .apply()
+    }
+
     companion object {
         private const val KEY_ACCESS_TOKEN = "access_token"
         private const val KEY_REFRESH_TOKEN = "refresh_token"

@@ -76,6 +76,8 @@ object FoxyBrowserLogin {
         val loginScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         var completing = false
         var finished = false
+        var loginJob: kotlinx.coroutines.Job? = null
+        var loginAttempt = 0
         var notifying = true
         fun finish(result: Result<Unit>) {
             if (finished) return
@@ -115,24 +117,35 @@ object FoxyBrowserLogin {
         val bridge = WebChannelBridge(
             web,
             onSessionToken = { token ->
-                if (!finished && !completing) {
+                // A second fxaccounts:login (the user re-entered the password
+                // while the first exchange was still polling for 2FA/email
+                // verification) must REPLACE the in-flight attempt. Dropping it
+                // behind `completing` left the old never-verifying session
+                // polling for its full 5 minutes while the user's real login
+                // was thrown away (v3.2.27 audit).
+                if (!finished) {
+                    loginJob?.cancel()
+                    val myAttempt = ++loginAttempt
                     completing = true
-                    // Reference shows a busy indicator while the token
-                    // exchange runs — the horizontal bar switches to an
-                    // indeterminate "busy" mode for that window.
                     progress.isIndeterminate = true
                     progress.visibility = View.VISIBLE
-                    loginScope.launch {
-                        val result = repository.completeBrowserLogin(token)
-                        completing = false
-                        progress.isIndeterminate = false
-                        progress.visibility = View.GONE
-                        if (!finished) {
-                            if (result.isSuccess) finish(result)
-                            else {
-                                android.widget.Toast.makeText(activity,
-                                    result.exceptionOrNull()?.message ?: "Sign-in failed. Please try again.",
-                                    android.widget.Toast.LENGTH_LONG).show()
+                    loginJob = loginScope.launch {
+                        try {
+                            val result = repository.completeBrowserLogin(token)
+                            if (!finished && myAttempt == loginAttempt) {
+                                if (result.isSuccess) {
+                                    finish(result)
+                                } else {
+                                    android.widget.Toast.makeText(activity,
+                                        result.exceptionOrNull()?.message ?: "Sign-in failed. Please try again.",
+                                        android.widget.Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        } finally {
+                            if (myAttempt == loginAttempt) {
+                                completing = false
+                                progress.isIndeterminate = false
+                                progress.visibility = View.GONE
                             }
                         }
                     }
@@ -166,6 +179,10 @@ object FoxyBrowserLogin {
         }
         web.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                // The token exchange owns the bar while it runs (indeterminate
+                // busy mode); the page-load progress writer must not fight it —
+                // it used to clear the busy state and reset the bar mid-exchange.
+                if (progress.isIndeterminate) return
                 progress.progress = newProgress
                 progress.visibility = if (newProgress < 100) View.VISIBLE else View.GONE
             }

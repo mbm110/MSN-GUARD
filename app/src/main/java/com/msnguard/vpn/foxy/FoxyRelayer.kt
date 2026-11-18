@@ -7,6 +7,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 
 /** Relayer failover ported from the reference FoxyVPN 2.0.3 data layer.
  * Direct connection is always attempted first; when the network fails or the
@@ -55,6 +56,7 @@ internal class FoxyRelayerInterceptor(
 
         var directException: Exception? = null
         var directFailoverCode: Int? = null
+        var directChallengeBody: String? = null
         try {
             val directResponse = chain.withConnectTimeout(DIRECT_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS).proceed(request)
             if (directResponse.isSuccessful || directResponse.code !in config.failoverCodes) {
@@ -62,6 +64,13 @@ internal class FoxyRelayerInterceptor(
             }
             FoxyLog.i("Relayer", "Direct connection returned status ${directResponse.code}, starting relayer failover")
             directFailoverCode = directResponse.code
+            // A 406 carries the Fastly challenge the caller's solver needs.
+            // Buffer it before closing so that, if every relay fails too, the
+            // challenge can still be surfaced instead of dying as a bare
+            // IOException the solver never sees (v3.2.27 audit).
+            if (directResponse.code == 406) {
+                directChallengeBody = runCatching { directResponse.body?.string() }.getOrNull()
+            }
             directResponse.close()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -101,6 +110,23 @@ internal class FoxyRelayerInterceptor(
             }
         }
         if (directFailoverCode != null) {
+            if (directFailoverCode == 406 && directChallengeBody != null) {
+                // Surface the original Fastly challenge so the caller's
+                // challenge solver (and its retry loop) gets its turn.
+                FoxyLog.w("Relayer", "All relayers failed on a 406 — surfacing the Fastly challenge body to the solver")
+                return Response.Builder()
+                    .request(request)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(406)
+                    .message("Not Acceptable")
+                    .body(
+                        okhttp3.ResponseBody.create(
+                            "text/plain; charset=utf-8".toMediaTypeOrNull(),
+                            directChallengeBody,
+                        ),
+                    )
+                    .build()
+            }
             throw IOException("Direct request failed with HTTP $directFailoverCode and all candidate relayers failed")
         }
         return chain.proceed(request)

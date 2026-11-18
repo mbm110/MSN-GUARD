@@ -904,6 +904,8 @@ object Strings {
         "FOXY" to Triple("FOXY", "Foxy", "FOXY"),
         "Refresh server pings" to Triple("Refresh server pings", "تازه‌سازی پینگ سرورها", "刷新服务器延迟"),
         "Pick the Lantern server to use" to Triple("Pick the Lantern server to use", "سرور Lantern را انتخاب کن", "选择要使用的 Lantern 服务器"),
+        "updated just now" to Triple("updated just now", "همین حالا به‌روز شد", "刚刚更新"),
+        "updated" to Triple("updated", "به‌روزرسانی", "更新于"),
         "Connect with Lantern once, then pick a server here" to Triple("Connect with Lantern once, then pick a server here", "یک بار با Lantern وصل شو، بعد اینجا سرور انتخاب کن", "先连接一次 Lantern，然后在这里选择服务器"),
         "Auto - Lantern picks and follows the fastest server" to Triple("Auto - Lantern picks and follows the fastest server", "خودکار — Lantern سریع‌ترین سرور را انتخاب و دنبال می‌کند", "自动 — Lantern 选择并跟随最快的服务器"),
         "no ping" to Triple("no ping", "بدون پینگ", "无延迟数据"),

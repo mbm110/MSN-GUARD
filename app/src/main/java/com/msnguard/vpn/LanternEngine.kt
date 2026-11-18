@@ -37,6 +37,24 @@ object LanternEngine {
     private val generationLock = Any()
     private val processLock = Any()
 
+    /**
+     * True between a tunnel connect attempt's arm and its final cleanup.
+     * The idle-sidecar reaper must NEVER kill the process while this is set —
+     * a list-only boot and a tunnel connect share startProcess, and an activity
+     * destroyed mid-connect (rotation, back-out) would otherwise tear down a
+     * connect that is seconds from going live.
+     */
+    @Volatile private var tunnelAttemptActive = false
+
+    /** Last time any picker surface (list/selection/ping) actually used the sidecar. */
+    private val lastSidecarUse = AtomicLong(0L)
+
+    /** Idle reaper cadence and how long a list-only sidecar may sit untouched. */
+    private const val SIDECAR_IDLE_TICK_MS = 30_000L
+    private const val SIDECAR_IDLE_TIMEOUT_MS = 4 * 60_000L
+
+    @Volatile private var idleReaper: Thread? = null
+
     @Volatile private var stopRequested = false
     @Volatile private var process: Process? = null
     @Volatile private var logThread: Thread? = null
@@ -73,6 +91,15 @@ object LanternEngine {
 
     /** Blocking connect: call only from MsnGuardVpnService's worker thread. */
     fun connect(context: Context, attempt: Long): Boolean {
+        tunnelAttemptActive = true
+        return try {
+            connectInner(context, attempt)
+        } finally {
+            tunnelAttemptActive = false
+        }
+    }
+
+    private fun connectInner(context: Context, attempt: Long): Boolean {
         return try {
             if (!isCurrent(attempt)) return false
             if (!startProcess(context, attempt)) return false
@@ -442,11 +469,67 @@ object LanternEngine {
         disconnectAsync()
     }
 
+    /** Record that a picker surface is actively using the sidecar. */
+    private fun touchSidecarUse() {
+        lastSidecarUse.set(android.os.SystemClock.elapsedRealtime())
+    }
+
+    /**
+     * Stop a LIST-ONLY sidecar — the no-TUN boot from the offline server
+     * picker. A live Lantern tunnel (running) or an in-flight connect attempt
+     * owns the process and is left strictly alone. Safe to call from anywhere
+     * at any time: every destructive path is guarded.
+     */
+    fun stopIdleListOnly() {
+        if (tunnelAttemptActive || running.get()) return
+        if (process?.isAlive != true) return
+        ConnectionLog.record("Lantern: stopping idle list-only sidecar")
+        disconnectAsync()
+    }
+
+    /**
+     * One daemon reaper per sidecar boot: while the tunnel is up or a picker
+     * surface keeps touching the sidecar it does nothing; after the idle
+     * timeout with no owner it stops the bare process. Without this the
+     * Radiance core — which probes servers continuously — would outlive the
+     * picker for the lifetime of the app process, burning battery and mobile
+     * data (v3.2.27 audit).
+     */
+    private fun ensureIdleReaper() {
+        synchronized(processLock) {
+            if (idleReaper?.isAlive == true) return
+            val thread = Thread({
+                touchSidecarUse()
+                try {
+                    while (true) {
+                        Thread.sleep(SIDECAR_IDLE_TICK_MS)
+                        if (process?.isAlive != true) break
+                        if (tunnelAttemptActive || running.get()) {
+                            touchSidecarUse()
+                            continue
+                        }
+                        val idleFor = android.os.SystemClock.elapsedRealtime() - lastSidecarUse.get()
+                        if (idleFor >= SIDECAR_IDLE_TIMEOUT_MS) {
+                            ConnectionLog.record("Lantern: list-only sidecar idle ${(idleFor / 1000L)}s — stopping")
+                            disconnectAsync()
+                            break
+                        }
+                    }
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            }, "lantern-idle-reaper").apply { isDaemon = true }
+            idleReaper = thread
+            thread.start()
+        }
+    }
+
     // ---- Server selection & probe surface for the settings screen ----
 
     /** Current server list + ping data; null when the sidecar is not running. */
     fun serversSnapshot(timeoutMs: Int = 2_000): JSONObject? {
         if (controlToken.isBlank() || controlSocketPath.isBlank()) return null
+        touchSidecarUse()
         // The control response wraps the payload in "data".
         return runCatching { request("GET", "/servers", timeoutMs = timeoutMs) }
             .getOrNull()?.optJSONObject("data")
@@ -455,6 +538,7 @@ object LanternEngine {
     /** Select a server by tag ("" = automatic fastest). Returns an error or null on success. */
     fun selectServer(tag: String): String? {
         if (controlToken.isBlank() || controlSocketPath.isBlank()) return "Lantern is not connected"
+        touchSidecarUse()
         val response = runCatching {
             request("POST", "/select", JSONObject().put("tag", tag), timeoutMs = 4_000)
         }.getOrNull()
@@ -468,6 +552,7 @@ object LanternEngine {
     /** Re-probe every server's latency. Returns an error or null on success. */
     fun refreshServerPings(): String? {
         if (controlToken.isBlank() || controlSocketPath.isBlank()) return "Lantern is not connected"
+        touchSidecarUse()
         val response = runCatching {
             request("POST", "/ping", JSONObject(), timeoutMs = 95_000)
         }.getOrNull()
@@ -505,7 +590,9 @@ object LanternEngine {
         // Control readiness only — no /connect, no TUN. Radiance fetches its
         // config and probes servers directly (the app is outside the VPN), so
         // /servers and /ping answer with live data.
-        return awaitControlReady(attempt)
+        val ready = awaitControlReady(attempt)
+        if (ready) ensureIdleReaper()
+        return ready
     }
 
     /** The stored server choice ("" = auto), shared with the settings screen. */

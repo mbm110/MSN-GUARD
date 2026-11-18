@@ -32,8 +32,16 @@ object TunnelStatus {
     var isProxyMode: Boolean = false
         internal set
 
-    /** True when either data path is up: Rust core (proxy/other protocols) or any TUN engine (VPN). */
-    fun isActive(): Boolean = NativeCore.isRunning() || TunEngineManager.isRunningAny || isProxyMode
+    /**
+     * True when either data path is up: Rust core (proxy/other protocols), any
+     * shared TUN engine (VPN), the proxy-only Psiphon path — or Foxy's OWN Hev
+     * engine, which lives outside TunEngineManager by design (isolated config,
+     * timeouts and fd). Without it the dial, the tile and the header all read a
+     * live Foxy session as "Disconnected" and a second tile tap routes to
+     * ACTION_CONNECT, which silently no-ops behind the connected guard.
+     */
+    fun isActive(): Boolean = NativeCore.isRunning() || TunEngineManager.isRunningAny ||
+        isProxyMode || com.msnguard.vpn.foxy.FoxyHevEngine.isRunning
 
     /**
      * True when the whole device is being routed through tun2socks.

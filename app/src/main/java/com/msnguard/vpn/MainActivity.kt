@@ -542,6 +542,12 @@ class MainActivity : Activity() {
         // The application context outlives this activity, so a mid-session
         // recreate() never orphans it.
         AppLanguage.appContext = applicationContext
+        // Fresh UI-only process (no service, no prior sign-in): FoxySettings /
+        // FoxyRemoteConfig defaults must be live before ANY Foxy request this
+        // screen makes (quota fetch, sign-in bootstrap), or defaultRelayerConfig
+        // silently falls back to AUTOMATIC and drops the user's CUSTOM relayer
+        // (v3.2.27 audit). Idempotent — the service calls it too.
+        com.msnguard.vpn.foxy.FoxyRemoteConfig.init(applicationContext)
         palette = AppAppearance.load(this)
         // Profiles: prefix any settings key written before this feature existed,
         // so an upgrade keeps every value the user set. Idempotent — a second
@@ -840,6 +846,12 @@ class MainActivity : Activity() {
                 onBackInvokedDispatcher.unregisterOnBackInvokedCallback(it)
             }
         }
+        // The offline server picker boots a list-only Lantern sidecar. If the
+        // picker is gone and no Lantern tunnel is up, reap it now instead of
+        // waiting for the 4-minute idle reaper. The engine-side guards make
+        // this a no-op while a Lantern connect/session is live.
+        lanternPickerOpen = false
+        LanternEngine.stopIdleListOnly()
         super.onDestroy()
     }
 
@@ -4563,13 +4575,24 @@ class MainActivity : Activity() {
     )
 
     /** Small cache so the row label can render without blocking the UI thread. */
-    private var lanternServersCache: List<LanternServerOption> = emptyList()
+    @Volatile private var lanternServersCache: List<LanternServerOption> = emptyList()
 
     /** True when the last snapshot said selection is automatic (not pinned). */
-    private var lanternAutoSelected = true
+    @Volatile private var lanternAutoSelected = true
 
     /** Tag of the server the tunnel is currently actually using, per the sidecar. */
-    private var lanternCurrentTag: String = ""
+    @Volatile private var lanternCurrentTag: String = ""
+
+    /**
+     * True while the Lantern server picker sheet is on screen. The background
+     * probe thread checks it before repainting from a fresh snapshot, so a
+     * sheet the user already closed is not silently parsed behind them, and
+     * the ping refresh knows whether anyone is waiting for its result.
+     */
+    @Volatile private var lanternPickerOpen = false
+
+    /** When the current server snapshot was fetched (0 = unknown/legacy cache). */
+    @Volatile private var lanternServersFetchedAt = 0L
 
     /**
      * Last snapshot persisted by [parseLanternSnapshot], so the picker still
@@ -4627,13 +4650,24 @@ class MainActivity : Activity() {
         "Bosnia and Herzegovina" to "BA",
     )
 
+    /**
+     * Lowercase view of the alias table. The fallback lookup normalizes the
+     * server's country name with lowercase(), so without this the whole
+     * table was DEAD — every key here is stored capitalized and the lookup
+     * could never hit (v3.2.27 audit: missing flags, e.g. Ashburn/USA when
+     * country_code is absent).
+     */
+    private val lanternCountryCodesLower: Map<String, String> by lazy {
+        lanternCountryCodes.entries.associate { (k, v) -> k.lowercase() to v }
+    }
+
     /** Flag emoji from Lantern's ISO code first, country name as fallback. */
     private fun lanternFlag(countryCode: String, country: String): String {
         val normalized = countryCode.trim().uppercase()
         val code = if (normalized.length == 2 && normalized.all { it in 'A'..'Z' }) {
             normalized
         } else {
-            lanternCountryCodes[country.trim().lowercase()] ?: return ""
+            lanternCountryCodesLower[country.trim().lowercase()] ?: return ""
         }
         val sb = StringBuilder(2)
         for (c in code) sb.append(Character.toChars(0x1F1E6 + (c - 'A')))
@@ -4668,8 +4702,24 @@ class MainActivity : Activity() {
             runCatching { JSONObject(cached) }.getOrNull() ?: return
         }
         if (raw != null) {
-            preferences().edit().putString(lanternServersCachePref, snapshot.toString()).apply()
+            // An empty live snapshot (sidecar booted but Radiance has not
+            // fetched its config yet) must NOT overwrite the last good cache —
+            // otherwise the picker goes permanently empty offline after one
+            // unlucky open (v3.2.27 audit). Keep the old cache; the live
+            // refresh loop will repopulate momentarily.
+            val incoming = snapshot.optJSONArray("servers")
+            if (incoming == null || incoming.length() == 0) {
+                val cached = preferences().getString(lanternServersCachePref, null)
+                val cachedSnapshot = cached?.let { runCatching { JSONObject(it) }.getOrNull() }
+                if (cachedSnapshot != null) return parseLanternSnapshot(null)
+                return
+            }
+            preferences().edit().putString(
+                lanternServersCachePref,
+                snapshot.put("fetched_at_epoch_ms", System.currentTimeMillis()).toString(),
+            ).apply()
         }
+        lanternServersFetchedAt = snapshot.optLong("fetched_at_epoch_ms", 0L)
         lanternAutoSelected = snapshot.optBoolean("auto", true)
         lanternCurrentTag = snapshot.optString("current", "")
         val list = snapshot.optJSONArray("servers") ?: return
@@ -4695,19 +4745,32 @@ class MainActivity : Activity() {
         servers.sortWith(compareBy({ !it.probed }, { it.pingMs }))
         // Number repeated cities in ping order, like the official app
         // ("Frankfurt 1", "Frankfurt 2", ...); a unique city stays unnumbered.
+        // Within a city the numbering follows the servers' TAG order (stable
+        // across refreshes), NOT the ping-sorted position — pings change every
+        // probe round, and a server the user knows as "Frankfurt 2" must not
+        // become "Frankfurt 1" an hour later (v3.2.27 audit).
         val totals = HashMap<String, Int>()
         for (server in servers) {
             val key = "${server.city}|${server.country}"
             totals[key] = (totals[key] ?: 0) + 1
         }
+        val tagOrder = HashMap<String, Int>()
+        servers.groupBy { "${it.city}|${it.country}" }.forEach { (_, group) ->
+            group.sortedBy { it.tag }.forEachIndexed { idx, server ->
+                tagOrder["${server.city}|${server.country}|${server.tag}"] = idx + 1
+            }
+        }
         val seen = HashMap<String, Int>()
+        // Display order stays ping-sorted; only the WITHIN-CITY number comes
+        // from the stable tag rank.
         val numbered = servers.map { server ->
             val key = "${server.city}|${server.country}"
             seen[key] = (seen[key] ?: 0) + 1
             val base = server.city.ifBlank { server.country.ifBlank { server.tag } }
             val flag = lanternFlag(server.countryCode, server.country)
             val name = when {
-                server.city.isNotBlank() && (totals[key] ?: 0) > 1 -> "$base ${seen[key]}"
+                server.city.isNotBlank() && (totals[key] ?: 0) > 1 ->
+                    "$base ${tagOrder["$key|${server.tag}"] ?: seen[key]}"
                 else -> base
             }
             server.copy(title = if (flag.isBlank()) name else "$flag $name")
@@ -4729,7 +4792,13 @@ class MainActivity : Activity() {
                     // Lantern core list-only (no tunnel), like the official
                     // app whose core runs while its VPN is off.
                     ConnectionLog.record("Lantern: starting the core for the offline server list")
-                    if (LanternEngine.ensureSidecar(this@MainActivity)) {
+                    // A previous sidecar may still be mid-shutdown; without this
+                    // guard the IllegalStateException escaped the picker thread
+                    // silently and the refresh just never happened.
+                    val booted = runCatching { LanternEngine.ensureSidecar(this@MainActivity) }
+                        .onFailure { ConnectionLog.record("Lantern: list boot failed: ${it.message}") }
+                        .getOrDefault(false)
+                    if (booted) {
                         snapshot = LanternEngine.serversSnapshot(timeoutMs = 5_000)
                     }
                 }
@@ -4752,16 +4821,36 @@ class MainActivity : Activity() {
         // Every open triggers a fresh probe round in the background; while
         // connected it runs through the live tunnel, and while disconnected
         // the core boots list-only so pings still refresh offline.
+        lanternPickerOpen = true
         Thread {
             // Connected: re-probe through the live tunnel. Disconnected: boot
             // the core list-only (official-app parity) so pings still refresh.
-            if (LanternEngine.isRunning || LanternEngine.ensureSidecar(this@MainActivity)) {
-                val refreshError = LanternEngine.refreshServerPings()
-                ConnectionLog.record(
-                    if (refreshError == null) "Lantern: server pings refreshed"
-                    else "Lantern: ping refresh failed: $refreshError",
-                )
-                parseLanternSnapshot(LanternEngine.serversSnapshot(timeoutMs = 3_000))
+            val sidecarUp = LanternEngine.isRunning || runCatching {
+                LanternEngine.ensureSidecar(this@MainActivity)
+            }.onFailure {
+                ConnectionLog.record("Lantern: picker sidecar boot failed: ${it.message}")
+            }.getOrDefault(false)
+            if (sidecarUp) {
+                // Probe-cost guard (v3.2.27 audit): a full probe round hits
+                // every server — up to 95s of requests. Through the live
+                // tunnel that rides the VPN the user already pays for; a
+                // list-only sidecar probes on the RAW carrier link, so on
+                // mobile data the round is skipped (cached pings are shown)
+                // and runs again on the next Wi-Fi open or connect.
+                val probesViaTunnel = LanternEngine.isRunning
+                val onWifi = isLanternProbeWifi()
+                if (probesViaTunnel || onWifi) {
+                    val refreshError = LanternEngine.refreshServerPings()
+                    ConnectionLog.record(
+                        if (refreshError == null) "Lantern: server pings refreshed"
+                        else "Lantern: ping refresh failed: $refreshError",
+                    )
+                } else {
+                    ConnectionLog.record("Lantern: ping refresh skipped on mobile data (cached pings shown)")
+                }
+                if (lanternPickerOpen) {
+                    parseLanternSnapshot(LanternEngine.serversSnapshot(timeoutMs = 3_000))
+                }
             }
         }.apply { isDaemon = true; start() }
         // Meanwhile build the sheet from the current snapshot so it opens
@@ -4777,7 +4866,18 @@ class MainActivity : Activity() {
                 subtitle = if (servers.isEmpty()) {
                     Strings.t("Connect with Lantern once, then pick a server here")
                 } else {
-                    Strings.t("Pick the Lantern server to use")
+                    // Cache age: tells the user how fresh the pings are, which
+                    // the audit flagged as invisible (no TTL surface at all).
+                    val ageMin = if (lanternServersFetchedAt > 0L) {
+                        ((System.currentTimeMillis() - lanternServersFetchedAt) / 60_000L).coerceAtLeast(0L)
+                    } else 0L
+                    val age = when {
+                        lanternServersFetchedAt <= 0L -> ""
+                        ageMin < 1L -> " · ${Strings.t("updated just now")}"
+                        ageMin < 60L -> " · ${Strings.t("updated")} ${ageMin}m"
+                        else -> " · ${Strings.t("updated")} ${ageMin / 60L}h"
+                    }
+                    Strings.t("Pick the Lantern server to use") + age
                 },
                 options = options,
                 selected = selected,
@@ -4793,6 +4893,7 @@ class MainActivity : Activity() {
                     }
                 },
                 scrollable = true,
+                onDismiss = { lanternPickerOpen = false },
             ) { chosen ->
                 val tag = chosen?.tag ?: ""
                 LanternEngine.storeServerSelection(this, tag)
@@ -4808,6 +4909,16 @@ class MainActivity : Activity() {
                 after?.invoke()
             }
         }
+    }
+
+    /** Wi-Fi check for the offline probe guard: probes only on Wi-Fi when the
+     *  Lantern tunnel is down (a list-only sidecar probes on the raw link). */
+    private fun isLanternProbeWifi(): Boolean = try {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return false
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+    } catch (_: Exception) {
+        false
     }
 
     private fun refreshPsiphonModeRows() {
@@ -6092,11 +6203,13 @@ class MainActivity : Activity() {
         description: (T) -> String,
         scrollable: Boolean,
         refuse: ((T) -> String?)? = null,
+        onDismiss: (() -> Unit)? = null,
         onSelected: (T) -> Unit,
     ) {
         // `after` is invoked by the caller's onSelected lambda; see chooseObfuscation
         // and friends, which pass a refresh for the row that opened the sheet.
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        if (onDismiss != null) dialog.setOnDismissListener { onDismiss() }
         val sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(24), dp(24), dp(24))
@@ -8813,7 +8926,15 @@ class MainActivity : Activity() {
         sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
         sheet.addView(createSettingsButton(Strings.t("Save")) {
             val url = field.text.toString().trim()
-            if (url.isNotEmpty() && !com.msnguard.vpn.foxy.FoxySettings.validCustomRelayerUrl(url)) {
+            // Empty is a real error, not "clear": provider stays CUSTOM while
+            // the URL becomes "", getCandidateRelayers turns that into DIRECT
+            // silently, and the settings row keeps claiming a custom relayer
+            // (v3.2.27 audit). Switch back to Automatic instead of saving blank.
+            if (url.isEmpty()) {
+                field.error = Strings.t("Enter a valid http or https URL")
+                return@createSettingsButton
+            }
+            if (!com.msnguard.vpn.foxy.FoxySettings.validCustomRelayerUrl(url)) {
                 field.error = Strings.t("Enter a valid http or https URL")
                 return@createSettingsButton
             }
