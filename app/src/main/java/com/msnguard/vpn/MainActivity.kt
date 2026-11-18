@@ -687,7 +687,10 @@ class MainActivity : Activity() {
         chainCard = ChainModeCard(this, palette) { armed -> setChainArmed(armed) }
         mimCard = MimCard(this, palette) { armed -> setMimArmed(armed) }
         smartSplitCard = SmartSplitCard(this, palette) { on -> setSmartSplitEnabled(on) }
-        transportRail = TransportRail(this, palette, Protocol.entries.map { railLabel(it) }) { index ->
+        // v3.2.26: perRow=4 — the eight transports sit in two rows of four:
+        // WireGuard · MASQUE · WoW · Lantern / Psiphon · Tor · Foxy · SHARD.
+        // The 7-label fallback keeps its own 3+4 special case inside TransportRail.
+        transportRail = TransportRail(this, palette, Protocol.entries.map { railLabel(it) }, perRow = 4) { index ->
             updateConnectionMode(Protocol.entries[index])
         }
         // Height follows the grid rather than being a constant: the rail decides how
@@ -3522,7 +3525,7 @@ class MainActivity : Activity() {
         // Psiphon gets its own section: all three controls below are meaningless
         // unless the chain is armed, and grouping them says that structurally
         // instead of relying on the user to infer it from a mixed list.
-        content.addView(expandableSection(Strings.t("PSIPHON"), id = "PSIPHON") { body ->
+        content.addView(expandableSection(Strings.t("PSIPHON"), id = "PSIPHON", iconRes = R.drawable.ic_psiphon) { body ->
             // The mode row sits FIRST: it decides the dial model for every connect,
             // and the two CDN fields below only exist to feed it. Reading order
             // matches the packet — mode first, then what the chain carries.
@@ -3606,7 +3609,7 @@ class MainActivity : Activity() {
 
         // Tor section, mirroring the Psiphon one: the mode picker is the only
         // control, and it is meaningful regardless of what else is set.
-        content.addView(expandableSection(Strings.t("TOR"), id = "TOR") { body ->
+        content.addView(expandableSection(Strings.t("TOR"), id = "TOR", iconRes = R.drawable.ic_tor) { body ->
             torModeRowRef = navRow(Strings.t("Connection mode"), torMode().label) {
                 chooseTorMode {
                     torModeRowRef?.setValue(torMode().label)
@@ -3699,7 +3702,7 @@ class MainActivity : Activity() {
         // FOXY — its own top-level section (same shape as LANTERN's), sitting
         // above it. One row into the dedicated page, which owns the Firefox
         // Accounts browser sign-in; MSN never collects the password or code.
-        content.addView(expandableSection(Strings.t("FOXY"), id = "FOXY") { body ->
+        content.addView(expandableSection(Strings.t("FOXY"), id = "FOXY", iconRes = R.drawable.ic_foxy) { body ->
             body.addView(navRow(Strings.t("Foxy Account & Setting"), foxyAccountSummary()) { openFoxySettingScreen() }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -3713,7 +3716,7 @@ class MainActivity : Activity() {
         // server picker refreshes pings automatically (no separate button):
         // Lantern keeps probing every server in the background, and each open
         // also re-reads the latest probe results and re-ranks by them.
-        content.addView(expandableSection(Strings.t("LANTERN"), id = "LANTERN") { body ->
+        content.addView(expandableSection(Strings.t("LANTERN"), id = "LANTERN", iconRes = R.drawable.ic_lantern) { body ->
             lanternServerRow = navRow(Strings.t("Server"), lanternServerLabel()) {
                 chooseLanternServer { lanternServerRow?.setValue(lanternServerLabel()) }
             }
@@ -3752,7 +3755,7 @@ class MainActivity : Activity() {
         // which is what the chain exists to achieve for Psiphon, and wrapping
         // fragmented TLS inside a second tunnel both doubles the latency and
         // destroys the fragmentation's effect — the DPI sees the outer tunnel.
-        content.addView(expandableSection(Strings.t("SHARD"), id = "SHARD") { body ->
+        content.addView(expandableSection(Strings.t("SHARD"), id = "SHARD", iconRes = R.drawable.ic_shard) { body ->
             shardPoolRow = navRow(Strings.t("Node list"), shardPoolSummary()) {
                 // force = true: the whole point of tapping this is to bypass the
                 // six-hour interval the background job honours.
@@ -10081,7 +10084,7 @@ class MainActivity : Activity() {
     private fun expandableSection(
         title: String,
         body: (LinearLayout) -> Unit,
-    ): ExpandableSection = expandableSection(title, id = title, body)
+    ): ExpandableSection = expandableSection(title, id = title, body = body)
 
     /**
      * An expandable section, whose open/closed state persists under [id].
@@ -10094,6 +10097,7 @@ class MainActivity : Activity() {
     private fun expandableSection(
         title: String,
         id: String,
+        iconRes: Int? = null,
         body: (LinearLayout) -> Unit,
     ): ExpandableSection {
         val key = "section_open_" + sectionId(id)
@@ -10101,6 +10105,7 @@ class MainActivity : Activity() {
             onExpansionChanged = { expanded ->
                 profiled().edit().putBoolean(key, expanded).apply()
             },
+            iconRes = iconRes,
             body = body,
         ).apply {
             if (profiled().getBoolean(key, false)) setExpanded(true, animate = false)
@@ -10283,6 +10288,12 @@ class MainActivity : Activity() {
         WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel", true),
         MASQUE("MASQUE", "masque", "HTTP/3 or HTTP/2 tunnel", true),
         WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel", true),
+
+        /** Public Lantern servers via Radiance; MSN-GUARD owns the Android TUN.
+         *  v3.2.26: sits 4th so the 2×4 rail reads WireGuard · MASQUE · WoW ·
+         *  Lantern on row one — the order the user asked for. The Auto Scan
+         *  ladder is a separate list and does NOT follow this order. */
+        LANTERN("Lantern", "lantern", "Public Lantern servers; automatic selection", true),
         PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel", true),
         TOR("Tor", "tor", "Onion routing; slowest but hardest to block", true),
 
@@ -10304,10 +10315,7 @@ class MainActivity : Activity() {
          * started for SHARD. The service branches on it before touching
          * NativeCore, the same way the Psiphon and Tor names do.
          */
-        SHARD("SHARD", "shard", "Public nodes, auto-selected; no setup", true),
-
-        /** Public Lantern servers via Radiance; MSN-GUARD owns the Android TUN. */
-        LANTERN("Lantern", "lantern", "Public Lantern servers; automatic selection", true);
+        SHARD("SHARD", "shard", "Public nodes, auto-selected; no setup", true);
 
         val label: String get() = Strings.t(enLabel)
         val description: String get() = Strings.t(enDescription)

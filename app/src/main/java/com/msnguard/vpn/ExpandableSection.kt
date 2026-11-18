@@ -47,6 +47,10 @@ class ExpandableSection(
     /** Notified after every toggle. Used by the settings page to re-fit its
      *  entrance animation window to the new content height. */
     private val onExpansionChanged: ((expanded: Boolean) -> Unit)? = null,
+    /** Optional small brand icon drawn between the neon tick and the title —
+     *  the transport sections (PSIPHON, TOR, FOXY, LANTERN, SHARD) each carry
+     *  their own mark so a long settings page can be scanned by shape. */
+    private val iconRes: Int? = null,
     private val body: (LinearLayout) -> Unit,
 ) : LinearLayout(context) {
 
@@ -67,7 +71,7 @@ class ExpandableSection(
             visibility = if (initiallyExpanded) VISIBLE else GONE
         }
 
-        val header = HeaderRow(context, palette, title).apply {
+        val header = HeaderRow(context, palette, title, iconRes).apply {
             isClickable = true
             isFocusable = true
             contentDescription = "$sectionTitle ${if (expanded) "باز" else "بسته"} — برای تغییر، ضربه بزنید"
@@ -152,6 +156,7 @@ class ExpandableSection(
         context: Context,
         palette: AppAppearance.Palette,
         text: String,
+        iconRes: Int? = null,
     ) : LinearLayout(context) {
 
         private val chevron: ChevronView = ChevronView(context, palette.neonBlue)
@@ -167,6 +172,18 @@ class ExpandableSection(
             addView(TickView(context, palette.neonBlue), LayoutParams(dp(3), dp(13)).apply {
                 rightMargin = dp(9)
             })
+            // The optional brand mark: sized to sit IN the caption's line —
+            // 15dp against the English 11.5sp caption, 17dp against fa/zh's
+            // taller 15.5sp line box, so the header's height never changes.
+            if (iconRes != null) {
+                val english = AppLanguage.current() == "en"
+                val size = if (english) dp(15) else dp(17)
+                addView(android.widget.ImageView(context).apply {
+                    setImageResource(iconRes)
+                    // VectorDrawable scaling is crisp; no software layer needed.
+                    importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                }, LayoutParams(size, size).apply { rightMargin = dp(7) })
+            }
             addView(TextView(context).apply {
                 this.text = text
                 val english = AppLanguage.current() == "en"
