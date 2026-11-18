@@ -87,6 +87,10 @@ object FoxySettings {
             .apply()
     }
 
+    /** Custom relayer URL validation for the settings row (http/https, host
+     *  present) — the top-level helper lives in FoxyRelayer.kt. */
+    fun validCustomRelayerUrl(value: String): Boolean = isValidRelayerUrl(value)
+
     // Compatibility defaults for existing call sites.
     fun tlsSplitMode(): TlsSplitMode = TlsSplitMode.OFF
     fun upstreamProxyEnabled(): Boolean = false

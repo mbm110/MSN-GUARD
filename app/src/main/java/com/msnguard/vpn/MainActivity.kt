@@ -66,6 +66,9 @@ import java.net.URL
 import kotlin.math.min
 import kotlin.math.roundToInt
 import com.msnguard.vpn.profiled
+import com.msnguard.vpn.foxy.RELAYER_AUTOMATIC
+import com.msnguard.vpn.foxy.RELAYER_CUSTOM
+import com.msnguard.vpn.foxy.RELAYER_DIRECT
 
 class MainActivity : Activity() {
     private lateinit var orbitDial: OrbitDialView
@@ -8700,6 +8703,18 @@ class MainActivity : Activity() {
             }
         }
         tuningCard.addView(muxRow, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
+
+        // FoxyVPN 2.0.3/2.0.4 relayer: pick how Foxy's control-plane requests
+        // reach Mozilla when the direct path is blocked (failover codes or a
+        // dead network). The candidate relayer list itself comes from the
+        // remote config; only the provider choice is stored here.
+        val relayerRow = foxyInfoRow(
+            Strings.t("Relayer"),
+            foxyRelayerProviderLabel(com.msnguard.vpn.foxy.FoxySettings.relayerProvider(this)),
+            INK, palette.amber,
+        )
+        relayerRow.setOnClickListener { chooseFoxyRelayer(relayerRow) }
+        tuningCard.addView(relayerRow, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
         tuningCard.addView(label(Strings.t("These controls affect Foxy only. Changes apply on the next Foxy connection."), 11f, MUTED).apply { setPadding(dp(2), dp(12), 0, 0) })
         content.addView(tuningCard, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) })
 
@@ -8729,6 +8744,92 @@ class MainActivity : Activity() {
     }
 
     private fun closeFoxySettingScreen() { foxySettingPage?.let { animatePageClose(it) { foxySettingPage = null } }; openSettingsScreen() }
+
+    /** Localized label for a Foxy relayer provider constant. */
+    private fun foxyRelayerProviderLabel(provider: String): String = when (provider.trim().uppercase()) {
+        RELAYER_DIRECT -> Strings.t("Direct connection")
+        RELAYER_CUSTOM -> Strings.t("Custom")
+        else -> Strings.t("Automatic (recommended)")
+    }
+
+    /** Foxy page Relayer row: provider choice sheet; Custom opens a URL
+     *  prompt (FoxyVPN 2.0.3/2.0.4 relayer port). */
+    private fun chooseFoxyRelayer(relayerRow: android.view.View) {
+        val providers = listOf(RELAYER_DIRECT, RELAYER_AUTOMATIC, RELAYER_CUSTOM)
+        showChoiceSheet(
+            title = Strings.t("Relayer"),
+            subtitle = Strings.t("Relay Foxy requests through a backup server when direct access is blocked."),
+            options = providers,
+            selected = com.msnguard.vpn.foxy.FoxySettings.relayerProvider(this),
+            label = { foxyRelayerProviderLabel(it) },
+            description = { "" },
+        ) { chosen ->
+            if (chosen == RELAYER_CUSTOM) {
+                promptFoxyCustomRelayerUrl { url ->
+                    com.msnguard.vpn.foxy.FoxySettings.saveRelayer(this, chosen, url)
+                    val scheme = url.substringBefore("://").ifBlank { "custom" }
+                    ConnectionLog.record("Foxy: relayer set to custom ($scheme)")
+                    (relayerRow.tag as? TextView)?.text = foxyRelayerProviderLabel(chosen)
+                }
+            } else {
+                com.msnguard.vpn.foxy.FoxySettings.saveRelayer(
+                    this, chosen, com.msnguard.vpn.foxy.FoxySettings.customRelayerUrl(this))
+                ConnectionLog.record("Foxy: relayer set to $chosen")
+                (relayerRow.tag as? TextView)?.text = foxyRelayerProviderLabel(chosen)
+            }
+        }
+    }
+
+    /** URL entry sheet for the Custom relayer provider; validates http/https
+     *  and a non-empty host before saving. */
+    private fun promptFoxyCustomRelayerUrl(onSaved: (String) -> Unit) {
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val field = EditText(this).apply {
+            setText(com.msnguard.vpn.foxy.FoxySettings.customRelayerUrl(this@MainActivity))
+            hint = "https://example.org"
+            setTextColor(INK)
+            setHintTextColor(MUTED)
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setPadding(dp(18), 0, dp(18), 0)
+            background = roundedBackground(SURFACE_VARIANT, 16, SURFACE_VARIANT)
+        }
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            background = roundedBackground(SURFACE, 28, SURFACE)
+        }
+        sheet.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label(Strings.t("Custom relayer URL"), 22f, INK, TypefaceStyle.MEDIUM))
+        })
+        sheet.addView(label(Strings.t("Relay Foxy requests through a backup server when direct access is blocked."), 14f, MUTED), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
+        sheet.addView(createSettingsButton(Strings.t("Save")) {
+            val url = field.text.toString().trim()
+            if (url.isNotEmpty() && !com.msnguard.vpn.foxy.FoxySettings.validCustomRelayerUrl(url)) {
+                field.error = Strings.t("Enter a valid http or https URL")
+                return@createSettingsButton
+            }
+            onSaved(url)
+            dialog.dismiss()
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(16) })
+        dialog.setContentView(FrameLayout(this).apply {
+            setPadding(dp(16), 0, dp(16), dp(16))
+            addView(sheet)
+        })
+        dialog.show()
+        dialog.window?.apply {
+            mirrorDialog(dialog)
+            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
+            setDimAmount(0.62f)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+        }
+    }
 
     /** The Foxy page's Server row: open a real country chooser over the
      *  cached RemoteSettings list, falling back to a live fetch. */

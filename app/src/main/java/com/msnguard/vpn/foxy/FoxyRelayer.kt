@@ -196,7 +196,7 @@ internal fun isValidRelayerUrl(value: String): Boolean =
             "https://$trimmed"
         }
         val uri = java.net.URI(normalized)
-        uri.scheme.equals("https", ignoreCase = true) &&
+        (uri.scheme.equals("https", ignoreCase = true) || uri.scheme.equals("http", ignoreCase = true)) &&
             !uri.host.isNullOrBlank() &&
             uri.rawUserInfo == null &&
             uri.rawFragment == null &&
