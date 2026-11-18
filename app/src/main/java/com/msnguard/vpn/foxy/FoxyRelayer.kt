@@ -203,15 +203,18 @@ internal fun isValidRelayerUrl(value: String): Boolean =
             (uri.port == -1 || uri.port in 1..65_535)
     }.getOrDefault(false)
 
-/** Default relayer policy: automatic relayers from the remote config,
- * matching the reference app's out-of-the-box behavior.
+/** Default relayer policy: the user's provider choice from FoxySettings with
+ * the relayer list, routes and failover codes from the remote config. Falls
+ * back to AUTOMATIC (reference out-of-the-box behavior) until the app
+ * context is captured.
  */
 internal fun defaultRelayerConfig(): FoxyRelayerConfig? {
     val config = FoxyRemoteConfig.current
-    if (config.relayers.isEmpty()) return null
+    val provider = FoxySettings.relayerProviderOrNull() ?: RELAYER_AUTOMATIC
+    if (provider.equals(RELAYER_AUTOMATIC, ignoreCase = true) && config.relayers.isEmpty()) return null
     return FoxyRelayerConfig(
-        provider = RELAYER_AUTOMATIC,
-        customUrl = "",
+        provider = provider,
+        customUrl = FoxySettings.customRelayerUrlOrNull(),
         relayedEndpoints = config.relayerRoutes,
         availableRelayers = config.relayers,
         failoverCodes = config.failoverCodes,

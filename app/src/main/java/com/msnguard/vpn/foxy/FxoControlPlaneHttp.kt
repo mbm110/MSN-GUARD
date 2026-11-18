@@ -188,11 +188,17 @@ private class ProtectingSocketFactory : SocketFactory() {
 object FoxyControlPlaneHttp {
     val cookieJar = SimpleCookieJar()
 
-    internal val relayerInterceptor = FoxyRelayerInterceptor { defaultRelayerConfig() }
+    /** Overridable relayer policy hook (reference: relayerConfigProvider).
+     *  Defaults to the user preference + remote-config policy. */
+    @Volatile
+    var relayerConfigProvider: (() -> FoxyRelayerConfig?)? = { defaultRelayerConfig() }
+
+    internal val relayerInterceptor = FoxyRelayerInterceptor { relayerConfigProvider?.invoke() }
 
     private val bootstrapClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
+            .addInterceptor(relayerInterceptor)
             .socketFactory(ProtectingSocketFactory())
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)

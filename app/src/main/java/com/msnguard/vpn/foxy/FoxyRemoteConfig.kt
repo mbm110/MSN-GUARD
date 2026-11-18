@@ -164,6 +164,10 @@ object FoxyRemoteConfig {
     fun init(context: Context) {
         val app = context.applicationContext
         appContext = app
+        // Capture the app context for FoxySettings too: the relayer
+        // interceptor runs without a Context and needs the user's relayer
+        // preferences.
+        FoxySettings.init(app)
         val file = File(app.filesDir, FILE_NAME)
         if (file.isFile && file.length() > 0) {
             val text = runCatching { file.readText() }.getOrNull().orEmpty()
