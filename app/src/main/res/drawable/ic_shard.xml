@@ -1,14 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- SHARD section icon: a shattered crystal, app neon cyan. -->
+<!-- SHARD section icon: a faceted crystal shard, app neon cyan. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp" android:height="24dp"
     android:viewportWidth="24" android:viewportHeight="24">
+    <!-- base gem -->
     <path android:fillColor="#00C8FF"
-        android:pathData="M8.2,2.6 L11.8,7.9 L9.3,15.4 L5.1,10.0 Z" />
-    <path android:fillColor="#7FE9FF"
-        android:pathData="M13.3,1.8 L18.7,7.0 L16.6,13.6 L12.2,9.2 Z" />
-    <path android:fillColor="#00A9DC"
-        android:pathData="M9.9,16.6 L14.3,14.3 L17.4,19.7 L13.0,22.4 L8.5,21.0 Z" />
-    <path android:fillColor="#CFF6FF"
-        android:pathData="M6.2,12.4 L8.0,14.7 L7.2,16.8 L5.6,14.9 Z" />
+        android:pathData="M12,2 L19.5,9.2 L12,22 L4.5,9.2 Z" />
+    <!-- left facet (lit) -->
+    <path android:fillColor="#8FEBFF"
+        android:pathData="M12,2 L4.5,9.2 L12,13 Z" />
+    <!-- right facet (shaded) -->
+    <path android:fillColor="#0090BE"
+        android:pathData="M19.5,9.2 L12,22 L12,13 Z" />
+    <!-- small satellite shard -->
+    <path android:fillColor="#4FD8FF"
+        android:pathData="M17.2,2.6 L21.4,5.4 L18.6,8.2 Z" />
 </vector>
