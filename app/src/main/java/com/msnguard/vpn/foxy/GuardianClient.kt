@@ -2,6 +2,7 @@ package com.msnguard.vpn.foxy
 
 import android.util.Base64
 import com.msnguard.vpn.foxy.Entitlement
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
@@ -112,7 +113,19 @@ class GuardianClient(
         var attempts = 1
         while (response.code == 406 && attempts < GUARDIAN_MAX_CHALLENGE_ATTEMPTS) {
             val challengedBody = response.use { it.body?.string().orEmpty() }
-            challengeSolver.solveAndInstall(challengedBody, url.substringBefore("/api/").trimEnd('/'), FirefoxAccountHeaders.controlPlaneUserAgent)
+            try {
+                challengeSolver.solveAndInstall(challengedBody, url.substringBefore("/api/").trimEnd('/'), FirefoxAccountHeaders.controlPlaneUserAgent)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (solveFailure: Exception) {
+                FoxyLog.w("GuardianClient", "could not solve the Fastly challenge", solveFailure)
+                FoxyRemoteConfig.triggerRefresh()
+                throw GuardianHttpError(
+                    "Mozilla's bot protection rejected this request (HTTP 406) and the challenge " +
+                        "could not be solved automatically. Try again later or on another network.",
+                    406,
+                )
+            }
             response = FoxyControlPlaneHttp.client.newCall(buildRequest()).execute()
             attempts++
         }
@@ -121,7 +134,7 @@ class GuardianClient(
     }
 }
 
-internal fun jwtExpiryEpochSeconds(token: String): Long? {
+internal fun jwtExpiryEpochSeconds(token: String, nowSeconds: Long = System.currentTimeMillis() / 1_000L): Long? {
     val parts = token.split('.')
     if (parts.size < 2) return null
     val payload = runCatching {
@@ -132,5 +145,29 @@ internal fun jwtExpiryEpochSeconds(token: String): Long? {
             Charsets.UTF_8,
         )
     }.getOrNull() ?: return null
-    return runCatching { JSONObject(payload).optLong("exp", 0L) }.getOrNull()?.takeIf { it > 0 }
+    return runCatching {
+        val json = JSONObject(payload)
+        val exp = json.optLong("exp", 0L)
+        if (exp <= 0L) return@runCatching null
+        // Clock-skew compensation (reference v2.0.4): when the JWT's issue
+        // time is far from our wall clock, trust the token's own lifetime
+        // instead of its absolute expiry.
+        val iat = json.optLong("iat", 0L)
+        val nbf = json.optLong("nbf", 0L)
+        val start = when {
+            nbf > 0L -> nbf
+            iat > 0L -> iat
+            else -> 0L
+        }
+        if (start > 0L && exp > start) {
+            val offset = nowSeconds - start
+            if (kotlin.math.abs(offset) > 60L) {
+                nowSeconds + (exp - start)
+            } else {
+                exp
+            }
+        } else {
+            exp
+        }
+    }.getOrNull()
 }
