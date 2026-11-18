@@ -332,6 +332,10 @@ type lanternServer struct {
 	Type    string `json:"type"`
 	City    string `json:"city"`
 	Country string `json:"country"`
+	// CountryCode is the ISO 3166-1 alpha-2 code Lantern itself provides
+	// ("US", "DE", ...): the same source the official app renders its flags
+	// from. Names alone are unreliable for that ("USA" vs "United States").
+	CountryCode string `json:"country_code"`
 	// PingMs is the last successful probe latency in milliseconds; Probed
 	// distinguishes "measured, fast" from "never answered".
 	PingMs uint32 `json:"ping_ms"`
@@ -365,10 +369,11 @@ func ServersJSON() string {
 			continue
 		}
 		entry := lanternServer{
-			Tag:     srv.Tag,
-			Type:    srv.Type,
-			City:    srv.Location.City,
-			Country: srv.Location.Country,
+			Tag:         srv.Tag,
+			Type:        srv.Type,
+			City:        srv.Location.City,
+			Country:     srv.Location.Country,
+			CountryCode: srv.Location.CountryCode,
 		}
 		if h := srv.SelectionHistory; h != nil && h.LastSuccessDelayMs > 0 {
 			entry.PingMs = h.LastSuccessDelayMs

@@ -4540,6 +4540,7 @@ class MainActivity : Activity() {
         val title: String,
         val city: String,
         val country: String,
+        val countryCode: String,
         val pingMs: Long,
         val probed: Boolean,
     )
@@ -4561,25 +4562,35 @@ class MainActivity : Activity() {
     private val lanternServersCachePref = "lantern_servers_cache_json"
 
     /**
-     * Country name to ISO code, for the flag emoji. Lantern's server metadata
-     * carries only the country NAME, not its code; this covers every country
-     * currently present in Lantern's server pool.
+     * Country name to ISO code, the fallback path when Lantern's metadata
+     * carries no country_code. Keys are matched case-insensitively; the
+     * aliases cover the spellings Lantern is known to emit ("USA",
+     * "United States of America", ...).
      */
     private val lanternCountryCodes = mapOf(
         "Germany" to "DE", "Netherlands" to "NL", "United States" to "US",
-        "United Kingdom" to "GB", "Singapore" to "SG", "Japan" to "JP",
-        "Hong Kong" to "HK", "France" to "FR", "Canada" to "CA",
-        "India" to "IN", "Brazil" to "BR", "Switzerland" to "CH",
-        "Spain" to "ES", "Italy" to "IT", "Turkey" to "TR",
-        "United Arab Emirates" to "AE", "Poland" to "PL", "Sweden" to "SE",
+        "United States of America" to "US", "USA" to "US", "U.S." to "US",
+        "U.S.A." to "US", "America" to "US",
+        "United Kingdom" to "GB", "Great Britain" to "GB", "Britain" to "GB",
+        "England" to "GB", "UK" to "GB",
+        "Singapore" to "SG", "Japan" to "JP", "Hong Kong" to "HK",
+        "Hong Kong SAR" to "HK", "Hongkong" to "HK", "France" to "FR",
+        "Canada" to "CA", "India" to "IN", "Brazil" to "BR",
+        "Switzerland" to "CH", "Spain" to "ES", "Italy" to "IT",
+        "Turkey" to "TR", "Turkiye" to "TR",
+        "United Arab Emirates" to "AE", "UAE" to "AE", "U.A.E." to "AE",
+        "Poland" to "PL", "Sweden" to "SE",
         "Norway" to "NO", "Denmark" to "DK", "Finland" to "FI",
         "Ireland" to "IE", "Belgium" to "BE", "Austria" to "AT",
-        "Romania" to "RO", "Czech Republic" to "CZ", "Ukraine" to "UA",
-        "Russia" to "RU", "Mexico" to "MX", "Argentina" to "AR",
+        "Romania" to "RO", "Czech Republic" to "CZ", "Czechia" to "CZ",
+        "Ukraine" to "UA", "Russia" to "RU", "Russian Federation" to "RU",
+        "Mexico" to "MX", "Argentina" to "AR",
         "Chile" to "CL", "Colombia" to "CO", "South Africa" to "ZA",
         "Nigeria" to "NG", "Kenya" to "KE", "Egypt" to "EG",
-        "Indonesia" to "ID", "Vietnam" to "VN", "Thailand" to "TH",
-        "Malaysia" to "MY", "South Korea" to "KR", "Taiwan" to "TW",
+        "Indonesia" to "ID", "Vietnam" to "VN", "Viet Nam" to "VN",
+        "Thailand" to "TH",
+        "Malaysia" to "MY", "South Korea" to "KR", "Republic of Korea" to "KR",
+        "Korea" to "KR", "Taiwan" to "TW",
         "Australia" to "AU", "New Zealand" to "NZ", "Israel" to "IL",
         "Portugal" to "PT", "Greece" to "GR", "Hungary" to "HU",
         "Bulgaria" to "BG", "Serbia" to "RS", "Latvia" to "LV",
@@ -4595,14 +4606,20 @@ class MainActivity : Activity() {
         "Ecuador" to "EC", "Bolivia" to "BO", "Paraguay" to "PY",
         "Iceland" to "IS", "Luxembourg" to "LU", "Malta" to "MT",
         "Cyprus" to "CY", "Albania" to "AL", "Montenegro" to "ME",
-        "North Macedonia" to "MK", "Bosnia and Herzegovina" to "BA",
+        "North Macedonia" to "MK", "Macedonia" to "MK",
+        "Bosnia and Herzegovina" to "BA",
     )
 
-    /** Regional-indicator flag emoji for an ISO code; empty when unknown. */
-    private fun lanternFlag(country: String): String {
-        val code = lanternCountryCodes[country.trim()] ?: return ""
+    /** Flag emoji from Lantern's ISO code first, country name as fallback. */
+    private fun lanternFlag(countryCode: String, country: String): String {
+        val normalized = countryCode.trim().uppercase()
+        val code = if (normalized.length == 2 && normalized.all { it in 'A'..'Z' }) {
+            normalized
+        } else {
+            lanternCountryCodes[country.trim().lowercase()] ?: return ""
+        }
         val sb = StringBuilder(2)
-        for (c in code) sb.append(Character.toChars(0x1F1E6 + (c.uppercaseChar() - 'A')))
+        for (c in code) sb.append(Character.toChars(0x1F1E6 + (c - 'A')))
         return sb.toString()
     }
 
@@ -4650,6 +4667,7 @@ class MainActivity : Activity() {
                     title = "", // assigned below, after sort + numbering
                     city = entry.optString("city", ""),
                     country = entry.optString("country", ""),
+                    countryCode = entry.optString("country_code", ""),
                     pingMs = entry.optLong("ping_ms", 0),
                     probed = entry.optBoolean("probed", false),
                 ),
@@ -4670,7 +4688,7 @@ class MainActivity : Activity() {
             val key = "${server.city}|${server.country}"
             seen[key] = (seen[key] ?: 0) + 1
             val base = server.city.ifBlank { server.country.ifBlank { server.tag } }
-            val flag = lanternFlag(server.country)
+            val flag = lanternFlag(server.countryCode, server.country)
             val name = when {
                 server.city.isNotBlank() && (totals[key] ?: 0) > 1 -> "$base ${seen[key]}"
                 else -> base
