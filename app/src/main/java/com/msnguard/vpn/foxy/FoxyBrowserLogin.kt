@@ -112,19 +112,24 @@ object FoxyBrowserLogin {
         page.addView(header, LinearLayout.LayoutParams(-1, -2))
         page.addView(progress, LinearLayout.LayoutParams(-1, (3 * density).toInt()))
         page.addView(web, LinearLayout.LayoutParams(-1, 0, 1f))
-        lateinit var bridge: WebChannelBridge
-        bridge = WebChannelBridge(
+        val bridge = WebChannelBridge(
             web,
             onSessionToken = { token ->
                 if (!finished && !completing) {
                     completing = true
+                    // Reference shows a busy indicator while the token
+                    // exchange runs — the horizontal bar switches to an
+                    // indeterminate "busy" mode for that window.
+                    progress.isIndeterminate = true
+                    progress.visibility = View.VISIBLE
                     loginScope.launch {
                         val result = repository.completeBrowserLogin(token)
                         completing = false
+                        progress.isIndeterminate = false
+                        progress.visibility = View.GONE
                         if (!finished) {
                             if (result.isSuccess) finish(result)
                             else {
-                                bridge.retrySessionToken()
                                 android.widget.Toast.makeText(activity,
                                     result.exceptionOrNull()?.message ?: "Sign-in failed. Please try again.",
                                     android.widget.Toast.LENGTH_LONG).show()
@@ -185,10 +190,7 @@ object FoxyBrowserLogin {
         private val onSessionToken: (String) -> Unit,
     ) {
         private val webViewRef = WeakReference(webView)
-        @Volatile private var pendingSessionToken: String? = null
         @Volatile private var dispatchedSessionToken: String? = null
-
-        fun retrySessionToken() { dispatchedSessionToken = null }
 
         @JavascriptInterface
         fun onMessage(payload: String) = onMessage(payload, "https://accounts.firefox.com")
@@ -207,32 +209,23 @@ object FoxyBrowserLogin {
                 CMD_FXA_STATUS -> reply(channelId, messageId, command, "{\"capabilities\":{},\"signedInUser\":null}")
                 CMD_CAN_LINK_ACCOUNT -> reply(channelId, messageId, command, "{\"ok\":true}")
                 CMD_LOGIN, "fxaccounts:oauth_login" -> {
+                    // Reference v2.0.4: notify the session token IMMEDIATELY,
+                    // even while the user is still on the 2FA code page. The
+                    // sign-in completes underneath; Mozilla's post-verify
+                    // "open this in a browser" page is never reached.
                     val token = data.optString("sessionToken").ifBlank { data.optString("token") }.trim()
-                    if (tokenPattern.matches(token)) {
-                        pendingSessionToken = token
-                        val verified = !data.has("verified") || data.optBoolean("verified", true)
-                        if (verified && data.optString("verificationReason").isBlank()) notifySessionToken(token)
-                    }
+                    if (tokenPattern.matches(token)) notifySessionToken(token)
                     if (messageId.isNotBlank()) reply(channelId, messageId, command, "{\"ok\":true}")
                 }
                 else -> {
-                    if (command.contains("verified", ignoreCase = true)) {
-                        val token = data.optString("sessionToken").ifBlank { data.optString("token") }
-                            .ifBlank { pendingSessionToken.orEmpty() }.trim()
-                        if (tokenPattern.matches(token)) notifySessionToken(token)
-                    }
                     if (messageId.isNotBlank()) reply(channelId, messageId, command, "{\"ok\":true}")
                 }
             }
         }
 
-        @JavascriptInterface
-        fun onSessionVerified() = pendingSessionToken?.let { notifySessionToken(it) }
-
         private fun notifySessionToken(token: String) {
             if (!tokenPattern.matches(token) || token == dispatchedSessionToken) return
             dispatchedSessionToken = token
-            pendingSessionToken = token
             runCatching { CookieManager.getInstance().flush() }
             webViewRef.get()?.post { onSessionToken(token) } ?: onSessionToken(token)
         }
