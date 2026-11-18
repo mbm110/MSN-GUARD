@@ -3431,12 +3431,10 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
-            // FOXY — one row like Warp Setting; the dedicated page owns the
-            // Firefox Accounts browser sign-in; MSN never collects the password or code.
-            body.addView(navRow(Strings.t("Foxy Account & Setting"), foxyAccountSummary()) { openFoxySettingScreen() }, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(8) })
+            // FOXY has its own top-level section above LANTERN now (like Warp and
+            // Lantern, it is a whole transport, not a connection detail); the
+            // dedicated page still owns the Firefox Accounts browser sign-in and
+            // MSN never collects the password or code.
             // Share over LAN, directly under the port it publishes.
             //
             // Moved out of the PSIPHON section: it is not Psiphon's any more. Every
@@ -3687,6 +3685,19 @@ class MainActivity : Activity() {
                 chooseTorRegion { torRegionRowRef?.setValue(torRegionLabel()) }
             }
             body.addView(torRegionRowRef, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(26) })
+
+        // FOXY — its own top-level section (same shape as LANTERN's), sitting
+        // above it. One row into the dedicated page, which owns the Firefox
+        // Accounts browser sign-in; MSN never collects the password or code.
+        content.addView(expandableSection(Strings.t("FOXY"), id = "FOXY") { body ->
+            body.addView(navRow(Strings.t("Foxy Account & Setting"), foxyAccountSummary()) { openFoxySettingScreen() }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
