@@ -442,6 +442,7 @@ class MainActivity : Activity() {
                 MsnGuardVpnService.STATUS_CONNECTING -> showConnecting(
                     intent.getStringExtra(MsnGuardVpnService.EXTRA_DETAIL),
                     intent.getIntExtra(MsnGuardVpnService.EXTRA_PROGRESS, -1),
+                    intent.getIntExtra(MsnGuardVpnService.EXTRA_STEPS, 0),
                 )
                 MsnGuardVpnService.STATUS_STARTING -> showStarting()
                 MsnGuardVpnService.STATUS_SCANNING -> showScanning()
@@ -9082,12 +9083,22 @@ class MainActivity : Activity() {
         return true
     }
 
-    private fun showConnecting(detail: String? = null, progress: Int = -1) {
+    private fun showConnecting(detail: String? = null, progress: Int = -1, steps: Int = 0) {
         // The percentage arrives on its own broadcasts, most of which carry no new
         // text, so it is applied before the shared progress renderer rather than
         // through it.
         orbitDial.progressPercent = progress
-        showConnectionProgress(Strings.t("Connecting"), detail ?: Strings.tf("Starting %s tunnel", selectedProtocol.label))
+        // "· 2/5" step counter: derived from the same percentage the service
+        // publishes, so the dial (percent) and the line (n/N) can never disagree.
+        // steps == 0 (Tor: continuous bootstrap %) → no counter.
+        val base = detail ?: Strings.tf("Starting %s tunnel", selectedProtocol.label)
+        val line = if (steps > 0 && progress in 1..100) {
+            val step = (steps * progress + 99) / 100
+            "$base · ${step.coerceIn(1, steps)}/$steps"
+        } else {
+            base
+        }
+        showConnectionProgress(Strings.t("Connecting"), line)
     }
 
     private fun showStarting() {

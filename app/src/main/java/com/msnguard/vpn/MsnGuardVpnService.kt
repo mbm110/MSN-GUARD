@@ -352,6 +352,16 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     @Volatile
     private var connectProgress = -1
 
+    /**
+     * Real connect steps for the active transport (0 while idle, or for Tor
+     * which reports a continuous percentage). Drives the "· 2/5" suffix on
+     * the main screen's connecting line.
+     */
+    @Volatile private var connectStepsTotal = 0
+
+    /** Last CONNECTING detail text, so percent-only reposts keep it on screen. */
+    @Volatile private var lastConnectingDetail: String? = null
+
     /** Polls [TorManager.progress] while Tor bootstraps. */
     private var torProgressTask: java.util.concurrent.ScheduledFuture<*>? = null
 
@@ -942,6 +952,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val EXTRA_PROGRESS = "progress"
 
         /**
+         * Total connect steps for the "n/N" counter on the main screen's
+         * status line. 0 = this transport reports continuous progress only
+         * (Tor), so no step counter is shown.
+         */
+        const val EXTRA_STEPS = "steps"
+
+        /**
          * Accent used for the notification's icon tint and header text.
          *
          * Sampled from the launcher artwork's neon ring (#70E0B0 region), so the
@@ -1298,6 +1315,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // is still empty and any decision would be a guess. See
         // scheduleLadderAttribution() for the deferred, evidence-based version.
         scheduleLadderAttribution()
+        publishProgress(65) // upstream Psiphon tunnel ready; TUN bridging next
 
         val port = activeSocksPort
         if (port <= 0) {
@@ -1914,6 +1932,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // onConnected() starts the Rust core to bridge TUN → SOCKS.
             tunnel.startTunneling(serverEntries)
             ConnectionLog.record("Psiphon tunnel starting...")
+            publishProgress(35) // this rung's tunnel is starting
             armLadderTimer()
         } catch (e: Exception) {
             ConnectionLog.record("Psiphon start failed: ${e.message}")
@@ -2794,6 +2813,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 "log" -> {
                     val message = event.getString("message")
                     ConnectionLog.record(message)
+                    reportCoreConnectMilestone(message)
                 }
             }
         } catch (e: Exception) {
@@ -3203,6 +3223,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 kotlinx.coroutines.runBlocking {
                     com.msnguard.vpn.foxy.FoxyTunnel.start(this@MsnGuardVpnService)
                 }
+                publishProgress(45) // Foxy session is up; routing comes next
                 sendStatus(STATUS_CONNECTING, Strings.t("Starting device routing…"), 70)
                 // Reference parity: FoxyVPN runs ONE tun2socks engine —
                 // hev-socks5-tunnel — with mapdns always on (DNS provider
@@ -3234,6 +3255,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     // DoH relay — exactly the false connection to avoid.
                     error("Could not start the Hev tun2socks engine")
                 }
+                publishProgress(90) // tun2socks engine running — verification remains
                 currentVpnIp = ""
                 sendStatus(STATUS_CONNECTED, Strings.t("Foxy connected"))
                 ConnectionLog.record("Foxy: connected — device tunnel up on port 1830")
@@ -3339,7 +3361,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     error(LanternEngine.errorMessage().ifBlank { "Could not connect to public Lantern servers" })
                 }
                 if (!LanternEngine.isCurrent(attempt)) return@execute
-
+                publishProgress(50) // Radiance session is up; routing comes next
                 sendStatus(STATUS_CONNECTING, Strings.t("Starting device routing…"), 75)
                 activeSocksPort = LanternEngine.SOCKS_PORT
                 val hevStarted = synchronized(lanternLifecycleLock) {
@@ -3350,6 +3372,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 if (!hevStarted) {
                     error("Could not start the Hev device-routing engine for Lantern")
                 }
+                publishProgress(90) // Hev running — verification remains
 
                 synchronized(lanternLifecycleLock) {
                     if (!LanternEngine.isCurrent(attempt)) return@execute
@@ -3464,6 +3487,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 if (!TunEngineManager.start(this, tun!!, ShardSocksFront.LISTEN_PORT, mtu = shardMtu)) {
                     error("Could not start device routing")
                 }
+                publishProgress(90) // front + tun2socks running — verification remains
 
                 currentVpnIp = ""
                 val node = ShardManager.activeNode?.displayName ?: "a public node"
@@ -4833,6 +4857,18 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
 
         currentProtocol = config.substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
         currentVpnIp = ""
+        // Real connect steps for this transport — drives the "· n/N" counter
+        // on the connecting line (and gates the log-driven milestone mapper to
+        // this session's CONNECTING phase). Tor reports a continuous bootstrap
+        // percentage instead, so it gets no step counter.
+        connectStepsTotal = when {
+            currentProtocol.contains("TOR") -> 0
+            currentProtocol.contains("SHARD") -> 4
+            currentProtocol.contains("LANTERN") -> 5
+            currentProtocol.contains("FOXY") -> 5
+            currentProtocol.contains("PSIPHON") -> 4
+            else -> 5 // WireGuard / MASQUE / WoW / MIM and the chain ladder
+        }
         // MTU auto-scan: every connect starts its own scan context — no stale
         // value from the previous tunnel can reach a different transport
         // (MtuAutoScan doc explains why this matters for the chain's per-rung env).
@@ -5455,6 +5491,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 }
                 CoreConfig.applyEnv(patchedEnv)
                 val addresses = NativeCore.prepare(effectiveConfig)
+                publishProgress(35) // identity/config ready — TUN comes next
                 if (addresses.organization.isNotBlank()) {
                     ConnectionLog.record("Zero Trust organization ${addresses.organization}")
                 }
@@ -6093,6 +6130,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         warpListen: String,
         generationAtStart: Int,
     ): Boolean {
+        publishProgress(45) // entering the MTU/TUN ladder — the core runs next
         val storedMtu = MtuConfig.get(this, method)
         // Build ladder: stored → 1500 → Scan result. Deduplicated, in-range only.
         val ladder = mutableListOf<Int>()
@@ -6157,6 +6195,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 CoreConfig.applyEnv(patched)
             }
             val addresses = NativeCore.prepare(effectiveConfig)
+            publishProgress(35) // identity/config ready — TUN comes next
             tun = Builder()
                 .setSession("MSN-GUARD")
                 .setMtu(mtu)
@@ -6479,16 +6518,47 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         if (progress >= 0) connectProgress = progress
         if (status == STATUS_CONNECTED || status == STATUS_DISCONNECTED || status == STATUS_FAILED) {
             connectProgress = -1
+            connectStepsTotal = 0
+            lastConnectingDetail = null
+        } else if (status == STATUS_CONNECTING && detail != null) {
+            lastConnectingDetail = detail
         }
         sendBroadcast(Intent(ACTION_STATUS)
             .setPackage(packageName)
             .putExtra(EXTRA_STATUS, status)
             .putExtra(EXTRA_PROGRESS, connectProgress)
+            .putExtra(EXTRA_STEPS, connectStepsTotal)
             .apply { detail?.let { putExtra(EXTRA_DETAIL, it) } })
         TileService.requestListeningState(
             this,
             ComponentName(this, MsnGuardTileService::class.java),
         )
+    }
+
+    /**
+     * Maps the aether core's own log lines to real connect progress for the
+     * WARP family (WireGuard/MASQUE/WoW/MIM). PURELY COSMETIC — nothing here
+     * feeds a decision; a missed or late line only leaves the bar where it
+     * was. Guarded to CONNECTING-only and monotonic, so an out-of-order line
+     * cannot move the bar backwards.
+     */
+    private fun reportCoreConnectMilestone(message: String) {
+        if (connectStepsTotal <= 0 || connected.get() || stopRequested.get()) return
+        val pct = when {
+            message.contains("identity ready") -> 55
+            message.contains("verifying cached gateway") ||
+                message.contains("scan mode=") ||
+                message.contains("hunting for a working") -> 60
+            message.contains("selected V2 gateway") ||
+                message.contains("using cloudflare edge") ||
+                message.contains("connect-ip status: 200") ||
+                message.contains("tls established") -> 80
+            message.contains("exposing socks5") -> 90
+            message.contains("socks5 server listening") ||
+                message.contains("s0 listener up") -> 95
+            else -> return
+        }
+        if (pct > connectProgress) publishProgress(pct)
     }
 
     /**
@@ -6500,7 +6570,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
      */
     private fun publishProgress(percent: Int) {
         if (percent == connectProgress) return
-        sendStatus(STATUS_CONNECTING, null, percent)
+        sendStatus(STATUS_CONNECTING, lastConnectingDetail, percent)
     }
 
     /**
