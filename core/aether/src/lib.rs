@@ -308,7 +308,7 @@ pub async fn run_with(args: Vec<String>) -> Result<()> {
                 secondary.device_id,
                 secondary.ipv4
             );
-            run_gool(primary, secondary, listen).await
+            run_gool(primary, secondary, listen, gool_cache_path(&primary_path)).await
         }
         Protocol::MasqueInMasque => {
             select_masque_transport().await;
@@ -505,6 +505,7 @@ async fn run_gool(
     primary: account::Identity,
     secondary: account::Identity,
     listen: SocketAddr,
+    cache_path: String,
 ) -> Result<()> {
     let pinned = wiw_endpoints_with_fallback(&env_value)?;
 
@@ -523,6 +524,20 @@ async fn run_gool(
 
     let mut outer_peer = pinned.outer;
     let mut inner_peer = pinned.inner;
+    // The last pair that carried traffic is tried first: an end-to-end
+    // verified pair usually keeps working on the same network, and it makes
+    // the next connect fast. The loop's own 2-strike blacklist below drops
+    // the pair and scans fresh when it stops answering, which is exactly the
+    // fallback a stale cache needs.
+    if outer_peer.is_none() && inner_peer.is_none() {
+        if let Some((outer, inner)) = load_gool_pair(&cache_path) {
+            log::info!(
+                "[*] trying the last working warp-in-warp pair first: {outer} (outer) and {inner} (inner)"
+            );
+            outer_peer = Some(outer);
+            inner_peer = Some(inner);
+        }
+    }
     let mut consecutive_fails: u32 = 0;
     const MAX_CONSECUTIVE_FAILS: u32 = 2;
     let mut scan_settings: Option<(String, prober::IpScan)> = None;
@@ -578,7 +593,8 @@ async fn run_gool(
                     }
                 };
 
-                let found = match select_wg_peers(&primary, &mode_str, ip, wanted, &avoid).await {
+                let found = match select_wg_peers(&primary, &mode_str, ip, wanted + 2, &avoid).await
+                {
                     Ok(found) => found,
                     Err(e) => {
                         log::warn!("[-] no usable WARP endpoint found: {e}; rescanning shortly");
@@ -592,9 +608,32 @@ async fn run_gool(
                     spread_hops(&mut found);
                 }
 
-                let mut found = found.into_iter();
-                let outer = known_outer.or_else(|| found.next());
-                let inner = known_inner.or_else(|| found.next());
+                // IPv6 first: on throttle-prone carriers the IPv4 UDP flows
+                // die within seconds while IPv6 flows keep carrying sustained
+                // traffic (the 3.2.36 field log: every IPv4-outer pair went
+                // stale at ~11s, the first all-IPv6 pair carried the session),
+                // so IPv6 candidates take both hops whenever the scan surfaced
+                // any, and IPv4 stays the fallback when it did not. The extra
+                // two candidates above are what leave a real choice. The
+                // separate-edge rule of spread_hops is re-applied per hop here
+                // because the IPv6 reorder changes the order it arranged.
+                let outer = known_outer.or_else(|| {
+                    let idx = found.iter().position(|p| p.is_ipv6()).unwrap_or(0);
+                    (!found.is_empty()).then(|| found.remove(idx))
+                });
+                let inner = known_inner.or_else(|| {
+                    let outer_net = outer.as_ref().map(|p| edge_network(p.ip()));
+                    let idx = found
+                        .iter()
+                        .position(|p| p.is_ipv6() && outer_net != Some(edge_network(p.ip())))
+                        .or_else(|| {
+                            found
+                                .iter()
+                                .position(|p| outer_net != Some(edge_network(p.ip())))
+                        })
+                        .unwrap_or(0);
+                    (!found.is_empty()).then(|| found.remove(idx))
+                });
 
                 match (outer, inner) {
                     (Some(outer), Some(inner)) => (outer, inner),
@@ -621,6 +660,7 @@ async fn run_gool(
             peer,
             inner_peer_now,
             listen,
+            cache_path.clone(),
         )
         .await
         {
@@ -1308,6 +1348,27 @@ fn masque_carrier() -> &'static str {
 
 fn lastconn_path(config_path: &str) -> String {
     derive_sibling_path(config_path, "lastconn")
+}
+
+/// The file holding the last warp-in-warp pair that carried traffic. Kept
+/// apart from [lastconn_path] so a WOW session never clobbers the W1/masque
+/// cache and vice versa.
+fn gool_cache_path(config_path: &str) -> String {
+    derive_sibling_path(config_path, "lastconn.gool")
+}
+
+fn load_gool_pair(path: &str) -> Option<(SocketAddr, SocketAddr)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut peers = text.lines().filter_map(|line| line.trim().parse().ok());
+    let outer = peers.next()?;
+    let inner = peers.next()?;
+    Some((outer, inner))
+}
+
+fn save_gool_pair(path: &str, outer: SocketAddr, inner: SocketAddr) {
+    if let Err(e) = std::fs::write(path, format!("{outer}\n{inner}\n")) {
+        log::debug!("[gool] failed to save the working pair to {path}: {e}");
+    }
 }
 
 /// Whether `peer` serves MASQUE, by a quick check on the carrier the session uses, which
@@ -2808,6 +2869,7 @@ async fn run_warp_in_warp(
     peer: SocketAddr,
     inner_peer: SocketAddr,
     listen: SocketAddr,
+    cache_path: String,
 ) -> Result<()> {
     if inner_peer.ip() == peer.ip() {
         return Err(AetherError::Other(format!(
@@ -2833,6 +2895,15 @@ async fn run_warp_in_warp(
 
     let policy = exitloc::Policy::from_env();
     exitloc::settle(&inner_stack, &policy, "warp-in-warp").await?;
+    // Both hops validated end-to-end (handshake + data-plane) and the exit
+    // settled, so this pair carried real traffic: remember it so the next
+    // session connects fast instead of re-hunting. The next run tries this
+    // pair first and falls back to a fresh scan through the 2-strike
+    // blacklist when it no longer answers.
+    save_gool_pair(&cache_path, peer, inner_peer);
+    log::info!(
+        "[+] gool: remembered the working pair {peer} (outer) + {inner_peer} (inner) for the next connect"
+    );
     let policy_stack = inner_stack.clone();
 
     let socks_listener = socks::bind_listener("socks5", listen).await?;
