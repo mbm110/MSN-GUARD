@@ -3118,9 +3118,8 @@ async fn run_gool_tunnel(
     // pick the rejected floor becomes the tunnel rather than an error.
     let policy_clean_pick = established.is_some();
     if policy_clean_pick {
-        if let Some((_, (mut rejected_exit, _), _guard)) = policy_fallback {
+        if let Some((_, (_, mut rejected_exit), _guard)) = policy_fallback {
             rejected_exit.abort();
-            let _ = &rejected_exit;
         }
     } else if policy_fallback.is_some() {
         established = policy_fallback;
