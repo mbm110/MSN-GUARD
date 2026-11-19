@@ -1233,7 +1233,7 @@ class MainActivity : Activity() {
         showVerifying()
         Thread {
             val budget = verifyTimeoutMs()
-            val deadline = System.currentTimeMillis() + budget
+            var deadline = System.currentTimeMillis() + budget
             // In native TUN mode the HTTP probe rides the carrier link, not the
             // tunnel, so it proves nothing. Gate on in-tunnel bytes instead and
             // use the probe only for the latency figure afterwards.
@@ -1269,10 +1269,33 @@ class MainActivity : Activity() {
             }
             var proof: Pair<String, Float>? = null
             var attempts = 0
+            // ECONNREFUSED extensions: the core's own reconnect loop tears its
+            // SOCKS listener down between cycles, so a refused probe during a
+            // live core means "reconnecting", not "dead". The 3.2.34 WG field
+            // log is the shape this guards against: peer throttled at 11s,
+            // core mid-retry 4s from restoring the tunnel, gate gave up at
+            // 5 refused probes and tore down a session that was coming back.
+            var extensions = 0
             while (System.currentTimeMillis() < deadline && request == verifyRequest) {
                 attempts++
                 proof = pingAnyEndpoint()
                 if (proof != null) break
+                // Only the native aether core (WG/WoW/MASQUE/Gool through its
+                // s0 listener) self-heals forever; its listener downtime is a
+                // cycle, not an end state. Front-end transports (Tor, SHARD,
+                // Foxy, Lantern, Psiphon) own listeners outside the core —
+                // for them a refused listener really is a dead front, so
+                // they keep the plain budget.
+                if (extensions < VERIFY_RECONNECT_EXTENSIONS &&
+                    NativeCore.isRunning() &&
+                    lastProbeFailure?.contains("/127.0.0.1:") == true) {
+                    extensions++
+                    ConnectionLog.record(
+                        "probe refused — native core between reconnect cycles, " +
+                            "extending verify patience ${extensions}/${VERIFY_RECONNECT_EXTENSIONS}"
+                    )
+                    deadline += VERIFY_RECONNECT_EXTENSION_MS
+                }
                 // The tunnel may still be settling (routes, DNS, lwIP warm-up),
                 // so retry rather than failing on the first miss.
                 Thread.sleep(VERIFY_RETRY_DELAY_MS)
@@ -10359,6 +10382,20 @@ class MainActivity : Activity() {
          */
         const val TOR_VERIFY_TIMEOUT_MS = 60_000L
         const val VERIFY_RETRY_DELAY_MS = 1_200L
+        /**
+         * Extra patience per refused probe while the native core is between
+         * cycles of its own reconnect loop (see the gate loop for why a refused
+         * listener during a live core is a cycle, not a death). One WG reconnect
+         * cycle is 12–16s (dataplane validate + retry); a WoW cycle with an
+         * endpoint rescan can run 30s+.
+         */
+        const val VERIFY_RECONNECT_EXTENSION_MS = 15_000L
+        /**
+         * Cap on those extensions, so a truly stuck core still fails honestly
+         * instead of parking the dial on "Verifying" forever: 6 × 15s = 90s on
+         * top of the base budget.
+         */
+        const val VERIFY_RECONNECT_EXTENSIONS = 6
         /**
          * Grace period after the dial goes green before the core's own byte
          * counters are checked. 12s is past the point where a working tunnel has
