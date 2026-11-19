@@ -735,6 +735,8 @@ internal object RussianStrings {
         "MASQUE OVER MASQUE" to "MASQUE ЧЕРЕЗ MASQUE",
         "Masque over Masque" to "Masque через Masque",
         "GOOL OVER MASQUE" to "GOOL ЧЕРЕЗ MASQUE",
+        "MASQUE OVER WARP" to "MASQUE ЧЕРЕЗ WARP",
+        "foreign exit — masque rides the warp carrier" to "внешний выход — masque выходит через warp-носитель",
         "only for the WoW transport" to "только для транспорта WoW",
         "foreign exit — the identity registers through the tunnel" to "внешний выход — идентичность регистрируется через туннель",
         "classic: wireguard in wireguard, a local exit" to "классика: WireGuard в WireGuard, локальный выход",

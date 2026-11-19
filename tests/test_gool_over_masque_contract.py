@@ -88,16 +88,36 @@ class GoolOverMasqueContract(unittest.TestCase):
         sni = CORE.split("AETHER_MASQUE_SNI", 1)[1].split("\n        }", 1)[0]
         self.assertIn("if (isMasqueForEnv) {", sni)
 
-    def test_armed_run_walks_country_proven_inner_endpoints_with_an_ir_deny_policy(self):
-        # 3.2.40 field log: the identity registered through the masque tunnel
-        # and STILL exited IR — the exit follows the inner wireguard ENDPOINT,
-        # not the registration (the same identity reached GB/DE/IR through
-        # different gateways). So the armed run seeds the policy's country-proven
-        # endpoints as the inner-peer walk and denies IR.
+    def test_armed_run_swaps_the_hops_masque_over_warp(self):
+        # 3.2.40/41 field logs settled it: the LAST hop owns the exit, and every
+        # wireguard egress of the gool identity was IR ("IR via FRA", endpoint
+        # after endpoint) while the masque egress on the same network is
+        # foreign. So the armed run flips the hops — warp carries, masque
+        # exits — and still denies IR on the masque exit.
+        self.assertIn('out["AETHER_GW_SWAP"] = "1"', CORE)
         self.assertIn('out["AETHER_EXIT_LOC"] = "!IR"', CORE)
-        self.assertIn("RemotePolicy.exitEndpointsFor(", CORE)
-        # The user's own manual inner endpoint always wins over our seeds.
-        self.assertIn('!out.containsKey("AETHER_GOOL_INNER")', CORE)
+        # The seeds walk is gone: no wireguard inner hop exists on this path.
+        self.assertNotIn("RemotePolicy.exitEndpointsFor(", CORE)
+
+    def test_engine_serves_a_carrying_warp_and_dials_masque_through_it(self):
+        # warp_reverse: the carrier serves socks on an ephemeral loopback port
+        # and the masque H2 dial goes through AETHER_UPSTREAM, exactly like the
+        # psiphon and tor reverse modes; a warp that never comes up is a
+        # connect error, not a watchdog kill.
+        self.assertIn("async fn warp_reverse", ENGINE)
+        self.assertIn("run_wireguard(identity, socks, lastconn)", ENGINE)
+        self.assertIn("the carrying warp tunnel never came up", ENGINE)
+        self.assertIn('AETHER_UPSTREAM", format!("socks5://{socks}")', ENGINE)
+        self.assertIn("the exit is the masque egress", ENGINE)
+
+    def test_the_carrying_warp_ignores_the_exit_policy(self):
+        # The carrier's egress is geo-IR by design; honoring !IR on the warp
+        # hop would fail its settle the moment it connected. The policy belongs
+        # to the masque exit alone.
+        self.assertIn('if std::env::var("AETHER_GW_SWAP").as_deref() == Ok("1") {\n        None\n    } else {\n        exitloc::Policy::from_env()\n    }', ENGINE)
+
+    def test_gw_swap_cannot_leak_into_the_next_connect(self):
+        self.assertIn('"AETHER_GW_SWAP",', CORE)
 
     def test_exit_loc_cannot_leak_into_the_next_connect(self):
         # applyEnv clears every carrier-mode key when absent (3.2.39); the exit
@@ -156,9 +176,9 @@ class GoolOverMasqueContract(unittest.TestCase):
 
     def test_strings_exist_in_every_locale_column(self):
         for key in (
-            "GOOL OVER MASQUE",
+            "MASQUE OVER WARP",
             "only for the WoW transport",
-            "foreign exit — the identity registers through the tunnel",
+            "foreign exit — masque rides the warp carrier",
             "classic: wireguard in wireguard, a local exit",
         ):
             row = STRINGS.split(f'"{key}" to Triple(', 1)

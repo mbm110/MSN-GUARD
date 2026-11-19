@@ -254,6 +254,26 @@ pub async fn run_with(args: Vec<String>) -> Result<()> {
         psiphon::Mode::Only | psiphon::Mode::Off => {}
     }
 
+    // GOOL OVER WARP (the 3.2.42 swap): the LAST hop owns the exit. The 3.2.40
+    // and 3.2.41 field logs showed every wireguard egress of the gool identity
+    // is IR ("IR via FRA", endpoint after endpoint, fresh identity included)
+    // while the masque egress on the same network is foreign. So the armed
+    // mode flips the hops: warp carries the carrier TCP and masque exits. The
+    // carrying warp serves socks on an ephemeral loopback port — exactly the
+    // psiphon and tor reverse pattern — and the masque H2 dial goes through
+    // it (AETHER_UPSTREAM).
+    if std::env::var("AETHER_GW_SWAP").as_deref() == Ok("1")
+        && matches!(protocol, Protocol::WarpInWarp)
+        && !gool_classic()
+    {
+        let socks = warp_reverse(&base_config).await?;
+        std::env::set_var("AETHER_UPSTREAM", format!("socks5://{socks}"));
+        std::env::set_var("AETHER_MASQUE_HTTP2", "1");
+        log::info!(
+            "[+] the tunnel is dialled through warp on the http/2 carrier; the exit is the masque egress"
+        );
+    }
+
     match protocol {
         Protocol::Masque => {
             select_masque_transport().await;
@@ -287,13 +307,24 @@ pub async fn run_with(args: Vec<String>) -> Result<()> {
             select_masque_transport().await;
             let config_path = masque_config_path(&base_config);
             let identity = load_or_provision_masque(&config_path).await?;
+            let lastconn_path = lastconn_path(&config_path);
+            if std::env::var("AETHER_GW_SWAP").as_deref() == Ok("1") {
+                // The swapped direction (3.2.42): warp carries (the pre-match
+                // hook already started it and pointed AETHER_UPSTREAM at its
+                // socks) and plain masque exits — the gool wireguard hop is
+                // gone, so the exit is the masque egress.
+                log::info!(
+                    "[+] masque over warp: device, warp, masque, the internet; the exit is the masque egress"
+                );
+                let _ech = tls::EchSession::start(resolve_ech().await?);
+                return run_masque(identity, listen, lastconn_path, None).await;
+            }
             let inner_path = derive_sibling_path(&config_path, "gool");
             log::info!(
                 "[+] gool: masque device={} carries the wireguard identity in {inner_path}",
                 identity.device_id
             );
             let _ech = tls::EchSession::start(resolve_ech().await?);
-            let lastconn_path = lastconn_path(&config_path);
             run_masque(identity, listen, lastconn_path, Some(inner_path)).await
         }
         Protocol::WarpInWarp => {
@@ -2660,7 +2691,15 @@ async fn run_wireguard_tunnel(
 
     let mut tasks = TaskGuard::new();
 
-    let policy = exitloc::Policy::from_env();
+    // MASQUE OVER WARP (3.2.42): when warp is the CARRYING hop the exit policy
+    // belongs to the masque exit, not to the carrier — the carrier's egress is
+    // geo-IR by design, and honoring !IR here would fail every warp attempt's
+    // settle the moment it connected.
+    let policy = if std::env::var("AETHER_GW_SWAP").as_deref() == Ok("1") {
+        None
+    } else {
+        exitloc::Policy::from_env()
+    };
     exitloc::settle(&stack, &policy, "wireguard").await?;
 
     let socks_listener = socks::bind_listener("socks5", listen).await?;
@@ -3040,6 +3079,53 @@ async fn gool_inner_identity(
 }
 
 const GOOL_INNER_ATTEMPTS: u32 = 2;
+
+/// GOOL OVER WARP (the 3.2.42 swap): starts the CARRYING wireguard hop.
+///
+/// The last hop owns the exit, and on this network every wireguard egress is
+/// geo-IR while the masque egress is foreign — so warp carries and masque
+/// exits. This establishes warp exactly like a plain WireGuard run (same peer
+/// scan, cache and retry loop) but serves its socks on an ephemeral loopback
+/// port the caller points `AETHER_UPSTREAM` at, mirroring the psiphon and tor
+/// reverse modes.
+async fn warp_reverse(base_config: &str) -> Result<SocketAddr> {
+    let config_path = warp_config_path(base_config);
+    let identity = load_or_provision_warp(&config_path).await?;
+    let lastconn = lastconn_path(&config_path);
+
+    // A free ephemeral port: bind, read, drop. Loopback-only and milliseconds
+    // wide; if the race ever loses, warp's own retry loop rebinds on the next
+    // attempt, exactly like a died-and-rebound listener today.
+    let port = {
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        probe.local_addr()?.port()
+    };
+    let socks = SocketAddr::from(([127, 0, 0, 1], port));
+    log::info!("[*] starting warp; the masque tunnel will be dialled through it");
+
+    tokio::spawn(async move {
+        if let Err(e) = run_wireguard(identity, socks, lastconn).await {
+            log::error!("[-] the carrying warp tunnel ended: {e}");
+        }
+    });
+
+    // The socks only answers once warp has validated a peer and served; wait
+    // like psiphon's wait_for_proxy, but with a deadline so a warp that never
+    // comes up surfaces as a connect error instead of a watchdog kill.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
+    loop {
+        if tokio::net::TcpStream::connect(socks).await.is_ok() {
+            log::info!("[+] warp carries the tunnel; the dial goes through {socks}");
+            return Ok(socks);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(AetherError::Other(
+                "the carrying warp tunnel never came up".into(),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
 
 async fn run_gool_tunnel(
     identity: &account::Identity,

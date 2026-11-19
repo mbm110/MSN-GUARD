@@ -70,7 +70,7 @@ class GoolCard(
 
         val column = LinearLayout(context).apply { orientation = VERTICAL }
         titleView = TextView(context).apply {
-            text = Strings.t("GOOL OVER MASQUE")
+            text = Strings.t("MASQUE OVER WARP")
             textSize = 11f
             letterSpacing = spacing(0.1f)
             typeface = Typefaces.medium(context)
@@ -165,7 +165,7 @@ class GoolCard(
         // States the effect for the user, not the mechanism: the foreign exit
         // is the entire point of the masque carrier.
         subtitleView.text = unavailableReason ?: if (value) {
-            Strings.t("foreign exit — the identity registers through the tunnel")
+            Strings.t("foreign exit — masque rides the warp carrier")
         } else {
             Strings.t("classic: wireguard in wireguard, a local exit")
         }
