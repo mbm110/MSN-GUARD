@@ -3537,7 +3537,7 @@ class MainActivity : Activity() {
         // Psiphon gets its own section: all three controls below are meaningless
         // unless the chain is armed, and grouping them says that structurally
         // instead of relying on the user to infer it from a mixed list.
-        content.addView(expandableSection(Strings.t("PSIPHON"), id = "PSIPHON", iconRes = R.drawable.ic_psiphon) { body ->
+        content.addView(expandableSection(Strings.t("PSIPHON"), id = "PSIPHON", iconRes = R.drawable.ic_psiphon, iconSizeDp = 22) { body ->
             // The mode row sits FIRST: it decides the dial model for every connect,
             // and the two CDN fields below only exist to feed it. Reading order
             // matches the packet — mode first, then what the chain carries.
@@ -3767,7 +3767,7 @@ class MainActivity : Activity() {
         // which is what the chain exists to achieve for Psiphon, and wrapping
         // fragmented TLS inside a second tunnel both doubles the latency and
         // destroys the fragmentation's effect — the DPI sees the outer tunnel.
-        content.addView(expandableSection(Strings.t("SHARD"), id = "SHARD", iconRes = R.drawable.ic_shard) { body ->
+        content.addView(expandableSection(Strings.t("SHARD"), id = "SHARD", iconRes = R.drawable.ic_shard, iconSizeDp = 22) { body ->
             shardPoolRow = navRow(Strings.t("Node list"), shardPoolSummary()) {
                 // force = true: the whole point of tapping this is to bypass the
                 // six-hour interval the background job honours.

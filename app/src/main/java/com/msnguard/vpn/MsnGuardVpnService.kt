@@ -340,6 +340,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private var currentCountry = ""
 
+    /**
+     * ISO code of the session's exit (e.g. "IR", "NL") for the notification's
+     * "METHOD-ISO" subtitle. Set from any of: the core's exit_ip event, Psiphon's
+     * region report, the activity's geo lookup, or [scheduleExitLabelProbe]'s
+     * probe through the tunnel itself.
+     */
+    @Volatile private var currentCountryIso = ""
+
     /** Last progress value published, so a repost can reuse it. */
     @Volatile
     private var connectProgress = -1
@@ -1455,6 +1463,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // change the user can see.
         if (currentCountry != exitedIn) {
             currentCountry = exitedIn
+            currentCountryIso = region.trim().uppercase()
             repostNotification()
         }
     }
@@ -2541,6 +2550,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // not overwrite a country Psiphon already gave us.
                 intent.getStringExtra(EXTRA_NOTIFICATION_COUNTRY)?.takeIf { it.isNotBlank() }
                     ?.let { if (currentCountry.isBlank()) currentCountry = it }
+                intent.getStringExtra(EXTRA_NOTIFICATION_COUNTRY)?.takeIf { it.isNotBlank() }
+                    ?.let { if (currentCountryIso.isBlank()) currentCountryIso = it.trim().uppercase() }
                 repostNotification()
             }
             ACTION_RESET_IDENTITIES -> {
@@ -2768,7 +2779,8 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                                     if (labelGeneration != sessionGeneration) return@execute
                                     val actual = ExitGeo.countryOf(ip)
                                     if (labelGeneration != sessionGeneration) return@execute
-                                    if (!actual.isNullOrBlank() && currentCountry.isBlank()) {
+                                    if (!actual.isNullOrBlank() && currentCountryIso.isBlank()) {
+                                        currentCountryIso = actual
                                         currentCountry = PsiphonRegions.name(actual)
                                         ConnectionLog.record("Exit country: $currentCountry ($actual)")
                                         repostNotification()
@@ -3822,6 +3834,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         currentVpnIp = ""
         lastExitIp = ""
         currentCountry = ""
+        currentCountryIso = ""
         sendStatus(STATUS_CONNECTED, Strings.tf("SHARD connected via %s", node))
         ConnectionLog.record("SHARD: now on $node")
         repostNotification()
@@ -4959,6 +4972,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // notification would label a fresh tunnel with the previous exit's
         // country until something overwrote it.
         currentCountry = ""
+        currentCountryIso = ""
         // The previous tunnel's exit belongs to the previous tunnel. Cleared here
         // as well as in stopTunnel because a reconnect goes straight from one
         // startTunnel to the next, and a stale address would otherwise be handed
@@ -6450,6 +6464,12 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 // This is the latch's normal end: the scheduled restart cannot clear
                 // it itself without racing the old session's teardown readers.
                 reconnectRequested.set(false)
+                // The notification names the exit country as METHOD-ISO
+                // (MASQUE-IR, LANTERN-NL). The aether core self-reports its
+                // exit (exit_ip event); every OTHER transport needs this
+                // probe-through-the-tunnel to name its exit at all, with the
+                // app open or closed.
+                scheduleExitLabelProbe()
             }
             STATUS_DISCONNECTED, STATUS_FAILED -> connectedSince = 0L
         }
@@ -6942,6 +6962,94 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
      * on proxy mode, where rotating would kill a listener another device is
      * actively using over the LAN.
      */
+    // ── Exit country label for the notification (METHOD-ISO) ────────────────
+
+    /**
+     * The local SOCKS listener of the live transport, mirrored from the
+     * activity's socksPort() so both measurements always agree. -1 when no
+     * listener exists for the current shape (e.g. the aether core in native
+     * TUN mode, which self-reports its exit via the exit_ip event instead).
+     */
+    private fun exitProbeSocksPort(): Int = when {
+        TorManager.isTorActive -> TorManager.FRONT_SOCKS_PORT
+        currentProtocol.contains("LANTERN") && LanternEngine.isRunning -> LanternEngine.SOCKS_PORT
+        com.msnguard.vpn.foxy.FoxyTunnel.isRunning -> com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT
+        WarpExitManager.isRunning ->
+            if (WarpUdpgwFront.isRunning) WarpUdpgwFront.LISTEN_PORT else WarpExitManager.SOCKS_PORT
+        ShardSocksFront.isRunning -> ShardSocksFront.LISTEN_PORT
+        TunnelStatus.isProxyMode -> CoreConfig.proxyListenPort(this)
+        else -> CoreConfig.SOCKS_PORT
+    }
+
+    /**
+     * One probe THROUGH the tunnel: geojs's ip/geo.json answers with both the
+     * exit address and its country, asked from the exit itself, so it works
+     * even when carrier-direct geo lookups are blocked — and it is the only
+     * source for transports whose core never reports an exit (Lantern, Tor,
+     * SHARD, Foxy). Runs on [exitGeoExecutor]; every write is generation-
+     * guarded so a late answer cannot label the next session.
+     */
+    private fun probeExitLabelOnce(generation: Int): Boolean {
+        if (generation != sessionGeneration) return false
+        if (currentCountryIso.isNotBlank()) return true
+        val port = exitProbeSocksPort()
+        if (port <= 0) return false
+        val proxy = java.net.Proxy(
+            java.net.Proxy.Type.SOCKS,
+            java.net.InetSocketAddress("127.0.0.1", port),
+        )
+        return try {
+            val connection = java.net.URL("https://get.geojs.io/v1/ip/geo.json")
+                .openConnection(proxy) as java.net.HttpURLConnection
+            connection.connectTimeout = 5_000
+            connection.readTimeout = 5_000
+            try {
+                if (connection.responseCode !in 200..299) return false
+                val body = connection.inputStream.bufferedReader().use { it.readText() }
+                val geo = org.json.JSONObject(body)
+                val ip = geo.optString("ip", "")
+                val code = geo.optString("country_code", "").trim().uppercase()
+                if (code.length == 2 && generation == sessionGeneration && currentCountryIso.isBlank()) {
+                    currentCountryIso = code
+                    if (ip.isNotBlank() && currentVpnIp.isBlank()) currentVpnIp = ip
+                    ConnectionLog.record("Exit country: ${PsiphonRegions.name(code)} ($code), probed through the tunnel")
+                    repostNotification()
+                    true
+                } else false
+            } finally {
+                connection.disconnect()
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Retry ladder for the exit label: CONNECTED is broadcast the moment the
+     * data path is up, but the local listeners and the tunnel itself need a
+     * moment before a probe through them can succeed. A few attempts spread
+     * over the first minute settle it; every attempt is a no-op once any
+     * source (exit_ip, Psiphon's report, the activity, a previous probe) has
+     * already named the exit.
+     */
+    private fun scheduleExitLabelProbe() {
+        val generation = sessionGeneration
+        val delays = longArrayOf(2_000L, 8_000L, 20_000L, 45_000L)
+        for (delay in delays) {
+            runCatching {
+                ladderScheduler.schedule({
+                    if (generation != sessionGeneration || !TunnelStatus.isActive()) return@schedule
+                    if (currentCountryIso.isNotBlank()) return@schedule
+                    runCatching {
+                        exitGeoExecutor.execute {
+                            probeExitLabelOnce(generation)
+                        }
+                    }
+                }, delay, TimeUnit.MILLISECONDS)
+            }
+        }
+    }
+
     private fun evaluateExitCountry(ip: String) {
         val wanted = sessionExitCountry ?: return
         if (exitCountryEvaluated) return
@@ -7212,27 +7320,13 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             this, 3, pauseIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // Second line: what is carrying the traffic and where it comes out.
-        // Byte counters and speed are deliberately gone from here — see
-        // [updateTrafficNotification] for why they were the cause of the
-        // lock-screen wakeups, not just clutter.
+        // Second line: the method and its exit country (MASQUE-IR, LANTERN-NL).
+        // The ISO code is the notification's currency — it comes from the
+        // core's exit_ip event, Psiphon's region report, the activity's
+        // lookup, or the service's own probe through the tunnel, so every
+        // transport can name its exit even with the app closed.
         val method = prettyProtocol()
-        // SHARD names no country at all, by request: its pool is public and a node's
-        // advertised country is the publisher's label, not a measurement, so the two
-        // letters were being read as a promise about where the exit is. The other
-        // five transports keep theirs — Psiphon reports its region from the tunnel
-        // itself and the WARP/Tor paths get theirs from the activity's geolocation
-        // lookup, both of which describe the exit that is actually carrying traffic.
-        //
-        // Suppressed here rather than at the source: the active node's country is
-        // still what the main screen shows, and it belongs there. This is a
-        // notification-only decision.
-        val country = if (currentProtocol.contains("SHARD")) {
-            ""
-        } else {
-            currentCountry
-        }
-        val subtitle = if (country.isNotBlank()) "$method • $country" else method
+        val subtitle = if (currentCountryIso.isNotBlank()) "$method-$currentCountryIso" else method
 
         // Proxy mode must not claim "VPN connected": nothing is tunnelled device-wide,
         // and a user who reads that and then finds Chrome on their real IP would be
