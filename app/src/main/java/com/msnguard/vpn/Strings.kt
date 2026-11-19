@@ -769,8 +769,6 @@ object Strings {
         "MASQUE OVER MASQUE" to Triple("MASQUE OVER MASQUE", "MASQUE روی MASQUE", "MASQUE over MASQUE"),
         "Masque over Masque" to Triple("Masque over Masque", "MASQUE روی MASQUE", "Masque over Masque"),
         "GOOL OVER MASQUE" to Triple("GOOL OVER MASQUE", "GOOL روی MASQUE", "GOOL over MASQUE"),
-        "MASQUE OVER WARP" to Triple("MASQUE OVER WARP", "MASQUE روی WARP", "MASQUE over WARP"),
-        "foreign exit — masque rides the warp carrier" to Triple("foreign exit — masque rides the warp carrier", "خروجی خارجی — MASQUE از داخل WARP خارج می‌شود", "外部出口 — MASQUE 经由 WARP 载体"),
         "only for the WoW transport" to Triple("only for the WoW transport", "فقط مخصوص متد WoW", "仅适用于 WoW 传输"),
         "foreign exit — the identity registers through the tunnel" to Triple("foreign exit — the identity registers through the tunnel", "خروجی خارجی — هویت از داخل تانل ثبت می‌شود", "外部出口 — 身份经由隧道注册"),
         "classic: wireguard in wireguard, a local exit" to Triple("classic: wireguard in wireguard, a local exit", "کلاسیک: وایرگارد در وایرگارد، خروجی محلی", "经典模式：WireGuard 套 WireGuard，本地出口"),

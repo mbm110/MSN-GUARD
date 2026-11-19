@@ -475,20 +475,6 @@ object CoreConfig {
                 }
                 out["AETHER_MIM_INNER_PEER"] = it
             }
-
-            // GOOL OVER WARP — the swapped direction (3.2.42). The 3.2.40/41
-            // field logs settled it: the LAST hop owns the exit, and every
-            // wireguard egress of the gool identity was IR ("IR via FRA",
-            // endpoint after endpoint) while the masque egress on the same
-            // network is foreign. So the armed run flips the hops — warp only
-            // carries the carrier TCP, masque exits — and asks for any exit
-            // but IR; the engine rotates masque gateways if the measured
-            // egress ever lands IR. The engine's gool_inner_peers walk
-            // (AETHER_GOOL_INNER) is not read on this path.
-            if (goolOverMasqueArmed) {
-                out["AETHER_GW_SWAP"] = "1"
-                out["AETHER_EXIT_LOC"] = "!IR"
-            }
         }
 
         // MASQUE transport: H2/TCP is the only working mode on this carrier.
@@ -852,16 +838,6 @@ object CoreConfig {
             "AETHER_WIW_OUTER_PEER", "AETHER_WIW_INNER_PEER", "AETHER_WIW_PEERS",
             "AETHER_MIM_INNER_PEER", "AETHER_PEER", "AETHER_WG_PEER",
             "AETHER_MASQUE_SNI",
-            // Same leak family, opposite direction (3.2.40): the armed
-            // Gool-over-Masque run sets AETHER_EXIT_LOC=!IR, and a stale value
-            // surviving into a classic WoW connect would make its post-walk
-            // settle REJECT the IR exit and fail the whole connect — classic
-            // gool does not rotate peers on the policy.
-            "AETHER_EXIT_LOC", "AETHER_EXIT_LOC_SECS",
-            // The swapped gool direction (3.2.42): a stale GW_SWAP surviving
-            // into a classic WoW connect would silently re-point
-            // AETHER_UPSTREAM at a dead carrying warp.
-            "AETHER_GW_SWAP",
         )
         for (key in clearIfAbsent) if (key !in map) NativeCore.clearEnv(key)
     }
