@@ -126,6 +126,17 @@ class GoolOverMasqueContract(unittest.TestCase):
             ENGINE,
         )
 
+    def test_armed_run_relays_the_outer_masque_identity_on_a_fresh_install(self):
+        # 3.2.40 field log (fresh install): the engine provisioned the DEDICATED
+        # MASQUE identity directly from the device — the registration API never
+        # answered on the user's network (four 20s timeouts → watchdog → MTU retry
+        # loop). The app must relay it like every other identity, armed mode only.
+        self.assertIn('relayProtocol == "gool" && CoreConfig.goolOverMasque(this@MsnGuardVpnService)',
+                      SERVICE)
+        self.assertIn('IdentityProvisioner.hasIdentity(this@MsnGuardVpnService, "masque")',
+                      SERVICE)
+        self.assertIn('"Identity relay: masque stored (Gool over MASQUE)"', SERVICE)
+
     def test_slot_card_is_wired_for_the_wow_transport(self):
         self.assertIn("private lateinit var goolCard: GoolCard", UI)
         self.assertIn("goolCard = GoolCard(this, palette) { armed -> setGoolArmed(armed) }", UI)
