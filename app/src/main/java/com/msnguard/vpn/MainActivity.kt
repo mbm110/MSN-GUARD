@@ -3621,7 +3621,7 @@ class MainActivity : Activity() {
 
         // Tor section, mirroring the Psiphon one: the mode picker is the only
         // control, and it is meaningful regardless of what else is set.
-        content.addView(expandableSection(Strings.t("TOR"), id = "TOR", iconRes = R.drawable.ic_tor) { body ->
+        content.addView(expandableSection(Strings.t("TOR"), id = "TOR", iconRes = R.drawable.ic_tor, iconSizeDp = 22) { body ->
             torModeRowRef = navRow(Strings.t("Connection mode"), torMode().label) {
                 chooseTorMode {
                     torModeRowRef?.setValue(torMode().label)
@@ -3728,7 +3728,7 @@ class MainActivity : Activity() {
         // server picker refreshes pings automatically (no separate button):
         // Lantern keeps probing every server in the background, and each open
         // also re-reads the latest probe results and re-ranks by them.
-        content.addView(expandableSection(Strings.t("LANTERN"), id = "LANTERN", iconRes = R.drawable.ic_lantern) { body ->
+        content.addView(expandableSection(Strings.t("LANTERN"), id = "LANTERN", iconRes = R.drawable.ic_lantern, iconSizeDp = 22) { body ->
             lanternServerRow = navRow(Strings.t("Server"), lanternServerLabel()) {
                 chooseLanternServer { lanternServerRow?.setValue(lanternServerLabel()) }
             }
@@ -4696,7 +4696,7 @@ class MainActivity : Activity() {
      * picker still shows servers and countries — pings then reflect the last
      * connected session until the next connect refreshes them.
      */
-    private fun parseLanternSnapshot(raw: JSONObject?) {
+    private fun parseLanternSnapshot(raw: JSONObject?, trustCurrent: Boolean = true) {
         val snapshot = raw ?: run {
             val cached = preferences().getString(lanternServersCachePref, null) ?: return
             runCatching { JSONObject(cached) }.getOrNull() ?: return
@@ -4711,7 +4711,7 @@ class MainActivity : Activity() {
             if (incoming == null || incoming.length() == 0) {
                 val cached = preferences().getString(lanternServersCachePref, null)
                 val cachedSnapshot = cached?.let { runCatching { JSONObject(it) }.getOrNull() }
-                if (cachedSnapshot != null) return parseLanternSnapshot(null)
+                if (cachedSnapshot != null) return parseLanternSnapshot(null, trustCurrent)
                 return
             }
             preferences().edit().putString(
@@ -4721,7 +4721,14 @@ class MainActivity : Activity() {
         }
         lanternServersFetchedAt = snapshot.optLong("fetched_at_epoch_ms", 0L)
         lanternAutoSelected = snapshot.optBoolean("auto", true)
-        lanternCurrentTag = snapshot.optString("current", "")
+        // The "current" marker is a LIVE fact. When the tunnel is up but the
+        // live /servers read failed (a busy tunnel makes the request time out —
+        // same failure class as the speed-counter bug) the cached snapshot's
+        // "current" is some PREVIOUS session's server, and badging that row
+        // (Italy "Current" while connected to Germany, v3.2.30 report) is a
+        // lie. Offline (tunnel down) the cached value is our best knowledge and
+        // stays.
+        lanternCurrentTag = if (trustCurrent) snapshot.optString("current", "") else ""
         val list = snapshot.optJSONArray("servers") ?: return
         val servers = mutableListOf<LanternServerOption>()
         for (i in 0 until list.length()) {
@@ -4785,6 +4792,13 @@ class MainActivity : Activity() {
     private fun loadLanternServers(after: (List<LanternServerOption>) -> Unit) {
         Thread {
             var snapshot = LanternEngine.serversSnapshot()
+            if (snapshot == null && LanternEngine.isRunning) {
+                // Connected but the default 2s read timed out — a busy tunnel
+                // does exactly that. One retry with a longer budget before the
+                // fallback, or the picker falls back to the cache and the
+                // current marker lies.
+                snapshot = LanternEngine.serversSnapshot(timeoutMs = 5_000)
+            }
             if (snapshot == null) {
                 val cacheEmpty = preferences().getString(lanternServersCachePref, null).isNullOrBlank()
                 if (cacheEmpty) {
@@ -4803,7 +4817,12 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            parseLanternSnapshot(snapshot)
+            // Live snapshot ⇒ trust its "current". Cache while CONNECTED ⇒
+            // the cached current belongs to a previous session; suppress it.
+            parseLanternSnapshot(
+                snapshot,
+                trustCurrent = snapshot != null || !LanternEngine.isRunning,
+            )
             runOnUiThread { after(lanternServersCache) }
         }.apply { isDaemon = true; start() }
     }
@@ -4849,7 +4868,11 @@ class MainActivity : Activity() {
                     ConnectionLog.record("Lantern: ping refresh skipped on mobile data (cached pings shown)")
                 }
                 if (lanternPickerOpen) {
-                    parseLanternSnapshot(LanternEngine.serversSnapshot(timeoutMs = 3_000))
+                    val fresh = LanternEngine.serversSnapshot(timeoutMs = 5_000)
+                    parseLanternSnapshot(
+                        fresh,
+                        trustCurrent = fresh != null || !LanternEngine.isRunning,
+                    )
                 }
             }
         }.apply { isDaemon = true; start() }
