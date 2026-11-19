@@ -88,6 +88,44 @@ class GoolOverMasqueContract(unittest.TestCase):
         sni = CORE.split("AETHER_MASQUE_SNI", 1)[1].split("\n        }", 1)[0]
         self.assertIn("if (isMasqueForEnv) {", sni)
 
+    def test_armed_run_walks_country_proven_inner_endpoints_with_an_ir_deny_policy(self):
+        # 3.2.40 field log: the identity registered through the masque tunnel
+        # and STILL exited IR — the exit follows the inner wireguard ENDPOINT,
+        # not the registration (the same identity reached GB/DE/IR through
+        # different gateways). So the armed run seeds the policy's country-proven
+        # endpoints as the inner-peer walk and denies IR.
+        self.assertIn('out["AETHER_EXIT_LOC"] = "!IR"', CORE)
+        self.assertIn("RemotePolicy.exitEndpointsFor(", CORE)
+        # The user's own manual inner endpoint always wins over our seeds.
+        self.assertIn('!out.containsKey("AETHER_GOOL_INNER")', CORE)
+
+    def test_exit_loc_cannot_leak_into_the_next_connect(self):
+        # applyEnv clears every carrier-mode key when absent (3.2.39); the exit
+        # policy joined that family in 3.2.40 — a stale !IR surviving into a
+        # classic WoW connect would make its post-walk settle reject IR and fail
+        # the whole connect, because classic gool does not rotate on policy.
+        self.assertIn('"AETHER_EXIT_LOC", "AETHER_EXIT_LOC_SECS",', CORE)
+
+    def test_engine_rotates_inner_peers_on_policy_rejection(self):
+        # The engine gates the peer walk: a rejected hop is torn down and the
+        # next candidate tried; when every candidate fails the policy the first
+        # working one is kept — a working tunnel beats a perfect one.
+        self.assertIn("rejected by the exit policy", ENGINE)
+        self.assertIn("policy_fallback", ENGINE)
+        self.assertIn("staying on the first working one", ENGINE)
+        # A policy-rejected endpoint must not be remembered.
+        self.assertIn("(policy.is_none() || policy_clean_pick)", ENGINE)
+
+    def test_gool_inner_env_is_a_walk_not_a_pin(self):
+        # Comma-separated seeds; the engine's own candidates follow them so a
+        # seed that will not validate inside the tunnel falls through to the
+        # defaults instead of failing the connect.
+        self.assertIn("value.split([',', ';', ' '])", ENGINE)
+        self.assertIn(
+            "fall through to the default endpoints".replace("fall through", "falls through"),
+            ENGINE,
+        )
+
     def test_slot_card_is_wired_for_the_wow_transport(self):
         self.assertIn("private lateinit var goolCard: GoolCard", UI)
         self.assertIn("goolCard = GoolCard(this, palette) { armed -> setGoolArmed(armed) }", UI)

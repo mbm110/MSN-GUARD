@@ -2964,10 +2964,30 @@ fn gool_classic() -> bool {
 }
 
 fn gool_inner_peers(identity: &account::Identity) -> Result<Vec<SocketAddr>> {
-    if let Some(value) = env_value("AETHER_GOOL_INNER") {
-        return Ok(vec![parse_endpoint(&value)?]);
-    }
     let mut peers: Vec<SocketAddr> = Vec::new();
+    if let Some(value) = env_value("AETHER_GOOL_INNER") {
+        // A comma/semicolon/space separated WALK, not a pin: the first
+        // candidate whose exit passes the policy wins, so the caller names
+        // several proven endpoints and the engine rotates them inside ONE
+        // connect instead of the service reconnecting per endpoint.
+        for part in value.split([',', ';', ' ']) {
+            if part.trim().is_empty() {
+                continue;
+            }
+            let peer = parse_endpoint(part)?;
+            if !peers.contains(&peer) {
+                peers.push(peer);
+            }
+        }
+        if peers.is_empty() {
+            return Err(AetherError::Other(
+                "AETHER_GOOL_INNER carried no endpoint".into(),
+            ));
+        }
+    }
+    // The engine's own candidates follow the named ones, so a seed that will
+    // not validate inside the tunnel falls through to the default endpoints
+    // instead of failing the connect.
     let named = std::iter::once(identity.assigned_endpoint.trim())
         .chain(wireguard::wg_seeds_v4());
     for host in named {
@@ -3047,7 +3067,18 @@ async fn run_gool_tunnel(
     let inner_identity = gool_inner_identity(&outer.stack, inner_path).await?;
     let candidates = gool_inner_peers(&inner_identity)?;
 
+    // The exit policy gates the peer walk, not just the finished tunnel: a
+    // wireguard endpoint that handshakes but exits through a country the policy
+    // refuses is dropped and the next candidate tried (field-proven: the same
+    // gool identity reached GB, DE and IR through different gateways — the
+    // exit follows the endpoint, not the registration).
+    let policy = exitloc::Policy::from_env();
+
     let mut established = None;
+    // The first peer that carried traffic but failed the exit policy. If every
+    // candidate fails the policy this is still a working tunnel — a working
+    // tunnel beats a perfect one — so it is kept as the floor.
+    let mut policy_fallback = None;
     let mut last_error = AetherError::Other("no wireguard endpoint to try".into());
     'peers: for inner_peer in candidates {
         let (forwarder, forwarder_guard) = spawn_udp_forwarder(&outer.stack, inner_peer).await?;
@@ -3055,8 +3086,26 @@ async fn run_gool_tunnel(
         for attempt in 1..=GOOL_INNER_ATTEMPTS {
             match establish_wg(&inner_identity, forwarder, INNER_MTU, false, 25, "inner").await {
                 Ok(hop) => {
-                    established = Some((inner_peer, hop, forwarder_guard));
-                    break 'peers;
+                    match exitloc::settle(&hop.0, &policy, "gool").await {
+                        Ok(()) => {
+                            established = Some((inner_peer, hop, forwarder_guard));
+                            break 'peers;
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "[-] inner wireguard {inner_peer} rejected by the exit policy: {e}"
+                            );
+                            last_error = e;
+                            if policy_fallback.is_none() {
+                                policy_fallback = Some((inner_peer, hop, forwarder_guard));
+                            } else {
+                                // A floor is already banked; this hop is torn
+                                // down, not left running detached.
+                                hop.1.abort();
+                            }
+                            break;
+                        }
+                    }
                 }
                 Err(e) => {
                     log::warn!("[-] inner wireguard {inner_peer} attempt {attempt} failed: {e}");
@@ -3065,11 +3114,28 @@ async fn run_gool_tunnel(
             }
         }
     }
+    // A policy-clean pick tears the earlier rejected hop down; with no clean
+    // pick the rejected floor becomes the tunnel rather than an error.
+    let policy_clean_pick = established.is_some();
+    if policy_clean_pick {
+        if let Some((_, (mut rejected_exit, _), _guard)) = policy_fallback {
+            rejected_exit.abort();
+            let _ = &rejected_exit;
+        }
+    } else if policy_fallback.is_some() {
+        established = policy_fallback;
+        log::warn!(
+            "[*] no inner endpoint satisfied the exit policy; staying on the first working one"
+        );
+    }
     let Some((inner_peer, (inner_stack, mut inner_exit), _forwarder_guard)) = established else {
         return Err(last_error);
     };
     if inner_identity.assigned_endpoint != inner_peer.ip().to_string()
         && env_value("AETHER_GOOL_INNER").is_none()
+        // A policy-rejected endpoint must not be remembered as the identity's
+        // endpoint — the next connect would try it first and walk past it again.
+        && (policy.is_none() || policy_clean_pick)
     {
         let remembered = account::Identity {
             assigned_endpoint: inner_peer.ip().to_string(),
@@ -3080,8 +3146,10 @@ async fn run_gool_tunnel(
         }
     }
 
-    let policy = exitloc::Policy::from_env();
-    exitloc::settle(&inner_stack, &policy, "gool").await?;
+    // The peer walk settled the policy above; without one, report the exit once.
+    if policy.is_none() {
+        exitloc::settle(&inner_stack, &policy, "gool").await?;
+    }
     let policy_stack = inner_stack.clone();
 
     let socks_listener = socks::bind_listener("socks5", listen).await?;

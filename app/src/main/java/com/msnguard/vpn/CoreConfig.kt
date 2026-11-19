@@ -475,6 +475,29 @@ object CoreConfig {
                 }
                 out["AETHER_MIM_INNER_PEER"] = it
             }
+
+            // GOOL OVER MASQUE — the foreign-exit walk (3.2.40). The exit
+            // follows the inner wireguard ENDPOINT, not the registration
+            // (field-proven: the same gool identity reached GB, DE and IR
+            // through different gateways; registering the identity through the
+            // masque tunnel alone still landed IR because the first endpoint
+            // that handshook exited IR). So the armed run asks the engine for
+            // any exit but IR, seeds the policy's country-proven endpoints as
+            // the head of the inner-peer walk, and the engine rotates the
+            // candidates inside ONE connect until the measured exit passes.
+            // The user's own manual inner endpoint (above) always leads the
+            // walk over our seeds.
+            if (goolOverMasqueArmed) {
+                if (!out.containsKey("AETHER_GOOL_INNER")) {
+                    val seeds = RemotePolicy.exitEndpointsFor(
+                        context, listOf("GB", "US", "IT"), "GOOL"
+                    )
+                    if (seeds.isNotEmpty()) {
+                        out["AETHER_GOOL_INNER"] = seeds.joinToString(",") { it.endpoint }
+                    }
+                }
+                out["AETHER_EXIT_LOC"] = "!IR"
+            }
         }
 
         // MASQUE transport: H2/TCP is the only working mode on this carrier.
@@ -838,6 +861,12 @@ object CoreConfig {
             "AETHER_WIW_OUTER_PEER", "AETHER_WIW_INNER_PEER", "AETHER_WIW_PEERS",
             "AETHER_MIM_INNER_PEER", "AETHER_PEER", "AETHER_WG_PEER",
             "AETHER_MASQUE_SNI",
+            // Same leak family, opposite direction (3.2.40): the armed
+            // Gool-over-Masque run sets AETHER_EXIT_LOC=!IR, and a stale value
+            // surviving into a classic WoW connect would make its post-walk
+            // settle REJECT the IR exit and fail the whole connect — classic
+            // gool does not rotate peers on the policy.
+            "AETHER_EXIT_LOC", "AETHER_EXIT_LOC_SECS",
         )
         for (key in clearIfAbsent) if (key !in map) NativeCore.clearEnv(key)
     }
