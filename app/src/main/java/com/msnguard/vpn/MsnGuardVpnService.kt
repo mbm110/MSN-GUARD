@@ -4891,7 +4891,13 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // the chip is GOOL-only in the UI, and this guard is what enforces it
         // even for a stale pref left by an older build (setAiMode wrote GB
         // under MASQUE in ≤1.9.6) or a restored backup.
-        if (sessionExitCountry != null && currentProtocol != "GOOL") {
+        if (sessionExitCountry != null && (currentProtocol != "GOOL" ||
+                // Gool-over-masque: the exit follows where the masque tunnel
+                // hands the inner registration, not a gateway this service can
+                // force — a forced WG-style seed would be dialed as the masque
+                // outer peer and never handshake. The chase stays classic-only.
+                CoreConfig.goolOverMasque(this))
+        ) {
             sessionExitCountry = null
         }
         // PREFERRED-EXIT PIN: the endpoint a previous session verified exits in
@@ -6866,7 +6872,14 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         val direct = when (currentProtocol) {
             "MASQUE" -> readLastconnPeer(File(filesDir, "aether-masque-lastconn.toml"))
             "WIREGUARD" -> readLastconnPeer(coreLastconnFile("wireguard"))
-            "GOOL" -> readLastconnPeer(coreLastconnFile("gool"))
+            // Gool-over-masque runs on the masque identity (aether-masque.toml),
+            // so run_masque saves the working gateway into the masque lastconn
+            // — the classic aether-gool-lastconn.toml belongs to the
+            // wireguard-in-wireguard run and stays untouched by that mode.
+            "GOOL" -> readLastconnPeer(
+                if (CoreConfig.goolOverMasque(this)) File(filesDir, "aether-masque-lastconn.toml")
+                else coreLastconnFile("gool")
+            )
             "MIM" -> readLastconnPeer(coreLastconnFile("mim"))
             else -> ""
         }

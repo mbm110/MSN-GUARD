@@ -103,6 +103,19 @@ object CoreConfig {
     const val MIM_ARMED_PREF = "mim_armed"
     const val MIM_ARMED_DEFAULT = false
 
+    /**
+     * Whether WoW runs gool over MASQUE (foreign exit) instead of classic
+     * wireguard-in-wireguard (local, Iranian exit).
+     *
+     * ON by default: the whole point of the WoW transport label was a foreign
+     * address, and the engine's own gool menu defaults the same way (upstream
+     * Aether v2.3.0 asks "[1] gool over masque ... (default)"). A user who
+     * needs the classic carrier behaviour turns it off once and the explicit
+     * off is remembered — never quietly re-armed.
+     */
+    const val GOOL_OVER_MASQUE_PREF = "gool_over_masque"
+    const val GOOL_OVER_MASQUE_DEFAULT = true
+
     /** The core's protocol name for masque-over-masque. */
     const val MIM_PROTOCOL = "mim"
 
@@ -235,6 +248,11 @@ object CoreConfig {
         context.profiled()
             .getBoolean(MIM_ARMED_PREF, MIM_ARMED_DEFAULT)
 
+    /** Whether WoW runs gool over MASQUE (foreign exit). See [GOOL_OVER_MASQUE_PREF]. */
+    fun goolOverMasque(context: Context): Boolean =
+        context.profiled()
+            .getBoolean(GOOL_OVER_MASQUE_PREF, GOOL_OVER_MASQUE_DEFAULT)
+
     fun json(context: Context, protocol: String? = null): String =
         json(context, protocol, listenOverride = null, socksProxyForCore = "")
 
@@ -327,6 +345,12 @@ object CoreConfig {
             protocol ?: text("default_protocol", "wireguard")
         }
 
+        // WoW mode: gool over MASQUE (engine `WarpInWarp if !gool_classic()`:
+        // masque outer, wireguard identity registered THROUGH the tunnel, so
+        // the exit is foreign) or classic wireguard-in-wireguard. The pref
+        // decides; AETHER_GOOL_MODE below is what actually tells the engine.
+        val goolOverMasqueArmed = effectiveProtocol == "gool" && goolOverMasque(context)
+
         val out = LinkedHashMap<String, String>()
 
         // The identity file. The engine loads an existing one or provisions a
@@ -341,15 +365,15 @@ object CoreConfig {
         // everything else -> masque.
         out["AETHER_PROTOCOL"] = effectiveProtocol
 
-        // FCAE sets this for gool (core/fcae-ffi/runtime/src/config.rs:
-        // `set("AETHER_GOOL_MODE", (cfg.protocol == FcaeProtocol::Gool).then_some("classic"))`),
-        // and the engine's own gool_classic() reads it: without it, "gool" is
-        // WARP-in-MASQUE (the `WarpInWarp if !gool_classic()` arm), which dials a
-        // MASQUE handshake this carrier kills. Classic gool — WireGuard carried
-        // inside WireGuard — is what the WoW label actually promises and what the
-        // scan + AETHER_WG_PEER path is built for, so name it explicitly the way
-        // FCAE does.
-        if (effectiveProtocol == "gool") {
+        // Classic gool selection. The engine's gool_classic() flips to
+        // wireguard-in-wireguard on AETHER_GOOL_MODE=classic; without the
+        // variable "gool" is WARP-in-MASQUE — masque outer, wireguard carried
+        // inside, identity registered through the tunnel for a FOREIGN exit
+        // (upstream Aether v2.3.0 --gool). The Gool Over MASQUE card owns the
+        // choice now: ON leaves the variable unset (foreign exit), OFF pins
+        // classic exactly the way FCAE does — the scan + AETHER_WG_PEER path
+        // classic WoW was built for.
+        if (effectiveProtocol == "gool" && !goolOverMasqueArmed) {
             out["AETHER_GOOL_MODE"] = "classic"
         }
 
@@ -390,7 +414,13 @@ object CoreConfig {
         out["AETHER_SCAN"] = text("default_scan_mode", "balanced")
         // Masque in Iran: always H2 and always IPv4 (hardcoded, 2026-10-10). Other
         // transports keep the user's choice; masque/mim ignore it.
-        val isMasqueForEnv = effectiveProtocol == "masque" || effectiveProtocol == MIM_PROTOCOL
+        // Gool over MASQUE runs on the engine's masque carrier (run_gool_tunnel
+        // dials the outer hop exactly the way plain MASQUE does), so it needs
+        // the same masque-shaped env: v4 scan (masque's standing rule), H2
+        // transport, no aethernoize, ECH off, the H2-fragment knobs. Without
+        // this the masque handshake would run on the wireguard-shaped env.
+        val isMasqueForEnv = effectiveProtocol == "masque" || effectiveProtocol == MIM_PROTOCOL ||
+            (effectiveProtocol == "gool" && goolOverMasqueArmed)
         out["AETHER_IP"] = if (isMasqueForEnv) "v4" else text("default_scan", "both")
 
         // Obfuscation (aethernoize). off/light/balanced/aggressive/firewall/gfw;
@@ -414,18 +444,35 @@ object CoreConfig {
         // MASQUE gateway to the WireGuard rung, where it cannot work — so the
         // chain's outer legs always scan.
         if (listenOverride == null) {
-            text("manual_endpoint").ifBlank { "" }.takeIf { it.isNotBlank() }?.let {
-                // The engine splits AETHER_PEER across protocols: AETHER_PEER is
-                // the masque peer, AETHER_WG_PEER the wireguard one. Set both so
-                // a manual endpoint reaches whichever transport the user picked.
-                out["AETHER_PEER"] = it
-                out["AETHER_WG_PEER"] = it
+            // A manual endpoint entered on WoW names a wireguard-style peer for
+            // the CLASSIC stack. In gool-over-masque the outer hop is a masque
+            // dial and AETHER_PEER would force that peer into it (probe
+            // skipped, straight handshake), so the outer scans on its own and
+            // AETHER_WG_PEER is simply unread there. Pinning is a classic-WoW
+            // feature; gool-over-masque ignores the field the way the engine
+            // does.
+            if (!goolOverMasqueArmed) {
+                text("manual_endpoint").ifBlank { "" }.takeIf { it.isNotBlank() }?.let {
+                    // The engine splits AETHER_PEER across protocols: AETHER_PEER is
+                    // the masque peer, AETHER_WG_PEER the wireguard one. Set both so
+                    // a manual endpoint reaches whichever transport the user picked.
+                    out["AETHER_PEER"] = it
+                    out["AETHER_WG_PEER"] = it
+                }
             }
             // The inner hop of a nested transport. Empty means "same as the
             // outer", which is the behaviour every version before this had —
             // so an unset field changes nothing for existing users.
             text("manual_inner_endpoint").ifBlank { "" }.takeIf { it.isNotBlank() }?.let {
-                out["AETHER_WIW_INNER_PEER"] = it
+                if (goolOverMasqueArmed) {
+                    // The engine's gool_inner_peers reads AETHER_GOOL_INNER.
+                    // AETHER_WIW_INNER_PEER must NOT be set here: its mere
+                    // presence makes the engine's gool_classic() flip the whole
+                    // run back to wireguard-in-wireguard.
+                    out["AETHER_GOOL_INNER"] = it
+                } else {
+                    out["AETHER_WIW_INNER_PEER"] = it
+                }
                 out["AETHER_MIM_INNER_PEER"] = it
             }
         }
@@ -729,9 +776,15 @@ object CoreConfig {
         if (peer != null) {
             val ov = LinkedHashMap(base)
             // Mirrors the old JSON -> engine mapping: a manual pin reached both
-            // AETHER_PEER and AETHER_WG_PEER.
-            ov["AETHER_PEER"] = peer
-            ov["AETHER_WG_PEER"] = peer
+            // AETHER_PEER and AETHER_WG_PEER. In gool-over-masque both are
+            // meaningless-to-harmful (AETHER_PEER would force a wireguard-style
+            // peer into the masque outer dial, probe skipped), and env() already
+            // drops the manual endpoint there — so the forced-peer injection sits
+            // behind the same gate.
+            if (!(proto == "gool" && goolOverMasque(context))) {
+                ov["AETHER_PEER"] = peer
+                ov["AETHER_WG_PEER"] = peer
+            }
             return ov
         }
         return base

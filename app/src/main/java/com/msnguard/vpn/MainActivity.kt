@@ -89,6 +89,11 @@ class MainActivity : Activity() {
      */
     private lateinit var mimCard: MimCard
     /**
+     * The WoW twin of [chainCard]/[mimCard], in the same slot. Only ever
+     * visible with WoW (WARP-on-WARP) selected.
+     */
+    private lateinit var goolCard: GoolCard
+    /**
      * The SHARD twin of [chainCard], in the same slot.
      *
      * Only one of the two is ever applicable — the chain wraps Psiphon/Tor, this
@@ -634,6 +639,7 @@ class MainActivity : Activity() {
         exitNodeCard = ExitNodeCard(this, palette) { refreshPublicIp() }
         chainCard = ChainModeCard(this, palette) { armed -> setChainArmed(armed) }
         mimCard = MimCard(this, palette) { armed -> setMimArmed(armed) }
+        goolCard = GoolCard(this, palette) { armed -> setGoolArmed(armed) }
         smartSplitCard = SmartSplitCard(this, palette) { on -> setSmartSplitEnabled(on) }
         // v3.2.26: perRow=4 — the eight transports sit in two rows of four:
         // WireGuard · MASQUE · WoW · Lantern / Psiphon · Tor · Foxy · SHARD.
@@ -1678,6 +1684,16 @@ class MainActivity : Activity() {
         // chained mode. [renderChainCard] keeps exactly one of the three cards
         // visible, so the screen keeps its height here too.
         addView(mimCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(56),
+        ).apply { topMargin = dp(10) })
+
+        // Gool over masque, the fourth occupant of the same slot: WoW's own
+        // carrier choice — wireguard registered through the masque tunnel for a
+        // foreign exit, or classic wireguard-in-wireguard. [renderChainCard]
+        // keeps exactly one of the four cards visible, so the screen keeps its
+        // height here too.
+        addView(goolCard, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
         ).apply { topMargin = dp(10) })
@@ -9468,11 +9484,17 @@ class MainActivity : Activity() {
         // screen.
         val shardSelected = selectedProtocol == Protocol.SHARD
         val masqueSelected = selectedProtocol == Protocol.MASQUE
-        chainCard.visibility = if (!shardSelected && !masqueSelected) View.VISIBLE else View.GONE
+        val wowSelected = selectedProtocol == Protocol.WARP_IN_WARP
+        // WoW hands its slot to the gool card: the chain card would only sit
+        // there greyed ("only for the PSIPHON and TOR transports"), and the
+        // gool carrier choice is what actually belongs under a WoW selection.
+        chainCard.visibility = if (!shardSelected && !masqueSelected && !wowSelected) View.VISIBLE else View.GONE
         smartSplitCard.visibility = if (shardSelected) View.VISIBLE else View.GONE
         mimCard.visibility = if (masqueSelected) View.VISIBLE else View.GONE
+        goolCard.visibility = if (wowSelected) View.VISIBLE else View.GONE
         renderSmartSplitCard()
         renderMimCard()
+        renderGoolCard()
         // The AI MODE chip rides the chip line, but the same repaint decides
         // transport applicability and the connected lock, so it is painted here
         // too — one place, the same rules as the cards.
@@ -9603,6 +9625,46 @@ class MainActivity : Activity() {
         }
         mimCard.setUnavailable(reason, applicable = applies)
         mimCard.setArmed(CoreConfig.mimArmed(this))
+    }
+
+    /**
+     * Paints the gool card. Same rules as [renderMimCard]:
+     *
+     *  - not WoW: the card is GONE, so the reason is only for the repaint that
+     *    lands mid-animation;
+     *  - connected: the same lock the transport rail gets — the carrier choice
+     *    only takes effect on the next connect.
+     */
+    private fun renderGoolCard() {
+        val applies = selectedProtocol == Protocol.WARP_IN_WARP
+        val reason = when {
+            !applies -> Strings.t("only for the WoW transport")
+            !modeControlsEnabled -> Strings.t("disconnect to change")
+            else -> null
+        }
+        goolCard.setUnavailable(reason, applicable = applies)
+        goolCard.setArmed(CoreConfig.goolOverMasque(this))
+    }
+
+    /**
+     * Records the gool carrier choice. Takes effect on the next connect, like
+     * every other slot-card switch.
+     *
+     * ON by default (see [CoreConfig.GOOL_OVER_MASQUE_PREF]): ON is the foreign
+     * exit, OFF is the classic wireguard-in-wireguard every earlier WoW build
+     * shipped.
+     */
+    private fun setGoolArmed(armed: Boolean) {
+        preferences().edit().putBoolean(CoreConfig.GOOL_OVER_MASQUE_PREF, armed).apply()
+        if (armed) {
+            ConnectionLog.record(
+                "Gool-over-Masque armed: wireguard registers through the masque tunnel for a foreign exit"
+            )
+        } else {
+            ConnectionLog.record(
+                "Gool-over-Masque disarmed: classic wireguard-in-wireguard, local warp exit"
+            )
+        }
     }
 
     /**
