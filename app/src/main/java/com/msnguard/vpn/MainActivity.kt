@@ -1270,28 +1270,31 @@ class MainActivity : Activity() {
             var proof: Pair<String, Float>? = null
             var attempts = 0
             // ECONNREFUSED extensions: the core's own reconnect loop tears its
-            // SOCKS listener down between cycles, so a refused probe during a
+            // SOCKS listener down between cycles, so a failed probe during a
             // live core means "reconnecting", not "dead". The 3.2.34 WG field
             // log is the shape this guards against: peer throttled at 11s,
             // core mid-retry 4s from restoring the tunnel, gate gave up at
             // 5 refused probes and tore down a session that was coming back.
+            //
+            // 3.2.35 shipped a first cut of this that never fired: it matched
+            // "/127.0.0.1:" (colon) but Android's ConnectException reads
+            // "failed to connect to /127.0.0.1 (port 1819) ..." (no colon), so
+            // the 3.2.35 WOW field log shows the gate dying at 6 probes with
+            // zero extensions granted. The matching is now not textual at all:
+            // any probe failure while the native core still runs is a cycle of
+            // its self-healing loop. Front-end transports (Tor, SHARD, Foxy,
+            // Lantern, Psiphon) own listeners outside the core — for them a
+            // dead listener really is a dead front, so they keep the plain
+            // budget because NativeCore.isRunning() is false there.
             var extensions = 0
             while (System.currentTimeMillis() < deadline && request == verifyRequest) {
                 attempts++
                 proof = pingAnyEndpoint()
                 if (proof != null) break
-                // Only the native aether core (WG/WoW/MASQUE/Gool through its
-                // s0 listener) self-heals forever; its listener downtime is a
-                // cycle, not an end state. Front-end transports (Tor, SHARD,
-                // Foxy, Lantern, Psiphon) own listeners outside the core —
-                // for them a refused listener really is a dead front, so
-                // they keep the plain budget.
-                if (extensions < VERIFY_RECONNECT_EXTENSIONS &&
-                    NativeCore.isRunning() &&
-                    lastProbeFailure?.contains("/127.0.0.1:") == true) {
+                if (extensions < VERIFY_RECONNECT_EXTENSIONS && NativeCore.isRunning()) {
                     extensions++
                     ConnectionLog.record(
-                        "probe refused — native core between reconnect cycles, " +
+                        "probe failed while native core is reconnecting — " +
                             "extending verify patience ${extensions}/${VERIFY_RECONNECT_EXTENSIONS}"
                     )
                     deadline += VERIFY_RECONNECT_EXTENSION_MS
@@ -10387,15 +10390,17 @@ class MainActivity : Activity() {
          * cycles of its own reconnect loop (see the gate loop for why a refused
          * listener during a live core is a cycle, not a death). One WG reconnect
          * cycle is 12–16s (dataplane validate + retry); a WoW cycle with an
-         * endpoint rescan can run 30s+.
+         * endpoint rescan can run 30s+, and the 3.2.0 field log needed ~95s of
+         * core hunting across 5 endpoint pairs before a stable IPv6 pair
+         * carried traffic.
          */
-        const val VERIFY_RECONNECT_EXTENSION_MS = 15_000L
+        const val VERIFY_RECONNECT_EXTENSION_MS = 20_000L
         /**
          * Cap on those extensions, so a truly stuck core still fails honestly
-         * instead of parking the dial on "Verifying" forever: 6 × 15s = 90s on
-         * top of the base budget.
+         * instead of parking the dial on "Verifying" forever: 8 × 20s = 160s
+         * on top of the base budget.
          */
-        const val VERIFY_RECONNECT_EXTENSIONS = 6
+        const val VERIFY_RECONNECT_EXTENSIONS = 8
         /**
          * Grace period after the dial goes green before the core's own byte
          * counters are checked. 12s is past the point where a working tunnel has
