@@ -556,8 +556,10 @@ object CoreConfig {
         // REVERT: delete this whole block → engine falls back to built-ins.
         run {
             val sm = warpScannerMode(context)
-            val isMasqueEnv = effectiveProtocol == "masque" || effectiveProtocol == MIM_PROTOCOL
-            if (isMasqueEnv) return@run // Masque/MiM: always engine CIDRs + hard v4, scanner choice never applies
+            // Gool over MASQUE is a masque-carrier run (3.2.39): WG Ptech
+            // CIDRs/ports would steer the OUTER masque hunt off the working
+            // gateway pool — engine CIDRs + hard v4, exactly like masque/mim.
+            if (isMasqueForEnv) return@run
             val isPtechV4 = sm == WARP_SCANNER_MODE_PTECH_V4
             val isPtechV6 = sm == WARP_SCANNER_MODE_PTECH_V6
             if (isPtechV4) {
@@ -580,8 +582,9 @@ object CoreConfig {
 
         // Masque SNI (DPI bypass): engine reads AETHER_MASQUE_SNI as the ClientHello SNI for
         // MASQUE handshakes (H2 + H3). PattNG 512726 changed default from
-        // consumer-masque.cloudflareclient.com to www.cloudflare.com; set explicitly, only for masque/mim.
-        if (effectiveProtocol == "masque" || effectiveProtocol == MIM_PROTOCOL) {
+        // consumer-masque.cloudflareclient.com to www.cloudflare.com; set explicitly, only for
+        // masque/mim — and for gool over MASQUE, whose outer hop is the same H2 handshake.
+        if (isMasqueForEnv) {
             out["AETHER_MASQUE_SNI"] = "www.cloudflare.com"
         }
 
@@ -822,6 +825,19 @@ object CoreConfig {
             // Warp Setting register job: must not leak into the next normal connect,
             // otherwise the engine would just `--register` and exit without a tunnel.
             "AETHER_REGISTER",
+            // Carrier-mode keys (3.2.39 field log): the engine keeps ONE process
+            // env across connects, and AETHER_GOOL_MODE=classic from a
+            // Gool-over-Masque OFF connect survived into the next ON connect —
+            // the engine ran wireguard-in-wireguard again and the exit stayed
+            // IR. The same leak family covers the peer pins: AETHER_WIW_*
+            // presence alone flips gool_classic() true, and a stale
+            // AETHER_GOOL_INNER / AETHER_MIM_INNER_PEER / AETHER_PEER /
+            // AETHER_WG_PEER from a manual endpoint or a pinned transport
+            // would steer a connect that never asked for it.
+            "AETHER_GOOL_MODE", "AETHER_GOOL_INNER",
+            "AETHER_WIW_OUTER_PEER", "AETHER_WIW_INNER_PEER", "AETHER_WIW_PEERS",
+            "AETHER_MIM_INNER_PEER", "AETHER_PEER", "AETHER_WG_PEER",
+            "AETHER_MASQUE_SNI",
         )
         for (key in clearIfAbsent) if (key !in map) NativeCore.clearEnv(key)
     }

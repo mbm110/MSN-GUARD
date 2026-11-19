@@ -65,6 +65,29 @@ class GoolOverMasqueContract(unittest.TestCase):
         # And the forced-peer injection sits behind the same gate.
         self.assertIn('if (!(proto == "gool" && goolOverMasque(context)))', CORE)
 
+    def test_stale_carrier_env_is_cleared_between_connects(self):
+        # 3.2.39 field log: the engine keeps ONE process env, and the previous
+        # connect's AETHER_GOOL_MODE=classic survived into the next ON connect
+        # — the engine ran wireguard-in-wireguard again and the exit stayed IR.
+        # applyEnv must actively clear every carrier-mode key absent from the
+        # new map.
+        block = CORE.split("fun applyEnv(map: Map<String, String>)", 1)[1].split("\n    }\n", 1)[0]
+        for key in (
+            "AETHER_GOOL_MODE", "AETHER_GOOL_INNER",
+            "AETHER_WIW_OUTER_PEER", "AETHER_WIW_INNER_PEER", "AETHER_WIW_PEERS",
+            "AETHER_MIM_INNER_PEER", "AETHER_PEER", "AETHER_WG_PEER",
+            "AETHER_MASQUE_SNI",
+        ):
+            self.assertIn(f'"{key}"', block)
+
+    def test_foreign_exit_run_gets_the_masque_sni_and_no_ptech_pool(self):
+        # The outer hop is an H2 masque handshake: it needs the DPI-bypass SNI
+        # masque gets, and must NOT inherit the WG Ptech CIDR/port pool.
+        ptech = CORE.split("run {\n            val sm = warpScannerMode(context)", 1)[1].split("return@run", 1)[0]
+        self.assertIn("if (isMasqueForEnv) return@run", CORE)
+        sni = CORE.split("AETHER_MASQUE_SNI", 1)[1].split("\n        }", 1)[0]
+        self.assertIn("if (isMasqueForEnv) {", sni)
+
     def test_slot_card_is_wired_for_the_wow_transport(self):
         self.assertIn("private lateinit var goolCard: GoolCard", UI)
         self.assertIn("goolCard = GoolCard(this, palette) { armed -> setGoolArmed(armed) }", UI)
