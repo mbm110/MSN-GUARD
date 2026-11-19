@@ -450,12 +450,21 @@ object LanternEngine {
         false
     }
 
-    /** Cumulative byte counters from Radiance's active connection tracker. */
-    fun trafficCounters(): Pair<Long, Long> = try {
-        val json = request("GET", "/traffic", timeoutMs = 700)
+    /**
+     * Cumulative byte counters from Radiance's active connection tracker.
+     *
+     * NULL on failure, never (0, 0): a failed /traffic read used to be reported
+     * as zero counters, which the pipeline's rebase guard read as a counter
+     * reset — zeroing the speed baseline and painting "0 B/s" on the main
+     * screen while the tunnel carried traffic (the "Telegram is loading but
+     * Speed shows 0" report; the control request times out exactly when the
+     * tunnel is busiest). Callers must SKIP a null sample, not feed it in.
+     */
+    fun trafficCountersOrNull(): Pair<Long, Long>? = try {
+        val json = request("GET", "/traffic", timeoutMs = 1_500)
         json.optLong("tx", 0L) to json.optLong("rx", 0L)
     } catch (_: Throwable) {
-        0L to 0L
+        null
     }
 
     fun errorMessage(): String = lastError.ifBlank {

@@ -3714,7 +3714,7 @@ class MainActivity : Activity() {
         // FOXY — its own top-level section (same shape as LANTERN's), sitting
         // above it. One row into the dedicated page, which owns the Firefox
         // Accounts browser sign-in; MSN never collects the password or code.
-        content.addView(expandableSection(Strings.t("FOXY"), id = "FOXY", iconRes = R.drawable.ic_foxy) { body ->
+        content.addView(expandableSection(Strings.t("FOXY"), id = "FOXY", iconRes = R.drawable.ic_foxy, iconSizeDp = 22) { body ->
             body.addView(navRow(Strings.t("Foxy Account & Setting"), foxyAccountSummary()) { openFoxySettingScreen() }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -10219,6 +10219,7 @@ class MainActivity : Activity() {
         title: String,
         id: String,
         iconRes: Int? = null,
+        iconSizeDp: Int? = null,
         body: (LinearLayout) -> Unit,
     ): ExpandableSection {
         val key = "section_open_" + sectionId(id)
@@ -10227,6 +10228,7 @@ class MainActivity : Activity() {
                 profiled().edit().putBoolean(key, expanded).apply()
             },
             iconRes = iconRes,
+            iconSizeDp = iconSizeDp,
             body = body,
         ).apply {
             if (profiled().getBoolean(key, false)) setExpanded(true, animate = false)

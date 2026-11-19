@@ -3379,8 +3379,11 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             try {
                 if (!LanternEngine.isRunning) return@scheduleAtFixedRate
                 if (!shouldSampleTraffic()) return@scheduleAtFixedRate
-                val (tx, rx) = LanternEngine.trafficCounters()
-                updateTrafficNotification(tx, rx)
+                // A failed counter read is SKIPPED, never fed in as zero — see
+                // trafficCountersOrNull. Feeding zeros rebased the baseline and
+                // flashed "0 B/s" while the tunnel was busy (v3.2.29 report).
+                val counters = LanternEngine.trafficCountersOrNull() ?: return@scheduleAtFixedRate
+                updateTrafficNotification(counters.first, counters.second)
             } catch (_: Exception) {
             }
         }, 1L, 1L, TimeUnit.SECONDS)
