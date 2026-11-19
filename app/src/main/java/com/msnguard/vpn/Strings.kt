@@ -188,7 +188,6 @@ object Strings {
         "Australia" to Triple("Australia", "استرالیا", "澳大利亚"),
         "Austria" to Triple("Austria", "اتریش", "奥地利"),
         "Auto" to Triple("Auto", "خودکار", "自动"),
-        "Auto Scan" to Triple("Auto Scan", "اسکن خودکار", "自动扫描"),
         "Auto reconnect" to Triple("Auto reconnect", "اتصال مجدد خودکار", "自动重连"),
         "Automatic" to Triple("Automatic", "خودکار", "自动选择"),
         "BACKUP" to Triple("BACKUP", "پشتیبان‌گیری", "备份"),

@@ -175,7 +175,6 @@ internal object RussianStrings {
         "Australia" to "Австралия",
         "Austria" to "Австрия",
         "Auto" to "Авто",
-        "Auto Scan" to "Автосканирование",
         "Auto reconnect" to "Автоподключение",
         "Automatic" to "Автоматически",
         "BACKUP" to "РЕЗЕРВНАЯ КОПИЯ",
