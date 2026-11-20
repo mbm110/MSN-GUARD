@@ -32,15 +32,6 @@ object LanternEngine {
     private const val CONNECT_TIMEOUT_SECONDS = 180L
     private const val CONTROL_READY_TIMEOUT_MS = 10_000L
 
-    /**
-     * The country identity the sidecar's config fetches present to Lantern
-     * (RADIANCE_COUNTRY → x-lantern-client-country). See the spawn comment:
-     * any non-IR identity draws from Lantern's global free pool instead of
-     * the pinned four-track IR pool. TR: nearest non-censored region to the
-     * user's line; the drawn sample itself rotates per fetch.
-     */
-    private const val LANTERN_CONFIG_COUNTRY = "TR"
-
     private val running = AtomicBoolean(false)
     private val generation = AtomicLong(0L)
     private val generationLock = Any()
@@ -189,22 +180,12 @@ object LanternEngine {
             // Executed PIEs do not inherit the app's Java native-loader namespace.
             // Make packaged dependencies visible to Android's executable linker.
             builder.environment()["LD_LIBRARY_PATH"] = context.applicationInfo.nativeLibraryDir
-            // 3.2.49: Lantern geo-serves its free pool by client country, and
-            // IR clients are pinned to a dedicated four-track pool (3x
-            // Frankfurt + 1x Amsterdam, tags suffixed "-ir-free-") — verified
-            // live: the same fetch with any other country draws a random
-            // ~6-location sample from the GLOBAL pool (Milan, Ashburn,
-            // Cardiff, ...), which is what the user's official Lantern app
-            // shows from the same Iranian line and what MSN itself listed
-            // early on (connecting to Milan worked). RADIANCE_COUNTRY makes
-            // every config fetch (boot, forced refresh, poll) send
-            // x-lantern-client-country, trading the pinned IR pool for the
-            // global draw the official app effectively gets. Revert = remove
-            // this one line. The override also flips radiance's
-            // pairing-route eligibility to non-censored, but the pairings
-            // route still requires a joined volunteer pairing this sidecar
-            // never creates, so nothing else changes.
-            builder.environment()["RADIANCE_COUNTRY"] = LANTERN_CONFIG_COUNTRY
+            // 3.2.50 revert: the sidecar again presents NO country identity, so
+            // Lantern geo-serves the IR pool (3x Frankfurt + 1x Amsterdam,
+            // tags suffixed "-ir-free-") — the field-tested fast servers. The
+            // 3.2.49 global-pool draw (country override → Milan/Ashburn/...)
+            // worked but its throughput on the user's line was poor; the IR
+            // pool is the one to ship.
 
             val started = try {
                 builder.start()
@@ -559,27 +540,6 @@ object LanternEngine {
     }
 
     // ---- Server selection & probe surface for the settings screen ----
-
-    /**
-     * Force Radiance to refetch its public config NOW (POST /update-config).
-     *
-     * Lantern hands each config fetch a fresh random draw of ~6 locations
-     * from its global free pool (see the RADIANCE_COUNTRY spawn comment), so
-     * a forced refetch re-rolls the server list: the offline picker's
-     * "refresh" is exactly this — a new draw, and the open sheet rebuilds in
-     * place when the tag set changes.
-     */
-    fun forceConfigRefresh(): String? {
-        if (controlToken.isBlank() || controlSocketPath.isBlank()) return "Lantern sidecar is not running"
-        touchSidecarUse()
-        val response = runCatching {
-            request("POST", "/update-config", JSONObject(), timeoutMs = 120_000)
-        }
-        return response.fold(
-            onFailure = { it.message },
-            onSuccess = { if (it.optBoolean("ok")) null else it.optString("error", "config refresh failed") },
-        )
-    }
 
     /** Current server list + ping data; null when the sidecar is not running. */
     fun serversSnapshot(timeoutMs: Int = 2_000): JSONObject? {

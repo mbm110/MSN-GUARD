@@ -4858,16 +4858,6 @@ class MainActivity : Activity() {
                         .onFailure { ConnectionLog.record("Lantern: list boot failed: ${it.message}") }
                         .getOrDefault(false)
                     if (booted) {
-                        // 3.2.49: re-roll the draw on the very first open —
-                        // each fetch is a fresh random ~6-location sample
-                        // (RADIANCE_COUNTRY draws from the global pool, see
-                        // the spawn comment), so a pinned config would show
-                        // one stale sample. When the draw lands the sheet
-                        // rebuilds in place.
-                        val refreshError = LanternEngine.forceConfigRefresh()
-                        if (refreshError != null) {
-                            ConnectionLog.record("Lantern: first-open config refresh failed: $refreshError")
-                        }
                         snapshot = LanternEngine.serversSnapshot(timeoutMs = 5_000)
                         if (snapshot == null) {
                             // The control socket answers the moment the sidecar
@@ -4987,20 +4977,6 @@ class MainActivity : Activity() {
             }.onFailure {
                 ConnectionLog.record("Lantern: picker sidecar boot failed: ${it.message}")
             }.getOrDefault(false)
-            if (sidecarUp && !LanternEngine.isRunning) {
-                // OFFLINE refresh (3.2.49): each config fetch is a fresh
-                // random draw from Lantern's global pool (the sidecar's
-                // RADIANCE_COUNTRY identity; see the spawn comment), so the
-                // refresh button re-rolls the list — Milan/Ashburn appear in
-                // some draws, exactly like the official app's rotating list —
-                // and the open sheet rebuilds in place when the tag set
-                // changes.
-                val refreshError = LanternEngine.forceConfigRefresh()
-                ConnectionLog.record(
-                    if (refreshError == null) "Lantern: config refreshed for this network"
-                    else "Lantern: config refresh failed: $refreshError",
-                )
-            }
             if (sidecarUp) {
                 // Probe-cost guard (v3.2.27 audit): a full probe round hits
                 // every server — up to 95s of requests. Through the live
@@ -5028,7 +5004,8 @@ class MainActivity : Activity() {
                             trustCurrent = fresh != null || !LanternEngine.isRunning,
                         )
                         val afterTags = lanternServersCache.map { it.tag }.toSet()
-                        // The geo-honest refresh (or any server-list change)
+                        // Any server-list change (rare with the geo-served IR
+                        // pool, but possible after a sidecar reboot)
                         // rebuilds the OPEN sheet in place — the field report's
                         // whole complaint was needing to back out and re-enter
                         // to see the new list. Ping-only changes keep the open

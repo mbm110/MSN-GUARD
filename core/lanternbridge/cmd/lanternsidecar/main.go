@@ -273,24 +273,6 @@ func handleControl(conn net.Conn, token string) {
 			Data:   json.RawMessage(lanternbridge.ServersJSON()),
 		})
 
-	case request.Method == "POST" && request.Path == "/update-config":
-		// Forces a config refetch: each fetch is a fresh random location draw
-		// from Lantern's free pool (the sidecar runs with a RADIANCE_COUNTRY
-		// identity, so the global pool — see the app-side spawn comment), so
-		// this re-rolls the server list for the picker. The fetch can be
-		// slow; the 310s connection deadline covers it.
-		if err := lanternbridge.UpdateConfig(); err != nil {
-			_ = writeControl(conn, controlResponse{
-				OK: false, Status: lanternbridge.Status(), Error: err.Error(),
-			})
-			return
-		}
-		_ = writeControl(conn, controlResponse{
-			OK:     true,
-			Status: lanternbridge.Status(),
-			Data:   json.RawMessage(lanternbridge.ServersJSON()),
-		})
-
 	default:
 		_ = writeControl(conn, controlResponse{OK: false, Error: "unknown control request"})
 	}

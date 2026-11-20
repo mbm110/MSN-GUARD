@@ -13,13 +13,15 @@ opened with "Automatic" only.
 Also verified live (scratch probes, 3.2.49): Lantern geo-serves its free pool
 by client country — IR is PINNED to a dedicated four-track pool (3x Frankfurt +
 1x Amsterdam, "-ir-free-" tags) while every other country draws a random ~6-
-location sample from the GLOBAL pool (Milan, Ashburn, Cardiff, ...). The
-official app's richer list is a global draw, and MSN showed the same early on.
-So the sidecar runs with RADIANCE_COUNTRY set (LanternEngine spawn → env →
-x-lantern-client-country): every fetch draws from the global pool, and the
-picker forces a re-roll on offline opens (LanternEngine.forceConfigRefresh →
-POST /update-config → radiance UpdateConfig) so the open sheet REBUILDS in
-place with the new draw — no back-out needed.
+location sample from the GLOBAL pool (Milan, Ashburn, Cardiff, ...). 3.2.49
+briefly drew from the global pool via RADIANCE_COUNTRY; the field report
+followed immediately: the global servers' throughput on the user's Iranian
+line was far below the IR pool's, so 3.2.50 REVERTED the country override —
+the sidecar presents no country identity and Lantern geo-serves the fast IR
+pool. The revert also dropped the re-roll plumbing (forceConfigRefresh /
+POST /update-config), which existed only to re-roll the global draw; the
+picker's first-entry wait gate and the in-place sheet rebuild are unrelated
+and stay.
 """
 
 from pathlib import Path
@@ -63,37 +65,23 @@ class LanternServerPickerFirstLoadContract(unittest.TestCase):
         dismiss_post_idx = UI.index("runOnUiThread { loading.get()?.dismiss() }")
         self.assertLess(show_idx, dismiss_post_idx)
 
-    def test_offline_open_forces_a_fresh_config_draw(self):
-        # Lantern hands each config fetch a random ~6-location draw from its
-        # global free pool; the offline picker must force the refetch so the
-        # list is a fresh draw instead of a stale cache, and the open sheet
-        # must rebuild in place when the tag set changes — the whole
-        # field-report complaint.
-        self.assertIn("fun forceConfigRefresh(): String?", ENGINE)
-        self.assertIn(
-            'request("POST", "/update-config", JSONObject(), timeoutMs = 120_000)', ENGINE
-        )
-        self.assertIn("LanternEngine.forceConfigRefresh()", UI)
-        self.assertIn("if (sidecarUp && !LanternEngine.isRunning) {", UI)
+    def test_the_sidecar_serves_the_geo_ir_pool_again(self):
+        # 3.2.50 revert (field report): the 3.2.49 global-pool draw
+        # (RADIANCE_COUNTRY → x-lantern-client-country, Milan/Ashburn/...)
+        # had poor throughput on the user's Iranian line; Lantern geo-serves
+        # IR the dedicated fast four-track pool, and that is what ships. The
+        # sidecar presents NO country identity, and the re-roll plumbing that
+        # existed only for the global draw is gone.
+        self.assertNotIn("RADIANCE_COUNTRY", ENGINE)
+        self.assertNotIn("LANTERN_CONFIG_COUNTRY", ENGINE)
+        self.assertNotIn("forceConfigRefresh", ENGINE)
+        self.assertNotIn("forceConfigRefresh", UI)
+        self.assertNotIn("/update-config", SIDECAR)
+        self.assertNotIn("func UpdateConfig() error {", BRIDGE)
+        # The in-place sheet rebuild stays: any real server-list change still
+        # re-renders the open sheet without a back-out.
         self.assertIn("before != afterTags", UI)
         self.assertIn("runOnUiThread { reopenLanternServerSheetIfOpen() }", UI)
-
-    def test_the_sidecar_draws_from_the_global_pool(self):
-        # IR clients are pinned to Lantern's four-track "-ir-free-" pool
-        # (3x Frankfurt + 1x Amsterdam) — the exact list the field report
-        # complained about, while the official app shows a global draw. The
-        # sidecar therefore presents a non-IR country identity
-        # (RADIANCE_COUNTRY → x-lantern-client-country) so every config fetch
-        # (boot, forced refresh, poll) draws from the global pool; one
-        # ProcessBuilder line, trivially revertible.
-        self.assertIn('builder.environment()["RADIANCE_COUNTRY"] = LANTERN_CONFIG_COUNTRY', ENGINE)
-        self.assertIn('private const val LANTERN_CONFIG_COUNTRY = "TR"', ENGINE)
-
-    def test_the_sidecar_exposes_the_update_config_route(self):
-        # Go side: radiance's UpdateConfig() forced through the control socket.
-        self.assertIn("func UpdateConfig() error {", BRIDGE)
-        self.assertIn("b.UpdateConfig()", BRIDGE)
-        self.assertIn('request.Path == "/update-config"', SIDECAR)
 
     def test_the_open_sheet_is_rebuilt_in_place(self):
         # The sheet dialog is tracked so a refresh can rebuild it without the

@@ -419,24 +419,6 @@ func PingServers() error {
 	return nil
 }
 
-// UpdateConfig forces Radiance to refetch its public configuration NOW.
-//
-// Lantern hands each config fetch a fresh random draw of ~6 locations from
-// its free pool — with the sidecar's RADIANCE_COUNTRY identity that pool is
-// the global one (see the app-side spawn comment), so a forced refetch
-// re-rolls the server list and the picker's open sheet rebuilds in place.
-// Idempotent and safe while connected too; it only refetches config.
-func UpdateConfig() error {
-	b := currentBackend()
-	if b == nil {
-		return errors.New("Radiance is not initialized")
-	}
-	if err := b.UpdateConfig(); err != nil {
-		return fmt.Errorf("update Lantern config: %w", err)
-	}
-	return nil
-}
-
 func mustJSON(value any) string {
 	encoded, err := json.Marshal(value)
 	if err != nil {
