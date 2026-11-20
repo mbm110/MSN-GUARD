@@ -4848,6 +4848,18 @@ class MainActivity : Activity() {
                         .getOrDefault(false)
                     if (booted) {
                         snapshot = LanternEngine.serversSnapshot(timeoutMs = 5_000)
+                        if (snapshot == null) {
+                            // The control socket answers the moment the sidecar
+                            // process is up, but Radiance's config fetch
+                            // (user-create + POST /config-new) can take well past
+                            // the 5s read on the raw Iranian link — so the sheet
+                            // used to open with "Automatic" only and the servers
+                            // appeared just after backing out and re-entering
+                            // (field report). Wait for the config here behind a
+                            // visible progress sheet, bounded so a dead network
+                            // still opens the picker with its empty-state text.
+                            snapshot = awaitLanternServerConfig()
+                        }
                     }
                 }
             }
@@ -4859,6 +4871,58 @@ class MainActivity : Activity() {
             )
             runOnUiThread { after(lanternServersCache) }
         }.apply { isDaemon = true; start() }
+    }
+
+    /**
+     * Waits for the just-booted list-only sidecar to finish its first config
+     * fetch (worker-thread context — [loadLanternServers] only). Shows a small
+     * centered progress sheet while waiting so the Server row's tap does not
+     * look frozen, then dismisses it and returns the snapshot (null on
+     * timeout — the picker then opens with its empty-state text as before).
+     */
+    private fun awaitLanternServerConfig(): JSONObject? {
+        val loading = java.util.concurrent.atomic.AtomicReference<Dialog?>(null)
+        runOnUiThread {
+            val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+            val bar = ProgressBar(this).apply {
+                isIndeterminate = true
+                indeterminateDrawable?.setTint(primary)
+            }
+            dialog.setContentView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dp(32), dp(32), dp(32), dp(32))
+                background = roundedBackground(SURFACE, 28, SURFACE)
+                addView(bar, LinearLayout.LayoutParams(dp(44), dp(44)).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                })
+                // WRAP_CONTENT both ways: the caption must measure its real
+                // width (see the app-scan page note — a MATCH_PARENT child in
+                // a WRAP_CONTENT box lays out 44dp wide and clips the text).
+                addView(label(Strings.t("Fetching Lantern servers…"), 14f, MUTED).apply {
+                    gravity = Gravity.CENTER
+                    setPadding(0, dp(16), 0, 0)
+                }, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ))
+            })
+            dialog.show()
+            loading.set(dialog)
+        }
+        try {
+            val deadline = System.currentTimeMillis() + 25_000L
+            var snapshot: JSONObject? = null
+            while (snapshot == null && System.currentTimeMillis() < deadline) {
+                Thread.sleep(1_500L)
+                snapshot = LanternEngine.serversSnapshot(timeoutMs = 3_000)
+            }
+            return snapshot
+        } finally {
+            // Both runOnUiThread blocks are posted from this same worker thread
+            // in order, so the dismiss cannot run before the show.
+            runOnUiThread { loading.get()?.dismiss() }
+        }
     }
 
     /**

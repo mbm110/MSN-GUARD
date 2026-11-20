@@ -4,6 +4,7 @@ package com.msnguard.vpn
 internal object RussianStrings {
     private val table = mapOf(
         "Send Code" to "Отправить код",
+        "Fetching Lantern servers…" to "Получение серверов Lantern…",
         "Sign in with Firefox" to "Войти через Firefox",
         "Anti-Censorship & Performance" to "Защита от цензуры и производительность",
         "Disabled" to "Отключено",
