@@ -101,9 +101,11 @@ object WarpUdpgwFront {
 
     /**
      * @param socksPort aether's SOCKS listener ([CoreConfig.SOCKS_PORT]).
+     * @param context loads the persisted answers; null keeps the current set.
      */
     @Synchronized
-    fun start(socksPort: Int): Boolean {
+    fun start(socksPort: Int, context: android.content.Context? = null): Boolean {
+        context?.let { WarpDnsCache.configure(it) }
         if (running.get()) {
             if (upstreamPort == socksPort) {
                 record("$TAG already running")
@@ -177,6 +179,7 @@ object WarpUdpgwFront {
     @Synchronized
     fun stop() {
         if (!running.getAndSet(false)) return
+        WarpDnsCache.flush()
         associations.values.forEach { closeQuietly(it.udp) }
         associations.clear()
         val server = serverSocket
@@ -383,6 +386,127 @@ object WarpUdpgwFront {
 
     // ----------------------------------------------------------------- udpgw
 
+    /**
+     * Warm the DNS cache right after the tunnel is up (3.2.47, experimental).
+     *
+     * Re-sends the queries whose cached answers are nearly expired — or just
+     * expired — through ONE SOCKS5 UDP ASSOCIATE, and offers the fresh
+     * replies back to the cache. Nothing is served to any app from here, and
+     * nothing is fabricated: an answer only becomes servable after a real
+     * resolver answered through the real tunnel. The point is timing — by the
+     * time the user opens an app, the names it will ask about are already
+     * fresh, so its first query does not pay the two tunnel crossings.
+     */
+    fun warmDnsCache() {
+        if (!running.get() || upstreamPort <= 0) return
+        val port = upstreamPort
+        Thread({
+            try {
+                val batch = WarpDnsCache.takeRefreshBatch()
+                if (batch.isEmpty()) return@Thread
+                record("$TAG warming ${batch.size} DNS answers")
+
+                val control = try {
+                    Socket().apply {
+                        tcpNoDelay = true
+                        connect(InetSocketAddress("127.0.0.1", port), UPSTREAM_CONNECT_TIMEOUT_MS)
+                    }
+                } catch (e: Exception) {
+                    return@Thread
+                }
+                try {
+                    val upIn = DataInputStream(BufferedInputStream(control.getInputStream()))
+                    val upOut = BufferedOutputStream(control.getOutputStream())
+                    upOut.write(byteArrayOf(SOCKS_VERSION.toByte(), 1, 0x00))
+                    upOut.flush()
+                    if (upIn.read() != SOCKS_VERSION || upIn.read() != 0x00) return@Thread
+                    upOut.write(buildRequest(CMD_UDP_ASSOCIATE, "0.0.0.0", 0))
+                    upOut.flush()
+                    if (upIn.read() != SOCKS_VERSION) return@Thread
+                    if (upIn.read() != REP_SUCCESS) return@Thread
+                    upIn.read() // reserved
+
+                    // The UDP relay address this datagram socket must send to —
+                    // parsed exactly like openAssociation does.
+                    var relayHost = InetAddress.getByName("127.0.0.1")
+                    when (upIn.read()) {
+                        ATYP_IPV4 -> {
+                            val bytes = ByteArray(4)
+                            upIn.readFully(bytes)
+                            if (bytes.any { it != 0.toByte() }) relayHost = InetAddress.getByAddress(bytes)
+                        }
+                        ATYP_IPV6 -> {
+                            val bytes = ByteArray(16)
+                            upIn.readFully(bytes)
+                            if (bytes.any { it != 0.toByte() }) relayHost = InetAddress.getByAddress(bytes)
+                        }
+                        else -> return@Thread
+                    }
+                    val relayPort = ((upIn.read() and 0xFF) shl 8) or (upIn.read() and 0xFF)
+                    val relay = InetSocketAddress(relayHost, relayPort)
+
+                    val udp = DatagramSocket()
+                    udp.soTimeout = 250
+                    try {
+                        val received = java.util.concurrent.atomic.AtomicInteger(0)
+                        val reader = Thread({
+                            val buf = ByteArray(UDP_BUFFER)
+                            try {
+                                val deadline = System.currentTimeMillis() + 8_000
+                                while (System.currentTimeMillis() < deadline &&
+                                    received.get() < batch.size && !udp.isClosed
+                                ) {
+                                    val packet = DatagramPacket(buf, buf.size)
+                                    try {
+                                        udp.receive(packet)
+                                    } catch (_: java.net.SocketTimeoutException) {
+                                        continue
+                                    }
+                                    val payload = decapsulateSocks5(buf, packet.length) ?: continue
+                                    if (WarpDnsCache.offer(payload, ByteArray(0))) {
+                                        received.incrementAndGet()
+                                    }
+                                }
+                            } catch (_: Throwable) {
+                            }
+                        }, "warp-dns-warm").apply { isDaemon = true }
+                        reader.start()
+
+                        // Send the queries to the resolver that originally
+                        // answered them — reproducing today's path exactly.
+                        batch.forEachIndexed { index, (resolver, query) ->
+                            val q = query.copyOf()
+                            q[0] = ((index + 1) shr 8).toByte()
+                            q[1] = ((index + 1) and 0xFF).toByte()
+                            val address = try {
+                                InetAddress.getByAddress(resolver)
+                            } catch (_: Exception) {
+                                return@forEachIndexed
+                            }
+                            if (address.address.size != 4) return@forEachIndexed
+                            val datagram = encapsulateSocks5(address, 53, q)
+                            try {
+                                udp.send(DatagramPacket(datagram, datagram.size, relay))
+                            } catch (_: Exception) {
+                            }
+                        }
+                        // Give the reader its window.
+                        val joinBy = System.currentTimeMillis() + 9_000
+                        while (reader.isAlive && System.currentTimeMillis() < joinBy) {
+                            try { Thread.sleep(100) } catch (_: InterruptedException) { break }
+                        }
+                        record("$TAG warm pass done: ${received.get()}/${batch.size} refreshed")
+                    } finally {
+                        closeQuietly(udp)
+                    }
+                } finally {
+                    closeQuietly(control)
+                }
+            } catch (_: Throwable) {
+            }
+        }, "warp-dns-warmup").apply { isDaemon = true }.start()
+    }
+
     private class Association(
         val udp: DatagramSocket,
         val relayHost: InetAddress,
@@ -459,6 +583,19 @@ object WarpUdpgwFront {
                 }
                 val destinationPort = ((address[addressLength - 2].toInt() and 0xFF) shl 8) or
                     (address[addressLength - 1].toInt() and 0xFF)
+
+                // 3.2.47 DNS cache: a port-53 query with a live cached answer
+                // is answered HERE, before any association is opened — the
+                // two tunnel crossings the answer would otherwise pay are the
+                // app-open delay the field report measured on every
+                // WARP-class connect. Misses and non-DNS continue untouched.
+                if (destinationPort == 53 && payload.size >= 12) {
+                    val cached = WarpDnsCache.lookup(payload)
+                    if (cached != null) {
+                        writeUdpgwReply(conid, isIpv6, address, cached, output)
+                        continue
+                    }
+                }
 
                 val association = associations[conid] ?: run {
                     if (associations.size >= MAX_ASSOCIATIONS) {
@@ -570,6 +707,13 @@ object WarpUdpgwFront {
             val udp = DatagramSocket()
             udp.soTimeout = 0
 
+            // The association's destination port: the only flows offered to
+            // the DNS cache are port-53 ones (mDNS on 5353 and QUIC on 443
+            // must never be parsed as DNS).
+            val clientPort = ((clientAddress[clientAddress.size - 2].toInt() and 0xFF) shl 8) or
+                (clientAddress[clientAddress.size - 1].toInt() and 0xFF)
+            val isDnsFlow = clientPort == 53
+
             // Return path: every datagram the association receives is a SOCKS5 UDP
             // reply from aether. Strip that header, reframe it as udpgw with this
             // association's conid and the address the client asked about, and write
@@ -585,6 +729,13 @@ object WarpUdpgwFront {
                         udp.receive(packet)
                         val payload = decapsulateSocks5(buf, packet.length) ?: continue
                         lastSeen.set(System.currentTimeMillis())
+                        // 3.2.47 DNS cache: a clean DNS response on a port-53
+                        // association is offered to the cache. The datagram
+                        // itself still flows to the app byte-identically —
+                        // caching only arms the next identical query.
+                        if (isDnsFlow && payload.size >= 12) {
+                            WarpDnsCache.offer(payload, clientAddress)
+                        }
                         writeUdpgwReply(conid, isIpv6, clientAddress, payload, output)
                     }
                 } catch (_: Throwable) {

@@ -3815,6 +3815,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                         repostNotification()
                         sendStatus(STATUS_CONNECTED)
                         ConnectionLog.record("aether SOCKS listener up (late) — connected")
+                        WarpUdpgwFront.warmDnsCache()
                         // 2.3.15: polling was armed in startTunnel, so this is a
                         // no-op guard, not a first start — but keep the call site
                         // so a future change to the arm order cannot regress this
@@ -5564,7 +5565,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 // Forward chain keeps the existing final Xray listener.
                 val legacyUpstreamPort = if (reverseExitUp) CoreConfig.SOCKS_PORT else if (exitNodeUp) WarpExitManager.SOCKS_PORT else CoreConfig.SOCKS_PORT
                 val legacyFrontUp = activeEngine == TunEnginePref.LEGACY &&
-                    WarpUdpgwFront.start(legacyUpstreamPort)
+                    WarpUdpgwFront.start(legacyUpstreamPort, this@MsnGuardVpnService)
                 // Encrypted DNS: SmartDnsFront answers the device's DNS itself over
                 // DoT/DoH on the WARP egress and relays every other byte to the core.
                 // Only for the engines whose mapdns/fake-ip cannot speak DoT or DoH
@@ -6466,6 +6467,10 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 repostNotification()
                 sendStatus(STATUS_CONNECTED)
                 ConnectionLog.record("aether SOCKS listener up at " + listenAddress + " — connected")
+                // 3.2.47: the DNS cache's post-connect refresh pass — re-asks
+                // the nearly-expired names before the user opens an app. Purely
+                // additive: it only feeds the cache, never serves an app.
+                WarpUdpgwFront.warmDnsCache()
                 startWatchdog()
                 startWarpTrafficPolling()
                 return true
@@ -6502,6 +6507,8 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     repostNotification()
                     sendStatus(STATUS_CONNECTED)
                     ConnectionLog.record("aether SOCKS listener up at $listenAddress — connected")
+                    // 3.2.47: see the warm-up note at the other connect site.
+                    WarpUdpgwFront.warmDnsCache()
                     // Now the tunnel exists, so the watchdog has something to
                     // watch. Arming it earlier killed the engine while it was
                     // still registering (see the comment at the startProxy call).
