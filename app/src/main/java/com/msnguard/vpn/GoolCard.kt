@@ -32,13 +32,14 @@ import kotlin.math.roundToInt
 class GoolCard(
     context: Context,
     private val palette: AppAppearance.Palette,
-    private val onToggle: (Boolean) -> Unit,
     // The WireGuard carrier card (3.2.45) reuses this whole view; only the
-    // strings differ. Defaults keep the WoW card byte-identical.
+    // strings differ. Defaults keep the WoW card byte-identical. They sit
+    // BEFORE onToggle so the WoW call sites keep their trailing lambda.
     private val title: String = Strings.t("GOOL OVER MASQUE"),
     private val onText: String = Strings.t("foreign exit — the identity registers through the tunnel"),
     private val offText: String = Strings.t("classic: wireguard in wireguard, a local exit"),
     private val name: String = "Gool over Masque",
+    private val onToggle: (Boolean) -> Unit,
 ) : LinearLayout(context) {
 
     private val titleView: TextView

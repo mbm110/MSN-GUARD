@@ -645,12 +645,11 @@ class MainActivity : Activity() {
         // transport's own strings and its own remembered pref.
         wgOverMasqueCard = GoolCard(
             this, palette,
-            { armed -> setWgOverArmed(armed) },
             title = Strings.t("WIREGUARD OVER MASQUE"),
             onText = Strings.t("foreign exit — the identity registers through the tunnel"),
             offText = Strings.t("plain wireguard, a local exit"),
             name = "WireGuard over Masque",
-        )
+        ) { armed -> setWgOverArmed(armed) }
         smartSplitCard = SmartSplitCard(this, palette) { on -> setSmartSplitEnabled(on) }
         // v3.2.26: perRow=4 — the eight transports sit in two rows of four:
         // WireGuard · MASQUE · WoW · Lantern / Psiphon · Tor · Foxy · SHARD.
