@@ -104,7 +104,10 @@ class GoolOverMasqueContract(unittest.TestCase):
 
     def test_slot_card_is_wired_for_the_wow_transport(self):
         self.assertIn("private lateinit var goolCard: GoolCard", UI)
-        self.assertIn("goolCard = GoolCard(this, palette) { armed -> setGoolArmed(armed) }", UI)
+        # 3.2.45: onToggle is no longer GoolCard's last parameter (the carrier
+        # cards pass strings after it) — a trailing lambda here would bind to
+        # `name` and fail to compile (the 3.2.45 CI failure).
+        self.assertIn("goolCard = GoolCard(this, palette, onToggle = { armed -> setGoolArmed(armed) })", UI)
         # Exactly one slot occupant visible: WoW hands the slot to the gool card.
         self.assertIn("val wowSelected = selectedProtocol == Protocol.WARP_IN_WARP", UI)
         self.assertIn(

@@ -640,7 +640,10 @@ class MainActivity : Activity() {
         exitNodeCard = ExitNodeCard(this, palette) { refreshPublicIp() }
         chainCard = ChainModeCard(this, palette) { armed -> setChainArmed(armed) }
         mimCard = MimCard(this, palette) { armed -> setMimArmed(armed) }
-        goolCard = GoolCard(this, palette) { armed -> setGoolArmed(armed) }
+        // 3.2.45: onToggle is no longer the last parameter (the carrier cards
+        // pass strings after it), so the lambda must be a named argument — a
+        // trailing lambda would bind to `name` and fail to compile.
+        goolCard = GoolCard(this, palette, onToggle = { armed -> setGoolArmed(armed) })
         // WireGuard over MASQUE (3.2.45): the same carrier view, the WireGuard
         // transport's own strings and its own remembered pref.
         wgOverMasqueCard = GoolCard(
