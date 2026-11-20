@@ -29,14 +29,28 @@ class GoolOverMasqueContract(unittest.TestCase):
         self.assertIn("fn gool_classic()", ENGINE)
         self.assertIn('"wiw") | Ok("wg") | Ok("classic")', ENGINE)
 
-    def test_pref_defaults_on_and_env_only_pins_classic_when_disarmed(self):
+    def test_pref_defaults_off_and_env_only_pins_classic_when_disarmed(self):
         self.assertIn('const val GOOL_OVER_MASQUE_PREF = "gool_over_masque"', CORE)
-        self.assertIn("const val GOOL_OVER_MASQUE_DEFAULT = true", CORE)
+        # 3.2.43: default OFF — the classic carrier is the state WoW always
+        # connected with; the armed direction is opt-in and remembered.
+        self.assertIn("const val GOOL_OVER_MASQUE_DEFAULT = false", CORE)
         self.assertIn("fun goolOverMasque(context: Context): Boolean", CORE)
         # The variable is what flips the engine; it may only be written when
         # the user turned the foreign exit OFF.
         self.assertIn('if (effectiveProtocol == "gool" && !goolOverMasqueArmed)', CORE)
         self.assertEqual(CORE.count('out["AETHER_GOOL_MODE"] = "classic"'), 1)
+
+    def test_armed_run_relays_the_outer_masque_identity_on_a_fresh_install(self):
+        # 3.2.40 field log (fresh install): the engine provisioned the DEDICATED
+        # MASQUE identity directly from the device — the registration API never
+        # answered on the user's network (four 20s timeouts → watchdog → MTU
+        # retry loop). The app must relay it like every other identity, armed
+        # mode only.
+        self.assertIn('relayProtocol == "gool" && CoreConfig.goolOverMasque(this@MsnGuardVpnService)',
+                      SERVICE)
+        self.assertIn('IdentityProvisioner.hasIdentity(this@MsnGuardVpnService, "masque")',
+                      SERVICE)
+        self.assertIn('"Identity relay: masque stored (Gool over MASQUE)"', SERVICE)
 
     def test_gool_over_masque_runs_with_the_masque_shaped_env(self):
         # v4 scan, H2 transport, no aethernoize, ECH off — the same env plain
@@ -102,8 +116,9 @@ class GoolOverMasqueContract(unittest.TestCase):
         self.assertIn("goolCard.setArmed(CoreConfig.goolOverMasque(this))", UI)
         self.assertIn("private fun setGoolArmed(armed: Boolean)", UI)
         self.assertIn("putBoolean(CoreConfig.GOOL_OVER_MASQUE_PREF, armed)", UI)
-        # Default-ON card state must be painted from the pref, not hardcoded.
-        self.assertIn("setArmed(true)", CARD)
+        # The card's initial paint matches the OFF default; the real state is
+        # still painted from the pref at render time, never hardcoded ON.
+        self.assertIn("setArmed(false)", CARD)
 
     def test_strings_exist_in_every_locale_column(self):
         for key in (

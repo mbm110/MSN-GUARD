@@ -5280,6 +5280,22 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                         ConnectionLog.record("Identity relay: $relayProtocol stored")
                     }
                 }
+                // GOOL OVER MASQUE also needs the OUTER masque identity. On a
+                // fresh install — the user never connected with MASQUE, so no
+                // identity was ever provisioned — the engine would register it
+                // directly from the device, and the registration API does not
+                // answer on this network (3.2.40 field log: four 20s timeouts
+                // → watchdog → MTU retry loop); only this relay reaches it.
+                // Classic gool needs no masque identity, so the relay call is
+                // armed-mode only.
+                if (relayProtocol == "gool" && CoreConfig.goolOverMasque(this@MsnGuardVpnService) &&
+                    !IdentityProvisioner.hasIdentity(this@MsnGuardVpnService, "masque")) {
+                    val outcome = IdentityRelayClient.provision(this@MsnGuardVpnService, "masque") { stopRequested.get() }
+                    ConnectionLog.record(
+                        if (outcome.success) "Identity relay: masque stored (Gool over MASQUE)"
+                        else "Identity relay: masque unavailable; core will try direct provisioning"
+                    )
+                }
                 NativeCore.attach(this)
                 // PattNG relays the core's own output line by line; an
                 // in-process library has no stdout, so install the callback

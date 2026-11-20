@@ -25,9 +25,9 @@ import kotlin.math.roundToInt
  * wireguard in wireguard, the plain (local) warp exit every MSN WoW build
  * shipped before this.
  *
- * Defaults to ON: the foreign exit is the reason the toggle exists, and the
- * engine's own gool menu defaults the same way. The user's explicit OFF is
- * remembered and never quietly re-armed.
+ * Defaults to OFF (3.2.43): the classic carrier is the state WoW always
+ * connected with; the armed direction is opt-in. The user's explicit ON is
+ * remembered and never quietly disarmed.
  */
 class GoolCard(
     context: Context,
@@ -124,7 +124,7 @@ class GoolCard(
             )
         )
 
-        setArmed(true)
+        setArmed(false)
     }
 
     /**

@@ -107,14 +107,14 @@ object CoreConfig {
      * Whether WoW runs gool over MASQUE (foreign exit) instead of classic
      * wireguard-in-wireguard (local, Iranian exit).
      *
-     * ON by default: the whole point of the WoW transport label was a foreign
-     * address, and the engine's own gool menu defaults the same way (upstream
-     * Aether v2.3.0 asks "[1] gool over masque ... (default)"). A user who
-     * needs the classic carrier behaviour turns it off once and the explicit
-     * off is remembered — never quietly re-armed.
+     * OFF by default (3.2.43, the user's call): the field logs showed the
+     * armed direction is the experiment, not the promised outcome — the
+     * classic carrier is the state WoW always connected with. A user who
+     * wants the masque carrier arms the card once and the explicit ON is
+     * remembered — never quietly disarmed.
      */
     const val GOOL_OVER_MASQUE_PREF = "gool_over_masque"
-    const val GOOL_OVER_MASQUE_DEFAULT = true
+    const val GOOL_OVER_MASQUE_DEFAULT = false
 
     /** The core's protocol name for masque-over-masque. */
     const val MIM_PROTOCOL = "mim"
