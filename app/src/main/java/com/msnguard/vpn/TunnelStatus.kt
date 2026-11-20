@@ -69,4 +69,24 @@ object TunnelStatus {
     @Volatile
     var isNativeTunMode: Boolean = false
         internal set
+
+    /**
+     * The UI's verification gate is still proving that payload crosses.
+     *
+     * The service's "connected" (the SOCKS listener answered) and the dial's
+     * "connected" (beginVerification passed a real probe through the tunnel)
+     * are two different moments by design — the gate exists to catch
+     * handshake-only tunnels. The notification reads these so its row and the
+     * screen never disagree: while [uiVerifying] is set the row still says
+     * "Connecting…", and it claims "VPN connected" only once the UI itself
+     * did ([sessionVerified]). Set by MainActivity, cleared by both sides.
+     */
+    @Volatile
+    var uiVerifying: Boolean = false
+        internal set
+
+    /** The UI's verification passed for this session; see [uiVerifying]. */
+    @Volatile
+    var sessionVerified: Boolean = false
+        internal set
 }

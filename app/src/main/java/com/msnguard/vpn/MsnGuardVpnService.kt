@@ -902,6 +902,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val ACTION_PAUSE = "com.msnguard.vpn.PAUSE"
         const val ACTION_RECONNECT = "com.msnguard.vpn.RECONNECT"
         const val ACTION_NOTIFICATION_HEALTH = "com.msnguard.vpn.NOTIFICATION_HEALTH"
+        // The UI's verification gate reports its phase so the notification row
+        // and the screen never disagree (the row must not say Connected while
+        // the dial is still on Connecting/Verifying).
+        const val ACTION_VERIFY_STATE = "com.msnguard.vpn.VERIFY_STATE"
+        const val EXTRA_VERIFY_PHASE = "verify_phase"
+        const val VERIFY_PHASE_VERIFYING = "verifying"
+        const val VERIFY_PHASE_CONNECTED = "connected"
+        const val VERIFY_PHASE_ABANDONED = "abandoned"
         const val ACTION_RESET_IDENTITIES = "com.msnguard.vpn.RESET_IDENTITIES"
         const val ACTION_STATUS = "com.msnguard.vpn.STATUS"
         const val EXTRA_CONFIG = "config"
@@ -2571,6 +2579,25 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                     ?.let { if (currentCountry.isBlank()) currentCountry = it }
                 intent.getStringExtra(EXTRA_NOTIFICATION_COUNTRY)?.takeIf { it.isNotBlank() }
                     ?.let { if (currentCountryIso.isBlank()) currentCountryIso = it.trim().uppercase() }
+                repostNotification()
+            }
+            ACTION_VERIFY_STATE -> {
+                // The activity's verification gate is the authority on when
+                // the SCREEN calls it connected; the row follows it. Abandoned
+                // (the activity died mid-verify, app swiped away) falls back
+                // to the service's own handshake edge so the row is never
+                // stuck on "Connecting…" over a live tunnel with no UI.
+                when (intent.getStringExtra(EXTRA_VERIFY_PHASE)) {
+                    VERIFY_PHASE_VERIFYING -> {
+                        TunnelStatus.uiVerifying = true
+                        TunnelStatus.sessionVerified = false
+                    }
+                    VERIFY_PHASE_CONNECTED -> {
+                        TunnelStatus.uiVerifying = false
+                        TunnelStatus.sessionVerified = true
+                    }
+                    VERIFY_PHASE_ABANDONED -> TunnelStatus.uiVerifying = false
+                }
                 repostNotification()
             }
             ACTION_RESET_IDENTITIES -> {
@@ -7307,6 +7334,12 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
     private fun startAsForeground() {
         val manager = getSystemService(NotificationManager::class.java)
         ensureNotificationChannel(manager)
+        // A fresh session starts unverified: until the activity's gate proves
+        // payload crosses, the row may only ever say "Connecting…" — a stale
+        // verified flag from the previous session would flip it to
+        // "VPN connected" at the first mid-connect repost.
+        TunnelStatus.uiVerifying = false
+        TunnelStatus.sessionVerified = false
         val cancelIntent = Intent(this, MsnGuardVpnService::class.java).apply { action = ACTION_CANCEL_CONNECT }
         val cancelPendingIntent = PendingIntent.getService(
             this, 5, cancelIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -7440,6 +7473,13 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         val title = when {
             isPaused -> Strings.t("Paused")
             proxyMode -> Strings.tf("SOCKS proxy on %s", CoreConfig.proxyListenPort(this))
+            // 3.2.44: the row must not claim a tunnel the screen is still
+            // proving. The service's handshake edge and the UI's verification
+            // gate are different moments by design — the gate exists to catch
+            // handshake-only tunnels — so while the activity is verifying, the
+            // row holds "Connecting…" exactly like the dial. When no activity
+            // is verifying (app closed), it falls back to the handshake edge.
+            TunnelStatus.uiVerifying && !TunnelStatus.sessionVerified -> Strings.t("Connecting…")
             else -> Strings.t("VPN connected")
         }
 
@@ -7482,7 +7522,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // `when` is derived by mapping the elapsedRealtime stamp we already keep
         // onto wall-clock time; using System.currentTimeMillis() directly would
         // restart the displayed timer on every repost.
-        if (connectedSince > 0L) {
+        if (connectedSince > 0L && !TunnelStatus.uiVerifying) {
             val elapsed = SystemClock.elapsedRealtime() - connectedSince
             builder.setWhen(System.currentTimeMillis() - elapsed)
                 .setUsesChronometer(true)

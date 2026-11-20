@@ -783,6 +783,13 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         com.msnguard.vpn.foxy.FoxyBrowserLogin.close()
+        // A verification still in flight dies with this instance (its verdict
+        // only ever painted this activity). Release the row from "Connecting…"
+        // so a swiped-away app cannot leave the notification stuck on it over
+        // a live tunnel — it falls back to the service's own handshake edge.
+        if (verifyInFlight) {
+            reportVerifyState(MsnGuardVpnService.VERIFY_PHASE_ABANDONED)
+        }
         // The session ticker is a Handler post, not tied to a view, so it has to
         // be cancelled by hand. The dial's own animators already stop in
         // onDetachedFromWindow.
@@ -1179,6 +1186,12 @@ class MainActivity : Activity() {
         if (verifyInFlight) return
         verifyInFlight = true
         val request = ++verifyRequest
+        // The notification follows this gate: the service's handshake edge and
+        // this proof are different moments, and a row that says "Connected"
+        // while the dial still says "Connecting" is the exact contradiction
+        // the field report called out. Report the phase so the row holds
+        // "Connecting…" until this gate passes.
+        reportVerifyState(MsnGuardVpnService.VERIFY_PHASE_VERIFYING)
 
         // DIAGNOSTIC BYPASS — plain SHARD only.
         //
@@ -1433,6 +1446,24 @@ class MainActivity : Activity() {
         // case): the service thinks that session succeeded, so the failure is
         // reported here. The teardown above IS the disconnect.
         showFailure(Strings.t("Tunnel handshake succeeded but no traffic passes — try another protocol"))
+    }
+
+    /**
+     * Tells the service which phase the verification gate is in so the
+     * notification row and the dial never disagree. Only ever called with the
+     * service live (these states exist solely while a session broadcasts), but
+     * guarded anyway: a service that died mid-verify must not be resurrected
+     * into a connect by a stray status intent.
+     */
+    private fun reportVerifyState(phase: String) {
+        try {
+            startService(
+                Intent(this, MsnGuardVpnService::class.java)
+                    .setAction(MsnGuardVpnService.ACTION_VERIFY_STATE)
+                    .putExtra(MsnGuardVpnService.EXTRA_VERIFY_PHASE, phase)
+            )
+        } catch (_: Exception) {
+        }
     }
 
     /** The state between handshake and proof. Keeps the dial in its CONNECTING look. */
@@ -9177,6 +9208,10 @@ class MainActivity : Activity() {
 
     private fun showConnected(restored: Boolean = false) {
         visualState = OrbitDialView.State.CONNECTED
+        // The screen now claims the session — tell the row it may too. This
+        // covers every route here: the verification gate passing, the two
+        // engine-bypass paths, and the restored-on-recreate paint.
+        reportVerifyState(MsnGuardVpnService.VERIFY_PHASE_CONNECTED)
         exitLookupAllowed = true
         orbitDial.state = visualState
         orbitDial.progressPercent = -1
