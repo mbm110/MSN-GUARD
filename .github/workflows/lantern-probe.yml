@@ -1,0 +1,35 @@
+name: Lantern traffic probe
+
+# Manual-only diagnostics for the Lantern traffic counters (field report:
+# Down/Up/Speed sit at 0 on a working Lantern session). Runs the in-process
+# probe test from core/lanternbridge/trafficprobe_test.go on a CI runner where
+# the public Lantern servers are reachable. Never runs on push — the APK
+# build workflow is untouched by this job.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.10'
+          cache: true
+          cache-dependency-path: core/lanternbridge/go.sum
+
+      - name: Run the SOCKS-inbound traffic probe
+        env:
+          GOTOOLCHAIN: go1.26.10
+        run: |
+          set -e
+          cd core/lanternbridge
+          go mod download github.com/getlantern/radiance@v0.0.0-20261114050550-0f837799e530
+          go mod tidy
+          go test -tags="novpn,with_gvisor,with_quic,with_wireguard,with_utls,with_grpc,probe" \
+            -run TestProbeTrafficThroughSocksInbound -v -timeout 420s . -count=1
