@@ -4923,7 +4923,9 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 // hands the inner registration, not a gateway this service can
                 // force — a forced WG-style seed would be dialed as the masque
                 // outer peer and never handshake. The chase stays classic-only.
-                CoreConfig.goolOverMasque(this))
+                // WireGuard over MASQUE (3.2.45) arms the same masque carrier,
+                // so the chase is nulled there too.
+                (CoreConfig.goolOverMasque(this) || CoreConfig.wgOverMasque(this)))
         ) {
             sessionExitCountry = null
         }
@@ -5315,7 +5317,9 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 // → watchdog → MTU retry loop); only this relay reaches it.
                 // Classic gool needs no masque identity, so the relay call is
                 // armed-mode only.
-                if (relayProtocol == "gool" && CoreConfig.goolOverMasque(this@MsnGuardVpnService) &&
+                if (relayProtocol == "gool" &&
+                    (CoreConfig.goolOverMasque(this@MsnGuardVpnService) ||
+                        CoreConfig.wgOverMasque(this@MsnGuardVpnService)) &&
                     !IdentityProvisioner.hasIdentity(this@MsnGuardVpnService, "masque")) {
                     val outcome = IdentityRelayClient.provision(this@MsnGuardVpnService, "masque") { stopRequested.get() }
                     ConnectionLog.record(
@@ -6920,7 +6924,9 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             // — the classic aether-gool-lastconn.toml belongs to the
             // wireguard-in-wireguard run and stays untouched by that mode.
             "GOOL" -> readLastconnPeer(
-                if (CoreConfig.goolOverMasque(this)) File(filesDir, "aether-masque-lastconn.toml")
+                // Either carrier card arms the masque run (3.2.45): the
+                // gateway then lives in the masque lastconn.
+                if (CoreConfig.goolOverMasque(this) || CoreConfig.wgOverMasque(this)) File(filesDir, "aether-masque-lastconn.toml")
                 else coreLastconnFile("gool")
             )
             "MIM" -> readLastconnPeer(coreLastconnFile("mim"))
@@ -7564,6 +7570,10 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         currentProtocol.contains("MIM") -> Strings.t("Masque over Masque")
         currentProtocol.contains("MASQUE") -> Strings.t("MASQUE")
         currentProtocol.contains("WIREGUARD") -> Strings.t("WireGuard")
+        // A WireGuard connect armed with the masque carrier runs the engine's
+        // gool path (that is the whole point of the mapping), so the label
+        // would say WoW over a WireGuard session — name what the user picked.
+        currentProtocol.contains("GOOL") && CoreConfig.wgOverMasque(this) -> Strings.t("WireGuard")
         currentProtocol.contains("GOOL") -> Strings.t("WARP-on-WARP")
         currentProtocol.isBlank() -> Strings.t("Tunnel")
         else -> currentProtocol.lowercase().replaceFirstChar { it.uppercase() }

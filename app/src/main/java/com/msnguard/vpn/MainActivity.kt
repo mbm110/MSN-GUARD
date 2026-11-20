@@ -93,6 +93,7 @@ class MainActivity : Activity() {
      * visible with WoW (WARP-on-WARP) selected.
      */
     private lateinit var goolCard: GoolCard
+    private lateinit var wgOverMasqueCard: GoolCard
     /**
      * The SHARD twin of [chainCard], in the same slot.
      *
@@ -640,6 +641,16 @@ class MainActivity : Activity() {
         chainCard = ChainModeCard(this, palette) { armed -> setChainArmed(armed) }
         mimCard = MimCard(this, palette) { armed -> setMimArmed(armed) }
         goolCard = GoolCard(this, palette) { armed -> setGoolArmed(armed) }
+        // WireGuard over MASQUE (3.2.45): the same carrier view, the WireGuard
+        // transport's own strings and its own remembered pref.
+        wgOverMasqueCard = GoolCard(
+            this, palette,
+            { armed -> setWgOverArmed(armed) },
+            title = Strings.t("WIREGUARD OVER MASQUE"),
+            onText = Strings.t("foreign exit — the identity registers through the tunnel"),
+            offText = Strings.t("plain wireguard, a local exit"),
+            name = "WireGuard over Masque",
+        )
         smartSplitCard = SmartSplitCard(this, palette) { on -> setSmartSplitEnabled(on) }
         // v3.2.26: perRow=4 — the eight transports sit in two rows of four:
         // WireGuard · MASQUE · WoW · Lantern / Psiphon · Tor · Foxy · SHARD.
@@ -1725,6 +1736,14 @@ class MainActivity : Activity() {
         // keeps exactly one of the four cards visible, so the screen keeps its
         // height here too.
         addView(goolCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(56),
+        ).apply { topMargin = dp(10) })
+
+        // WireGuard over masque, the fifth occupant of the same slot (3.2.45):
+        // WireGuard's own carrier choice. [renderChainCard] keeps exactly one
+        // of the five cards visible, so the screen keeps its height here too.
+        addView(wgOverMasqueCard, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
         ).apply { topMargin = dp(10) })
@@ -9520,16 +9539,21 @@ class MainActivity : Activity() {
         val shardSelected = selectedProtocol == Protocol.SHARD
         val masqueSelected = selectedProtocol == Protocol.MASQUE
         val wowSelected = selectedProtocol == Protocol.WARP_IN_WARP
+        val wireguardSelected = selectedProtocol == Protocol.WIREGUARD
         // WoW hands its slot to the gool card: the chain card would only sit
         // there greyed ("only for the PSIPHON and TOR transports"), and the
         // gool carrier choice is what actually belongs under a WoW selection.
-        chainCard.visibility = if (!shardSelected && !masqueSelected && !wowSelected) View.VISIBLE else View.GONE
+        chainCard.visibility = if (!shardSelected && !masqueSelected && !wowSelected && !wireguardSelected) View.VISIBLE else View.GONE
         smartSplitCard.visibility = if (shardSelected) View.VISIBLE else View.GONE
         mimCard.visibility = if (masqueSelected) View.VISIBLE else View.GONE
         goolCard.visibility = if (wowSelected) View.VISIBLE else View.GONE
+        // WireGuard hands its slot to the masque-carrier card (3.2.45), exactly
+        // the way WoW hands its slot to the gool card.
+        wgOverMasqueCard.visibility = if (wireguardSelected) View.VISIBLE else View.GONE
         renderSmartSplitCard()
         renderMimCard()
         renderGoolCard()
+        renderWgOverCard()
         // The AI MODE chip rides the chip line, but the same repaint decides
         // transport applicability and the connected lock, so it is painted here
         // too — one place, the same rules as the cards.
@@ -9698,6 +9722,39 @@ class MainActivity : Activity() {
         } else {
             ConnectionLog.record(
                 "Gool-over-Masque disarmed: classic wireguard-in-wireguard, local warp exit"
+            )
+        }
+    }
+
+    /** The WireGuard card's twin of [renderGoolCard]. */
+    private fun renderWgOverCard() {
+        val applies = selectedProtocol == Protocol.WIREGUARD
+        val reason = when {
+            !applies -> Strings.t("only for the WireGuard transport")
+            !modeControlsEnabled -> Strings.t("disconnect to change")
+            else -> null
+        }
+        wgOverMasqueCard.setUnavailable(reason, applicable = applies)
+        wgOverMasqueCard.setArmed(CoreConfig.wgOverMasque(this))
+    }
+
+    /**
+     * Records the WireGuard carrier choice. Takes effect on the next connect,
+     * like every other slot-card switch.
+     *
+     * OFF by default (see [CoreConfig.WG_OVER_MASQUE_PREF]): plain wireguard is
+     * the state every WireGuard build shipped with; ON arms the masque carrier
+     * — wireguard registered through the masque tunnel for a foreign exit.
+     */
+    private fun setWgOverArmed(armed: Boolean) {
+        preferences().edit().putBoolean(CoreConfig.WG_OVER_MASQUE_PREF, armed).apply()
+        if (armed) {
+            ConnectionLog.record(
+                "WireGuard-over-Masque armed: wireguard registers through the masque tunnel for a foreign exit"
+            )
+        } else {
+            ConnectionLog.record(
+                "WireGuard-over-Masque disarmed: plain wireguard, local warp exit"
             )
         }
     }

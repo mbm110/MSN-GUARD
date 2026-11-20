@@ -33,6 +33,12 @@ class GoolCard(
     context: Context,
     private val palette: AppAppearance.Palette,
     private val onToggle: (Boolean) -> Unit,
+    // The WireGuard carrier card (3.2.45) reuses this whole view; only the
+    // strings differ. Defaults keep the WoW card byte-identical.
+    private val title: String = Strings.t("GOOL OVER MASQUE"),
+    private val onText: String = Strings.t("foreign exit — the identity registers through the tunnel"),
+    private val offText: String = Strings.t("classic: wireguard in wireguard, a local exit"),
+    private val name: String = "Gool over Masque",
 ) : LinearLayout(context) {
 
     private val titleView: TextView
@@ -70,7 +76,7 @@ class GoolCard(
 
         val column = LinearLayout(context).apply { orientation = VERTICAL }
         titleView = TextView(context).apply {
-            text = Strings.t("GOOL OVER MASQUE")
+            text = title
             textSize = 11f
             letterSpacing = spacing(0.1f)
             typeface = Typefaces.medium(context)
@@ -165,9 +171,9 @@ class GoolCard(
         // States the effect for the user, not the mechanism: the foreign exit
         // is the entire point of the masque carrier.
         subtitleView.text = unavailableReason ?: if (value) {
-            Strings.t("foreign exit — the identity registers through the tunnel")
+            onText
         } else {
-            Strings.t("classic: wireguard in wireguard, a local exit")
+            offText
         }
         // `muted` for the same measured-contrast reason as SmartSplitCard.
         subtitleView.setTextColor(palette.muted)
@@ -185,10 +191,10 @@ class GoolCard(
         )
         icon.setLinked(lit)
         contentDescription = when {
-            !applicable -> "Gool over Masque unavailable: $unavailableReason"
-            value && unavailableReason != null -> "Gool over Masque is on, $unavailableReason"
-            value -> "Gool over Masque is on"
-            else -> "Gool over Masque is off"
+            !applicable -> "$name unavailable: $unavailableReason"
+            value && unavailableReason != null -> "$name is on, $unavailableReason"
+            value -> "$name is on"
+            else -> "$name is off"
         }
     }
 

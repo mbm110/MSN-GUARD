@@ -116,6 +116,21 @@ object CoreConfig {
     const val GOOL_OVER_MASQUE_PREF = "gool_over_masque"
     const val GOOL_OVER_MASQUE_DEFAULT = false
 
+    /**
+     * WireGuard over MASQUE (3.2.45): the WireGuard carrier's twin of
+     * [GOOL_OVER_MASQUE_PREF] — armed, a WireGuard connect runs wireguard
+     * INSIDE the masque tunnel (identity registered through it) on exactly the
+     * engine path the WoW card arms, instead of a plain wireguard tunnel.
+     *
+     * OFF by default: plain wireguard is the state every WireGuard build
+     * shipped with; the masque carrier is opt-in and remembered.
+     */
+    const val WG_OVER_MASQUE_PREF = "wireguard_over_masque"
+    const val WG_OVER_MASQUE_DEFAULT = false
+
+    fun wgOverMasque(context: Context): Boolean =
+        context.profiled().getBoolean(WG_OVER_MASQUE_PREF, WG_OVER_MASQUE_DEFAULT)
+
     /** The core's protocol name for masque-over-masque. */
     const val MIM_PROTOCOL = "mim"
 
@@ -274,8 +289,19 @@ object CoreConfig {
         fun text(key: String, fallback: String = "") =
             prefs.getString(key, fallback)?.trim().orEmpty()
         val effectiveProtocol = when {
-            protocol == null -> text("default_protocol", "wireguard")
             protocol == "masque" && mimArmed(context) -> MIM_PROTOCOL
+            // WireGuard over MASQUE (3.2.45): the engine runs the armed-WoW
+            // path (wireguard inside the masque tunnel), and the service keys
+            // its whole setup off this protocol field — so a WireGuard
+            // selection armed with the masque carrier reads "gool" here and
+            // every downstream branch (SOCKS-front prep, MTU method, udpgw,
+            // lastconn) takes the proven WoW-over-MASQUE shape. Covers the
+            // null-protocol entry points too (tile, quick reconnect): they
+            // must not silently run plain wireguard over an armed card.
+            (protocol == "wireguard" ||
+                (protocol == null && text("default_protocol", "wireguard") == "wireguard")) &&
+                wgOverMasque(context) -> "gool"
+            protocol == null -> text("default_protocol", "wireguard")
             else -> protocol
         }
         return org.json.JSONObject().apply {
@@ -333,23 +359,27 @@ object CoreConfig {
         // anything, i.e. on a first connect — and WireGuard now leads the rail,
         // so a disagreement here would build a MASQUE config under a UI showing
         // WireGuard selected.
-        // Masque-over-masque: when the user armed the second hop, a MASQUE
-        // connect becomes a MIM connect. Rewritten here rather than by the
-        // callers so the tile, the dial and a quick reconnect cannot miss it.
-        val effectiveProtocol = if (
-            (protocol ?: text("default_protocol", "wireguard")) == "masque" &&
-            mimArmed(context)
-        ) {
-            MIM_PROTOCOL
-        } else {
-            protocol ?: text("default_protocol", "wireguard")
+        // WireGuard over MASQUE (3.2.45): the armed WireGuard card reuses the
+        // armed-WoW engine path — wireguard inside the masque tunnel — so both
+        // carrier cards funnel into the same "gool" protocol and the same
+        // masque-shaped env below. MIM rewrites MASQUE the same way (see
+        // [MIM_ARMED_PREF]); the carrier arming rewrites WireGuard.
+        val originalProtocol = protocol ?: text("default_protocol", "wireguard")
+        val effectiveProtocol = when {
+            originalProtocol == "masque" && mimArmed(context) -> MIM_PROTOCOL
+            originalProtocol == "wireguard" && wgOverMasque(context) -> "gool"
+            else -> originalProtocol
         }
 
         // WoW mode: gool over MASQUE (engine `WarpInWarp if !gool_classic()`:
         // masque outer, wireguard identity registered THROUGH the tunnel, so
         // the exit is foreign) or classic wireguard-in-wireguard. The pref
         // decides; AETHER_GOOL_MODE below is what actually tells the engine.
-        val goolOverMasqueArmed = effectiveProtocol == "gool" && goolOverMasque(context)
+        // WireGuard over MASQUE arms the very same carrier (3.2.45), so the
+        // armed flag covers either card.
+        val masqueCarrierArmed =
+            (originalProtocol == "gool" && goolOverMasque(context)) ||
+            (originalProtocol == "wireguard" && wgOverMasque(context))
 
         val out = LinkedHashMap<String, String>()
 
@@ -373,7 +403,7 @@ object CoreConfig {
         // choice now: ON leaves the variable unset (foreign exit), OFF pins
         // classic exactly the way FCAE does — the scan + AETHER_WG_PEER path
         // classic WoW was built for.
-        if (effectiveProtocol == "gool" && !goolOverMasqueArmed) {
+        if (effectiveProtocol == "gool" && !masqueCarrierArmed) {
             out["AETHER_GOOL_MODE"] = "classic"
         }
 
@@ -420,7 +450,7 @@ object CoreConfig {
         // transport, no aethernoize, ECH off, the H2-fragment knobs. Without
         // this the masque handshake would run on the wireguard-shaped env.
         val isMasqueForEnv = effectiveProtocol == "masque" || effectiveProtocol == MIM_PROTOCOL ||
-            (effectiveProtocol == "gool" && goolOverMasqueArmed)
+            (effectiveProtocol == "gool" && masqueCarrierArmed)
         out["AETHER_IP"] = if (isMasqueForEnv) "v4" else text("default_scan", "both")
 
         // Obfuscation (aethernoize). off/light/balanced/aggressive/firewall/gfw;
@@ -451,7 +481,7 @@ object CoreConfig {
             // AETHER_WG_PEER is simply unread there. Pinning is a classic-WoW
             // feature; gool-over-masque ignores the field the way the engine
             // does.
-            if (!goolOverMasqueArmed) {
+            if (!masqueCarrierArmed) {
                 text("manual_endpoint").ifBlank { "" }.takeIf { it.isNotBlank() }?.let {
                     // The engine splits AETHER_PEER across protocols: AETHER_PEER is
                     // the masque peer, AETHER_WG_PEER the wireguard one. Set both so
@@ -464,7 +494,7 @@ object CoreConfig {
             // outer", which is the behaviour every version before this had —
             // so an unset field changes nothing for existing users.
             text("manual_inner_endpoint").ifBlank { "" }.takeIf { it.isNotBlank() }?.let {
-                if (goolOverMasqueArmed) {
+                if (masqueCarrierArmed) {
                     // The engine's gool_inner_peers reads AETHER_GOOL_INNER.
                     // AETHER_WIW_INNER_PEER must NOT be set here: its mere
                     // presence makes the engine's gool_classic() flip the whole

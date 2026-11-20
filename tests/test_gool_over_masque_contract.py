@@ -37,7 +37,7 @@ class GoolOverMasqueContract(unittest.TestCase):
         self.assertIn("fun goolOverMasque(context: Context): Boolean", CORE)
         # The variable is what flips the engine; it may only be written when
         # the user turned the foreign exit OFF.
-        self.assertIn('if (effectiveProtocol == "gool" && !goolOverMasqueArmed)', CORE)
+        self.assertIn('if (effectiveProtocol == "gool" && !masqueCarrierArmed)', CORE)
         self.assertEqual(CORE.count('out["AETHER_GOOL_MODE"] = "classic"'), 1)
 
     def test_armed_run_relays_the_outer_masque_identity_on_a_fresh_install(self):
@@ -46,8 +46,8 @@ class GoolOverMasqueContract(unittest.TestCase):
         # answered on the user's network (four 20s timeouts → watchdog → MTU
         # retry loop). The app must relay it like every other identity, armed
         # mode only.
-        self.assertIn('relayProtocol == "gool" && CoreConfig.goolOverMasque(this@MsnGuardVpnService)',
-                      SERVICE)
+        self.assertIn('relayProtocol == "gool" &&', SERVICE)
+        self.assertIn("CoreConfig.goolOverMasque(this@MsnGuardVpnService) ||", SERVICE)
         self.assertIn('IdentityProvisioner.hasIdentity(this@MsnGuardVpnService, "masque")',
                       SERVICE)
         self.assertIn('"Identity relay: masque stored (Gool over MASQUE)"', SERVICE)
@@ -56,7 +56,7 @@ class GoolOverMasqueContract(unittest.TestCase):
         # v4 scan, H2 transport, no aethernoize, ECH off — the same env plain
         # MASQUE gets on this carrier, because the outer hop IS a masque dial.
         self.assertIn(
-            '(effectiveProtocol == "gool" && goolOverMasqueArmed)',
+            '(effectiveProtocol == "gool" && masqueCarrierArmed)',
             CORE,
         )
 
@@ -74,7 +74,7 @@ class GoolOverMasqueContract(unittest.TestCase):
         # would force a wireguard-style peer into the masque outer dial.
         self.assertRegex(
             CORE,
-            r"if \(!goolOverMasqueArmed\) \{\s*\n\s*text\(\"manual_endpoint\"\)",
+            r"if \(!masqueCarrierArmed\) \{\s*\n\s*text\(\"manual_endpoint\"\)",
         )
         # And the forced-peer injection sits behind the same gate.
         self.assertIn('if (!(proto == "gool" && goolOverMasque(context)))', CORE)
@@ -108,7 +108,7 @@ class GoolOverMasqueContract(unittest.TestCase):
         # Exactly one slot occupant visible: WoW hands the slot to the gool card.
         self.assertIn("val wowSelected = selectedProtocol == Protocol.WARP_IN_WARP", UI)
         self.assertIn(
-            "chainCard.visibility = if (!shardSelected && !masqueSelected && !wowSelected) View.VISIBLE else View.GONE",
+            "chainCard.visibility = if (!shardSelected && !masqueSelected && !wowSelected && !wireguardSelected) View.VISIBLE else View.GONE",
             UI,
         )
         self.assertIn("goolCard.visibility = if (wowSelected) View.VISIBLE else View.GONE", UI)
@@ -138,11 +138,11 @@ class GoolOverMasqueContract(unittest.TestCase):
             'if (sessionExitCountry != null && (currentProtocol != "GOOL" ||',
             SERVICE,
         )
-        self.assertIn("CoreConfig.goolOverMasque(this))", SERVICE)
+        self.assertIn("CoreConfig.goolOverMasque(this) || CoreConfig.wgOverMasque(this)))", SERVICE)
         # The session endpoint reads the masque lastconn in over-masque mode
         # (run_masque saves there), the classic gool file otherwise.
         self.assertIn(
-            'if (CoreConfig.goolOverMasque(this)) File(filesDir, "aether-masque-lastconn.toml")',
+            'if (CoreConfig.goolOverMasque(this) || CoreConfig.wgOverMasque(this)) File(filesDir, "aether-masque-lastconn.toml")',
             SERVICE,
         )
 
