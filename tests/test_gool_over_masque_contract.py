@@ -77,7 +77,9 @@ class GoolOverMasqueContract(unittest.TestCase):
             r"if \(!masqueCarrierArmed\) \{\s*\n\s*text\(\"manual_endpoint\"\)",
         )
         # And the forced-peer injection sits behind the same gate.
-        self.assertIn('if (!(proto == "gool" && goolOverMasque(context)))', CORE)
+        # Either carrier card arms the masque run (3.2.46), so the injection
+        # gate covers both.
+        self.assertIn('val carrierArmed = (selected == "gool" && goolOverMasque(context)) ||', CORE)
 
     def test_stale_carrier_env_is_cleared_between_connects(self):
         # 3.2.39 field log: the engine keeps ONE process env, and the previous

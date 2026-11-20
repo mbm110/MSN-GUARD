@@ -146,6 +146,30 @@ class WgOverMasqueContract(unittest.TestCase):
         self.assertEqual(CORE.count('out["AETHER_GOOL_MODE"] = "classic"'), 1)
         self.assertIn('(effectiveProtocol == "gool" && masqueCarrierArmed)', CORE)
 
+    def test_the_original_selection_rides_along(self):
+        # 3.2.45 field log: json's protocol field said "gool" for an armed
+        # WireGuard run, so envFromEffectiveConfig passed "gool" to env(),
+        # which read the WoW card's pref — OFF — pinned AETHER_GOOL_MODE=classic
+        # and the run connected through classic warp-in-warp with an IR exit
+        # instead of the masque carrier. The original selection now rides
+        # along and envFromEffectiveConfig prefers it.
+        self.assertIn(
+            'if (effectiveProtocol == "gool" &&\n                (protocol ?: text("default_protocol", "wireguard")) == "wireguard"\n            ) {\n                put("selected_protocol", "wireguard")\n            }',
+            CORE,
+        )
+        self.assertIn(
+            'val selected = json.optString("selected_protocol").ifBlank { proto }',
+            CORE,
+        )
+        self.assertIn("protocol = selected,", CORE)
+        # The forced-peer injection gate covers either carrier card too.
+        self.assertIn(
+            '''            val carrierArmed = (selected == "gool" && goolOverMasque(context)) ||
+                (selected == "wireguard" && wgOverMasque(context))
+            if (!carrierArmed) {''',
+            CORE,
+        )
+
     def test_strings_exist_in_every_locale_column(self):
         for key in (
             "WIREGUARD OVER MASQUE",

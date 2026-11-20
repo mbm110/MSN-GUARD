@@ -309,6 +309,20 @@ object CoreConfig {
             // here keeps currentProtocol/protocol parsing and lastResult fallbacks
             // working and avoids {} in logs/notifications.
             put("protocol", effectiveProtocol)
+            // The carrier cards (3.2.45) map a WireGuard selection onto "gool"
+            // for the engine — but env() decides which CARRIER that gool runs
+            // on by reading the ORIGINAL selection's pref, and a bare "gool"
+            // here reads the WoW card's pref and pins classic WIW (3.2.45 field
+            // log: the armed WireGuard run connected through warp-in-warp with
+            // an IR exit instead of the masque carrier). The original selection
+            // rides along as selected_protocol; envFromEffectiveConfig prefers
+            // it. Absent for every other protocol — WoW runs read "gool" here
+            // because the user picked gool.
+            if (effectiveProtocol == "gool" &&
+                (protocol ?: text("default_protocol", "wireguard")) == "wireguard"
+            ) {
+                put("selected_protocol", "wireguard")
+            }
             put("config_path", java.io.File(context.filesDir, "aether.toml").absolutePath)
             put("listen", if (listenOverride != null) "127.0.0.1:$listenOverride" else "${proxyBindHost(context)}:${sharedSocksPort(context)}")
             put("scan_mode", text("default_scan_mode", "balanced"))
@@ -788,6 +802,13 @@ object CoreConfig {
     ): Map<String, String> {
         val json = runCatching { org.json.JSONObject(overridesJson) }.getOrElse { org.json.JSONObject() }
         val proto = json.optString("protocol").ifBlank { null }
+        // The carrier mapping (3.2.45) writes the engine's protocol as "gool"
+        // for an armed WireGuard selection; env() reads the ORIGINAL selection
+        // to decide which carrier that gool runs on. Without this, a bare
+        // "gool" reads the WoW card's pref — off — and pins classic WIW: the
+        // 3.2.45 field log's armed WireGuard run connected through
+        // warp-in-warp with an IR exit instead of the masque carrier.
+        val selected = json.optString("selected_protocol").ifBlank { proto }
         val peer = json.optString("forced_peer").ifBlank { null }
         val w = runCatching { json.optString("socks_proxy").ifBlank { null } }.getOrNull()
         // socks_proxy was written as a plain `127.0.0.1:port` listener without a
@@ -801,7 +822,7 @@ object CoreConfig {
         }
         val base = env(
             context,
-            protocol = proto,
+            protocol = selected,
             listenOverride = listenOverride,
             socksProxyForCore = upstream ?: "",
             localUdpAssociate = localUdpAssociate,
@@ -809,12 +830,15 @@ object CoreConfig {
         if (peer != null) {
             val ov = LinkedHashMap(base)
             // Mirrors the old JSON -> engine mapping: a manual pin reached both
-            // AETHER_PEER and AETHER_WG_PEER. In gool-over-masque both are
+            // AETHER_PEER and AETHER_WG_PEER. On the masque carrier both are
             // meaningless-to-harmful (AETHER_PEER would force a wireguard-style
             // peer into the masque outer dial, probe skipped), and env() already
-            // drops the manual endpoint there — so the forced-peer injection sits
-            // behind the same gate.
-            if (!(proto == "gool" && goolOverMasque(context))) {
+            // drops the manual endpoint there — so the forced-peer injection
+            // sits behind the same gate. Either carrier card arms it (an armed
+            // WireGuard run reads selected_protocol "wireguard" above).
+            val carrierArmed = (selected == "gool" && goolOverMasque(context)) ||
+                (selected == "wireguard" && wgOverMasque(context))
+            if (!carrierArmed) {
                 ov["AETHER_PEER"] = peer
                 ov["AETHER_WG_PEER"] = peer
             }
