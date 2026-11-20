@@ -648,6 +648,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var warpTrafficTask: java.util.concurrent.ScheduledFuture<*>? = null
     /** 2.3.15: counts [startWarpTrafficPolling] ticks to emit a per-minute diagnostic. */
     private var warpStatsTick = 0
+
+    /** 3.3.1 Lantern traffic-poller diagnostics; see startLanternTrafficPolling. */
+    private var lanternStatsTick = 0
+    private var lanternStatsSamples = 0L
+    private var lanternStatsSkipped = 0
     private var ladderIndex = 0
     private var ladderAttempts = 0
     private var ladderTimer: ScheduledFuture<*>? = null
@@ -3437,16 +3442,53 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
     /** Feeds Radiance's cumulative connection counters into the normal traffic UI. */
     private fun startLanternTrafficPolling() {
         torTrafficTask?.cancel(false)
+        // 3.3.1 diagnostic (the warp-stats pattern, 2.3.15): the 3.3.0 field
+        // report — Lantern carries traffic, Down/Up show, Speed pinned at 0 —
+        // cannot be reproduced from source (every link reads correct), so the
+        // poll now records what it actually saw once a minute: the raw counter
+        // values plus how many of the last 60 ticks produced no sample. A
+        // frozen tx with live traffic, a mostly-skipped poller, or a growing
+        // tx with a zero speed each name a different culprit.
+        lanternStatsTick = 0
+        lanternStatsSamples = 0
+        lanternStatsSkipped = 0
         torTrafficTask = ladderScheduler.scheduleAtFixedRate({
             try {
-                if (!LanternEngine.isRunning) return@scheduleAtFixedRate
-                if (!shouldSampleTraffic()) return@scheduleAtFixedRate
+                if (!LanternEngine.isRunning) {
+                    lanternStatsSkipped++
+                    return@scheduleAtFixedRate
+                }
+                if (!shouldSampleTraffic()) {
+                    lanternStatsSkipped++
+                    return@scheduleAtFixedRate
+                }
                 // A failed counter read is SKIPPED, never fed in as zero — see
                 // trafficCountersOrNull. Feeding zeros rebased the baseline and
                 // flashed "0 B/s" while the tunnel was busy (v3.2.29 report).
-                val counters = LanternEngine.trafficCountersOrNull() ?: return@scheduleAtFixedRate
+                val counters = LanternEngine.trafficCountersOrNull() ?: run {
+                    lanternStatsSkipped++
+                    return@scheduleAtFixedRate
+                }
+                lanternStatsSamples++
+                if (lanternStatsSamples == 1L) {
+                    ConnectionLog.record(
+                        "lantern traffic first sample: tx=" + counters.first + " rx=" + counters.second
+                    )
+                }
                 updateTrafficNotification(counters.first, counters.second)
+                lanternStatsTick++
+                if (lanternStatsTick >= 60) {
+                    lanternStatsTick = 0
+                    ConnectionLog.record(
+                        "lantern stats: tx=" + counters.first + " rx=" + counters.second +
+                            " (samples=" + lanternStatsSamples + " skipped=" + lanternStatsSkipped +
+                            " in the last minute)"
+                    )
+                    lanternStatsSamples = 0
+                    lanternStatsSkipped = 0
+                }
             } catch (_: Exception) {
+                lanternStatsSkipped++
             }
         }, 1L, 1L, TimeUnit.SECONDS)
     }

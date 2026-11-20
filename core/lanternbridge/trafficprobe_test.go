@@ -147,8 +147,19 @@ func TestProbeTrafficThroughSocksInbound(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = Disconnect() })
 
-	// The SOCKS listener comes up while Radiance starts in the background.
-	deadline := time.Now().Add(30 * time.Second)
+	// ORDER (fixed): connect FIRST, then wait for the listener. The box — and
+	// with it the SOCKS inbound — is created per tunnel, at ConnectVPN: waiting
+	// for the listener before connecting waits forever (that is exactly how the
+	// first CI run failed: "SOCKS inbound never listened" with no connect ever
+	// attempted). The app does the same: Hev starts only after a successful
+	// LanternEngine.connect().
+	if err := Connect(180); err != nil {
+		t.Fatalf("Connect: %v (status %q, last error %q)", err, Status(), LastError())
+	}
+	t.Logf("connected; status=%q", Status())
+
+	// The tunnel is up; the mixed inbound binds with it.
+	deadline := time.Now().Add(60 * time.Second)
 	for {
 		c, err := net.DialTimeout("tcp", socksAddr, 500*time.Millisecond)
 		if err == nil {
@@ -156,15 +167,11 @@ func TestProbeTrafficThroughSocksInbound(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("SOCKS inbound never listened: %v", err)
+			t.Fatalf("SOCKS inbound never listened: %v (status %q, last error %q)",
+				err, Status(), LastError())
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-
-	if err := Connect(180); err != nil {
-		t.Fatalf("Connect: %v (status %q, last error %q)", err, Status(), LastError())
-	}
-	t.Logf("connected; status=%q", Status())
 
 	tx0, rx0, raw0 := probeTrafficTotals(t)
 	t.Logf("counters before any traffic: %s", raw0)
