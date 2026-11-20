@@ -3,10 +3,11 @@ name: Lantern traffic probe
 # Manual-only diagnostics for the Lantern traffic counters (field report:
 # Down/Up/Speed sit at 0 on a working Lantern session). Runs the in-process
 # probe test from core/lanternbridge/trafficprobe_test.go on a CI runner where
-# the public Lantern servers are reachable. Never runs on push — the APK
-# build workflow is untouched by this job.
+# the public Lantern servers are reachable. Triggers ONLY on this branch —
+# the APK build workflow is untouched by this job.
 on:
-  workflow_dispatch:
+  push:
+    branches: [lantern-probe]
 
 jobs:
   probe:
