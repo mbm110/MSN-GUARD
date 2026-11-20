@@ -4625,6 +4625,17 @@ class MainActivity : Activity() {
      */
     @Volatile private var lanternPickerOpen = false
 
+    /** The open Server sheet's dialog, so a background refresh can rebuild it
+     *  in place instead of forcing the user to back out and re-enter. */
+    @Volatile private var lanternServerSheet: Dialog? = null
+
+    /** The `after` callback of the currently open Lantern Server sheet. */
+    private var lanternPickerAfter: (() -> Unit)? = null
+
+    /** True while the sheet is being dismissed only to be reopened with fresh
+     *  data; the dismiss handler must not treat that as the user closing it. */
+    private var lanternSheetReopening = false
+
     /** When the current server snapshot was fetched (0 = unknown/legacy cache). */
     @Volatile private var lanternServersFetchedAt = 0L
 
@@ -4847,6 +4858,16 @@ class MainActivity : Activity() {
                         .onFailure { ConnectionLog.record("Lantern: list boot failed: ${it.message}") }
                         .getOrDefault(false)
                     if (booted) {
+                        // 3.2.49: re-roll the draw on the very first open —
+                        // each fetch is a fresh random ~6-location sample
+                        // (RADIANCE_COUNTRY draws from the global pool, see
+                        // the spawn comment), so a pinned config would show
+                        // one stale sample. When the draw lands the sheet
+                        // rebuilds in place.
+                        val refreshError = LanternEngine.forceConfigRefresh()
+                        if (refreshError != null) {
+                            ConnectionLog.record("Lantern: first-open config refresh failed: $refreshError")
+                        }
                         snapshot = LanternEngine.serversSnapshot(timeoutMs = 5_000)
                         if (snapshot == null) {
                             // The control socket answers the moment the sidecar
@@ -4911,11 +4932,29 @@ class MainActivity : Activity() {
             loading.set(dialog)
         }
         try {
-            val deadline = System.currentTimeMillis() + 25_000L
+            // 60s, not 25: the raw Iranian link regularly needs longer than
+            // the old bound, and the sheet opening empty was exactly the
+            // back-out-and-re-enter the field report described. The progress
+            // sheet keeps the wait visible, and a dead network still falls
+            // through to the empty-state text after the bound.
+            val deadline = System.currentTimeMillis() + 60_000L
             var snapshot: JSONObject? = null
-            while (snapshot == null && System.currentTimeMillis() < deadline) {
+            while (System.currentTimeMillis() < deadline) {
                 Thread.sleep(1_500L)
-                snapshot = LanternEngine.serversSnapshot(timeoutMs = 3_000)
+                val candidate = LanternEngine.serversSnapshot(timeoutMs = 3_000)
+                // The CONTROL socket answers the moment the sidecar process
+                // is up, but /servers lists nothing until Radiance has
+                // APPLIED its fetched config — a non-null answer with an
+                // empty array was the actual first-open bug: the wait loop
+                // below returned on the first empty read and the sheet opened
+                // with "Automatic" only (3.2.48). The gate is a NON-EMPTY
+                // list; null (control not ready yet) keeps polling.
+                if (candidate != null &&
+                    (candidate.optJSONArray("servers")?.length() ?: 0) > 0
+                ) {
+                    snapshot = candidate
+                    break
+                }
             }
             return snapshot
         } finally {
@@ -4939,6 +4978,7 @@ class MainActivity : Activity() {
         // connected it runs through the live tunnel, and while disconnected
         // the core boots list-only so pings still refresh offline.
         lanternPickerOpen = true
+        lanternPickerAfter = after
         Thread {
             // Connected: re-probe through the live tunnel. Disconnected: boot
             // the core list-only (official-app parity) so pings still refresh.
@@ -4947,6 +4987,20 @@ class MainActivity : Activity() {
             }.onFailure {
                 ConnectionLog.record("Lantern: picker sidecar boot failed: ${it.message}")
             }.getOrDefault(false)
+            if (sidecarUp && !LanternEngine.isRunning) {
+                // OFFLINE refresh (3.2.49): each config fetch is a fresh
+                // random draw from Lantern's global pool (the sidecar's
+                // RADIANCE_COUNTRY identity; see the spawn comment), so the
+                // refresh button re-rolls the list — Milan/Ashburn appear in
+                // some draws, exactly like the official app's rotating list —
+                // and the open sheet rebuilds in place when the tag set
+                // changes.
+                val refreshError = LanternEngine.forceConfigRefresh()
+                ConnectionLog.record(
+                    if (refreshError == null) "Lantern: config refreshed for this network"
+                    else "Lantern: config refresh failed: $refreshError",
+                )
+            }
             if (sidecarUp) {
                 // Probe-cost guard (v3.2.27 audit): a full probe round hits
                 // every server — up to 95s of requests. Through the live
@@ -4967,16 +5021,39 @@ class MainActivity : Activity() {
                 }
                 if (lanternPickerOpen) {
                     val fresh = LanternEngine.serversSnapshot(timeoutMs = 5_000)
-                    parseLanternSnapshot(
-                        fresh,
-                        trustCurrent = fresh != null || !LanternEngine.isRunning,
-                    )
+                    if (fresh != null) {
+                        val before = lanternServersCache.map { it.tag }.toSet()
+                        parseLanternSnapshot(
+                            fresh,
+                            trustCurrent = fresh != null || !LanternEngine.isRunning,
+                        )
+                        val afterTags = lanternServersCache.map { it.tag }.toSet()
+                        // The geo-honest refresh (or any server-list change)
+                        // rebuilds the OPEN sheet in place — the field report's
+                        // whole complaint was needing to back out and re-enter
+                        // to see the new list. Ping-only changes keep the open
+                        // sheet (pings re-render on the next open; a silent
+                        // mid-look rebuild for a number is churn, not help).
+                        if (lanternPickerOpen && before != afterTags) {
+                            runOnUiThread { reopenLanternServerSheetIfOpen() }
+                        }
+                    }
                 }
             }
         }.apply { isDaemon = true; start() }
         // Meanwhile build the sheet from the current snapshot so it opens
         // immediately with live values.
-        loadLanternServers { servers ->
+        loadLanternServers { servers -> openLanternServerSheet(servers) }
+    }
+
+    /**
+     * Builds the Server sheet from [servers]. Kept separate from
+     * [chooseLanternServer] so a background refresh can REBUILD the open sheet
+     * in place (see [reopenLanternServerSheetIfOpen]) — the field report's
+     * complaint was that new data only appeared after backing out and
+     * re-entering.
+     */
+    private fun openLanternServerSheet(servers: List<LanternServerOption>) {
             val options = listOf<LanternServerOption?>(null) + servers.map { it as LanternServerOption? }
             val selectedTag = LanternEngine.storedServerSelection(this)
             val selected = options.firstOrNull {
@@ -5014,7 +5091,16 @@ class MainActivity : Activity() {
                     }
                 },
                 scrollable = true,
-                onDismiss = { lanternPickerOpen = false },
+                onDismiss = {
+                    // A dismiss that happens only to rebuild the sheet with
+                    // fresh data is not the user closing it.
+                    if (!lanternSheetReopening) {
+                        lanternPickerOpen = false
+                        lanternPickerAfter = null
+                    }
+                    lanternServerSheet = null
+                },
+                onShown = { lanternServerSheet = it },
             ) { chosen ->
                 val tag = chosen?.tag ?: ""
                 LanternEngine.storeServerSelection(this, tag)
@@ -5027,9 +5113,25 @@ class MainActivity : Activity() {
                     else -> "Lantern: server choice stored, applying on next connect ($error)"
                 }
                 ConnectionLog.record(message)
-                after?.invoke()
+                lanternPickerAfter?.invoke()
             }
+    }
+
+    /**
+     * Rebuilds the open Server sheet with the latest [lanternServersCache].
+     * No-op unless the picker is actually open; safe to call from the UI
+     * thread after a background refresh changed the server set.
+     */
+    private fun reopenLanternServerSheetIfOpen() {
+        if (!lanternPickerOpen) return
+        val sheet = lanternServerSheet ?: return
+        lanternSheetReopening = true
+        try {
+            sheet.dismiss()
+        } finally {
+            lanternSheetReopening = false
         }
+        openLanternServerSheet(lanternServersCache)
     }
 
     /** Wi-Fi check for the offline probe guard: probes only on Wi-Fi when the
@@ -6325,6 +6427,7 @@ class MainActivity : Activity() {
         scrollable: Boolean,
         refuse: ((T) -> String?)? = null,
         onDismiss: (() -> Unit)? = null,
+        onShown: ((Dialog) -> Unit)? = null,
         onSelected: (T) -> Unit,
     ) {
         // `after` is invoked by the caller's onSelected lambda; see chooseObfuscation
@@ -6423,6 +6526,7 @@ class MainActivity : Activity() {
             addView(sheet)
         })
         dialog.show()
+        onShown?.invoke(dialog)
         dialog.window?.apply {
             mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
