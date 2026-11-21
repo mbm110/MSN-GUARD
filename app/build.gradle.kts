@@ -29,7 +29,7 @@ android {
         applicationId = "com.msnguard.vpn"
         minSdk = 26
         targetSdk = 36
-        versionCode = 509
+        versionCode = 510
         versionName = "3.4.0"
         // The encoded CI value is safe in generated Kotlin source. This is still extractable from an APK.
         val relaySecret = System.getenv("MSN_IDENTITY_RELAY_HMAC").orEmpty()
