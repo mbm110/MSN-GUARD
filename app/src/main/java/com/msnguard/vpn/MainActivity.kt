@@ -209,6 +209,7 @@ class MainActivity : Activity() {
     private var cdnEdgeIpsRow: OrbitSettingsRow? = null
     /** Lantern settings rows: server picker, like the Psiphon ones. */
     private var lanternServerRow: OrbitSettingsRow? = null
+    private var lanternDnsRow: OrbitSettingsRow? = null
     private var cdnSniRow: OrbitSettingsRow? = null
 
     /** LAN-sharing switch; its subtitle carries the live proxy address. */
@@ -3770,6 +3771,17 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
+
+            // The DNS region (3.3.3): the manual override of the radio-based
+            // Iran detection. Takes effect on the next connect — the locale
+            // string is handed to the sidecar when it starts.
+            lanternDnsRow = navRow(Strings.t("Lantern DNS"), lanternDnsChoice().label) {
+                chooseLanternDns { lanternDnsRow?.setValue(lanternDnsChoice().label) }
+            }
+            body.addView(lanternDnsRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -5021,6 +5033,24 @@ class MainActivity : Activity() {
         // Meanwhile build the sheet from the current snapshot so it opens
         // immediately with live values.
         loadLanternServers { servers -> openLanternServerSheet(servers) }
+    }
+
+    /**
+     * The DNS region picker (3.3.3). Says when it takes effect, because it
+     * does not take effect now: the locale string is read when the sidecar
+     * process starts, i.e. at the next connect.
+     */
+    private fun chooseLanternDns(after: (() -> Unit)? = null) = showChoiceSheet(
+        title = Strings.t("Lantern DNS"),
+        subtitle = Strings.t("The DNS the Lantern tunnel resolves through · applies next connection"),
+        options = LanternDnsRegion.entries.toList(),
+        selected = lanternDnsChoice(),
+        label = { it.label },
+        description = { it.description },
+    ) { chosen ->
+        preferences().edit().putString(CoreConfig.LANTERN_DNS_REGION, chosen.coreName).apply()
+        ConnectionLog.record("Lantern DNS region set to ${chosen.coreName} (next connect)")
+        after?.invoke()
     }
 
     /**
@@ -10596,6 +10626,31 @@ class MainActivity : Activity() {
 
         val label: String get() = Strings.t(enLabel)
     }
+
+    /**
+     * The Lantern DNS region (3.3.3), the user's manual override of the
+     * radio-based detection. NOT cosmetic: the coreName is stored in the pref
+     * and LanternEngine maps it to the locale string Radiance starts with —
+     * which is what selects the direct-path DNS (AliDNS / Yandex / Quad9).
+     * The three families are everything the reference project defines
+     * (verified: no Europe/America/Asia variants exist), so these four
+     * choices — Iran default, Auto = the 3.3.2 detection — are the complete,
+     * honest list.
+     */
+    private enum class LanternDnsRegion(val enLabel: String, val coreName: String, val enDescription: String) {
+        IRAN("Iran (AliDNS)", "iran", "AliDNS 223.5.5.5 — survives Iranian DPI; the default"),
+        AUTO("Auto (SIM detection)", "auto", "In Iran from the SIM or network country; abroad the device locale, like the reference app"),
+        RUSSIA("Russia (Yandex DNS)", "russia", "Yandex 77.88.8.8 — the reference's Russian-carrier DNS"),
+        INTERNATIONAL("International (Quad9)", "international", "Quad9 9.9.9.9 DoH — for use outside Iran; Iranian DPI resets it");
+
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
+    }
+
+    /** The chosen [LanternDnsRegion]; falls back to IRAN for unknown values. */
+    private fun lanternDnsChoice(): LanternDnsRegion =
+        LanternDnsRegion.entries.firstOrNull { it.coreName == CoreConfig.lanternDnsRegion(this) }
+            ?: LanternDnsRegion.IRAN
 
     /**
      * How the chain picks the WARP transport that carries Psiphon.

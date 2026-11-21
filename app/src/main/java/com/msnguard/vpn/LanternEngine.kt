@@ -193,19 +193,28 @@ object LanternEngine {
             val controlPath = "127.0.0.1:0"
             // Radiance picks its direct-path DNS purely from the locale
             // STRING it is started with (verified in its vpn/dnsoptions.go:
-            // fa-IR → AliDNS, ru → Yandex, anything else → Quad9 DoH — there
-            // is no IP-geo detection in that path). Quad9 DoH is exactly what
-            // Iranian DPI resets, the mid-session EOF cascade in the 3.3.1
-            // field log. So the locale we pass must encode WHERE the device
-            // is, not what language its menus are in: the field user's phone
-            // is set to English while standing in Tehran. "In Iran" comes
-            // from the radio (SIM / registered network country, with the
-            // Tehran timezone for SIM-less devices); Iran → fa-IR → AliDNS,
-            // anywhere else → the device locale unchanged (Quad9's path).
-            val radianceLocale = if (isInIran(context)) {
-                "fa-IR"
-            } else {
-                java.util.Locale.getDefault().toLanguageTag()
+            // FAIR/ZHCN/CN/IR → AliDNS, RU/RURU → Yandex, anything else →
+            // Quad9 DoH — there is no IP-geo detection in that path). Quad9
+            // DoH is exactly what Iranian DPI resets (the 3.3.1 mid-session
+            // EOF cascade), so the locale we pass must encode WHERE the
+            // device is, not what language its menus are in.
+            //
+            // 3.3.3: the region is a user setting (Settings → LANTERN → DNS)
+            // with Iran as the default. Iran forces AliDNS (fa-IR), Russia
+            // forces Yandex (ru-RU), International forces Quad9 (en-US), and
+            // Auto keeps the 3.3.2 detection: "in Iran" from the radio (SIM /
+            // registered network country, Tehran timezone for SIM-less
+            // devices) → fa-IR; anywhere else the device locale passes
+            // through unchanged — exactly what the reference app does.
+            val radianceLocale = when (CoreConfig.lanternDnsRegion(context)) {
+                "russia" -> "ru-RU"
+                "international" -> "en-US"
+                "auto" -> if (isInIran(context)) {
+                    "fa-IR"
+                } else {
+                    java.util.Locale.getDefault().toLanguageTag()
+                }
+                else -> "fa-IR"
             }
             val builder = ProcessBuilder(
                 bin.absolutePath,

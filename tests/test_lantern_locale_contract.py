@@ -50,7 +50,17 @@ class LanternLocaleContract(unittest.TestCase):
     def test_the_locale_passed_encodes_the_country(self):
         # In Iran: fa-IR, which Radiance normalizes to FAIR and maps to
         # AliDNS. Anywhere else: the device locale unchanged (Quad9's path).
-        self.assertIn("val radianceLocale = if (isInIran(context)) {", ENGINE_KT)
+        # 3.3.3: the region is a user setting (CoreConfig.LANTERN_DNS_REGION,
+        # default "iran"); Auto keeps this exact detection, while the forced
+        # regions map straight to their DNS family's locale — a forced choice
+        # must not depend on the radio.
+        self.assertIn(
+            "val radianceLocale = when (CoreConfig.lanternDnsRegion(context)) {",
+            ENGINE_KT,
+        )
+        self.assertIn('"russia" -> "ru-RU"', ENGINE_KT)
+        self.assertIn('"international" -> "en-US"', ENGINE_KT)
+        self.assertIn('"auto" -> if (isInIran(context)) {', ENGINE_KT)
         self.assertIn('"fa-IR"', ENGINE_KT)
         self.assertIn("java.util.Locale.getDefault().toLanguageTag()", ENGINE_KT)
         self.assertIn('"--locale", radianceLocale,', ENGINE_KT)

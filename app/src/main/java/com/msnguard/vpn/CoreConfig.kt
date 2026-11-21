@@ -117,6 +117,24 @@ object CoreConfig {
     const val GOOL_OVER_MASQUE_DEFAULT = false
 
     /**
+     * The Lantern DNS region (3.3.3). This is not a cosmetic setting: the
+     * locale string the sidecar is started with IS the DNS choice — verified
+     * in Radiance's vpn/dnsoptions.go: FAIR/ZHCN/CN/IR → AliDNS 223.5.5.5,
+     * RU/RURU → Yandex 77.88.8.8, anything else → Quad9 DoH 9.9.9.9 (which
+     * Iranian DPI resets — the 3.3.1 mid-session EOF cascade). The reference
+     * project has no Europe/America/Asia DNS variants, exactly these three
+     * families, so these are the choices offered. "auto" keeps the radio-based
+     * detection of 3.3.2 (SIM / network country IR → fa-IR; abroad the device
+     * locale passes through unchanged, exactly like the reference app).
+     * Iran is the default: Quad9 DoH is what the field logs showed failing.
+     */
+    const val LANTERN_DNS_REGION = "lantern_dns_region"
+
+    /** The chosen region's coreName; see [LANTERN_DNS_REGION]. */
+    fun lanternDnsRegion(context: Context): String =
+        context.profiled().getString(LANTERN_DNS_REGION, "iran") ?: "iran"
+
+    /**
      * WireGuard over MASQUE (3.2.45): the WireGuard carrier's twin of
      * [GOOL_OVER_MASQUE_PREF] — armed, a WireGuard connect runs wireguard
      * INSIDE the masque tunnel (identity registered through it) on exactly the
