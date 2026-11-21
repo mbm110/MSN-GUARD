@@ -227,7 +227,7 @@ func TestProbeTrafficThroughSocksInbound(t *testing.T) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	if !sawActive {
-		t.Fatalf("ACTIVE COUNTING BROKEN: counters stayed %s while an open " +
+		t.Fatalf("ACTIVE COUNTING BROKEN: counters stayed flat while an open " +
 			"connection carried bytes — the tracker path itself is broken, " +
 			"not the retention")
 	}
