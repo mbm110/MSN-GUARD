@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/subtle"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -230,12 +231,13 @@ func handleTunHandoff(conn net.Conn) {
 	var fds []int
 	for _, msg := range messages {
 		if msg.Header.Level == syscall.SOL_SOCKET && msg.Header.Type == syscall.SCM_RIGHTS {
-			rights, err := syscall.ParseRights(msg.Data)
-			if err != nil {
-				continue
-			}
-			for _, fd := range rights {
-				fds = append(fds, int(fd))
+			// An SCM_RIGHTS payload is a packed array of native-endian int32
+			// descriptors; Android ABIs are little-endian. Stdlib syscall has
+			// ParseSocketControlMessage but not ParseRights (that one lives
+			// in x/sys), so unpack the rights directly.
+			data := msg.Data
+			for off := 0; off+4 <= len(data); off += 4 {
+				fds = append(fds, int(binary.LittleEndian.Uint32(data[off:])))
 			}
 		}
 	}
