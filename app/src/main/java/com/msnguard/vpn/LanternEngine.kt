@@ -138,6 +138,31 @@ object LanternEngine {
         }
     }
 
+    /**
+     * Whether the device is IN IRAN, detected from the radio — not the UI
+     * language. The locale string handed to Radiance decides its direct-path
+     * DNS (fa-IR means AliDNS, anything else rides Quad9 DoH, which Iranian
+     * DPI resets), so the decision must follow the SIM / registered network
+     * country: a phone with English menus and an Iranian SIM is still in
+     * Iran. SIM-less devices (tablets on Wi-Fi) fall back to the Tehran
+     * timezone; a definitive answer comes from whichever signal exists.
+     */
+    private fun isInIran(context: Context): Boolean {
+        val tm = context.getSystemService(Context.TELEPHONY_SERVICE)
+            as? android.telephony.TelephonyManager
+        val sim = tm?.simCountryIso?.trim()?.uppercase()
+        val network = tm?.networkCountryIso?.trim()?.uppercase()
+        if (sim == "IR" || network == "IR") {
+            return true
+        }
+        if (sim == null && network == null &&
+            java.util.TimeZone.getDefault().id == "Asia/Tehran"
+        ) {
+            return true
+        }
+        return false
+    }
+
     private fun startProcess(context: Context, attempt: Long): Boolean {
         val startupOutput = java.util.ArrayDeque<String>()
         awaitPreviousStop()
@@ -166,6 +191,22 @@ object LanternEngine {
             // establish a working handshake on the target device. The bearer
             // token remains the per-process capability.
             val controlPath = "127.0.0.1:0"
+            // Radiance picks its direct-path DNS purely from the locale
+            // STRING it is started with (verified in its vpn/dnsoptions.go:
+            // fa-IR → AliDNS, ru → Yandex, anything else → Quad9 DoH — there
+            // is no IP-geo detection in that path). Quad9 DoH is exactly what
+            // Iranian DPI resets, the mid-session EOF cascade in the 3.3.1
+            // field log. So the locale we pass must encode WHERE the device
+            // is, not what language its menus are in: the field user's phone
+            // is set to English while standing in Tehran. "In Iran" comes
+            // from the radio (SIM / registered network country, with the
+            // Tehran timezone for SIM-less devices); Iran → fa-IR → AliDNS,
+            // anywhere else → the device locale unchanged (Quad9's path).
+            val radianceLocale = if (isInIran(context)) {
+                "fa-IR"
+            } else {
+                java.util.Locale.getDefault().toLanguageTag()
+            }
             val builder = ProcessBuilder(
                 bin.absolutePath,
                 "--data-dir", data.absolutePath,
@@ -173,6 +214,7 @@ object LanternEngine {
                 "--socks-address", "127.0.0.1:$SOCKS_PORT",
                 "--control-socket", controlPath,
                 "--control-token", token,
+                "--locale", radianceLocale,
             )
             builder.directory(root)
             builder.redirectErrorStream(true)

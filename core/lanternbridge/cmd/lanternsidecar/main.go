@@ -50,6 +50,9 @@ func run() error {
 	socksAddress := flag.String("socks-address", "127.0.0.1:1831", "loopback mixed SOCKS/HTTP listener")
 	controlSocket := flag.String("control-socket", "127.0.0.1:1832", "app-private loopback control endpoint")
 	controlToken := flag.String("control-token", "", "random per-process bearer token")
+	// The device locale, forwarded by the service. Empty falls back to
+	// Radiance's own detection exactly like the reference app.
+	locale := flag.String("locale", "", "device locale, e.g. fa-IR; drives Radiance's DNS choice")
 	flag.Parse()
 
 	if *dataDir == "" || *logDir == "" || *controlSocket == "" || *controlToken == "" {
@@ -116,7 +119,7 @@ func run() error {
 	}()
 	log.Printf("Lantern sidecar control socket ready; SOCKS=%s control-socket=%s", *socksAddress, listener.Addr().String())
 
-	if err := lanternbridge.Init(*dataDir, *logDir, *socksAddress); err != nil {
+	if err := lanternbridge.Init(*dataDir, *logDir, *socksAddress, *locale); err != nil {
 		_ = listener.Close()
 		_ = os.Remove(*controlSocket)
 		return fmt.Errorf("initialize Radiance: %w", err)

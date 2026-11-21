@@ -65,7 +65,14 @@ var state struct {
 // Init initializes Radiance once for this app process. The novpn build tag
 // replaces Radiance's TUN inbound with a loopback-only mixed HTTP/SOCKS
 // listener; MSN-GUARD remains the sole owner of Android's VpnService and TUN.
-func Init(dataDir, logDir, socksAddress string) error {
+//
+// The locale MUST be the device's real locale, not a hardcoded one: Radiance
+// picks its direct-path DNS server from it (fa-IR → AliDNS, ru → Yandex,
+// anything else → Quad9). The reference app passes the device locale the same
+// way, and a hardcoded "en" made every direct-outbound lookup ride DoH to
+// Quad9, which Iranian DPI resets — the field logs showed exactly that EOF
+// cascade killing Lantern sessions after minutes of connected time.
+func Init(dataDir, logDir, socksAddress, locale string) error {
 	state.mu.Lock()
 
 	if state.backend != nil || state.initialized {
@@ -91,7 +98,7 @@ func Init(dataDir, logDir, socksAddress string) error {
 	b, err := backend.NewLocalBackend(ctx, backend.Options{
 		DataDir:                  dataDir,
 		LogDir:                   logDir,
-		Locale:                   "en",
+		Locale:                  locale,
 		DeviceID:                 device,
 		LogLevel:                 "info",
 		TelemetryConsent:         false,
