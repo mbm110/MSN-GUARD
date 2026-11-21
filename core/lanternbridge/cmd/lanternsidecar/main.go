@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/mbm110/msn-guard/lanternbridge"
-	"golang.org/x/sys/unix"
 )
 
 type controlRequest struct {
@@ -223,15 +222,15 @@ func handleTunHandoff(conn net.Conn) {
 		return
 	}
 	// SCM_RIGHTS: parse each control message and take the descriptor(s).
-	messages, err := unix.ParseSocketControlMessage(oob[:oobn])
+	messages, err := syscall.ParseSocketControlMessage(oob[:oobn])
 	if err != nil {
 		_, _ = conn.Write([]byte("ERR " + err.Error() + "\n"))
 		return
 	}
 	var fds []int
 	for _, msg := range messages {
-		if msg.Header.Level == unix.SOL_SOCKET && msg.Header.Type == unix.SCM_RIGHTS {
-			rights, err := unix.ParseRights(msg.Data)
+		if msg.Header.Level == syscall.SOL_SOCKET && msg.Header.Type == syscall.SCM_RIGHTS {
+			rights, err := syscall.ParseRights(msg.Data)
 			if err != nil {
 				continue
 			}
@@ -246,7 +245,7 @@ func handleTunHandoff(conn net.Conn) {
 	}
 	lanternbridge.SetTunFd(fds[0])
 	for _, extra := range fds[1:] {
-		_ = unix.Close(extra)
+		_ = syscall.Close(extra)
 	}
 	log.Printf("tun handoff accepted: fd=%d payload=%q", fds[0], string(buf[:n]))
 	_, _ = conn.Write([]byte("OK " + fmt.Sprint(fds[0]) + "\n"))
