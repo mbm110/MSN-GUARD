@@ -36,6 +36,13 @@ static int mapdns_port;
 static int mapdns_network;
 static int mapdns_netmask;
 static int mapdns_cache_size;
+/* mapdns "hijack": answer EVERY UDP query aimed at mapdns_port, whatever
+   the resolver address — not only the synthetic mapdns_address. Used by
+   the Lantern path so apps with hardcoded resolvers (8.8.8.8 etc.) also
+   get Hev's own reversible fake IPs instead of reaching the SOCKS
+   server's DNS hijack, whose fake range cannot be mapped back through
+   Hev (the "missing fakeip record" rejects). */
+static int mapdns_hijack;
 
 static char log_file[1024];
 static char pid_file[1024];
@@ -309,6 +316,8 @@ hev_config_parse_mapdns (yaml_document_t *doc, yaml_node_t *base)
             inet_pton (AF_INET, value, &mapdns_netmask);
         else if (0 == strcmp (key, "cache-size"))
             mapdns_cache_size = strtoul (value, NULL, 10);
+        else if (0 == strcmp (key, "hijack"))
+            mapdns_hijack = (0 == strcmp (value, "true")) ? 1 : 0;
     }
 
     mapdns_network = ntohl (mapdns_network);
@@ -479,6 +488,7 @@ hev_config_reset (void)
     mapdns_network = 0;
     mapdns_netmask = 0;
     mapdns_cache_size = 0;
+    mapdns_hijack = 0;
 
     max_session_count = 0;
     task_stack_size = 86016;
@@ -644,6 +654,12 @@ int
 hev_config_get_mapdns_port (void)
 {
     return mapdns_port;
+}
+
+int
+hev_config_get_mapdns_hijack (void)
+{
+    return mapdns_hijack;
 }
 
 int

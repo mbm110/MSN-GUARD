@@ -253,7 +253,16 @@ udp_recv_handler (void *arg, struct udp_pcb *pcb, struct pbuf *p,
     if (dns && addr->type == IPADDR_TYPE_V4) {
         int faddr = hev_config_get_mapdns_address ();
         int fport = hev_config_get_mapdns_port ();
-        if (fport == port && faddr == ip_2_ip4 (addr)->addr) {
+        /* mapdns "hijack": answer every UDP query to the mapdns port no
+           matter which resolver it aimed at. Apps hardcoding resolvers
+           (8.8.8.8, operator DNS) would otherwise reach the SOCKS server's
+           DNS hijack, whose fake range cannot be mapped back here — every
+           such connection is then rejected with "missing fakeip record".
+           With the hijack, these apps get OUR reversible fake IPs and the
+           domain travels in the SOCKS request, exactly like the
+           system-resolver path. */
+        int hijack = hev_config_get_mapdns_hijack ();
+        if (fport == port && (faddr == ip_2_ip4 (addr)->addr || hijack)) {
             udp_recv (pcb, dns_recv_handler, dns);
             return;
         }
