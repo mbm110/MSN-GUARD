@@ -69,16 +69,11 @@ class LanternServerPickerFirstLoadContract(unittest.TestCase):
         # 3.2.50 revert (field report): the 3.2.49 global-pool draw
         # (RADIANCE_COUNTRY → x-lantern-client-country, Milan/Ashburn/...)
         # had poor throughput on the user's Iranian line; Lantern geo-serves
-        # IR the dedicated fast four-track pool, and that is what ships.
-        # 3.3.7: the pool became a user setting (Settings → LANTERN → Server
-        # pool) — Iran stays the default, so the identity is set ONLY inside
-        # the global guard, never unconditionally.
-        guard_idx = ENGINE.index('if (CoreConfig.lanternPool(context) == "global") {')
-        assign_idx = ENGINE.index('builder.environment()["RADIANCE_COUNTRY"] = LANTERN_CONFIG_COUNTRY')
-        self.assertLess(guard_idx, assign_idx)
-        self.assertEqual(ENGINE.count('builder.environment()["RADIANCE_COUNTRY"]'), 1)
-        # Still no config re-roll plumbing: a pool switch lands on the NEXT
-        # sidecar boot, not a live forceConfigRefresh.
+        # IR the dedicated fast four-track pool, and that is what ships. The
+        # sidecar presents NO country identity, and the re-roll plumbing that
+        # existed only for the global draw is gone.
+        self.assertNotIn("RADIANCE_COUNTRY", ENGINE)
+        self.assertNotIn("LANTERN_CONFIG_COUNTRY", ENGINE)
         self.assertNotIn("forceConfigRefresh", ENGINE)
         self.assertNotIn("forceConfigRefresh", UI)
         self.assertNotIn("/update-config", SIDECAR)

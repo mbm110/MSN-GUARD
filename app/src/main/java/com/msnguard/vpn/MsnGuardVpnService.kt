@@ -3398,7 +3398,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 activeSocksPort = LanternEngine.SOCKS_PORT
                 val hevStarted = synchronized(lanternLifecycleLock) {
                     if (!LanternEngine.isCurrent(attempt)) return@execute
-                    HevEngine.start(establishedTun, LanternEngine.SOCKS_PORT, mtu, dnsOnly = false, dnsHijackAll = true)
+                    HevEngine.start(establishedTun, LanternEngine.SOCKS_PORT, mtu, dnsOnly = false)
                 }
                 if (!LanternEngine.isCurrent(attempt)) return@execute
                 if (!hevStarted) {

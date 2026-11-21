@@ -42,24 +42,7 @@ object HevEngine : TunEngine {
 
     override val isRunning: Boolean get() = try { hev.htproxy.TProxyService.TProxyIsRunning() } catch (_: Throwable) { false }
 
-    override fun start(fd: ParcelFileDescriptor, socksPort: Int, mtu: Int, dnsOnly: Boolean): Boolean =
-        start(fd, socksPort, mtu, dnsOnly, dnsHijackAll = false)
-
-    /**
-     * [dnsHijackAll] (3.3.8, Lantern only): also answers UDP DNS queries aimed
-     * at OTHER resolvers (8.8.8.8, operator DNS) from Hev's own reversible
-     * mapdns pool. Without it those queries reach the SOCKS server's DNS
-     * hijack, whose 198.18.0.0/15 fake answers cannot be reverse-mapped by
-     * Hev — every such connection dies as "missing fakeip record". Default
-     * false keeps every other tunnel's DNS path byte-identical.
-     */
-    fun start(
-        fd: ParcelFileDescriptor,
-        socksPort: Int,
-        mtu: Int,
-        dnsOnly: Boolean,
-        dnsHijackAll: Boolean,
-    ): Boolean {
+    override fun start(fd: ParcelFileDescriptor, socksPort: Int, mtu: Int, dnsOnly: Boolean): Boolean {
         if (isRunning) {
             // The native Hev thread is process-wide: if FOXY's own engine owns
             // it right now, we must NOT pretend we started it — our stop()
@@ -127,8 +110,6 @@ object HevEngine : TunEngine {
             appendLine("  network: 100.64.0.0")
             appendLine("  netmask: 255.192.0.0")
             appendLine("  cache-size: 10000")
-            // 3.3.8: only the Lantern path opts in — see start(dnsHijackAll).
-            appendLine("  hijack: ${if (dnsHijackAll) "true" else "false"}")
         }
         try {
             cfgFile.writeText(yaml)

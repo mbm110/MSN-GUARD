@@ -45,7 +45,6 @@ HevConfigServer *hev_config_get_socks5_server (void);
 
 int hev_config_get_mapdns_address (void);
 int hev_config_get_mapdns_port (void);
-int hev_config_get_mapdns_hijack (void);
 int hev_config_get_mapdns_network (void);
 int hev_config_get_mapdns_netmask (void);
 int hev_config_get_mapdns_cache_size (void);
