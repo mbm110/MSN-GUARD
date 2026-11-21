@@ -3442,6 +3442,12 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
     /** Feeds Radiance's cumulative connection counters into the normal traffic UI. */
     private fun startLanternTrafficPolling() {
         torTrafficTask?.cancel(false)
+        // The generic s0 front path arms the WARP poller at session start
+        // (3.3.5), and a Lantern session runs through that path too. Its
+        // zero-snapshots are neutralized by the LanternEngine guard in the
+        // poller; cancel it here as well so a Lantern session does not keep a
+        // 1 Hz timer alive that can never produce a sample.
+        stopWarpTrafficPolling()
         // 3.3.1 diagnostic (the warp-stats pattern, 2.3.15): the 3.3.0 field
         // report — Lantern carries traffic, Down/Up show, Speed pinned at 0 —
         // cannot be reproduced from source (every link reads correct), so the
@@ -3768,6 +3774,16 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 // When a chained front is active its poller already feeds the pipeline.
                 // Guard against stacking two sources in the same second.
                 if (TorSocksFront.isRunning || ShardSocksFront.isRunning) return@scheduleAtFixedRate
+                // 3.3.5: the Lantern front too. Its own poller
+                // (startLanternTrafficPolling) feeds the pipeline with
+                // Radiance's cumulative counters, while this poller's
+                // NativeCore snapshot here is [0, 0] — no native core is
+                // running. Interleaving those zeros with the real counters
+                // trips the backwards-sample rebase in
+                // updateTrafficNotification every second, which is exactly the
+                // 3.3.4 field report: "lantern stats" grows in the log while
+                // Up/Down/Speed sit at 0 on the screen.
+                if (LanternEngine.isRunning) return@scheduleAtFixedRate
                 // 2.3.18: the screen-off throttle is back, narrower than before.
                 // 2.3.15 removed it because the guards swallowed samples while
                 // `connected` was still being latched — but that is now the only
