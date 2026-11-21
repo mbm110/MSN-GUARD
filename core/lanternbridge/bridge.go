@@ -56,6 +56,10 @@ var state struct {
 	trafficSeen   map[string]byteTotals
 	completedUp   int64
 	completedDn   int64
+
+	// retentionPollCancel stops the internal retention poller (see
+	// startRetentionPolling). Guarded by trafficMu together with the maps.
+	retentionPollCancel context.CancelFunc
 }
 
 // Init initializes Radiance once for this app process. The novpn build tag
@@ -171,7 +175,48 @@ func Connect(timeoutSeconds int64) error {
 	if err != nil {
 		return fmt.Errorf("connect to public Lantern servers: %w", err)
 	}
+	startRetentionPolling()
 	return nil
+}
+
+// startRetentionPolling folds the active-connection counters into the
+// retained totals every 150 ms.
+//
+// The retention design (TrafficJSON below) only folds a closed connection's
+// bytes if SOME poll observed it while it was still active. The app polls
+// /traffic at 1 Hz, and the CI probe made the gap precise: two real HTTP
+// fetches through the SOCKS inbound closed between the app's one-second
+// ticks and their bytes were folded into NOTHING — the exact shape of the
+// field report (Lantern carries traffic while Down/Up/Speed sit at 0; only
+// long-lived connections like Telegram ever surface). A busy tunnel can also
+// make the 1.5 s /traffic request itself time out, skipping the tick
+// entirely.
+//
+// This internal poller closes the gap without touching Radiance: 150 ms is
+// well under the lifetime of any connection that carries payload, and
+// TrafficJSON is safe to call concurrently (trafficMu + the tracker's own
+// atomics). It is stopped in Disconnect and restarted per Connect, exactly
+// like the counters themselves.
+func startRetentionPolling() {
+	state.trafficMu.Lock()
+	if state.retentionPollCancel != nil {
+		state.retentionPollCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	state.retentionPollCancel = cancel
+	state.trafficMu.Unlock()
+	go func() {
+		ticker := time.NewTicker(150 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = TrafficJSON()
+			}
+		}
+	}()
 }
 
 // CancelConnect interrupts a connection attempt without waiting for the
@@ -203,6 +248,10 @@ func Disconnect() error {
 		state.completedDn += previous.down
 	}
 	state.trafficSeen = make(map[string]byteTotals)
+	if state.retentionPollCancel != nil {
+		state.retentionPollCancel()
+		state.retentionPollCancel = nil
+	}
 	state.trafficMu.Unlock()
 	err := b.DisconnectVPN()
 	setLastError(err)

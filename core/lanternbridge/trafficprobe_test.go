@@ -26,6 +26,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -176,15 +178,81 @@ func TestProbeTrafficThroughSocksInbound(t *testing.T) {
 	tx0, rx0, raw0 := probeTrafficTotals(t)
 	t.Logf("counters before any traffic: %s", raw0)
 
+	// PHASE 1 — active counting, the load-bearing link: a connection that is
+	// STILL OPEN must move the counters within a few poller ticks. This is
+	// what distinguishes "the tracker never counted" (real engine bug) from
+	// "the bytes were folded too late" (the retention gap).
+	openConn := probeDialSocks(t, socksAddr, "www.example.com", 80)
+	defer openConn.Close()
+	request := "GET / HTTP/1.1\r\nHost: www.example.com\r\nUser-Agent: msn-traffic-probe\r\nConnection: keep-alive\r\n\r\n"
+	if _, err := openConn.Write([]byte(request)); err != nil {
+		t.Fatalf("http write (open conn): %v", err)
+	}
+	openReader := bufio.NewReader(openConn)
+	// Read the response fully (headers + Content-Length body) so the bytes
+	// cross the tunnel while the connection stays established.
+	contentLength := 0
+	for {
+		line, err := openReader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("http headers (open conn): %v", err)
+		}
+		if strings.HasPrefix(strings.ToLower(line), "content-length:") {
+			contentLength, _ = strconv.Atoi(strings.TrimSpace(strings.SplitN(line, ":", 2)[1]))
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	if contentLength > 0 {
+		if _, err := io.ReadFull(openReader, make([]byte, contentLength)); err != nil {
+			t.Fatalf("http body (open conn): %v", err)
+		}
+	}
+
+	deadline = time.Now().Add(8 * time.Second)
+	sawActive := false
+	var txActive, rxActive int64
+	for {
+		tx, rx, raw := probeTrafficTotals(t)
+		if tx > tx0 || rx > rx0 {
+			sawActive = true
+			txActive, rxActive = tx, rx
+			t.Logf("ACTIVE: counters moved while the connection is open: %s", raw)
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !sawActive {
+		t.Fatalf("ACTIVE COUNTING BROKEN: counters stayed %s while an open " +
+			"connection carried bytes — the tracker path itself is broken, " +
+			"not the retention")
+	}
+
+	// PHASE 2 — retention: close the connection; the internal 150 ms poller
+	// must have folded it into the completed totals.
+	openConn.Close()
+	time.Sleep(700 * time.Millisecond)
+	tx2, rx2, raw2 := probeTrafficTotals(t)
+	t.Logf("counters after closing the open conn: %s", raw2)
+	if tx2 < txActive || rx2 < rxActive {
+		t.Errorf("RETENTION LOST BYTES: after close tx %d < %d or rx %d < %d",
+			tx2, txActive, rx2, rxActive)
+	}
+
+	// PHASE 3 — the field report itself: short-lived fetches closed between
+	// the app's 1 Hz /traffic polls must still be counted by the retention
+	// poller. This is the exact shape of the 3.3.0 field report (two fetches
+	// through SOCKS, TrafficJSON read once afterwards: {"rx":0,"tx":0}).
 	up1, down1 := probeFetch(t, socksAddr, "www.example.com", "/")
 	up2, down2 := probeFetch(t, socksAddr, "www.example.com", "/")
-
-	// Give the counter conns a moment to settle their final accounting.
-	time.Sleep(2 * time.Second)
-
-	tx1, rx1, raw1 := probeTrafficTotals(t)
-	t.Logf("counters after %d fetches: %s", 2, raw1)
-	grewTx, grewRx := tx1-tx0, rx1-rx0
+	time.Sleep(700 * time.Millisecond)
+	tx3, rx3, raw3 := probeTrafficTotals(t)
+	t.Logf("counters after 2 short fetches: %s", raw3)
+	grewTx, grewRx := tx3-tx2, rx3-rx2
 	t.Logf("delta: tx=%d rx=%d (bytes actually pushed: up=%d down=%d)",
 		grewTx, grewRx, up1+up2, down1+down2)
 
