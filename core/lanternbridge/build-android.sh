@@ -24,7 +24,10 @@ if [[ ! -x "$TOOLCHAIN/aarch64-linux-android26-clang" ]]; then
 fi
 
 export GOTOOLCHAIN="go1.26.10"
-TAGS="novpn,with_gvisor,with_quic,with_wireguard,with_utls,with_grpc"
+# 3.4.0: the novpn tag is GONE — the sidecar now compiles the real TUN inbound
+# (boxoptions_default.go), matching the official app's data path. The app hands
+# the VpnService fd over the private Unix handoff socket; see handoff.go.
+TAGS="with_gvisor,with_quic,with_wireguard,with_utls,with_grpc"
 LDFLAGS="-s -w -checklinkname=0 -extldflags '-Wl,-z,max-page-size=16384 -Wl,-z,relro -Wl,-z,now'"
 
 export PATH="$(go env GOPATH)/bin:$PATH"

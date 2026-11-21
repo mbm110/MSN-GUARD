@@ -84,8 +84,11 @@ class LanternLocaleContract(unittest.TestCase):
     def test_no_other_transport_is_touched(self):
         # The fix is confined to the Lantern sidecar plumbing: no warp,
         # masque, psiphon, tor, shard or foxy env or engine change rides along.
-        self.assertIn("RADIANCE_USE_SOCKS_PROXY", BRIDGE_GO)
-        self.assertIn('socksAddress = "127.0.0.1:1831"', BRIDGE_GO)
+        # 3.4.0: the SOCKS proxy-mode env overrides are gone — the sidecar runs
+        # the real TUN inbound (official-app data path) and the fd arrives by
+        # handoff; the socksAddress flag is retained for CLI compatibility.
+        self.assertNotIn("EnvOverrides", BRIDGE_GO)
+        self.assertIn("socksAddress, locale string", BRIDGE_GO)
 
 
 if __name__ == "__main__":

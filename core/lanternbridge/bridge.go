@@ -72,6 +72,10 @@ var state struct {
 // way, and a hardcoded "en" made every direct-outbound lookup ride DoH to
 // Quad9, which Iranian DPI resets — the field logs showed exactly that EOF
 // cascade killing Lantern sessions after minutes of connected time.
+// Init starts the Radiance backend. socksAddress is retained for the CLI's
+// flag compatibility but is inert since 3.4.0 (the TUN build has no SOCKS
+// inbound; the engine's own loopback tunnel proxy on 127.0.0.1:14986 serves
+// app-side probes instead).
 func Init(dataDir, logDir, socksAddress, locale string) error {
 	state.mu.Lock()
 
@@ -82,9 +86,6 @@ func Init(dataDir, logDir, socksAddress, locale string) error {
 	if dataDir == "" || logDir == "" {
 		state.mu.Unlock()
 		return errors.New("Radiance data and log directories are required")
-	}
-	if socksAddress == "" {
-		socksAddress = "127.0.0.1:1831"
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -107,14 +108,10 @@ func Init(dataDir, logDir, socksAddress, locale string) error {
 		// platform interface; without one sing-box builds a netlink network
 		// monitor that Android bans for unprivileged apps.
 		PlatformInterface: newPlatformInterface(),
-		EnvOverrides: map[string]string{
-			// Radiance must use its SOCKS inbound here. MSN-GUARD owns the
-			// Android VpnService/TUN and Hev forwards that TUN to this port;
-			// without this flag Radiance starts sing-box's netlink TUN path,
-			// which Android rejects with "netlink socket ... banned".
-			"RADIANCE_USE_SOCKS_PROXY": "true",
-			"RADIANCE_SOCKS_ADDRESS":   socksAddress,
-		},
+		// 3.4.0: no RADIANCE_USE_SOCKS_PROXY / RADIANCE_SOCKS_ADDRESS overrides
+		// anymore — those belonged to the novpn proxy build. The real TUN
+		// inbound (boxoptions_default.go) is compiled in now and takes the fd
+		// our OpenTun serves from the app's handoff.
 	})
 	if err != nil {
 		cancel()

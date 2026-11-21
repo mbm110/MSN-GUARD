@@ -3,6 +3,7 @@ package com.msnguard.vpn
 import android.content.Context
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -26,11 +27,23 @@ import java.util.concurrent.atomic.AtomicLong
  * collide with it.
  */
 object LanternEngine {
-    const val SOCKS_PORT = 1831
+    /**
+     * 3.4.0: the sidecar owns the TUN now (the official-app data path), so
+     * this is no longer our own SOCKS front — it is Radiance's loopback
+     * tunnel proxy (common.TunnelProxyAddr, 127.0.0.1:14986), the inbound
+     * the engine itself provides for host traffic that must ride the
+     * tunnel. MSN's verify probes, the notification health pings and the
+     * watchdog's port check all go through it, exactly like the official
+     * app uses it from its own UI process.
+     */
+    const val SOCKS_PORT = 14986
     private const val CONTROL_PORT = 1832
     private const val TAG = "LanternEngine"
     private const val CONNECT_TIMEOUT_SECONDS = 180L
     private const val CONTROL_READY_TIMEOUT_MS = 10_000L
+
+    /** Name of the Unix socket the sidecar accepts the TUN fd on (in data-dir). */
+    private const val TUN_HANDOFF_SOCKET = "tun-handoff.sock"
 
     /**
      * The country identity the sidecar's config fetches present to Lantern
@@ -531,6 +544,50 @@ object LanternEngine {
         true
     } catch (_: Throwable) {
         false
+    }
+
+    /**
+     * 3.4.0 — the official-app data path: hand the app-owned Android TUN fd
+     * to the sidecar over its private Unix socket with SCM_RIGHTS. The
+     * sidecar's OpenTun serves a fresh dup of the master to sing-tun for
+     * every tunnel (re)start, exactly the role VpnService.establish() plays
+     * inside the official app. MUST be called before /connect, after the
+     * Builder established the interface; without it the engine cannot open
+     * the TUN and the connect fails cleanly.
+     */
+    fun handoffTun(context: Context, fd: ParcelFileDescriptor): Boolean {
+        val data = File(context.applicationContext.filesDir, "lantern-radiance/data")
+        val path = File(data, TUN_HANDOFF_SOCKET)
+        return try {
+            LocalSocket().use { socket ->
+                socket.soTimeout = 10_000
+                socket.connect(
+                    LocalSocketAddress(path.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM)
+                )
+                // The descriptor rides the NEXT write as an SCM_RIGHTS
+                // control message; the sidecar's handoff handler reads it
+                // with recvmsg and replies with a one-line ack.
+                socket.setFileDescriptorsForSend(arrayOf(fd.fileDescriptor))
+                socket.outputStream.apply {
+                    write("tun\n".toByteArray(Charsets.UTF_8))
+                    flush()
+                }
+                val ack = BufferedReader(InputStreamReader(socket.inputStream)).readLine().orEmpty()
+                if (ack.startsWith("OK")) {
+                    ConnectionLog.record("Lantern: TUN fd handed off to the sidecar ($ack)")
+                    true
+                } else {
+                    lastError = "TUN handoff rejected: $ack"
+                    ConnectionLog.record("Lantern: $lastError")
+                    false
+                }
+            }
+        } catch (error: Throwable) {
+            lastError = "TUN handoff failed: ${error.message}"
+            ConnectionLog.record("Lantern: $lastError")
+            Log.e(TAG, "TUN handoff failed", error)
+            false
+        }
     }
 
     /**

@@ -383,8 +383,22 @@ func (p *androidPlatform) UsePlatformAutoDetectInterfaceControl() bool {
 	return false
 }
 func (p *androidPlatform) AutoDetectInterfaceControl(fd int32) error { return nil }
-func (p *androidPlatform) OpenTun(box.TunOptions) (int32, error) {
-	return -1, errUnsupported
+// OpenTun is the official-app data path: sing-tun asks the platform for the
+// Android TUN (the official Kotlin app returns VpnService.establish()'s fd
+// here). This sidecar receives the fd from the app process over the private
+// Unix handoff socket (see handoff.go) and returns a fresh dup per tunnel —
+// sing-tun closes its copy on tunnel teardown, and restarts call OpenTun
+// again. The diagnostic line reports what the engine asked for so a field
+// log can confirm the Builder matches (address/MTU/stack).
+func (p *androidPlatform) OpenTun(options box.TunOptions) (int32, error) {
+	fd, err := openTunFd()
+	if err != nil {
+		platformLog("tun handoff refused: " + err.Error())
+		return -1, err
+	}
+	platformLog(fmt.Sprintf("tun handoff: passed fd %d to sing-box (mtu=%d auto-route=%v)",
+		fd, options.GetMTU(), options.GetAutoRoute()))
+	return int32(fd), nil
 }
 func (p *androidPlatform) UseProcFS() bool { return false }
 func (p *androidPlatform) FindConnectionOwner(int32, string, int32, string, int32) (*box.ConnectionOwner, error) {

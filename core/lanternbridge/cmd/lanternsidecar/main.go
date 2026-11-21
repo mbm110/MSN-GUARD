@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mbm110/msn-guard/lanternbridge"
+	"golang.org/x/sys/unix"
 )
 
 type controlRequest struct {
@@ -119,6 +120,17 @@ func run() error {
 	}()
 	log.Printf("Lantern sidecar control socket ready; SOCKS=%s control-socket=%s", *socksAddress, listener.Addr().String())
 
+	// TUN fd handoff (3.4.0): the app owns the VpnService and hands the
+	// established TUN fd to this process over a private Unix socket with
+	// SCM_RIGHTS — the split-process twin of the official app's gomobile
+	// OpenTun. LanternEngine connects and sends the fd BEFORE /connect; the
+	// box's OpenTun then serves a fresh dup of the master per tunnel.
+	handoffPath := filepath.Join(*dataDir, "tun-handoff.sock")
+	handoffErr := make(chan error, 1)
+	go func() {
+		handoffErr <- serveTunHandoff(handoffPath)
+	}()
+
 	if err := lanternbridge.Init(*dataDir, *logDir, *socksAddress, *locale); err != nil {
 		_ = listener.Close()
 		_ = os.Remove(*controlSocket)
@@ -159,6 +171,85 @@ func serveControl(listener net.Listener, token string) error {
 		}
 		go handleControl(conn, token)
 	}
+}
+
+// serveTunHandoff accepts TUN fd handoffs from the app. The socket lives in
+// the sidecar's private data dir (0600, app UID), so only the app itself can
+// reach it; each connection is one handoff: the app sends a short payload
+// carrying the fd via SCM_RIGHTS (Kotlin LocalSocket.setFileDescriptorsForSend)
+// and reads a one-line ack. A second handoff replaces the master — the old
+// TUN device belongs to a dead session.
+func serveTunHandoff(path string) error {
+	_ = os.Remove(path)
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return fmt.Errorf("listen on tun handoff socket: %w", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(path)
+	}()
+	if err := os.Chmod(path, 0600); err != nil {
+		return fmt.Errorf("secure tun handoff socket: %w", err)
+	}
+	log.Printf("LANTERN_TUN_HANDOFF=%s", path)
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+		handleTunHandoff(conn)
+	}
+}
+
+func handleTunHandoff(conn net.Conn) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		_, _ = conn.Write([]byte("ERR not a unix connection\n"))
+		return
+	}
+	buf := make([]byte, 128)
+	oob := make([]byte, 128)
+	n, oobn, _, _, err := unixConn.ReadMsgUnix(buf, oob)
+	if err != nil {
+		_, _ = conn.Write([]byte("ERR " + err.Error() + "\n"))
+		return
+	}
+	if oobn == 0 {
+		_, _ = conn.Write([]byte("ERR no file descriptor received\n"))
+		return
+	}
+	// SCM_RIGHTS: parse each control message and take the descriptor(s).
+	messages, err := unix.ParseSocketControlMessage(oob[:oobn])
+	if err != nil {
+		_, _ = conn.Write([]byte("ERR " + err.Error() + "\n"))
+		return
+	}
+	var fds []int
+	for _, msg := range messages {
+		if msg.Header.Level == unix.SOL_SOCKET && msg.Header.Type == unix.SCM_RIGHTS {
+			rights, err := unix.ParseRights(msg.Data)
+			if err != nil {
+				continue
+			}
+			for _, fd := range rights {
+				fds = append(fds, int(fd))
+			}
+		}
+	}
+	if len(fds) == 0 {
+		_, _ = conn.Write([]byte("ERR no SCM_RIGHTS descriptor in the message\n"))
+		return
+	}
+	lanternbridge.SetTunFd(fds[0])
+	for _, extra := range fds[1:] {
+		_ = unix.Close(extra)
+	}
+	log.Printf("tun handoff accepted: fd=%d payload=%q", fds[0], string(buf[:n]))
+	_, _ = conn.Write([]byte("OK " + fmt.Sprint(fds[0]) + "\n"))
 }
 
 func handleControl(conn net.Conn, token string) {

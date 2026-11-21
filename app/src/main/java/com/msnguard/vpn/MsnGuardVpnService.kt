@@ -3339,10 +3339,17 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
     }
 
     /**
-     * Public Lantern transport. Radiance runs as a novpn local proxy; this
-     * service remains the only Android VpnService and owns the one device TUN.
-     * The existing shared Hev engine forwards device packets to Radiance's
-     * loopback mixed SOCKS listener. No existing transport is modified.
+     * Public Lantern transport, 3.4.0 — the official-app data path.
+     * Radiance runs with its real TUN inbound compiled in and OWNS the tunnel:
+     * this service establishes the Android VpnService interface with the
+     * engine's own address plan, hands the fd to the sidecar over its private
+     * Unix socket (SCM_RIGHTS), and the engine's OpenTun — the twin of the
+     * official app's gomobile VpnService.establish() — serves it to sing-tun.
+     * DNS, routing, fake-IP and the split-tunnel rules all live INSIDE the
+     * engine box now, one process, one store: the cross-engine fake-IP
+     * mismatches and DNS round trips that the Hev+SOCKS bridge caused are
+     * structurally gone. No existing transport is modified — Hev still
+     * fronts every other method exactly as before.
      */
     private fun startLanternTunnel() {
         // Latch a fresh attempt before queueing work. A stop or a newer attempt
@@ -3352,22 +3359,35 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             try {
                 if (!LanternEngine.isCurrent(attempt)) return@execute
                 if (proxyMode) error("Lantern requires whole-device VPN mode")
-                val address = Tun2SocksManager.selectPrivateAddress()
+                // The engine's own TUN plan (radiance vpn/boxoptions_default.go:
+                // tunPrefix4 10.10.1.1/30, tunPrefix6 fdfe:dcba:9876::1/126) — the
+                // Builder must mirror what the box will configure, like the
+                // official app does from OpenTun's TunOptions.
                 val mtu = Tun2SocksManager.VPN_INTERFACE_MTU
                 currentTunMtu = mtu
+                val address = Tun2SocksManager.PrivateAddress(
+                    ipAddress = "10.10.1.1",
+                    subnet = "10.10.1.0",
+                    prefixLength = 30,
+                    router = "10.10.1.2",
+                )
                 TunEngineManager.syncPrivateAddress(address)
 
                 val builder = Builder()
                     .setSession("MSN-GUARD — Lantern")
                     .setMtu(mtu)
                     .addAddress(address.ipAddress, address.prefixLength)
-                    .addAddress("fd00::1", 64)
+                    .addAddress("fdfe:dcba:9876::1", 126)
                     .addRoute("0.0.0.0", 0)
                     .addRoute("::", 0)
                     .addRoute(address.subnet, address.prefixLength)
-                    // Hev's synthetic mapdns address resolves names inside the
-                    // tunnel and forwards DNS through Radiance's SOCKS UDP path.
-                    .addDnsServer(java.net.InetAddress.getByName(HevEngine.MAP_DNS_ADDRESS))
+                    // A resolver the box answers: any address routed into the TUN
+                    // is DNS-hijacked by the engine's route rules (protocol: dns
+                    // → hijack) and answered from its own fake-IP store — the
+                    // official loop. 172.19.0.2 is outside the 198.18.0.0/15 fake
+                    // range (a destination there without a record would be
+                    // rejected) and outside the TUN's own subnet.
+                    .addDnsServer(java.net.InetAddress.getByName("172.19.0.2"))
                     .applyLanAccess(tun = address)
                     .applyIranBypass()
                     .applySplitTunneling()
@@ -3388,23 +3408,20 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
 
                 if (!LanternEngine.isCurrent(attempt)) return@execute
                 sendStatus(STATUS_CONNECTING, Strings.t("Starting Lantern public servers…"), 15)
+                // The fd handoff MUST precede /connect: the engine's OpenTun
+                // serves the tunnel's TUN from the master this call stashes.
+                if (!LanternEngine.handoffTun(this, establishedTun)) {
+                    if (!LanternEngine.isCurrent(attempt)) return@execute
+                    error(LanternEngine.errorMessage().ifBlank { "Could not hand the TUN to the Lantern engine" })
+                }
+                if (!LanternEngine.isCurrent(attempt)) return@execute
                 if (!LanternEngine.connect(this, attempt)) {
                     if (!LanternEngine.isCurrent(attempt)) return@execute
                     error(LanternEngine.errorMessage().ifBlank { "Could not connect to public Lantern servers" })
                 }
                 if (!LanternEngine.isCurrent(attempt)) return@execute
-                publishProgress(50) // Radiance session is up; routing comes next
-                sendStatus(STATUS_CONNECTING, Strings.t("Starting device routing…"), 75)
+                publishProgress(90) // engine tunnel is up — verification remains
                 activeSocksPort = LanternEngine.SOCKS_PORT
-                val hevStarted = synchronized(lanternLifecycleLock) {
-                    if (!LanternEngine.isCurrent(attempt)) return@execute
-                    HevEngine.start(establishedTun, LanternEngine.SOCKS_PORT, mtu, dnsOnly = false)
-                }
-                if (!LanternEngine.isCurrent(attempt)) return@execute
-                if (!hevStarted) {
-                    error("Could not start the Hev device-routing engine for Lantern")
-                }
-                publishProgress(90) // Hev running — verification remains
 
                 synchronized(lanternLifecycleLock) {
                     if (!LanternEngine.isCurrent(attempt)) return@execute
@@ -3412,7 +3429,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     TunnelStatus.isProxyMode = false
                     TunnelStatus.isNativeTunMode = false
                     sendStatus(STATUS_CONNECTED, Strings.t("Lantern connected"))
-                    ConnectionLog.record("Lantern: connected — device TUN → Hev → Radiance SOCKS 127.0.0.1:${LanternEngine.SOCKS_PORT}")
+                    ConnectionLog.record("Lantern: connected — device TUN owned by the Radiance engine (official-app data path)")
                     repostNotification()
                     startLanternTrafficPolling()
                     startWatchdog()
@@ -3973,8 +3990,10 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // Deliberately NOT required in proxy mode: there is no TUN and no
         // tun2socks, so demanding it would report a healthy proxy as dead on the
         // first watchdog tick and auto-reconnect would loop forever.
+        // LANTERN is NOT here anymore (3.4.0): no Hev bridge runs for it —
+        // the Radiance engine owns the TUN, so there is no tun2socks to die.
         val needsRouting = psiphonVpnMode || currentProtocol.contains("TOR") ||
-            currentProtocol.contains("SHARD") || currentProtocol.contains("LANTERN")
+            currentProtocol.contains("SHARD")
         if (needsRouting && !TunEngineManager.isRunningAny) return "device routing stopped"
 
         if (currentProtocol.contains("LANTERN")) {
@@ -5216,8 +5235,9 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             return
         }
 
-        // Lantern's novpn Radiance build supplies a loopback proxy only; the
-        // Android TUN and its lifecycle stay entirely inside this service.
+        // Lantern's Radiance sidecar owns the tunnel data path (3.4.0): the
+        // service establishes the VpnService TUN, hands its fd to the engine
+        // and the engine's box drives it directly — like the official app.
         if (currentProtocol.contains("LANTERN")) {
             if (proxyMode) {
                 connected.set(false)
