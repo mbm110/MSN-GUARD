@@ -63,7 +63,7 @@ class LanternDnsRegionContract(unittest.TestCase):
         # DNS families. No invented Europe/America/Asia entries.
         self.assertIn("private enum class LanternDnsRegion", UI)
         for entry in (
-            'IRAN("Iran (AliDNS)", "iran",',
+            'IRAN("Iran", "iran",',
             'AUTO("Auto (SIM detection)", "auto",',
             'RUSSIA("Russia (Yandex DNS)", "russia",',
             'INTERNATIONAL("International (Quad9)", "international",',
@@ -87,7 +87,7 @@ class LanternDnsRegionContract(unittest.TestCase):
         for key in (
             "Lantern DNS",
             "The DNS the Lantern tunnel resolves through · applies next connection",
-            "Iran (AliDNS)",
+            "Iran",
             "Auto (SIM detection)",
             "Russia (Yandex DNS)",
             "International (Quad9)",

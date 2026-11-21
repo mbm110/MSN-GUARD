@@ -10638,7 +10638,7 @@ class MainActivity : Activity() {
      * honest list.
      */
     private enum class LanternDnsRegion(val enLabel: String, val coreName: String, val enDescription: String) {
-        IRAN("Iran (AliDNS)", "iran", "AliDNS 223.5.5.5 — survives Iranian DPI; the default"),
+        IRAN("Iran", "iran", "The DNS at 223.5.5.5 withstands Iranian filtering and DPI; the default"),
         AUTO("Auto (SIM detection)", "auto", "In Iran from the SIM or network country; abroad the device locale, like the reference app"),
         RUSSIA("Russia (Yandex DNS)", "russia", "Yandex 77.88.8.8 — the reference's Russian-carrier DNS"),
         INTERNATIONAL("International (Quad9)", "international", "Quad9 9.9.9.9 DoH — for use outside Iran; Iranian DPI resets it");
