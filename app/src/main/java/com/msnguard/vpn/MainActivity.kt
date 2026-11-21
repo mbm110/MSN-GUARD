@@ -10,6 +10,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import org.json.JSONObject
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -65,6 +66,9 @@ import java.net.URL
 import kotlin.math.min
 import kotlin.math.roundToInt
 import com.msnguard.vpn.profiled
+import com.msnguard.vpn.foxy.RELAYER_AUTOMATIC
+import com.msnguard.vpn.foxy.RELAYER_CUSTOM
+import com.msnguard.vpn.foxy.RELAYER_DIRECT
 
 class MainActivity : Activity() {
     private lateinit var orbitDial: OrbitDialView
@@ -84,6 +88,12 @@ class MainActivity : Activity() {
      * wraps Psiphon/Tor in WARP. Only ever visible with MASQUE selected.
      */
     private lateinit var mimCard: MimCard
+    /**
+     * The WoW twin of [chainCard]/[mimCard], in the same slot. Only ever
+     * visible with WoW (WARP-on-WARP) selected.
+     */
+    private lateinit var goolCard: GoolCard
+    private lateinit var wgOverMasqueCard: GoolCard
     /**
      * The SHARD twin of [chainCard], in the same slot.
      *
@@ -113,48 +123,12 @@ class MainActivity : Activity() {
     // v1.8.7: English keeps the exact v1.8.5 layout; fa/zh get tighter text
     // blocks and a dial no smaller than the English one. See fitConsoleToViewport.
     private val localizedTypography: Boolean get() = AppLanguage.current() != "en"
-    /**
-     * Where the one-time Auto Scan is in [AUTO_SCAN_LADDER], or -1 when it is not
-     * running.
-     *
-     * The scan exists for the user who does not know what MASQUE is: the first
-     * connect walks the four transports that need no account and no setup, keeps
-     * the one that actually carries traffic, and never asks again. It is UI-side on
-     * purpose — the service already knows how to raise one transport, and the
-     * decision of *which* to raise is exactly what this screen owns.
-     */
     // Consecutive handshook-but-empty WireGuard sessions on this device.
     // Core cached this peer (lastconn) so every retry handshakes the same
     // edge and the UI's own gate keeps tearing it down — from the user's
     // side it loops forever on Verifying. After N fails, evict the cached
     // peer so the next retry actually scans.
     private var consecutiveFakeWireguard = 0
-    private var autoScanIndex = -1
-    /**
-     * The transport selected before the scan started, restored if the whole ladder
-     * fails.
-     *
-     * Without this a failed scan would leave the user pinned to the last rung it
-     * tried (SHARD), which is the one they understand least and the one least
-     * likely to be right on the next network.
-     */
-    private var autoScanBefore: Protocol? = null
-    /**
-     * Invalidates the per-attempt watchdog. Incremented on every attempt and on
-     * every abort, so a timeout posted for attempt N cannot advance attempt N+1.
-     */
-    private var autoScanToken = 0
-
-    /**
-     * True between abandoning one rung and dialling the next.
-     *
-     * Without it the ladder skips rungs. A rung can be abandoned by the watchdog
-     * while its own FAILED broadcast is still in flight — or its teardown produces
-     * one — and the second report would advance the ladder again, so a network where
-     * MASQUE works could jump from WireGuard to SHARD. Cleared when the next rung's
-     * connect actually fires.
-     */
-    private var autoScanSettling = false
     private var pendingConfig: String? = null
     /**
      * The backup JSON built before the file picker opened.
@@ -233,6 +207,10 @@ class MainActivity : Activity() {
     private var tunEngineRow: OrbitSettingsRow? = null
     private var psiphonModeRow: OrbitSettingsRow? = null
     private var cdnEdgeIpsRow: OrbitSettingsRow? = null
+    /** Lantern settings rows: server picker, like the Psiphon ones. */
+    private var lanternServerRow: OrbitSettingsRow? = null
+    private var lanternDnsRow: OrbitSettingsRow? = null
+    private var lanternPoolRow: OrbitSettingsRow? = null
     private var cdnSniRow: OrbitSettingsRow? = null
 
     /** LAN-sharing switch; its subtitle carries the live proxy address. */
@@ -472,6 +450,7 @@ class MainActivity : Activity() {
                 MsnGuardVpnService.STATUS_CONNECTING -> showConnecting(
                     intent.getStringExtra(MsnGuardVpnService.EXTRA_DETAIL),
                     intent.getIntExtra(MsnGuardVpnService.EXTRA_PROGRESS, -1),
+                    intent.getIntExtra(MsnGuardVpnService.EXTRA_STEPS, 0),
                 )
                 MsnGuardVpnService.STATUS_STARTING -> showStarting()
                 MsnGuardVpnService.STATUS_SCANNING -> showScanning()
@@ -479,36 +458,15 @@ class MainActivity : Activity() {
                 // transport handshake finished; it is not proof that payload
                 // crosses. beginVerification() proves it before the UI claims it.
                 MsnGuardVpnService.STATUS_CONNECTED -> beginVerification()
-                MsnGuardVpnService.STATUS_FAILED -> {
-                    // A rung of the Auto Scan died: move to the next transport instead
-                    // of painting a red dial the user cannot act on. advanceAutoScan()
-                    // returns false when the ladder is exhausted, and then the failure
-                    // is shown normally.
-                    if (!advanceAutoScan()) {
-                        showFailure(intent.getStringExtra(MsnGuardVpnService.EXTRA_DETAIL))
-                    }
-                }
+                MsnGuardVpnService.STATUS_FAILED ->
+                    showFailure(intent.getStringExtra(MsnGuardVpnService.EXTRA_DETAIL))
                 MsnGuardVpnService.STATUS_DISCONNECTED -> {
                     // Our own verification teardown produces this broadcast. Keep
                     // the "no traffic passes" message instead of overwriting it
                     // with a generic "Not connected".
                     if (suppressNextDisconnectedPaint) {
                         suppressNextDisconnectedPaint = false
-                        // NOT while the Auto Scan is between rungs. Re-enabling here
-                        // un-dims the rail and the OVER WARP card for the 1.5s settle,
-                        // and the next rung's CONNECTING dims them again — on the
-                        // phone that is the lower half of the screen blinking once
-                        // per rung. The scan keeps the controls locked throughout.
-                        if (autoScanIndex < 0) setModeEnabled(true)
-                    } else if (autoScanIndex >= 0) {
-                        // A SECOND disconnected broadcast from the same teardown: the
-                        // native worker's exit branch and stopTunnel()'s tail can each
-                        // emit one depending on which finishes first, and only the
-                        // first is consumed by the flag above. Painting it would drop
-                        // "Not connected" over the scan's own progress line and reset
-                        // the metrics mid-search. The scan owns this screen until it
-                        // ends.
-                        ConnectionLog.record("Auto Scan: teardown broadcast ignored between rungs")
+                        setModeEnabled(true)
                     } else {
                         showDisconnected()
                     }
@@ -536,6 +494,12 @@ class MainActivity : Activity() {
         // The application context outlives this activity, so a mid-session
         // recreate() never orphans it.
         AppLanguage.appContext = applicationContext
+        // Fresh UI-only process (no service, no prior sign-in): FoxySettings /
+        // FoxyRemoteConfig defaults must be live before ANY Foxy request this
+        // screen makes (quota fetch, sign-in bootstrap), or defaultRelayerConfig
+        // silently falls back to AUTOMATIC and drops the user's CUSTOM relayer
+        // (v3.2.27 audit). Idempotent — the service calls it too.
+        com.msnguard.vpn.foxy.FoxyRemoteConfig.init(applicationContext)
         palette = AppAppearance.load(this)
         // Profiles: prefix any settings key written before this feature existed,
         // so an upgrade keeps every value the user set. Idempotent — a second
@@ -621,7 +585,7 @@ class MainActivity : Activity() {
                 setPadding(dp(10), 0, dp(10), 0)
             }
             // One line, always. Every headline this view shows is short ("Connecting",
-            // "Auto Scan", "Connection degraded"), and a wrap would change the
+            // "Connection degraded"), and a wrap would change the
             // console's height — see connectionDetail below for why that is the
             // expensive kind of change.
             maxLines = 1
@@ -638,8 +602,6 @@ class MainActivity : Activity() {
             // measured height, and [fitConsoleToViewport] answers a height change by
             // rescaling the dial — which relayouts the whole column, which is the
             // "screen goes and comes back" the user sees under the OVER WARP card.
-            // With the Auto Scan the messages change several times per connect, so
-            // what used to be one settle became a series of them: the flicker.
             //
             // Fixed at two lines the height is constant, the fit pass settles once,
             // and nothing below the dial moves for the rest of the session. Ellipsis
@@ -680,8 +642,25 @@ class MainActivity : Activity() {
         exitNodeCard = ExitNodeCard(this, palette) { refreshPublicIp() }
         chainCard = ChainModeCard(this, palette) { armed -> setChainArmed(armed) }
         mimCard = MimCard(this, palette) { armed -> setMimArmed(armed) }
+        // 3.2.45: onToggle is no longer the last parameter (the carrier cards
+        // pass strings after it), so the lambda must be a named argument — a
+        // trailing lambda would bind to `name` and fail to compile.
+        goolCard = GoolCard(this, palette, onToggle = { armed -> setGoolArmed(armed) })
+        // WireGuard over MASQUE (3.2.45): the same carrier view, the WireGuard
+        // transport's own strings and its own remembered pref.
+        wgOverMasqueCard = GoolCard(
+            this, palette,
+            onToggle = { armed -> setWgOverArmed(armed) },
+            title = Strings.t("WIREGUARD OVER MASQUE"),
+            onText = Strings.t("foreign exit — the identity registers through the tunnel"),
+            offText = Strings.t("plain wireguard, a local exit"),
+            name = "WireGuard over Masque",
+        )
         smartSplitCard = SmartSplitCard(this, palette) { on -> setSmartSplitEnabled(on) }
-        transportRail = TransportRail(this, palette, Protocol.entries.map { railLabel(it) }) { index ->
+        // v3.2.26: perRow=4 — the eight transports sit in two rows of four:
+        // WireGuard · MASQUE · WoW · Lantern / Psiphon · Tor · Foxy · SHARD.
+        // The 7-label fallback keeps its own 3+4 special case inside TransportRail.
+        transportRail = TransportRail(this, palette, Protocol.entries.map { railLabel(it) }, perRow = 4) { index ->
             updateConnectionMode(Protocol.entries[index])
         }
         // Height follows the grid rather than being a constant: the rail decides how
@@ -820,6 +799,13 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         com.msnguard.vpn.foxy.FoxyBrowserLogin.close()
+        // A verification still in flight dies with this instance (its verdict
+        // only ever painted this activity). Release the row from "Connecting…"
+        // so a swiped-away app cannot leave the notification stuck on it over
+        // a live tunnel — it falls back to the service's own handshake edge.
+        if (verifyInFlight) {
+            reportVerifyState(MsnGuardVpnService.VERIFY_PHASE_ABANDONED)
+        }
         // The session ticker is a Handler post, not tied to a view, so it has to
         // be cancelled by hand. The dial's own animators already stop in
         // onDetachedFromWindow.
@@ -831,6 +817,12 @@ class MainActivity : Activity() {
                 onBackInvokedDispatcher.unregisterOnBackInvokedCallback(it)
             }
         }
+        // The offline server picker boots a list-only Lantern sidecar. If the
+        // picker is gone and no Lantern tunnel is up, reap it now instead of
+        // waiting for the 4-minute idle reaper. The engine-side guards make
+        // this a no-op while a Lantern connect/session is live.
+        lanternPickerOpen = false
+        LanternEngine.stopIdleListOnly()
         super.onDestroy()
     }
 
@@ -1210,6 +1202,12 @@ class MainActivity : Activity() {
         if (verifyInFlight) return
         verifyInFlight = true
         val request = ++verifyRequest
+        // The notification follows this gate: the service's handshake edge and
+        // this proof are different moments, and a row that says "Connected"
+        // while the dial still says "Connecting" is the exact contradiction
+        // the field report called out. Report the phase so the row holds
+        // "Connecting…" until this gate passes.
+        reportVerifyState(MsnGuardVpnService.VERIFY_PHASE_VERIFYING)
 
         // DIAGNOSTIC BYPASS — plain SHARD only.
         //
@@ -1270,7 +1268,7 @@ class MainActivity : Activity() {
         showVerifying()
         Thread {
             val budget = verifyTimeoutMs()
-            val deadline = System.currentTimeMillis() + budget
+            var deadline = System.currentTimeMillis() + budget
             // In native TUN mode the HTTP probe rides the carrier link, not the
             // tunnel, so it proves nothing. Gate on in-tunnel bytes instead and
             // use the probe only for the latency figure afterwards.
@@ -1306,10 +1304,36 @@ class MainActivity : Activity() {
             }
             var proof: Pair<String, Float>? = null
             var attempts = 0
+            // ECONNREFUSED extensions: the core's own reconnect loop tears its
+            // SOCKS listener down between cycles, so a failed probe during a
+            // live core means "reconnecting", not "dead". The 3.2.34 WG field
+            // log is the shape this guards against: peer throttled at 11s,
+            // core mid-retry 4s from restoring the tunnel, gate gave up at
+            // 5 refused probes and tore down a session that was coming back.
+            //
+            // 3.2.35 shipped a first cut of this that never fired: it matched
+            // "/127.0.0.1:" (colon) but Android's ConnectException reads
+            // "failed to connect to /127.0.0.1 (port 1819) ..." (no colon), so
+            // the 3.2.35 WOW field log shows the gate dying at 6 probes with
+            // zero extensions granted. The matching is now not textual at all:
+            // any probe failure while the native core still runs is a cycle of
+            // its self-healing loop. Front-end transports (Tor, SHARD, Foxy,
+            // Lantern, Psiphon) own listeners outside the core — for them a
+            // dead listener really is a dead front, so they keep the plain
+            // budget because NativeCore.isRunning() is false there.
+            var extensions = 0
             while (System.currentTimeMillis() < deadline && request == verifyRequest) {
                 attempts++
                 proof = pingAnyEndpoint()
                 if (proof != null) break
+                if (extensions < VERIFY_RECONNECT_EXTENSIONS && NativeCore.isRunning()) {
+                    extensions++
+                    ConnectionLog.record(
+                        "probe failed while native core is reconnecting — " +
+                            "extending verify patience ${extensions}/${VERIFY_RECONNECT_EXTENSIONS}"
+                    )
+                    deadline += VERIFY_RECONNECT_EXTENSION_MS
+                }
                 // The tunnel may still be settling (routes, DNS, lwIP warm-up),
                 // so retry rather than failing on the first miss.
                 Thread.sleep(VERIFY_RETRY_DELAY_MS)
@@ -1423,9 +1447,8 @@ class MainActivity : Activity() {
                 consecutiveFakeWireguard = 0
                 ConnectionLog.record("Evicting cached WireGuard endpoint — will scan fresh")
                 MsnGuardVpnService.clearStaleWireguardCache(this)
-                // Do NOT advance the ladder yet: give the same rung one more
-                // try with a fresh scan before moving to MASQUE. The service
-                // already stopped; reconnect through the same protocol.
+                // Give the same protocol one more try with a fresh scan. The
+                // service already stopped; reconnect through the same protocol.
                 sessionHandler.postDelayed({
                     if (isFinishing || isDestroyed) return@postDelayed
                     connect(configJson())
@@ -1435,12 +1458,28 @@ class MainActivity : Activity() {
         } else {
             consecutiveFakeWireguard = 0
         }
-        // A rung that handshook but carried nothing is exactly the Hamrah-e-Aval
-        // WireGuard case the Auto Scan exists for, and it is the reason the ladder
-        // is driven from this screen: the service thinks that session succeeded.
-        // stopCurrent = false because the teardown above IS the disconnect.
-        if (advanceAutoScan(stopCurrent = false)) return
+        // The tunnel handshook but carried nothing (the Hamrah-e-Aval WireGuard
+        // case): the service thinks that session succeeded, so the failure is
+        // reported here. The teardown above IS the disconnect.
         showFailure(Strings.t("Tunnel handshake succeeded but no traffic passes — try another protocol"))
+    }
+
+    /**
+     * Tells the service which phase the verification gate is in so the
+     * notification row and the dial never disagree. Only ever called with the
+     * service live (these states exist solely while a session broadcasts), but
+     * guarded anyway: a service that died mid-verify must not be resurrected
+     * into a connect by a stray status intent.
+     */
+    private fun reportVerifyState(phase: String) {
+        try {
+            startService(
+                Intent(this, MsnGuardVpnService::class.java)
+                    .setAction(MsnGuardVpnService.ACTION_VERIFY_STATE)
+                    .putExtra(MsnGuardVpnService.EXTRA_VERIFY_PHASE, phase)
+            )
+        } catch (_: Exception) {
+        }
     }
 
     /** The state between handshake and proof. Keeps the dial in its CONNECTING look. */
@@ -1692,6 +1731,24 @@ class MainActivity : Activity() {
         // chained mode. [renderChainCard] keeps exactly one of the three cards
         // visible, so the screen keeps its height here too.
         addView(mimCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(56),
+        ).apply { topMargin = dp(10) })
+
+        // Gool over masque, the fourth occupant of the same slot: WoW's own
+        // carrier choice — wireguard registered through the masque tunnel for a
+        // foreign exit, or classic wireguard-in-wireguard. [renderChainCard]
+        // keeps exactly one of the four cards visible, so the screen keeps its
+        // height here too.
+        addView(goolCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(56),
+        ).apply { topMargin = dp(10) })
+
+        // WireGuard over masque, the fifth occupant of the same slot (3.2.45):
+        // WireGuard's own carrier choice. [renderChainCard] keeps exactly one
+        // of the five cards visible, so the screen keeps its height here too.
+        addView(wgOverMasqueCard, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(56),
         ).apply { topMargin = dp(10) })
@@ -3428,12 +3485,10 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
-            // FOXY — one row like Warp Setting; the dedicated page owns the
-            // Firefox Accounts browser sign-in; MSN never collects the password or code.
-            body.addView(navRow(Strings.t("Foxy Account & Setting"), foxyAccountSummary()) { openFoxySettingScreen() }, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(8) })
+            // FOXY has its own top-level section above LANTERN now (like Warp and
+            // Lantern, it is a whole transport, not a connection detail); the
+            // dedicated page still owns the Firefox Accounts browser sign-in and
+            // MSN never collects the password or code.
             // Share over LAN, directly under the port it publishes.
             //
             // Moved out of the PSIPHON section: it is not Psiphon's any more. Every
@@ -3518,7 +3573,7 @@ class MainActivity : Activity() {
         // Psiphon gets its own section: all three controls below are meaningless
         // unless the chain is armed, and grouping them says that structurally
         // instead of relying on the user to infer it from a mixed list.
-        content.addView(expandableSection(Strings.t("PSIPHON"), id = "PSIPHON") { body ->
+        content.addView(expandableSection(Strings.t("PSIPHON"), id = "PSIPHON", iconRes = R.drawable.ic_psiphon, iconSizeDp = 22) { body ->
             // The mode row sits FIRST: it decides the dial model for every connect,
             // and the two CDN fields below only exist to feed it. Reading order
             // matches the packet — mode first, then what the chain carries.
@@ -3602,7 +3657,7 @@ class MainActivity : Activity() {
 
         // Tor section, mirroring the Psiphon one: the mode picker is the only
         // control, and it is meaningful regardless of what else is set.
-        content.addView(expandableSection(Strings.t("TOR"), id = "TOR") { body ->
+        content.addView(expandableSection(Strings.t("TOR"), id = "TOR", iconRes = R.drawable.ic_tor, iconSizeDp = 22) { body ->
             torModeRowRef = navRow(Strings.t("Connection mode"), torMode().label) {
                 chooseTorMode {
                     torModeRowRef?.setValue(torMode().label)
@@ -3691,7 +3746,59 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(26) })
-        // Only after BOTH sections' rows are constructed and their refs assigned.
+
+        // FOXY — its own top-level section (same shape as LANTERN's), sitting
+        // above it. One row into the dedicated page, which owns the Firefox
+        // Accounts browser sign-in; MSN never collects the password or code.
+        content.addView(expandableSection(Strings.t("FOXY"), id = "FOXY", iconRes = R.drawable.ic_foxy, iconSizeDp = 22) { body ->
+            body.addView(navRow(Strings.t("Foxy Account & Setting"), foxyAccountSummary()) { openFoxySettingScreen() }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(26) })
+
+        // Lantern section, mirroring the Psiphon/Shard layout. Opening the
+        // server picker refreshes pings automatically (no separate button):
+        // Lantern keeps probing every server in the background, and each open
+        // also re-reads the latest probe results and re-ranks by them.
+        content.addView(expandableSection(Strings.t("LANTERN"), id = "LANTERN", iconRes = R.drawable.ic_lantern, iconSizeDp = 22) { body ->
+            lanternServerRow = navRow(Strings.t("Server"), lanternServerLabel()) {
+                chooseLanternServer { lanternServerRow?.setValue(lanternServerLabel()) }
+            }
+            body.addView(lanternServerRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+
+            // The DNS region (3.3.3): the manual override of the radio-based
+            // Iran detection. Takes effect on the next connect — the locale
+            // string is handed to the sidecar when it starts.
+            lanternDnsRow = navRow(Strings.t("Lantern DNS"), lanternDnsChoice().label) {
+                chooseLanternDns { lanternDnsRow?.setValue(lanternDnsChoice().label) }
+            }
+            body.addView(lanternDnsRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+
+            // The server pool (3.3.7): whether Lantern draws the pinned IR
+            // pool or the worldwide free pool. Takes effect on the next
+            // connect — RADIANCE_COUNTRY is read when the sidecar starts
+            // (both the connect path and the offline picker's list boot).
+            lanternPoolRow = navRow(Strings.t("Server pool"), lanternPoolChoice().label) {
+                chooseLanternPool { lanternPoolRow?.setValue(lanternPoolChoice().label) }
+            }
+            body.addView(lanternPoolRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(26) })
         //
         // This call used to sit right after the Psiphon rows, where torChainRowRef
         // and torRegionRowRef were still null — so the Tor rows were built and
@@ -3719,7 +3826,7 @@ class MainActivity : Activity() {
         // which is what the chain exists to achieve for Psiphon, and wrapping
         // fragmented TLS inside a second tunnel both doubles the latency and
         // destroys the fragmentation's effect — the DPI sees the outer tunnel.
-        content.addView(expandableSection(Strings.t("SHARD"), id = "SHARD") { body ->
+        content.addView(expandableSection(Strings.t("SHARD"), id = "SHARD", iconRes = R.drawable.ic_shard, iconSizeDp = 22) { body ->
             shardPoolRow = navRow(Strings.t("Node list"), shardPoolSummary()) {
                 // force = true: the whole point of tapping this is to bypass the
                 // six-hour interval the background job honours.
@@ -4347,7 +4454,9 @@ class MainActivity : Activity() {
             // that cannot share in SOCKS mode is Tor, and the one combination that
             // cannot share at all is a WARP transport in VPN mode — where the core
             // binds no listener because it is driving the TUN directly.
-            return if (selectedProtocol == Protocol.TOR && CoreConfig.proxyOnly(this)) {
+            return if (selectedProtocol == Protocol.LANTERN) {
+                Strings.t("Lantern requires whole-device VPN mode; LAN proxy sharing is not available")
+            } else if (selectedProtocol == Protocol.TOR && CoreConfig.proxyOnly(this)) {
                 Strings.t("Tor cannot run as a SOCKS proxy — set Tunnel type to VPN")
             } else if (selectedProtocol == Protocol.SHARD) {
                 Strings.t("SHARD shares from VPN mode — set Tunnel type to VPN")
@@ -4389,6 +4498,7 @@ class MainActivity : Activity() {
      *    which is what the old "Psiphon only" wording was really describing.
      */
     private fun lanSharingCapable(): Boolean = when (selectedProtocol) {
+        Protocol.LANTERN -> false
         Protocol.PSIPHON -> true
         Protocol.TOR -> !CoreConfig.proxyOnly(this)
         // VPN mode only, and that is not a limitation — SHARD has no proxy mode at
@@ -4509,6 +4619,551 @@ class MainActivity : Activity() {
      * Auto. Hiding is deliberate rather than disabling: a disabled row invites
      * the user to tap it, and there is nothing to type until the mode is on.
      */
+    // ---- Lantern server picking ----
+
+    /** One entry of the sidecar's /servers snapshot. */
+    private data class LanternServerOption(
+        val tag: String,
+        /** Display name: flag + numbered city (or country/tag fallback). */
+        val title: String,
+        val city: String,
+        val country: String,
+        val countryCode: String,
+        val pingMs: Long,
+        val probed: Boolean,
+    )
+
+    /** Small cache so the row label can render without blocking the UI thread. */
+    @Volatile private var lanternServersCache: List<LanternServerOption> = emptyList()
+
+    /** True when the last snapshot said selection is automatic (not pinned). */
+    @Volatile private var lanternAutoSelected = true
+
+    /** Tag of the server the tunnel is currently actually using, per the sidecar. */
+    @Volatile private var lanternCurrentTag: String = ""
+
+    /**
+     * True while the Lantern server picker sheet is on screen. The background
+     * probe thread checks it before repainting from a fresh snapshot, so a
+     * sheet the user already closed is not silently parsed behind them, and
+     * the ping refresh knows whether anyone is waiting for its result.
+     */
+    @Volatile private var lanternPickerOpen = false
+
+    /** The open Server sheet's dialog, so a background refresh can rebuild it
+     *  in place instead of forcing the user to back out and re-enter. */
+    @Volatile private var lanternServerSheet: Dialog? = null
+
+    /** The `after` callback of the currently open Lantern Server sheet. */
+    private var lanternPickerAfter: (() -> Unit)? = null
+
+    /** True while the sheet is being dismissed only to be reopened with fresh
+     *  data; the dismiss handler must not treat that as the user closing it. */
+    private var lanternSheetReopening = false
+
+    /** When the current server snapshot was fetched (0 = unknown/legacy cache). */
+    @Volatile private var lanternServersFetchedAt = 0L
+
+    /**
+     * Last snapshot persisted by [parseLanternSnapshot], so the picker still
+     * lists servers/countries while Lantern is disconnected (the sidecar only
+     * runs while connected; without this cache the sheet would show nothing).
+     */
+    private val lanternServersCachePref = "lantern_servers_cache_json"
+
+    /**
+     * Country name to ISO code, the fallback path when Lantern's metadata
+     * carries no country_code. Keys are matched case-insensitively; the
+     * aliases cover the spellings Lantern is known to emit ("USA",
+     * "United States of America", ...).
+     */
+    private val lanternCountryCodes = mapOf(
+        "Germany" to "DE", "Netherlands" to "NL", "United States" to "US",
+        "United States of America" to "US", "USA" to "US", "U.S." to "US",
+        "U.S.A." to "US", "America" to "US",
+        "United Kingdom" to "GB", "Great Britain" to "GB", "Britain" to "GB",
+        "England" to "GB", "UK" to "GB",
+        "Singapore" to "SG", "Japan" to "JP", "Hong Kong" to "HK",
+        "Hong Kong SAR" to "HK", "Hongkong" to "HK", "France" to "FR",
+        "Canada" to "CA", "India" to "IN", "Brazil" to "BR",
+        "Switzerland" to "CH", "Spain" to "ES", "Italy" to "IT",
+        "Turkey" to "TR", "Turkiye" to "TR",
+        "United Arab Emirates" to "AE", "UAE" to "AE", "U.A.E." to "AE",
+        "Poland" to "PL", "Sweden" to "SE",
+        "Norway" to "NO", "Denmark" to "DK", "Finland" to "FI",
+        "Ireland" to "IE", "Belgium" to "BE", "Austria" to "AT",
+        "Romania" to "RO", "Czech Republic" to "CZ", "Czechia" to "CZ",
+        "Ukraine" to "UA", "Russia" to "RU", "Russian Federation" to "RU",
+        "Mexico" to "MX", "Argentina" to "AR",
+        "Chile" to "CL", "Colombia" to "CO", "South Africa" to "ZA",
+        "Nigeria" to "NG", "Kenya" to "KE", "Egypt" to "EG",
+        "Indonesia" to "ID", "Vietnam" to "VN", "Viet Nam" to "VN",
+        "Thailand" to "TH",
+        "Malaysia" to "MY", "South Korea" to "KR", "Republic of Korea" to "KR",
+        "Korea" to "KR", "Taiwan" to "TW",
+        "Australia" to "AU", "New Zealand" to "NZ", "Israel" to "IL",
+        "Portugal" to "PT", "Greece" to "GR", "Hungary" to "HU",
+        "Bulgaria" to "BG", "Serbia" to "RS", "Latvia" to "LV",
+        "Estonia" to "EE", "Lithuania" to "LT", "Saudi Arabia" to "SA",
+        "Qatar" to "QA", "Kazakhstan" to "KZ", "Azerbaijan" to "AZ",
+        "Armenia" to "AM", "Georgia" to "GE", "Moldova" to "MD",
+        "Slovakia" to "SK", "Slovenia" to "SI", "Croatia" to "HR",
+        "Philippines" to "PH", "Pakistan" to "PK", "Bangladesh" to "BD",
+        "Sri Lanka" to "LK", "Nepal" to "NP", "Kuwait" to "KW",
+        "Oman" to "OM", "Bahrain" to "BH", "Jordan" to "JO",
+        "Morocco" to "MA", "Tunisia" to "TN", "Algeria" to "DZ",
+        "Peru" to "PE", "Uruguay" to "UY", "Venezuela" to "VE",
+        "Ecuador" to "EC", "Bolivia" to "BO", "Paraguay" to "PY",
+        "Iceland" to "IS", "Luxembourg" to "LU", "Malta" to "MT",
+        "Cyprus" to "CY", "Albania" to "AL", "Montenegro" to "ME",
+        "North Macedonia" to "MK", "Macedonia" to "MK",
+        "Bosnia and Herzegovina" to "BA",
+    )
+
+    /**
+     * Lowercase view of the alias table. The fallback lookup normalizes the
+     * server's country name with lowercase(), so without this the whole
+     * table was DEAD — every key here is stored capitalized and the lookup
+     * could never hit (v3.2.27 audit: missing flags, e.g. Ashburn/USA when
+     * country_code is absent).
+     */
+    private val lanternCountryCodesLower: Map<String, String> by lazy {
+        lanternCountryCodes.entries.associate { (k, v) -> k.lowercase() to v }
+    }
+
+    /** Flag emoji from Lantern's ISO code first, country name as fallback. */
+    private fun lanternFlag(countryCode: String, country: String): String {
+        val normalized = countryCode.trim().uppercase()
+        val code = if (normalized.length == 2 && normalized.all { it in 'A'..'Z' }) {
+            normalized
+        } else {
+            lanternCountryCodesLower[country.trim().lowercase()] ?: return ""
+        }
+        val sb = StringBuilder(2)
+        for (c in code) sb.append(Character.toChars(0x1F1E6 + (c - 'A')))
+        return sb.toString()
+    }
+
+    /**
+     * Label for the server row. Shows the pinned server when one is stored,
+     * otherwise "Automatic" with the current server as the value.
+     */
+    private fun lanternServerLabel(): String {
+        val stored = LanternEngine.storedServerSelection(this)
+        if (stored.isBlank()) return Strings.t("Automatic")
+        // Prefer the cached city/country name; the raw tag only shows before
+        // the first snapshot lands.
+        return lanternServersCache.firstOrNull { it.tag == stored }?.title ?: stored
+    }
+
+    /**
+     * Parse a /servers snapshot into the picker cache: server list, auto
+     * state, currently active tag. Shared by the open-and-show flow and the
+     * post-refresh reload so both stay in sync.
+     *
+     * Offline behavior: when the sidecar is down (Lantern disconnected) the
+     * caller passes null and the last persisted snapshot is reused, so the
+     * picker still shows servers and countries — pings then reflect the last
+     * connected session until the next connect refreshes them.
+     */
+    private fun parseLanternSnapshot(raw: JSONObject?, trustCurrent: Boolean = true) {
+        val snapshot = raw ?: run {
+            val cached = preferences().getString(lanternServersCachePref, null) ?: return
+            runCatching { JSONObject(cached) }.getOrNull() ?: return
+        }
+        if (raw != null) {
+            // An empty live snapshot (sidecar booted but Radiance has not
+            // fetched its config yet) must NOT overwrite the last good cache —
+            // otherwise the picker goes permanently empty offline after one
+            // unlucky open (v3.2.27 audit). Keep the old cache; the live
+            // refresh loop will repopulate momentarily.
+            val incoming = snapshot.optJSONArray("servers")
+            if (incoming == null || incoming.length() == 0) {
+                val cached = preferences().getString(lanternServersCachePref, null)
+                val cachedSnapshot = cached?.let { runCatching { JSONObject(it) }.getOrNull() }
+                if (cachedSnapshot != null) return parseLanternSnapshot(null, trustCurrent)
+                return
+            }
+            preferences().edit().putString(
+                lanternServersCachePref,
+                snapshot.put("fetched_at_epoch_ms", System.currentTimeMillis()).toString(),
+            ).apply()
+        }
+        lanternServersFetchedAt = snapshot.optLong("fetched_at_epoch_ms", 0L)
+        lanternAutoSelected = snapshot.optBoolean("auto", true)
+        // The "current" marker is a LIVE fact. When the tunnel is up but the
+        // live /servers read failed (a busy tunnel makes the request time out —
+        // same failure class as the speed-counter bug) the cached snapshot's
+        // "current" is some PREVIOUS session's server, and badging that row
+        // (Italy "Current" while connected to Germany, v3.2.30 report) is a
+        // lie. Offline (tunnel down) the cached value is our best knowledge and
+        // stays.
+        lanternCurrentTag = if (trustCurrent) snapshot.optString("current", "") else ""
+        val list = snapshot.optJSONArray("servers") ?: return
+        val servers = mutableListOf<LanternServerOption>()
+        for (i in 0 until list.length()) {
+            val entry = list.optJSONObject(i) ?: continue
+            val tag = entry.optString("tag", "")
+            if (tag.isBlank()) continue
+            servers.add(
+                LanternServerOption(
+                    tag = tag,
+                    title = "", // assigned below, after sort + numbering
+                    city = entry.optString("city", ""),
+                    country = entry.optString("country", ""),
+                    countryCode = entry.optString("country_code", ""),
+                    pingMs = entry.optLong("ping_ms", 0),
+                    probed = entry.optBoolean("probed", false),
+                ),
+            )
+        }
+        // Fastest first; servers that never answered a probe keep their
+        // relative order at the end of the list.
+        servers.sortWith(compareBy({ !it.probed }, { it.pingMs }))
+        // Number repeated cities in ping order, like the official app
+        // ("Frankfurt 1", "Frankfurt 2", ...); a unique city stays unnumbered.
+        // Within a city the numbering follows the servers' TAG order (stable
+        // across refreshes), NOT the ping-sorted position — pings change every
+        // probe round, and a server the user knows as "Frankfurt 2" must not
+        // become "Frankfurt 1" an hour later (v3.2.27 audit).
+        val totals = HashMap<String, Int>()
+        for (server in servers) {
+            val key = "${server.city}|${server.country}"
+            totals[key] = (totals[key] ?: 0) + 1
+        }
+        val tagOrder = HashMap<String, Int>()
+        servers.groupBy { "${it.city}|${it.country}" }.forEach { (_, group) ->
+            group.sortedBy { it.tag }.forEachIndexed { idx, server ->
+                tagOrder["${server.city}|${server.country}|${server.tag}"] = idx + 1
+            }
+        }
+        val seen = HashMap<String, Int>()
+        // Display order stays ping-sorted; only the WITHIN-CITY number comes
+        // from the stable tag rank.
+        val numbered = servers.map { server ->
+            val key = "${server.city}|${server.country}"
+            seen[key] = (seen[key] ?: 0) + 1
+            val base = server.city.ifBlank { server.country.ifBlank { server.tag } }
+            val flag = lanternFlag(server.countryCode, server.country)
+            val name = when {
+                server.city.isNotBlank() && (totals[key] ?: 0) > 1 ->
+                    "$base ${tagOrder["$key|${server.tag}"] ?: seen[key]}"
+                else -> base
+            }
+            server.copy(title = if (flag.isBlank()) name else "$flag $name")
+        }
+        lanternServersCache = numbered
+        ConnectionLog.record(
+            "Lantern: server list loaded (${numbered.size} servers, ${if (raw != null) "live" else "cached"})"
+        )
+    }
+
+    /** Fetch the server list off the UI thread; [after] runs on the UI thread. */
+    private fun loadLanternServers(after: (List<LanternServerOption>) -> Unit) {
+        Thread {
+            var snapshot = LanternEngine.serversSnapshot()
+            if (snapshot == null && LanternEngine.isRunning) {
+                // Connected but the default 2s read timed out — a busy tunnel
+                // does exactly that. One retry with a longer budget before the
+                // fallback, or the picker falls back to the cache and the
+                // current marker lies.
+                snapshot = LanternEngine.serversSnapshot(timeoutMs = 5_000)
+            }
+            if (snapshot == null) {
+                val cacheEmpty = preferences().getString(lanternServersCachePref, null).isNullOrBlank()
+                if (cacheEmpty) {
+                    // First offline open with nothing cached yet: boot the
+                    // Lantern core list-only (no tunnel), like the official
+                    // app whose core runs while its VPN is off.
+                    ConnectionLog.record("Lantern: starting the core for the offline server list")
+                    // A previous sidecar may still be mid-shutdown; without this
+                    // guard the IllegalStateException escaped the picker thread
+                    // silently and the refresh just never happened.
+                    val booted = runCatching { LanternEngine.ensureSidecar(this@MainActivity) }
+                        .onFailure { ConnectionLog.record("Lantern: list boot failed: ${it.message}") }
+                        .getOrDefault(false)
+                    if (booted) {
+                        snapshot = LanternEngine.serversSnapshot(timeoutMs = 5_000)
+                        if (snapshot == null) {
+                            // The control socket answers the moment the sidecar
+                            // process is up, but Radiance's config fetch
+                            // (user-create + POST /config-new) can take well past
+                            // the 5s read on the raw Iranian link — so the sheet
+                            // used to open with "Automatic" only and the servers
+                            // appeared just after backing out and re-entering
+                            // (field report). Wait for the config here behind a
+                            // visible progress sheet, bounded so a dead network
+                            // still opens the picker with its empty-state text.
+                            snapshot = awaitLanternServerConfig()
+                        }
+                    }
+                }
+            }
+            // Live snapshot ⇒ trust its "current". Cache while CONNECTED ⇒
+            // the cached current belongs to a previous session; suppress it.
+            parseLanternSnapshot(
+                snapshot,
+                trustCurrent = snapshot != null || !LanternEngine.isRunning,
+            )
+            runOnUiThread { after(lanternServersCache) }
+        }.apply { isDaemon = true; start() }
+    }
+
+    /**
+     * Waits for the just-booted list-only sidecar to finish its first config
+     * fetch (worker-thread context — [loadLanternServers] only). Shows a small
+     * centered progress sheet while waiting so the Server row's tap does not
+     * look frozen, then dismisses it and returns the snapshot (null on
+     * timeout — the picker then opens with its empty-state text as before).
+     */
+    private fun awaitLanternServerConfig(): JSONObject? {
+        val loading = java.util.concurrent.atomic.AtomicReference<Dialog?>(null)
+        runOnUiThread {
+            val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+            val bar = ProgressBar(this).apply {
+                isIndeterminate = true
+                indeterminateDrawable?.setTint(primary)
+            }
+            dialog.setContentView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dp(32), dp(32), dp(32), dp(32))
+                background = roundedBackground(SURFACE, 28, SURFACE)
+                addView(bar, LinearLayout.LayoutParams(dp(44), dp(44)).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                })
+                // WRAP_CONTENT both ways: the caption must measure its real
+                // width (see the app-scan page note — a MATCH_PARENT child in
+                // a WRAP_CONTENT box lays out 44dp wide and clips the text).
+                addView(label(Strings.t("Fetching Lantern servers…"), 14f, MUTED).apply {
+                    gravity = Gravity.CENTER
+                    setPadding(0, dp(16), 0, 0)
+                }, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ))
+            })
+            dialog.show()
+            loading.set(dialog)
+        }
+        try {
+            // 60s, not 25: the raw Iranian link regularly needs longer than
+            // the old bound, and the sheet opening empty was exactly the
+            // back-out-and-re-enter the field report described. The progress
+            // sheet keeps the wait visible, and a dead network still falls
+            // through to the empty-state text after the bound.
+            val deadline = System.currentTimeMillis() + 60_000L
+            var snapshot: JSONObject? = null
+            while (System.currentTimeMillis() < deadline) {
+                Thread.sleep(1_500L)
+                val candidate = LanternEngine.serversSnapshot(timeoutMs = 3_000)
+                // The CONTROL socket answers the moment the sidecar process
+                // is up, but /servers lists nothing until Radiance has
+                // APPLIED its fetched config — a non-null answer with an
+                // empty array was the actual first-open bug: the wait loop
+                // below returned on the first empty read and the sheet opened
+                // with "Automatic" only (3.2.48). The gate is a NON-EMPTY
+                // list; null (control not ready yet) keeps polling.
+                if (candidate != null &&
+                    (candidate.optJSONArray("servers")?.length() ?: 0) > 0
+                ) {
+                    snapshot = candidate
+                    break
+                }
+            }
+            return snapshot
+        } finally {
+            // Both runOnUiThread blocks are posted from this same worker thread
+            // in order, so the dismiss cannot run before the show.
+            runOnUiThread { loading.get()?.dismiss() }
+        }
+    }
+
+    /**
+     * Server picker sheet. Opening it automatically refreshes every server's
+     * ping (Radiance re-probes and re-ranks; no separate refresh button) while
+     * the sheet itself shows the latest known values right away. A server that
+     * never answered a probe shows "no ping" and is still selectable — the
+     * official app behaves the same way — and "Automatic" always stays first.
+     * With the sidecar down the sheet explains that the list refreshes on the
+     * next connect and only offers Automatic.
+     */
+    private fun chooseLanternServer(after: (() -> Unit)? = null) {
+        // Every open triggers a fresh probe round in the background; while
+        // connected it runs through the live tunnel, and while disconnected
+        // the core boots list-only so pings still refresh offline.
+        lanternPickerOpen = true
+        lanternPickerAfter = after
+        Thread {
+            // Connected: re-probe through the live tunnel. Disconnected: boot
+            // the core list-only (official-app parity) so pings still refresh.
+            val sidecarUp = LanternEngine.isRunning || runCatching {
+                LanternEngine.ensureSidecar(this@MainActivity)
+            }.onFailure {
+                ConnectionLog.record("Lantern: picker sidecar boot failed: ${it.message}")
+            }.getOrDefault(false)
+            if (sidecarUp) {
+                // Probe-cost guard (v3.2.27 audit): a full probe round hits
+                // every server — up to 95s of requests. Through the live
+                // tunnel that rides the VPN the user already pays for; a
+                // list-only sidecar probes on the RAW carrier link, so on
+                // mobile data the round is skipped (cached pings are shown)
+                // and runs again on the next Wi-Fi open or connect.
+                val probesViaTunnel = LanternEngine.isRunning
+                val onWifi = isLanternProbeWifi()
+                if (probesViaTunnel || onWifi) {
+                    val refreshError = LanternEngine.refreshServerPings()
+                    ConnectionLog.record(
+                        if (refreshError == null) "Lantern: server pings refreshed"
+                        else "Lantern: ping refresh failed: $refreshError",
+                    )
+                } else {
+                    ConnectionLog.record("Lantern: ping refresh skipped on mobile data (cached pings shown)")
+                }
+                if (lanternPickerOpen) {
+                    val fresh = LanternEngine.serversSnapshot(timeoutMs = 5_000)
+                    if (fresh != null) {
+                        val before = lanternServersCache.map { it.tag }.toSet()
+                        parseLanternSnapshot(
+                            fresh,
+                            trustCurrent = fresh != null || !LanternEngine.isRunning,
+                        )
+                        val afterTags = lanternServersCache.map { it.tag }.toSet()
+                        // Any server-list change (rare with the geo-served IR
+                        // pool, but possible after a sidecar reboot)
+                        // rebuilds the OPEN sheet in place — the field report's
+                        // whole complaint was needing to back out and re-enter
+                        // to see the new list. Ping-only changes keep the open
+                        // sheet (pings re-render on the next open; a silent
+                        // mid-look rebuild for a number is churn, not help).
+                        if (lanternPickerOpen && before != afterTags) {
+                            runOnUiThread { reopenLanternServerSheetIfOpen() }
+                        }
+                    }
+                }
+            }
+        }.apply { isDaemon = true; start() }
+        // Meanwhile build the sheet from the current snapshot so it opens
+        // immediately with live values.
+        loadLanternServers { servers -> openLanternServerSheet(servers) }
+    }
+
+    /**
+     * The DNS region picker (3.3.3). Says when it takes effect, because it
+     * does not take effect now: the locale string is read when the sidecar
+     * process starts, i.e. at the next connect.
+     */
+    private fun chooseLanternDns(after: (() -> Unit)? = null) = showChoiceSheet(
+        title = Strings.t("Lantern DNS"),
+        subtitle = Strings.t("The DNS the Lantern tunnel resolves through · applies next connection"),
+        options = LanternDnsRegion.entries.toList(),
+        selected = lanternDnsChoice(),
+        label = { it.label },
+        description = { it.description },
+    ) { chosen ->
+        preferences().edit().putString(CoreConfig.LANTERN_DNS_REGION, chosen.coreName).apply()
+        ConnectionLog.record("Lantern DNS region set to ${chosen.coreName} (next connect)")
+        after?.invoke()
+    }
+
+    /**
+     * Builds the Server sheet from [servers]. Kept separate from
+     * [chooseLanternServer] so a background refresh can REBUILD the open sheet
+     * in place (see [reopenLanternServerSheetIfOpen]) — the field report's
+     * complaint was that new data only appeared after backing out and
+     * re-entering.
+     */
+    private fun openLanternServerSheet(servers: List<LanternServerOption>) {
+            val options = listOf<LanternServerOption?>(null) + servers.map { it as LanternServerOption? }
+            val selectedTag = LanternEngine.storedServerSelection(this)
+            val selected = options.firstOrNull {
+                (it == null && selectedTag.isBlank()) || (it?.tag == selectedTag)
+            }
+            showChoiceSheet(
+                title = Strings.t("Server"),
+                subtitle = if (servers.isEmpty()) {
+                    Strings.t("Connect with Lantern once, then pick a server here")
+                } else {
+                    // Cache age: tells the user how fresh the pings are, which
+                    // the audit flagged as invisible (no TTL surface at all).
+                    val ageMin = if (lanternServersFetchedAt > 0L) {
+                        ((System.currentTimeMillis() - lanternServersFetchedAt) / 60_000L).coerceAtLeast(0L)
+                    } else 0L
+                    val age = when {
+                        lanternServersFetchedAt <= 0L -> ""
+                        ageMin < 1L -> " · ${Strings.t("updated just now")}"
+                        ageMin < 60L -> " · ${Strings.t("updated")} ${ageMin}m"
+                        else -> " · ${Strings.t("updated")} ${ageMin / 60L}h"
+                    }
+                    Strings.t("Pick the Lantern server to use") + age
+                },
+                options = options,
+                selected = selected,
+                label = { it?.title ?: Strings.t("Automatic") },
+                description = { option ->
+                    if (option == null) {
+                        Strings.t("Auto - Lantern picks and follows the fastest server")
+                    } else {
+                        val ping = if (option.probed) "${option.pingMs} ms" else Strings.t("no ping")
+                        val current = if (option.tag == lanternCurrentTag) " · ${Strings.t("current")}" else ""
+                        val where = option.country.ifBlank { option.city }
+                        if (where.isBlank()) "$ping$current" else "$where · $ping$current"
+                    }
+                },
+                scrollable = true,
+                onDismiss = {
+                    // A dismiss that happens only to rebuild the sheet with
+                    // fresh data is not the user closing it.
+                    if (!lanternSheetReopening) {
+                        lanternPickerOpen = false
+                        lanternPickerAfter = null
+                    }
+                    lanternServerSheet = null
+                },
+                onShown = { lanternServerSheet = it },
+            ) { chosen ->
+                val tag = chosen?.tag ?: ""
+                LanternEngine.storeServerSelection(this, tag)
+                // Live-apply only if the sidecar is up; otherwise the stored
+                // choice is applied right after the next connect (deferred).
+                val error = LanternEngine.selectServer(tag)
+                val message = when {
+                    chosen == null -> "Lantern: server selection set to automatic"
+                    error == null -> "Lantern: server pinned to ${chosen.title} (${chosen.tag})"
+                    else -> "Lantern: server choice stored, applying on next connect ($error)"
+                }
+                ConnectionLog.record(message)
+                lanternPickerAfter?.invoke()
+            }
+    }
+
+    /**
+     * Rebuilds the open Server sheet with the latest [lanternServersCache].
+     * No-op unless the picker is actually open; safe to call from the UI
+     * thread after a background refresh changed the server set.
+     */
+    private fun reopenLanternServerSheetIfOpen() {
+        if (!lanternPickerOpen) return
+        val sheet = lanternServerSheet ?: return
+        lanternSheetReopening = true
+        try {
+            sheet.dismiss()
+        } finally {
+            lanternSheetReopening = false
+        }
+        openLanternServerSheet(lanternServersCache)
+    }
+
+    /** Wi-Fi check for the offline probe guard: probes only on Wi-Fi when the
+     *  Lantern tunnel is down (a list-only sidecar probes on the raw link). */
+    private fun isLanternProbeWifi(): Boolean = try {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return false
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+    } catch (_: Exception) {
+        false
+    }
+
     private fun refreshPsiphonModeRows() {
         // The three rows above the chain switch are Psiphon's dial model. On any
         // other transport they are inert — WoW/MASQUE/WireGuard never read them —
@@ -5296,6 +5951,8 @@ class MainActivity : Activity() {
             // moment of the choice instead of letting the connect fail later.
             if (chosen == CoreConfig.TUNNEL_MODE_PROXY && selectedProtocol == Protocol.TOR) {
                 toastShort(Strings.t("Tor cannot run as a SOCKS proxy — pick another transport"))
+            } else if (chosen == CoreConfig.TUNNEL_MODE_PROXY && selectedProtocol == Protocol.LANTERN) {
+                toastShort(Strings.t("Lantern requires VPN mode — pick VPN to connect"))
             } else if (chosen == CoreConfig.TUNNEL_MODE_PROXY && selectedProtocol == Protocol.SHARD) {
                 // SHARD's refusal has a different cause — no byte counter in a proxy
                 // data path — but the same remedy, and it also has a better answer:
@@ -5767,7 +6424,7 @@ class MainActivity : Activity() {
         label: (T) -> String,
         description: (T) -> String,
         onSelected: (T) -> Unit,
-    ) = showChoiceSheet(title, subtitle, options, selected, label, description, false, null, onSelected)
+    ) = showChoiceSheet(title, subtitle, options, selected, label, description, scrollable = false, refuse = null, onDismiss = null, onSelected = onSelected)
 
     /**
      * @param scrollable caps the option list at 55% of the screen and scrolls it.
@@ -5789,11 +6446,14 @@ class MainActivity : Activity() {
         description: (T) -> String,
         scrollable: Boolean,
         refuse: ((T) -> String?)? = null,
+        onDismiss: (() -> Unit)? = null,
+        onShown: ((Dialog) -> Unit)? = null,
         onSelected: (T) -> Unit,
     ) {
         // `after` is invoked by the caller's onSelected lambda; see chooseObfuscation
         // and friends, which pass a refresh for the row that opened the sheet.
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        if (onDismiss != null) dialog.setOnDismissListener { onDismiss() }
         val sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(24), dp(24), dp(24))
@@ -5886,6 +6546,7 @@ class MainActivity : Activity() {
             addView(sheet)
         })
         dialog.show()
+        onShown?.invoke(dialog)
         dialog.window?.apply {
             mirrorDialog(dialog)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
@@ -7992,22 +8653,10 @@ class MainActivity : Activity() {
 
         // Keep the rail in sync when the change came from somewhere else (the
         // mode screen, a restored preference) rather than from a rail tap.
-        // Animated for a user tap, instant for a scan-driven change. The 330ms
-        // overshoot slide plus the chip's fade-to-zero-and-back is the right
-        // feedback for somebody who just pressed a cell; run once per rung by the
-        // Auto Scan it is three more blinks in the area the user is already
-        // watching. The labels still change, so the search stays visible.
-        val animate = autoScanIndex < 0
-        transportRail.select(Protocol.entries.indexOf(protocol), animate = animate)
+        // Animated: the 330ms overshoot slide plus the chip's fade-to-zero-and-back
+        // is the right feedback for somebody who just pressed a cell.
+        transportRail.select(Protocol.entries.indexOf(protocol), animate = true)
         chipProtocol.animate().cancel()
-        if (!animate) {
-            // Alpha reset explicitly: cancel() leaves whatever value the fade had
-            // reached, so a scan starting mid-animation could freeze the chip
-            // half-transparent.
-            chipProtocol.alpha = 1f
-            chipProtocol.text = protocol.label.uppercase()
-            return
-        }
         chipProtocol.animate().alpha(0f).setDuration(80)
             .setInterpolator(DecelerateInterpolator())
             .withEndAction {
@@ -8029,21 +8678,11 @@ class MainActivity : Activity() {
         // the UI sat on "Connecting" until the tunnel came up on its own or the
         // user force-stopped the app.
         if (TunnelStatus.isActive() || visualState == OrbitDialView.State.CONNECTING) {
-            // A tap during the ladder is the user overruling it, so the scan stops
-            // here and the transport they started from comes back. Left running, the
-            // next rung would dial 1.5s after they asked everything to stop.
-            if (autoScanIndex >= 0) {
-                ConnectionLog.record("Auto Scan: cancelled by the user")
-                endAutoScan(restoreSelection = true)
-            }
             startService(Intent(this, MsnGuardVpnService::class.java).setAction(MsnGuardVpnService.ACTION_DISCONNECT))
             showDisconnected(Strings.t("Disconnecting"))
             return
         }
 
-        // Decided BEFORE the consent dialog, because the answer depends on the
-        // selection and the user is about to be able to change nothing else.
-        if (shouldAutoScan()) beginAutoScan()
         val config = configJson()
         // Proxy mode needs no VPN consent at all — no TUN is created, so asking for
         // it would put a system dialog in front of a feature that does not use the
@@ -8087,10 +8726,6 @@ class MainActivity : Activity() {
         trafficSpeedTx = 0
         trafficSpeedRx = 0
         showConnecting()
-        // Every rung gets its own deadline, armed here so it covers the paths that
-        // never report anything back — see [armAutoScanWatchdog]. A no-op when no
-        // scan is running.
-        armAutoScanWatchdog()
         startForegroundService(Intent(this, MsnGuardVpnService::class.java)
             .setAction(MsnGuardVpnService.ACTION_CONNECT)
             .putExtra(MsnGuardVpnService.EXTRA_CONFIG, config))
@@ -8403,6 +9038,18 @@ class MainActivity : Activity() {
             }
         }
         tuningCard.addView(muxRow, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
+
+        // FoxyVPN 2.0.3/2.0.4 relayer: pick how Foxy's control-plane requests
+        // reach Mozilla when the direct path is blocked (failover codes or a
+        // dead network). The candidate relayer list itself comes from the
+        // remote config; only the provider choice is stored here.
+        val relayerRow = foxyInfoRow(
+            Strings.t("Relayer"),
+            foxyRelayerProviderLabel(com.msnguard.vpn.foxy.FoxySettings.relayerProvider(this)),
+            INK, palette.amber,
+        )
+        relayerRow.setOnClickListener { chooseFoxyRelayer(relayerRow) }
+        tuningCard.addView(relayerRow, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
         tuningCard.addView(label(Strings.t("These controls affect Foxy only. Changes apply on the next Foxy connection."), 11f, MUTED).apply { setPadding(dp(2), dp(12), 0, 0) })
         content.addView(tuningCard, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) })
 
@@ -8432,6 +9079,100 @@ class MainActivity : Activity() {
     }
 
     private fun closeFoxySettingScreen() { foxySettingPage?.let { animatePageClose(it) { foxySettingPage = null } }; openSettingsScreen() }
+
+    /** Localized label for a Foxy relayer provider constant. */
+    private fun foxyRelayerProviderLabel(provider: String): String = when (provider.trim().uppercase()) {
+        RELAYER_DIRECT -> Strings.t("Direct connection")
+        RELAYER_CUSTOM -> Strings.t("Custom")
+        else -> Strings.t("Automatic (recommended)")
+    }
+
+    /** Foxy page Relayer row: provider choice sheet; Custom opens a URL
+     *  prompt (FoxyVPN 2.0.3/2.0.4 relayer port). */
+    private fun chooseFoxyRelayer(relayerRow: android.view.View) {
+        val providers = listOf(RELAYER_DIRECT, RELAYER_AUTOMATIC, RELAYER_CUSTOM)
+        showChoiceSheet(
+            title = Strings.t("Relayer"),
+            subtitle = Strings.t("Relay Foxy requests through a backup server when direct access is blocked."),
+            options = providers,
+            selected = com.msnguard.vpn.foxy.FoxySettings.relayerProvider(this),
+            label = { foxyRelayerProviderLabel(it) },
+            description = { "" },
+        ) { chosen ->
+            if (chosen == RELAYER_CUSTOM) {
+                promptFoxyCustomRelayerUrl { url ->
+                    com.msnguard.vpn.foxy.FoxySettings.saveRelayer(this, chosen, url)
+                    val scheme = url.substringBefore("://").ifBlank { "custom" }
+                    ConnectionLog.record("Foxy: relayer set to custom ($scheme)")
+                    (relayerRow.tag as? TextView)?.text = foxyRelayerProviderLabel(chosen)
+                }
+            } else {
+                com.msnguard.vpn.foxy.FoxySettings.saveRelayer(
+                    this, chosen, com.msnguard.vpn.foxy.FoxySettings.customRelayerUrl(this))
+                ConnectionLog.record("Foxy: relayer set to $chosen")
+                (relayerRow.tag as? TextView)?.text = foxyRelayerProviderLabel(chosen)
+            }
+        }
+    }
+
+    /** URL entry sheet for the Custom relayer provider; validates http/https
+     *  and a non-empty host before saving. */
+    private fun promptFoxyCustomRelayerUrl(onSaved: (String) -> Unit) {
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val field = EditText(this).apply {
+            setText(com.msnguard.vpn.foxy.FoxySettings.customRelayerUrl(this@MainActivity))
+            hint = "https://example.org"
+            setTextColor(INK)
+            setHintTextColor(MUTED)
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setPadding(dp(18), 0, dp(18), 0)
+            background = roundedBackground(SURFACE_VARIANT, 16, SURFACE_VARIANT)
+        }
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            background = roundedBackground(SURFACE, 28, SURFACE)
+        }
+        sheet.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(label(Strings.t("Custom relayer URL"), 22f, INK, TypefaceStyle.MEDIUM))
+        })
+        sheet.addView(label(Strings.t("Relay Foxy requests through a backup server when direct access is blocked."), 14f, MUTED), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
+        sheet.addView(createSettingsButton(Strings.t("Save")) {
+            val url = field.text.toString().trim()
+            // Empty is a real error, not "clear": provider stays CUSTOM while
+            // the URL becomes "", getCandidateRelayers turns that into DIRECT
+            // silently, and the settings row keeps claiming a custom relayer
+            // (v3.2.27 audit). Switch back to Automatic instead of saving blank.
+            if (url.isEmpty()) {
+                field.error = Strings.t("Enter a valid http or https URL")
+                return@createSettingsButton
+            }
+            if (!com.msnguard.vpn.foxy.FoxySettings.validCustomRelayerUrl(url)) {
+                field.error = Strings.t("Enter a valid http or https URL")
+                return@createSettingsButton
+            }
+            onSaved(url)
+            dialog.dismiss()
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(16) })
+        dialog.setContentView(FrameLayout(this).apply {
+            setPadding(dp(16), 0, dp(16), dp(16))
+            addView(sheet)
+        })
+        dialog.show()
+        dialog.window?.apply {
+            mirrorDialog(dialog)
+            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
+            setDimAmount(0.62f)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+        }
+    }
 
     /** The Foxy page's Server row: open a real country chooser over the
      *  cached RemoteSettings list, falling back to a live fetch. */
@@ -8556,209 +9297,6 @@ class MainActivity : Activity() {
 
 
     /**
-     * Whether this connect should start the one-time transport search.
-     *
-     * Three conditions, and each one closes a way the scan could be the wrong
-     * behaviour rather than a helpful one:
-     *
-     *  - the latch is unset. That is what "only once, then remembered" means.
-     *  - the selection is ON the ladder. Somebody who deliberately picked Tor or
-     *    Psiphon has expressed a choice this must not overrule — and that same check
-     *    covers the chain, since Psiphon/Tor-over-WARP is only reachable from those
-     *    two selections and neither is on the ladder.
-     *  - VPN mode. Every rung after the first needs a TUN; in SOCKS mode SHARD has
-     *    no data path at all and switching transports under a user who is pointing
-     *    apps at a local port would break them silently.
-     */
-    private fun shouldAutoScan(): Boolean {
-        if (preferences().getBoolean(AUTO_SCAN_DONE, false)) return false
-        if (selectedProtocol !in AUTO_SCAN_LADDER) return false
-        if (CoreConfig.proxyOnly(this)) return false
-        return true
-    }
-
-    /**
-     * Arms the ladder at the selected transport.
-     *
-     * Starts from where the USER is, not from rung 0: the selection is WireGuard by
-     * default, so the common case starts at the top anyway, and a user who moved the
-     * rail before their first connect gets their pick tried first.
-     */
-    private fun beginAutoScan() {
-        autoScanBefore = selectedProtocol
-        autoScanIndex = AUTO_SCAN_LADDER.indexOf(selectedProtocol).coerceAtLeast(0)
-        autoScanToken++
-        ConnectionLog.record(
-            "Auto Scan: first connect — trying ${AUTO_SCAN_LADDER.drop(autoScanIndex).joinToString(", ") { it.label }}"
-        )
-    }
-
-    /**
-     * Advances the ladder after a rung failed, or ends the scan when none is left.
-     *
-     * Three callers, because a rung can die three ways and only one of them is a
-     * clean failure report:
-     *  - the service's FAILED broadcast;
-     *  - this screen's verification gate (handshake up, no traffic);
-     *  - [armAutoScanWatchdog], which is the one that matters most — with
-     *    auto-reconnect on (the default) the service does NOT broadcast FAILED for a
-     *    core that exited; it re-dials the same blocked transport on a backoff. A
-     *    ladder listening only for FAILED would sit on rung one forever.
-     *
-     * @param stopCurrent sends ACTION_DISCONNECT before moving on. Also what cancels
-     *   the service's own retry loop (it sets `userInitiatedStop`), so the abandoned
-     *   rung cannot come back under the next one. False only when the caller has
-     *   already sent it.
-     * @return true when it took over the paint and started another rung, so the
-     *   caller must not draw its own failure.
-     */
-    private fun advanceAutoScan(stopCurrent: Boolean = true): Boolean {
-        if (autoScanIndex < 0) return false
-        // A rung already being replaced must not be replaced twice — see
-        // [autoScanSettling]. Returns true so the caller still suppresses its own
-        // failure paint: a handover IS in progress, just not a new one.
-        if (autoScanSettling) return true
-        // Invalidate the watchdog for the rung that just died before starting the
-        // next one, or its timeout would fire into the new attempt.
-        autoScanToken++
-        val next = autoScanIndex + 1
-        if (next >= AUTO_SCAN_LADDER.size) {
-            ConnectionLog.record("Auto Scan: no transport carried traffic on this network")
-            // Latch even when nothing carried: the scan is done either way.
-            // Otherwise every later cold start repeats the whole ladder.
-            preferences().edit().putBoolean(AUTO_SCAN_DONE, true).apply()
-            endAutoScan(restoreSelection = true)
-            return false
-        }
-        autoScanIndex = next
-        autoScanSettling = true
-        val protocol = AUTO_SCAN_LADDER[next]
-        ConnectionLog.record("Auto Scan: ${protocol.label} next")
-        if (stopCurrent) {
-            // Keeps the abandoned rung's DISCONNECTED broadcast from painting "Not
-            // connected" over the scan's own progress line.
-            suppressNextDisconnectedPaint = true
-            startService(Intent(this, MsnGuardVpnService::class.java)
-                .setAction(MsnGuardVpnService.ACTION_DISCONNECT))
-        }
-        // Repaints the rail and the chip as well as writing the preference, so the
-        // user watches the search move — this is the whole point of doing it here
-        // rather than inside the service.
-        updateConnectionMode(protocol)
-        showConnectionProgress(Strings.t("Auto Scan"), "Trying ${protocol.label}…")
-        // The previous rung's session may still be unwinding. Consent is already
-        // granted at this point (the first rung asked for it), so this goes straight
-        // to the service.
-        val token = autoScanToken
-        sessionHandler.postDelayed({
-            if (isFinishing || isDestroyed) return@postDelayed
-            // A user tap or a fresh connect between the schedule and here moved the
-            // token on; this attempt is stale.
-            if (token != autoScanToken || autoScanIndex != next) return@postDelayed
-            autoScanSettling = false
-            connect(configJson())
-        }, AUTO_SCAN_HANDOVER_MS)
-        return true
-    }
-
-    /**
-     * How long a rung gets to reach a VERIFIED connection before the ladder moves on.
-     *
-     * Per transport, because their failure modes differ in kind. WireGuard either
-     * handshakes in a few seconds or is being dropped, so waiting longer only wastes
-     * the user's time. MASQUE does not fail fast when blocked — it keeps trying
-     * gateways — so its number is a cap on that search. WoW raises two tunnels in
-     * sequence. SHARD races a slice of its node pool and then has to bring up xray
-     * plus tun2socks.
-     *
-     * Each budget already contains [VERIFY_TIMEOUT_MS] (18s), because the clock
-     * starts at the connect and the gate runs after the handshake.
-     */
-    private fun autoScanBudgetMs(protocol: Protocol): Long = when (protocol) {
-        // The first-connect ladder is a UI deadline, not the core's scan
-        // deadline. Give MASQUE 80s so ECH/API delays do not evict it at 48s.
-        Protocol.WIREGUARD -> 32_000L
-        // Reference startup budget includes API activation retries plus the
-        // complete balanced H2/IPv4 gateway scan.
-        Protocol.MASQUE -> if (CoreConfig.mimArmed(this)) 300_000L else 300_000L
-        Protocol.WARP_IN_WARP -> 55_000L
-        else -> 240_000L // SHARD: 31 slices x12s=372s worst, 5 successes at slice 19 ≈228s — 240 covers it; 45s killed slice 4/31
-    }
-
-    /**
-     * Per-rung deadline. Armed by [connect] for every attempt while a scan is running.
-     *
-     * This is the ladder's real driver: it does not care WHY a rung did not arrive,
-     * only that it did not. It fires on a blocked handshake, on a core that keeps
-     * silently retrying itself, and on a Psiphon-style path that never reports
-     * anything at all.
-     */
-    private fun armAutoScanWatchdog() {
-        if (autoScanIndex < 0) return
-        val rung = autoScanIndex
-        val token = autoScanToken
-        sessionHandler.postDelayed({
-            if (isFinishing || isDestroyed) return@postDelayed
-            if (token != autoScanToken || autoScanIndex != rung) return@postDelayed
-            // Verified and live — nothing to do. completeAutoScan() has normally
-            // already moved the token by now; this is the belt to that braces.
-            if (visualState == OrbitDialView.State.CONNECTED ||
-                visualState == OrbitDialView.State.DEGRADED
-            ) return@postDelayed
-            val protocol = AUTO_SCAN_LADDER[rung]
-            ConnectionLog.record(
-                "Auto Scan: ${protocol.label} did not carry traffic in" +
-                    " ${autoScanBudgetMs(protocol) / 1000}s"
-            )
-            // Cancels the verification gate too: it may still be waiting on bytes
-            // from the tunnel this abandons, and its own failure path would then
-            // advance the ladder a second time.
-            cancelVerification()
-            if (!advanceAutoScan()) {
-                showFailure(Strings.t("No transport connected on this network — try again or pick one yourself"))
-            }
-        }, autoScanBudgetMs(AUTO_SCAN_LADDER[rung]))
-    }
-
-    /**
-     * Records the winner and stops the search.
-     *
-     * The transport is already selected and persisted by [updateConnectionMode], so
-     * all that is left is the latch — which is written only from here, on a rung
-     * that verified, so a scan interrupted by a dead network can run again.
-     */
-    private fun completeAutoScan() {
-        if (autoScanIndex < 0) return
-        ConnectionLog.record("Auto Scan: ${selectedProtocol.label} works — remembered for next time")
-        preferences().edit().putBoolean(AUTO_SCAN_DONE, true).apply()
-        endAutoScan(restoreSelection = false)
-    }
-
-    /** Clears the scan's state. [restoreSelection] puts the user's own pick back. */
-    private fun endAutoScan(restoreSelection: Boolean) {
-        // The scan is over either way — it verified, the ladder ran out, or the
-        // user cancelled it. Latching here is the fix for "Auto Scan runs on
-        // every connect": previously only completeAutoScan() (a rung that
-        // carried traffic) set AUTO_SCAN_DONE, so a cancelled scan or one that
-        // found nothing re-ran the whole ladder on the next tap — 100 times if
-        // the user tapped 100 times.
-        preferences().edit().putBoolean(AUTO_SCAN_DONE, true).apply()
-        autoScanIndex = -1
-        autoScanToken++
-        autoScanSettling = false
-        val before = autoScanBefore
-        autoScanBefore = null
-        if (restoreSelection && before != null && before != selectedProtocol) {
-            updateConnectionMode(before)
-        }
-        // The card slot was frozen for the whole search ([renderChainCard]), and the
-        // winner is only known now. Called unconditionally: updateConnectionMode()
-        // above is a no-op when the selection did not change, and the SHARD winner
-        // reaches this line with the chain card still occupying the slot.
-        renderChainCard()
-    }
-
-    /**
      * The config for the next connect.
      *
      * The chain marker replaces the protocol only when PSIPHON is selected and the
@@ -8828,12 +9366,22 @@ class MainActivity : Activity() {
         return true
     }
 
-    private fun showConnecting(detail: String? = null, progress: Int = -1) {
+    private fun showConnecting(detail: String? = null, progress: Int = -1, steps: Int = 0) {
         // The percentage arrives on its own broadcasts, most of which carry no new
         // text, so it is applied before the shared progress renderer rather than
         // through it.
         orbitDial.progressPercent = progress
-        showConnectionProgress(Strings.t("Connecting"), detail ?: Strings.tf("Starting %s tunnel", selectedProtocol.label))
+        // "· 2/5" step counter: derived from the same percentage the service
+        // publishes, so the dial (percent) and the line (n/N) can never disagree.
+        // steps == 0 (Tor: continuous bootstrap %) → no counter.
+        val base = detail ?: Strings.tf("Starting %s tunnel", selectedProtocol.label)
+        val line = if (steps > 0 && progress in 1..100) {
+            val step = (steps * progress + 99) / 100
+            "$base · ${step.coerceIn(1, steps)}/$steps"
+        } else {
+            base
+        }
+        showConnectionProgress(Strings.t("Connecting"), line)
     }
 
     private fun showStarting() {
@@ -8862,29 +9410,18 @@ class MainActivity : Activity() {
         // The headline is text, so it takes the text-safe accent. On the dark
         // palette PRIMARY_TEXT == primary, so this is a no-op there.
         connectionTitle.setTextColor(PRIMARY_TEXT)
-        // During the one-time Auto Scan every progress broadcast is relabelled here,
-        // in the single place they all pass through. Without it the service's own
-        // STARTING/SCANNING/CONNECTING lines ("Preparing MASQUE tunnel") overwrite
-        // the ladder's line a moment after it is drawn, and a user watching the
-        // screen cannot tell an automatic search from an ordinary connect.
-        if (autoScanIndex >= 0) {
-            connectionTitle.text = Strings.t("Auto Scan")
-            connectionDetail.text = Strings.tf("Trying %s", AUTO_SCAN_LADDER[autoScanIndex].label) +
-                Strings.tf(" (%s of %s)", autoScanIndex + 1, AUTO_SCAN_LADDER.size)
-        } else {
-            connectionTitle.text = title
-            connectionDetail.text = detail
-        }
+        connectionTitle.text = title
+        connectionDetail.text = detail
         footerWave.setLit(false)
         setModeEnabled(false)
     }
 
     private fun showConnected(restored: Boolean = false) {
-        // The winner of a one-time Auto Scan is recorded here and nowhere else: this
-        // is the only point in the app that means "traffic really passes", which is
-        // the whole bar the ladder was searching for. A no-op when no scan is running.
-        completeAutoScan()
         visualState = OrbitDialView.State.CONNECTED
+        // The screen now claims the session — tell the row it may too. This
+        // covers every route here: the verification gate passing, the two
+        // engine-bypass paths, and the restored-on-recreate paint.
+        reportVerifyState(MsnGuardVpnService.VERIFY_PHASE_CONNECTED)
         exitLookupAllowed = true
         orbitDial.state = visualState
         orbitDial.progressPercent = -1
@@ -9192,19 +9729,22 @@ class MainActivity : Activity() {
         // screen.
         val shardSelected = selectedProtocol == Protocol.SHARD
         val masqueSelected = selectedProtocol == Protocol.MASQUE
-        // Frozen while the Auto Scan is walking the ladder. The swap is one card
-        // disappearing and another taking its place, and the ladder changes the
-        // selection three times in a single connect — so the user watched the OVER
-        // WARP card vanish and come back mid-search, which is the flicker they
-        // reported. [endAutoScan] repaints once the search is over, so the slot
-        // always catches up to the transport that actually won.
-        if (autoScanIndex < 0) {
-            chainCard.visibility = if (!shardSelected && !masqueSelected) View.VISIBLE else View.GONE
-            smartSplitCard.visibility = if (shardSelected) View.VISIBLE else View.GONE
-            mimCard.visibility = if (masqueSelected) View.VISIBLE else View.GONE
-        }
+        val wowSelected = selectedProtocol == Protocol.WARP_IN_WARP
+        val wireguardSelected = selectedProtocol == Protocol.WIREGUARD
+        // WoW hands its slot to the gool card: the chain card would only sit
+        // there greyed ("only for the PSIPHON and TOR transports"), and the
+        // gool carrier choice is what actually belongs under a WoW selection.
+        chainCard.visibility = if (!shardSelected && !masqueSelected && !wowSelected && !wireguardSelected) View.VISIBLE else View.GONE
+        smartSplitCard.visibility = if (shardSelected) View.VISIBLE else View.GONE
+        mimCard.visibility = if (masqueSelected) View.VISIBLE else View.GONE
+        goolCard.visibility = if (wowSelected) View.VISIBLE else View.GONE
+        // WireGuard hands its slot to the masque-carrier card (3.2.45), exactly
+        // the way WoW hands its slot to the gool card.
+        wgOverMasqueCard.visibility = if (wireguardSelected) View.VISIBLE else View.GONE
         renderSmartSplitCard()
         renderMimCard()
+        renderGoolCard()
+        renderWgOverCard()
         // The AI MODE chip rides the chip line, but the same repaint decides
         // transport applicability and the connected lock, so it is painted here
         // too — one place, the same rules as the cards.
@@ -9335,6 +9875,79 @@ class MainActivity : Activity() {
         }
         mimCard.setUnavailable(reason, applicable = applies)
         mimCard.setArmed(CoreConfig.mimArmed(this))
+    }
+
+    /**
+     * Paints the gool card. Same rules as [renderMimCard]:
+     *
+     *  - not WoW: the card is GONE, so the reason is only for the repaint that
+     *    lands mid-animation;
+     *  - connected: the same lock the transport rail gets — the carrier choice
+     *    only takes effect on the next connect.
+     */
+    private fun renderGoolCard() {
+        val applies = selectedProtocol == Protocol.WARP_IN_WARP
+        val reason = when {
+            !applies -> Strings.t("only for the WoW transport")
+            !modeControlsEnabled -> Strings.t("disconnect to change")
+            else -> null
+        }
+        goolCard.setUnavailable(reason, applicable = applies)
+        goolCard.setArmed(CoreConfig.goolOverMasque(this))
+    }
+
+    /**
+     * Records the gool carrier choice. Takes effect on the next connect, like
+     * every other slot-card switch.
+     *
+     * ON by default (see [CoreConfig.GOOL_OVER_MASQUE_PREF]): ON is the foreign
+     * exit, OFF is the classic wireguard-in-wireguard every earlier WoW build
+     * shipped.
+     */
+    private fun setGoolArmed(armed: Boolean) {
+        preferences().edit().putBoolean(CoreConfig.GOOL_OVER_MASQUE_PREF, armed).apply()
+        if (armed) {
+            ConnectionLog.record(
+                "Gool-over-Masque armed: wireguard registers through the masque tunnel for a foreign exit"
+            )
+        } else {
+            ConnectionLog.record(
+                "Gool-over-Masque disarmed: classic wireguard-in-wireguard, local warp exit"
+            )
+        }
+    }
+
+    /** The WireGuard card's twin of [renderGoolCard]. */
+    private fun renderWgOverCard() {
+        val applies = selectedProtocol == Protocol.WIREGUARD
+        val reason = when {
+            !applies -> Strings.t("only for the WireGuard transport")
+            !modeControlsEnabled -> Strings.t("disconnect to change")
+            else -> null
+        }
+        wgOverMasqueCard.setUnavailable(reason, applicable = applies)
+        wgOverMasqueCard.setArmed(CoreConfig.wgOverMasque(this))
+    }
+
+    /**
+     * Records the WireGuard carrier choice. Takes effect on the next connect,
+     * like every other slot-card switch.
+     *
+     * OFF by default (see [CoreConfig.WG_OVER_MASQUE_PREF]): plain wireguard is
+     * the state every WireGuard build shipped with; ON arms the masque carrier
+     * — wireguard registered through the masque tunnel for a foreign exit.
+     */
+    private fun setWgOverArmed(armed: Boolean) {
+        preferences().edit().putBoolean(CoreConfig.WG_OVER_MASQUE_PREF, armed).apply()
+        if (armed) {
+            ConnectionLog.record(
+                "WireGuard-over-Masque armed: wireguard registers through the masque tunnel for a foreign exit"
+            )
+        } else {
+            ConnectionLog.record(
+                "WireGuard-over-Masque disarmed: plain wireguard, local warp exit"
+            )
+        }
     }
 
     /**
@@ -9683,7 +10296,7 @@ class MainActivity : Activity() {
     private fun expandableSection(
         title: String,
         body: (LinearLayout) -> Unit,
-    ): ExpandableSection = expandableSection(title, id = title, body)
+    ): ExpandableSection = expandableSection(title, id = title, body = body)
 
     /**
      * An expandable section, whose open/closed state persists under [id].
@@ -9696,6 +10309,8 @@ class MainActivity : Activity() {
     private fun expandableSection(
         title: String,
         id: String,
+        iconRes: Int? = null,
+        iconSizeDp: Int? = null,
         body: (LinearLayout) -> Unit,
     ): ExpandableSection {
         val key = "section_open_" + sectionId(id)
@@ -9703,6 +10318,8 @@ class MainActivity : Activity() {
             onExpansionChanged = { expanded ->
                 profiled().edit().putBoolean(key, expanded).apply()
             },
+            iconRes = iconRes,
+            iconSizeDp = iconSizeDp,
             body = body,
         ).apply {
             if (profiled().getBoolean(key, false)) setExpanded(true, animate = false)
@@ -9784,6 +10401,10 @@ class MainActivity : Activity() {
     private fun socksPort(): Int =
         if (TunnelStatus.isActive() && TorManager.isTorActive) {
             TorManager.FRONT_SOCKS_PORT
+        } else if (TunnelStatus.isActive() &&
+            selectedProtocol == Protocol.LANTERN && LanternEngine.isRunning
+        ) {
+            LanternEngine.SOCKS_PORT
         } else if (TunnelStatus.isActive() && com.msnguard.vpn.foxy.FoxyTunnel.isRunning) {
             // FOXY's listener is its own 1830 — the aether default below is a
             // closed socket on this transport, so every reachability probe was
@@ -9873,14 +10494,18 @@ class MainActivity : Activity() {
         // are built from `Protocol.entries`, so this list decides what a first-time
         // user reaches for — and the first cell is what most of them will tap.
         //
-        // WireGuard leads on purpose: it is the cheapest handshake of the six and it
+        // WireGuard leads on purpose: it is the cheapest handshake among the eight and it
         // either works immediately or fails immediately, which is the right first
         // move for a user who does not know what any of these words mean. MASQUE
-        // follows because it survives the carriers WireGuard is blocked on, and the
-        // one-time Auto Scan ([AUTO_SCAN_LADDER]) walks them in exactly this order.
+        // follows because it survives the carriers WireGuard is blocked on.
         WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel", true),
         MASQUE("MASQUE", "masque", "HTTP/3 or HTTP/2 tunnel", true),
         WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel", true),
+
+        /** Public Lantern servers via Radiance; MSN-GUARD owns the Android TUN.
+         *  v3.2.26: sits 4th so the 2×4 rail reads WireGuard · MASQUE · WoW ·
+         *  Lantern on row one — the order the user asked for. */
+        LANTERN("Lantern", "lantern", "Public Lantern servers; automatic selection", true),
         PSIPHON("Psiphon", "psiphon", "Anti-censorship tunnel", true),
         TOR("Tor", "tor", "Onion routing; slowest but hardest to block", true),
 
@@ -9891,7 +10516,7 @@ class MainActivity : Activity() {
          * on the name before touching NativeCore. Its sign-in lives on its own
          * Settings page (email + password + emailed verification code) and the
          * data path is an app-local SOCKS listener fed into the existing
-         * TunEngine — Warp Setting, Identity Vault and Auto Scan do not apply.
+         * TunEngine — Warp Setting and the Identity Vault do not apply.
          */
         FOXY("Foxy", "foxy", "Firefox-account VPN via Fastly HTTP/2", true),
 
@@ -10016,6 +10641,71 @@ class MainActivity : Activity() {
     }
 
     /**
+     * The Lantern DNS region (3.3.3), the user's manual override of the
+     * radio-based detection. NOT cosmetic: the coreName is stored in the pref
+     * and LanternEngine maps it to the locale string Radiance starts with —
+     * which is what selects the direct-path DNS (AliDNS / Yandex / Quad9).
+     * The three families are everything the reference project defines
+     * (verified: no Europe/America/Asia variants exist), so these four
+     * choices — Iran default, Auto = the 3.3.2 detection — are the complete,
+     * honest list.
+     */
+    private enum class LanternDnsRegion(val enLabel: String, val coreName: String, val enDescription: String) {
+        IRAN("Iran", "iran", "The DNS at 223.5.5.5 withstands Iranian filtering and DPI; the default"),
+        AUTO("Auto (SIM detection)", "auto", "In Iran from the SIM or network country; abroad the device locale, like the reference app"),
+        RUSSIA("Russia (Yandex DNS)", "russia", "Yandex 77.88.8.8 — the reference's Russian-carrier DNS"),
+        INTERNATIONAL("International (Quad9)", "international", "Quad9 9.9.9.9 DoH — for use outside Iran; Iranian DPI resets it");
+
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
+    }
+
+    /** The chosen [LanternDnsRegion]; falls back to IRAN for unknown values. */
+    private fun lanternDnsChoice(): LanternDnsRegion =
+        LanternDnsRegion.entries.firstOrNull { it.coreName == CoreConfig.lanternDnsRegion(this) }
+            ?: LanternDnsRegion.IRAN
+
+    /**
+     * The Lantern SERVER POOL the user draws from (3.3.7). IRAN is the
+     * default and must stay it: the sidecar presents no country identity, so
+     * Lantern geo-serves the pinned IR pool — the 3x Frankfurt + 1x
+     * Amsterdam tracks the field logs proved fast; the 3.2.49 global draw was
+     * slower on the user's line. GLOBAL presents a non-IR identity
+     * (RADIANCE_COUNTRY → x-lantern-client-country) and draws the worldwide
+     * free pool instead. Applies at the next connect, like the DNS region.
+     */
+    private enum class LanternPool(val enLabel: String, val coreName: String, val enDescription: String) {
+        IRAN("Iran", "iran", "Lantern's Iran pool — 3x Frankfurt + 1x Amsterdam; the fast servers for Iranian lines"),
+        GLOBAL("Global", "global", "The worldwide free pool (Milan, Ashburn, and more); more locations but slower on Iranian lines");
+
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
+    }
+
+    /** The chosen [LanternPool]; falls back to IRAN for unknown values. */
+    private fun lanternPoolChoice(): LanternPool =
+        LanternPool.entries.firstOrNull { it.coreName == CoreConfig.lanternPool(this) }
+            ?: LanternPool.IRAN
+
+    /**
+     * The pool chooser. Persisting the choice alone changes nothing running:
+     * RADIANCE_COUNTRY is read when the sidecar process starts, so the switch
+     * lands on the next connect (and the next offline picker boot).
+     */
+    private fun chooseLanternPool(after: (() -> Unit)? = null) = showChoiceSheet(
+        title = Strings.t("Server pool"),
+        subtitle = Strings.t("Which server pool Lantern draws from · applies next connection"),
+        options = LanternPool.entries.toList(),
+        selected = lanternPoolChoice(),
+        label = { it.label },
+        description = { it.description },
+    ) { chosen ->
+        preferences().edit().putString(CoreConfig.LANTERN_POOL, chosen.coreName).apply()
+        ConnectionLog.record("Lantern server pool set to ${chosen.coreName} (next connect)")
+        after?.invoke()
+    }
+
+    /**
      * How the chain picks the WARP transport that carries Psiphon.
      *
      * AUTO is the default and should stay it: it tries MASQUE, then WireGuard, then
@@ -10105,6 +10795,28 @@ class MainActivity : Activity() {
          */
         const val TOR_VERIFY_TIMEOUT_MS = 60_000L
         const val VERIFY_RETRY_DELAY_MS = 1_200L
+        /**
+         * Extra patience per refused probe while the native core is between
+         * cycles of its own reconnect loop (see the gate loop for why a refused
+         * listener during a live core is a cycle, not a death). One WG reconnect
+         * cycle is 12–16s (dataplane validate + retry); a WoW cycle with an
+         * endpoint rescan can run 30s+, and the 3.2.0 field log needed ~95s of
+         * core hunting across 5 endpoint pairs before a stable IPv6 pair
+         * carried traffic.
+         */
+        const val VERIFY_RECONNECT_EXTENSION_MS = 20_000L
+        /**
+         * Cap on those extensions, so a truly stuck core still fails honestly
+         * instead of parking the dial on "Verifying" forever. 3.3.4, the
+         * user's call after the 3.3.3 field log watched 8/8 fire on WireGuard:
+         * 4 × 20s = 80s of patience on top of the base budget — the connect
+         * either lands inside it or the gate gives up and the two-strike
+         * eviction (failFakeConnection → consecutiveFakeWireguard ≥ 2 →
+         * fresh scan) takes over sooner. Trade-off, stated plainly: a core
+         * whose own rescan needs more than ~80s now surfaces as a handshake-
+         * without-traffic failure instead of a long green-in-waiting.
+         */
+        const val VERIFY_RECONNECT_EXTENSIONS = 4
         /**
          * Grace period after the dial goes green before the core's own byte
          * counters are checked. 12s is past the point where a working tunnel has
@@ -10287,50 +10999,6 @@ class MainActivity : Activity() {
 
         const val DEFAULT_PROTOCOL = "default_protocol"
 
-        /**
-         * Latch: the one-time Auto Scan has already found a transport that works.
-         *
-         * Set only when a rung actually carried verified traffic. A ladder that ran
-         * out of rungs deliberately leaves this unset — the usual cause of "nothing
-         * connected" is a phone with no data at all, and holding a permanent verdict
-         * from that moment would deny the scan to the network where it would have
-         * worked.
-         *
-         * Learned state, not a choice: listed in SettingsBackup's TRANSIENT_KEYS so a
-         * backup cannot carry one device's answer onto another carrier.
-         */
-        const val AUTO_SCAN_DONE = "auto_scan_done"
-
-        /**
-         * The transports the Auto Scan is allowed to try, in order.
-         *
-         * Psiphon and Tor are absent by instruction: both are deliberate choices with
-         * their own costs (an account-free anti-censorship stack and a three-hop
-         * onion circuit), and moving a user onto them behind their back is not the
-         * same favour as moving them between WARP transports. SHARD is last because
-         * it is the only rung whose exit is a public node.
-         *
-         * The ladder is only entered when the transport that FAILED is itself on it —
-         * a user who picked Tor and lost it gets their failure reported, not a silent
-         * switch to something else.
-         */
-        val AUTO_SCAN_LADDER = listOf(
-            Protocol.WIREGUARD,
-            Protocol.MASQUE,
-            Protocol.WARP_IN_WARP,
-            Protocol.SHARD,
-        )
-
-        /**
-         * Gap between abandoning one rung and dialling the next.
-         *
-         * The service clears its own re-entrancy guard (`connected`) BEFORE
-         * stopTunnel() has finished unwinding, so a connect issued the instant a
-         * failure arrives races that teardown: on the tun2socks rungs the old TUN is
-         * still open, and the new session either loses its establish() or is torn
-         * down by the tail of the old one.
-         */
-        const val AUTO_SCAN_HANDOVER_MS = 1_500L
         const val LOG_LEVEL = "log_level"
         const val PERF_PROFILE = "perf_profile"
         const val H2_FRAGMENTATION = "h2_fragmentation"

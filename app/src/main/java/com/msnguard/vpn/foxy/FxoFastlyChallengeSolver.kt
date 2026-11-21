@@ -1,5 +1,6 @@
 package com.msnguard.vpn.foxy
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -54,22 +55,38 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
             if (url == null || !url.isHttps || url.host !in allowedHosts()) {
                 throw FastlyChallengeError("untrusted challenge origin")
             }
-            solveChallengeBody(origin, challengedBody, userAgent)
+            solveChallengeBody(origin, challengedBody, effectiveSolverUserAgent(userAgent))
             return@withContext
         }
+        // Reference v2.0.4 UA precedence: config solver UA first, then the
+        // browser UA, then the caller's UA.
+        val solverConfigUA = FoxyRemoteConfig.current.solver.headers["User-Agent"]
+        val candidateUAs = listOfNotNull(
+            solverConfigUA,
+            FirefoxAccountHeaders.browserUserAgent,
+            userAgent.takeIf { it.isNotBlank() },
+        ).distinct()
         var lastError: Exception? = null
         for (base in listOf("https://api.accounts.firefox.com", "https://accounts.firefox.com")) {
-            try {
-                solveOnHost(base)
-                return@withContext
-            } catch (_: NoChallengePage) {
-                continue
-            } catch (e: FastlyChallengeError) {
-                lastError = e
+            for (candidateUA in candidateUAs) {
+                try {
+                    solveOnHost(base, candidateUA)
+                    return@withContext
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (_: NoChallengePage) {
+                    break
+                } catch (e: FastlyChallengeError) {
+                    lastError = e
+                }
             }
         }
         throw lastError ?: FastlyChallengeError("host did not serve a Fastly challenge page")
     }
+
+    /** Config solver UA wins over the caller-supplied one (reference v2.0.4). */
+    private fun effectiveSolverUserAgent(userAgent: String): String =
+        FoxyRemoteConfig.current.solver.headers["User-Agent"] ?: userAgent
 
     private fun baseOrigin(prefixUrl: String): String {
         val idx = prefixUrl.indexOf("/_fs-ch-")
@@ -84,18 +101,19 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
         val prefix = CHALLENGE_PREFIX_REGEX.find(page)?.value
             ?: throw FastlyChallengeError("challenge asset prefix not found")
         val prefixUrl = origin.trimEnd('/') + prefix
-        val script = fetchText(solver, "$prefixUrl/script.js?reload=true")
+        val script = fetchText(solver, "$prefixUrl/script.js?reload=true", userAgent)
         var (challenges, token) = parseChallengeInit(script)
         repeat(MAX_POST_BACK_ROUNDS) {
             val answers = JSONArray()
             for (i in 0 until challenges.length()) {
-                answers.put(answerChallenge(solver, prefixUrl, token, challenges.getJSONObject(i)))
+                answers.put(answerChallenge(solver, prefixUrl, token, challenges.getJSONObject(i), userAgent))
             }
             val body = JSONObject().put("token", token).put("data", answers)
                 .toString().toRequestBody("application/json".toMediaType())
             val request = FirefoxAccountHeaders.apply(Request.Builder().url("$prefixUrl/fst-post-back"), FoxyRemoteConfig.current.solver)
                 .header("Content-Type", "application/json").header("Accept", "application/json")
-                .header("User-Agent", userAgent).header("Origin", origin)
+                .header("User-Agent", FoxyRemoteConfig.current.solver.headers["User-Agent"] ?: userAgent)
+                .header("Origin", origin)
                 .post(body).build()
             solver.newCall(request).execute().use { response ->
                 val text = response.body?.string().orEmpty()
@@ -137,7 +155,7 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
         accept: String = HTML_ACCEPT,
     ): String {
         val request = FirefoxAccountHeaders.apply(Request.Builder().url(url), FoxyRemoteConfig.current.solver)
-            .header("User-Agent", userAgent)
+            .header("User-Agent", FoxyRemoteConfig.current.solver.headers["User-Agent"] ?: userAgent)
             .header("Accept", accept)
             .build()
         client.newCall(request).execute().use { response ->
@@ -146,8 +164,8 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
         }
     }
 
-    private fun fetchChallengePage(client: OkHttpClient, pageUrl: String): Pair<String, Boolean> {
-        val body = fetchText(client, pageUrl)
+    private fun fetchChallengePage(client: OkHttpClient, pageUrl: String, userAgent: String): Pair<String, Boolean> {
+        val body = fetchText(client, pageUrl, userAgent)
         val isChallenge = body.contains("/_fs-ch-") && body.contains("Client Challenge")
         return body to isChallenge
     }
@@ -165,13 +183,12 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
         return challenges to last.groupValues[2]
     }
 
-    private fun fetchPat(client: OkHttpClient, prefixUrl: String, token: String): String {
+    private fun fetchPat(client: OkHttpClient, prefixUrl: String, token: String, userAgent: String): String {
         val patUrl = "$prefixUrl/pat?token=${URLEncoder.encode(token, "UTF-8")}"
-        val request = Request.Builder()
-            .url(patUrl)
+        val request = FirefoxAccountHeaders.apply(Request.Builder().url(patUrl), FoxyRemoteConfig.current.solver)
             .header("Accept", "text/plain")
             .header("Content-Type", "application/json")
-            .header("User-Agent", FirefoxAccountHeaders.controlPlaneUserAgent)
+            .header("User-Agent", FoxyRemoteConfig.current.solver.headers["User-Agent"] ?: userAgent)
             .header("Origin", baseOrigin(prefixUrl))
             .post(ByteArray(0).toRequestBody(null))
             .build()
@@ -210,7 +227,13 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
         put("v", 2)
     }
 
-    private fun answerChallenge(client: OkHttpClient, prefixUrl: String, token: String, challenge: JSONObject): JSONObject {
+    private fun answerChallenge(
+        client: OkHttpClient,
+        prefixUrl: String,
+        token: String,
+        challenge: JSONObject,
+        userAgent: String,
+    ): JSONObject {
         val data = challenge.optJSONObject("data") ?: JSONObject()
         return when (val type = challenge.optString("ty")) {
             "pow" -> {
@@ -227,7 +250,7 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
             }
             "pat" -> JSONObject().apply {
                 put("ty", "pat")
-                put("auth", fetchPat(client, prefixUrl, token))
+                put("auth", fetchPat(client, prefixUrl, token, userAgent))
             }
             "clientmetrics" -> clientMetricsAnswer()
             else -> throw FastlyChallengeError("unsupported Fastly challenge type '$type' (captcha cannot be solved automatically)")
@@ -254,7 +277,7 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
         runCatching { android.webkit.CookieManager.getInstance().flush() }
     }
 
-    private fun solveOnHost(base: String) {
+    private fun solveOnHost(base: String, userAgent: String) {
         val solverJar = SimpleCookieJar()
         val solver = FoxyControlPlaneHttp.client.newBuilder()
             .cookieJar(solverJar)
@@ -263,30 +286,30 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
             .build()
 
         val pageUrl = "$base/"
-        val (page, isChallenge) = fetchChallengePage(solver, pageUrl)
+        val (page, isChallenge) = fetchChallengePage(solver, pageUrl, userAgent)
         if (!isChallenge) throw NoChallengePage()
 
         val prefixMatch = CHALLENGE_PREFIX_REGEX.find(page)
             ?: throw FastlyChallengeError("challenge asset prefix not found on $base")
         val prefixUrl = base + prefixMatch.value
 
-        val script = fetchText(solver, "$prefixUrl/script.js?reload=true")
+        val script = fetchText(solver, "$prefixUrl/script.js?reload=true", userAgent)
         var (challenges, token) = parseChallengeInit(script)
 
         repeat(MAX_POST_BACK_ROUNDS) {
             val answers = JSONArray()
             for (i in 0 until challenges.length()) {
-                answers.put(answerChallenge(solver, prefixUrl, token, challenges.getJSONObject(i)))
+                answers.put(answerChallenge(solver, prefixUrl, token, challenges.getJSONObject(i), userAgent))
             }
             val postBody = JSONObject().apply {
                 put("token", token)
                 put("data", answers)
             }.toString().toRequestBody("application/json".toMediaType())
-            val request = Request.Builder()
-                .url("$prefixUrl/fst-post-back")
+            val request = FirefoxAccountHeaders.apply(Request.Builder()
+                .url("$prefixUrl/fst-post-back"), FoxyRemoteConfig.current.solver)
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
-                .header("User-Agent", FirefoxAccountHeaders.controlPlaneUserAgent)
+                .header("User-Agent", FoxyRemoteConfig.current.solver.headers["User-Agent"] ?: userAgent)
                 .header("Origin", baseOrigin(prefixUrl))
                 .post(postBody)
                 .build()
@@ -294,7 +317,7 @@ class FastlyChallengeSolver(private val cookieJar: SimpleCookieJar) {
                 if (!response.isSuccessful) throw FastlyChallengeError("challenge post-back returned HTTP ${response.code}")
                 val body = JSONObject(response.body?.string().orEmpty())
                 if (body.optString("status") == "success") {
-                    val (_, stillChallenged) = fetchChallengePage(solver, pageUrl)
+                    val (_, stillChallenged) = fetchChallengePage(solver, pageUrl, userAgent)
                     if (stillChallenged) throw FastlyChallengeError("challenge cookie not accepted on this exit IP")
                     installChallengeCookies(solverJar)
                     return

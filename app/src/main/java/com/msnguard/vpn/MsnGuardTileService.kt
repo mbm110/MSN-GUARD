@@ -81,6 +81,18 @@ class MsnGuardTileService : TileService() {
         if (permissionIntent == null) {
             // Already have permission
             val config = configJson()
+            // FOXY gate — same as MainActivity.connect: without a stored FxA
+            // session the service's refresh fails and failAndStop REMOVES the
+            // notification, so a tile-initiated dial used to bounce from Active
+            // back to Inactive with zero guidance. Open the app on the Foxy
+            // settings instead.
+            if (config.contains("\"protocol\":\"foxy\"") &&
+                com.msnguard.vpn.foxy.FoxyTunnel.signInStatus(this) == null
+            ) {
+                Log.w(LOG_TAG, "Foxy selected but not signed in; opening the app")
+                openApp()
+                return true
+            }
             startForegroundService(
                 Intent(this, MsnGuardVpnService::class.java)
                     .setAction(MsnGuardVpnService.ACTION_CONNECT)
@@ -151,7 +163,10 @@ class MsnGuardTileService : TileService() {
             startActivityAndCollapse(
                 PendingIntent.getActivity(
                     this,
-                    0,
+                    // Distinct from the service notification's content intent
+                    // (requestCode 0): shared requestCode + UPDATE_CURRENT made
+                    // the two PendingIntents overwrite each other's flags.
+                    7,
                     intent,
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
                 )
@@ -186,79 +201,16 @@ class MsnGuardTileService : TileService() {
         }
     }
 
-    private val selectedProtocolcoreName: String
-        get() = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-            .getString(DEFAULT_PROTOCOL, Protocol.WIREGUARD.coreName)
-            ?.let { name -> Protocol.entries.find { it.coreName == name } }
-            ?.coreName ?: Protocol.WIREGUARD.coreName
-
-    private fun defaultScan(): ScanTarget {
-        val name = getSharedPreferences(SETTINGS, MODE_PRIVATE).getString(DEFAULT_SCAN, ScanTarget.BOTH.coreName)
-        return ScanTarget.entries.find { it.coreName == name } ?: ScanTarget.BOTH
-    }
-
-    private fun defaultScanMode(): ScanMode {
-        val name = getSharedPreferences(SETTINGS, MODE_PRIVATE).getString(DEFAULT_SCAN_MODE, ScanMode.BALANCED.coreName)
-        return ScanMode.entries.find { it.coreName == name } ?: ScanMode.BALANCED
-    }
-
-    private fun defaultEndpointDiscovery(): EndpointDiscovery {
-        val name = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-            .getString(ENDPOINT_DISCOVERY, EndpointDiscovery.CACHE.coreName)
-        return EndpointDiscovery.entries.find { it.coreName == name } ?: EndpointDiscovery.CACHE
-    }
-
-    private fun defaultMasqueTransport(): MasqueTransport {
-        val name = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-            .getString(DEFAULT_MASQUE_TRANSPORT, MasqueTransport.H3.coreName)
-        return MasqueTransport.entries.find { it.coreName == name } ?: MasqueTransport.H3
-    }
-
-    private fun obfuscationProfile(): ObfuscationProfile = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        .getString(OBFUSCATION_PROFILE, ObfuscationProfile.BALANCED.coreName)
-        ?.let { name -> ObfuscationProfile.entries.find { it.coreName == name } }
-        ?: ObfuscationProfile.BALANCED
-
-    private fun manualEndpoint(): String? = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        .getString(MANUAL_ENDPOINT, null)?.takeIf { it.isNotBlank() }
-
-    private fun retryObfuscationProfiles(): Boolean = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        .getBoolean(RETRY_OBFUSCATION, true)
-
-    private fun tlsCurvePreset(): TlsCurvePreset = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        .getString(TLS_CURVE_PRESET, TlsCurvePreset.CHROME.coreName)
-        ?.let { name -> TlsCurvePreset.entries.find { it.coreName == name } }
-        ?: TlsCurvePreset.CHROME
-
-    private fun wireGuardDataCheck(): Boolean = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        .getBoolean(WIREGUARD_DATA_CHECK, true)
-
-    private fun logLevel(): String = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        .getString(LOG_LEVEL, "info") ?: "info"
-
-    private fun perfProfile(): String = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        .getString(PERF_PROFILE, "auto") ?: "auto"
-
-    private fun h2Fragmentation(): Boolean = getSharedPreferences(SETTINGS, MODE_PRIVATE)
-        .getString(H2_FRAGMENTATION, "on") == "on"
+    // All the settings-reader helpers that used to live here (defaultScan,
+    // obfuscationProfile, manualEndpoint, …) were DEAD CODE — configJson() is
+    // the only config surface the tile needs and it reads CoreConfig.json
+    // directly. Removed in the v3.2.27 audit; CoreConfig owns every default.
 
     companion object {
         private const val LOG_TAG = "AetherTile"
 
         // From MainActivity
         const val SETTINGS = "settings"
-        const val DEFAULT_SCAN = "default_scan"
-        const val DEFAULT_SCAN_MODE = "default_scan_mode"
-        const val ENDPOINT_DISCOVERY = "endpoint_discovery"
-        const val DEFAULT_MASQUE_TRANSPORT = "default_masque_transport"
-        const val OBFUSCATION_PROFILE = "obfuscation_profile"
-        const val MANUAL_ENDPOINT = "manual_endpoint"
-        const val RETRY_OBFUSCATION = "retry_obfuscation_profiles"
-        const val TLS_CURVE_PRESET = "tls_curve_preset"
-        const val WIREGUARD_DATA_CHECK = "wireguard_data_check"
-        const val LOG_LEVEL = "log_level"
-        const val PERF_PROFILE = "perf_profile"
-        const val H2_FRAGMENTATION = "h2_fragmentation"
         const val DEFAULT_PROTOCOL = "default_protocol"
         /** Mirrors MainActivity.CHAIN_ARMED — same SharedPreferences file. */
         const val CHAIN_ARMED = "chain_armed"

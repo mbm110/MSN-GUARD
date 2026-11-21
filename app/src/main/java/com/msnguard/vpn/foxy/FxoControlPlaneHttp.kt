@@ -6,7 +6,6 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
-import okhttp3.dnsoverhttps.DnsOverHttps
 import android.webkit.CookieManager
 import okhttp3.Request
 import com.msnguard.vpn.foxy.TlsClientHelloSplitter
@@ -188,62 +187,18 @@ private class ProtectingSocketFactory : SocketFactory() {
 object FoxyControlPlaneHttp {
     val cookieJar = SimpleCookieJar()
 
-    internal val relayerInterceptor = FoxyRelayerInterceptor { defaultRelayerConfig() }
+    /** Overridable relayer policy hook (reference: relayerConfigProvider).
+     *  Defaults to the user preference + remote-config policy. */
+    @Volatile
+    var relayerConfigProvider: (() -> FoxyRelayerConfig?)? = { defaultRelayerConfig() }
 
-    private val bootstrapClient: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
-            .socketFactory(ProtectingSocketFactory())
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(10, TimeUnit.SECONDS)
-            .callTimeout(10, TimeUnit.SECONDS)
-            .build()
-    }
+    internal val relayerInterceptor = FoxyRelayerInterceptor { relayerConfigProvider?.invoke() }
 
-    /**
-     * The reference Foxy client does not depend on one resolver.  A single
-     * blocked DoH endpoint made every control-plane hostname look unknown on
-     * the device, including the relayer itself.  Keep the literal bootstrap
-     * addresses and try the operators in order without recursive hostname DNS.
-     */
-    private val bootstrapDohResolvers: List<DnsOverHttps> by lazy {
-        listOf(
-            "1.1.1.1" to "https://1.1.1.1/dns-query",
-            "8.8.8.8" to "https://8.8.8.8/dns-query",
-            "9.9.9.9" to "https://9.9.9.9/dns-query",
-        ).map { (address, url) ->
-            DnsOverHttps.Builder()
-                .client(bootstrapClient)
-                .url(url.toHttpUrl())
-                .post(true)
-                .includeIPv6(true)
-                .bootstrapDnsHosts(listOf(InetAddress.getByName(address)))
-                .build()
-        }
-    }
-
-    private val bootstrapDoh: okhttp3.Dns by lazy {
-        object : okhttp3.Dns {
-            override fun lookup(hostname: String): List<InetAddress> {
-                if (isIpLiteral(hostname)) return listOf(InetAddress.getByName(hostname))
-                var last: Throwable? = null
-                for (resolver in bootstrapDohResolvers) {
-                    try {
-                        val addresses = resolver.lookup(hostname)
-                        if (addresses.isNotEmpty()) return addresses
-                    } catch (failure: Throwable) {
-                        last = failure
-                    }
-                }
-                throw java.net.UnknownHostException(
-                    "No bootstrap DoH resolver answered for $hostname",
-                ).also { if (last != null) it.initCause(last) }
-            }
-        }
-    }
-
-    private fun isIpLiteral(hostname: String): Boolean =
-        runCatching { InetAddress.getByName(hostname).hostAddress == hostname }.getOrDefault(false)
+    // The bootstrap-DoH chain that used to live here (bootstrapClient +
+    // bootstrapDohResolvers + bootstrapDoh) was DEAD CODE: the main client uses
+    // Dns.SYSTEM and nothing ever wired `bootstrapDoh` in, while its resolver
+    // list still advertised a "blocked DoH" fallback that could never fire.
+    // Removed in the v3.2.27 audit.
 
     @Volatile
     var socketProtector: ((Socket) -> Boolean)? = null

@@ -76,6 +76,8 @@ object FoxyBrowserLogin {
         val loginScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         var completing = false
         var finished = false
+        var loginJob: kotlinx.coroutines.Job? = null
+        var loginAttempt = 0
         var notifying = true
         fun finish(result: Result<Unit>) {
             if (finished) return
@@ -112,22 +114,38 @@ object FoxyBrowserLogin {
         page.addView(header, LinearLayout.LayoutParams(-1, -2))
         page.addView(progress, LinearLayout.LayoutParams(-1, (3 * density).toInt()))
         page.addView(web, LinearLayout.LayoutParams(-1, 0, 1f))
-        lateinit var bridge: WebChannelBridge
-        bridge = WebChannelBridge(
+        val bridge = WebChannelBridge(
             web,
             onSessionToken = { token ->
-                if (!finished && !completing) {
+                // A second fxaccounts:login (the user re-entered the password
+                // while the first exchange was still polling for 2FA/email
+                // verification) must REPLACE the in-flight attempt. Dropping it
+                // behind `completing` left the old never-verifying session
+                // polling for its full 5 minutes while the user's real login
+                // was thrown away (v3.2.27 audit).
+                if (!finished) {
+                    loginJob?.cancel()
+                    val myAttempt = ++loginAttempt
                     completing = true
-                    loginScope.launch {
-                        val result = repository.completeBrowserLogin(token)
-                        completing = false
-                        if (!finished) {
-                            if (result.isSuccess) finish(result)
-                            else {
-                                bridge.retrySessionToken()
-                                android.widget.Toast.makeText(activity,
-                                    result.exceptionOrNull()?.message ?: "Sign-in failed. Please try again.",
-                                    android.widget.Toast.LENGTH_LONG).show()
+                    progress.isIndeterminate = true
+                    progress.visibility = View.VISIBLE
+                    loginJob = loginScope.launch {
+                        try {
+                            val result = repository.completeBrowserLogin(token)
+                            if (!finished && myAttempt == loginAttempt) {
+                                if (result.isSuccess) {
+                                    finish(result)
+                                } else {
+                                    android.widget.Toast.makeText(activity,
+                                        result.exceptionOrNull()?.message ?: "Sign-in failed. Please try again.",
+                                        android.widget.Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        } finally {
+                            if (myAttempt == loginAttempt) {
+                                completing = false
+                                progress.isIndeterminate = false
+                                progress.visibility = View.GONE
                             }
                         }
                     }
@@ -161,6 +179,10 @@ object FoxyBrowserLogin {
         }
         web.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                // The token exchange owns the bar while it runs (indeterminate
+                // busy mode); the page-load progress writer must not fight it —
+                // it used to clear the busy state and reset the bar mid-exchange.
+                if (progress.isIndeterminate) return
                 progress.progress = newProgress
                 progress.visibility = if (newProgress < 100) View.VISIBLE else View.GONE
             }
@@ -185,10 +207,7 @@ object FoxyBrowserLogin {
         private val onSessionToken: (String) -> Unit,
     ) {
         private val webViewRef = WeakReference(webView)
-        @Volatile private var pendingSessionToken: String? = null
         @Volatile private var dispatchedSessionToken: String? = null
-
-        fun retrySessionToken() { dispatchedSessionToken = null }
 
         @JavascriptInterface
         fun onMessage(payload: String) = onMessage(payload, "https://accounts.firefox.com")
@@ -207,32 +226,23 @@ object FoxyBrowserLogin {
                 CMD_FXA_STATUS -> reply(channelId, messageId, command, "{\"capabilities\":{},\"signedInUser\":null}")
                 CMD_CAN_LINK_ACCOUNT -> reply(channelId, messageId, command, "{\"ok\":true}")
                 CMD_LOGIN, "fxaccounts:oauth_login" -> {
+                    // Reference v2.0.4: notify the session token IMMEDIATELY,
+                    // even while the user is still on the 2FA code page. The
+                    // sign-in completes underneath; Mozilla's post-verify
+                    // "open this in a browser" page is never reached.
                     val token = data.optString("sessionToken").ifBlank { data.optString("token") }.trim()
-                    if (tokenPattern.matches(token)) {
-                        pendingSessionToken = token
-                        val verified = !data.has("verified") || data.optBoolean("verified", true)
-                        if (verified && data.optString("verificationReason").isBlank()) notifySessionToken(token)
-                    }
+                    if (tokenPattern.matches(token)) notifySessionToken(token)
                     if (messageId.isNotBlank()) reply(channelId, messageId, command, "{\"ok\":true}")
                 }
                 else -> {
-                    if (command.contains("verified", ignoreCase = true)) {
-                        val token = data.optString("sessionToken").ifBlank { data.optString("token") }
-                            .ifBlank { pendingSessionToken.orEmpty() }.trim()
-                        if (tokenPattern.matches(token)) notifySessionToken(token)
-                    }
                     if (messageId.isNotBlank()) reply(channelId, messageId, command, "{\"ok\":true}")
                 }
             }
         }
 
-        @JavascriptInterface
-        fun onSessionVerified() = pendingSessionToken?.let { notifySessionToken(it) }
-
         private fun notifySessionToken(token: String) {
             if (!tokenPattern.matches(token) || token == dispatchedSessionToken) return
             dispatchedSessionToken = token
-            pendingSessionToken = token
             runCatching { CookieManager.getInstance().flush() }
             webViewRef.get()?.post { onSessionToken(token) } ?: onSessionToken(token)
         }

@@ -120,7 +120,7 @@ object IdentityProvisioner {
      * A [accountApiReachable] answer is a property of the *network*, not of the
      * protocol: the carrier either lets the account API through or it does not,
      * and re-asking changes nothing while costing the full probe timeout on
-     * every rung of the Auto Scan ladder — 33s × 3 in the field log.
+     * every transport attempt — 33s × 3 in the field log.
      *
      * Cached for [BLOCKED_CACHE_MS] after a negative answer. A positive answer is
      * never cached (cheap, and the only thing that can flip a carrier back to
@@ -204,8 +204,8 @@ object IdentityProvisioner {
      * The two are decided *in parallel* on a network worth probing at all.
      * Doing them in sequence is what made provisioning slow: the probe takes up
      * to its full 8s+8s timeout to fail on a filtered carrier, and only then
-     * does SHARD begin its 2s node race — a serial 33s the user watches every
-     * rung of the Auto Scan ladder pay. Racing them means the listener is
+     * does SHARD begin its 2s node race — a serial 33s the user watches on
+     * every connect. Racing them means the listener is
      * already bound by the time the verdict arrives, so a blocked carrier pays
      * max(probe, shard) instead of probe + shard.
      *

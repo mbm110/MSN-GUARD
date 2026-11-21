@@ -29,8 +29,8 @@ android {
         applicationId = "com.msnguard.vpn"
         minSdk = 26
         targetSdk = 36
-        versionCode = 450
-        versionName = "3.2.1"
+        versionCode = 508
+        versionName = "3.3.7"
         // The encoded CI value is safe in generated Kotlin source. This is still extractable from an APK.
         val relaySecret = System.getenv("MSN_IDENTITY_RELAY_HMAC").orEmpty()
         val relayEncoded = Base64.getEncoder().encodeToString(relaySecret.toByteArray(Charsets.UTF_8))
@@ -140,6 +140,34 @@ android {
             isDebuggable = false
         }
     }
+}
+
+
+// Lantern/Radiance is a separate Android PIE executable, not a gomobile AAR.
+// This avoids colliding with Psiphon's existing libgojni.so and go.Seq classes.
+// The sidecar binds only a loopback SOCKS listener; MSN-GUARD remains the sole
+// owner of Android VpnService and the device TUN.
+val buildLanternSidecar = tasks.register<Exec>("buildLanternSidecar") {
+    group = "build"
+    description = "Builds the isolated Lantern/Radiance Android sidecar binaries"
+    val buildScript = rootProject.file("core/lanternbridge/build-android.sh")
+    commandLine("bash", buildScript.absolutePath)
+    workingDir(rootProject.projectDir)
+    environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
+    environment("ANDROID_SDK_ROOT", android.sdkDirectory.absolutePath)
+    environment("ANDROID_NDK_HOME", "${android.sdkDirectory.absolutePath}/ndk/26.3.11579264")
+    environment("ANDROID_NDK_ROOT", "${android.sdkDirectory.absolutePath}/ndk/26.3.11579264")
+    inputs.dir(rootProject.file("core/lanternbridge"))
+    inputs.file(buildScript)
+    outputs.files(
+        file("src/main/jniLibs/arm64-v8a/liblantern.so"),
+        file("src/main/jniLibs/armeabi-v7a/liblantern.so"),
+        file("src/main/jniLibs/x86_64/liblantern.so"),
+    )
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(buildLanternSidecar)
 }
 
     dependencies {

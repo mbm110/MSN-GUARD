@@ -191,6 +191,8 @@ private class PsiphonStrategy(
 
 class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.HostService {
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
+    /** Serializes Lantern's TUN/Hev start and stop transitions. */
+    private val lanternLifecycleLock = Any()
 
     /**
      * The exit-country geo verdict gets its own thread, NOT [worker].
@@ -338,9 +340,27 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
      */
     private var currentCountry = ""
 
+    /**
+     * ISO code of the session's exit (e.g. "IR", "NL") for the notification's
+     * "METHOD-ISO" subtitle. Set from any of: the core's exit_ip event, Psiphon's
+     * region report, the activity's geo lookup, or [scheduleExitLabelProbe]'s
+     * probe through the tunnel itself.
+     */
+    @Volatile private var currentCountryIso = ""
+
     /** Last progress value published, so a repost can reuse it. */
     @Volatile
     private var connectProgress = -1
+
+    /**
+     * Real connect steps for the active transport (0 while idle, or for Tor
+     * which reports a continuous percentage). Drives the "· 2/5" suffix on
+     * the main screen's connecting line.
+     */
+    @Volatile private var connectStepsTotal = 0
+
+    /** Last CONNECTING detail text, so percent-only reposts keep it on screen. */
+    @Volatile private var lastConnectingDetail: String? = null
 
     /** Polls [TorManager.progress] while Tor bootstraps. */
     private var torProgressTask: java.util.concurrent.ScheduledFuture<*>? = null
@@ -628,6 +648,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
     private var warpTrafficTask: java.util.concurrent.ScheduledFuture<*>? = null
     /** 2.3.15: counts [startWarpTrafficPolling] ticks to emit a per-minute diagnostic. */
     private var warpStatsTick = 0
+
+    /** 3.3.1 Lantern traffic-poller diagnostics; see startLanternTrafficPolling. */
+    private var lanternStatsTick = 0
+    private var lanternStatsSamples = 0L
+    private var lanternStatsSkipped = 0
     private var ladderIndex = 0
     private var ladderAttempts = 0
     private var ladderTimer: ScheduledFuture<*>? = null
@@ -882,6 +907,14 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         const val ACTION_PAUSE = "com.msnguard.vpn.PAUSE"
         const val ACTION_RECONNECT = "com.msnguard.vpn.RECONNECT"
         const val ACTION_NOTIFICATION_HEALTH = "com.msnguard.vpn.NOTIFICATION_HEALTH"
+        // The UI's verification gate reports its phase so the notification row
+        // and the screen never disagree (the row must not say Connected while
+        // the dial is still on Connecting/Verifying).
+        const val ACTION_VERIFY_STATE = "com.msnguard.vpn.VERIFY_STATE"
+        const val EXTRA_VERIFY_PHASE = "verify_phase"
+        const val VERIFY_PHASE_VERIFYING = "verifying"
+        const val VERIFY_PHASE_CONNECTED = "connected"
+        const val VERIFY_PHASE_ABANDONED = "abandoned"
         const val ACTION_RESET_IDENTITIES = "com.msnguard.vpn.RESET_IDENTITIES"
         const val ACTION_STATUS = "com.msnguard.vpn.STATUS"
         const val EXTRA_CONFIG = "config"
@@ -930,6 +963,13 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
          * happens is worse than no progress bar.
          */
         const val EXTRA_PROGRESS = "progress"
+
+        /**
+         * Total connect steps for the "n/N" counter on the main screen's
+         * status line. 0 = this transport reports continuous progress only
+         * (Tor), so no step counter is shown.
+         */
+        const val EXTRA_STEPS = "steps"
 
         /**
          * Accent used for the notification's icon tint and header text.
@@ -1288,6 +1328,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // is still empty and any decision would be a guess. See
         // scheduleLadderAttribution() for the deferred, evidence-based version.
         scheduleLadderAttribution()
+        publishProgress(65) // upstream Psiphon tunnel ready; TUN bridging next
 
         val port = activeSocksPort
         if (port <= 0) {
@@ -1453,6 +1494,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // change the user can see.
         if (currentCountry != exitedIn) {
             currentCountry = exitedIn
+            currentCountryIso = region.trim().uppercase()
             repostNotification()
         }
     }
@@ -1903,6 +1945,7 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
             // onConnected() starts the Rust core to bridge TUN → SOCKS.
             tunnel.startTunneling(serverEntries)
             ConnectionLog.record("Psiphon tunnel starting...")
+            publishProgress(35) // this rung's tunnel is starting
             armLadderTimer()
         } catch (e: Exception) {
             ConnectionLog.record("Psiphon start failed: ${e.message}")
@@ -2385,6 +2428,18 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // Arm the ECH fallback roster: cached results are reused for
         // MAX_AGE_MS, a probe cycle only refreshes on a daemon thread.
         EchEndpointRoster.maybeProbe(applicationContext)
+        // startForeground contract for REDELIVERED intents: after Android kills
+        // the process, START_REDELIVER_INTENT re-delivers the LAST intent. If
+        // that is not ACTION_CONNECT (a health probe, a pause…), no code path
+        // below ever calls startForeground for the restarted service → crash
+        // with ForegroundServiceDidNotStartInTimeException. Only the redelivery
+        // flag is handled here on purpose: normal in-process action sends must
+        // not promote the service to foreground (v3.2.27 audit).
+        if ((flags and android.app.Service.START_FLAG_REDELIVERY) != 0 &&
+            intent?.action != ACTION_CONNECT
+        ) {
+            startAsForeground()
+        }
         when (intent?.action) {
             ACTION_CONNECT -> intent.getStringExtra(EXTRA_CONFIG)?.let { config ->
                 // A fresh user-initiated connect clears both the "user switched it
@@ -2527,6 +2582,27 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                 // not overwrite a country Psiphon already gave us.
                 intent.getStringExtra(EXTRA_NOTIFICATION_COUNTRY)?.takeIf { it.isNotBlank() }
                     ?.let { if (currentCountry.isBlank()) currentCountry = it }
+                intent.getStringExtra(EXTRA_NOTIFICATION_COUNTRY)?.takeIf { it.isNotBlank() }
+                    ?.let { if (currentCountryIso.isBlank()) currentCountryIso = it.trim().uppercase() }
+                repostNotification()
+            }
+            ACTION_VERIFY_STATE -> {
+                // The activity's verification gate is the authority on when
+                // the SCREEN calls it connected; the row follows it. Abandoned
+                // (the activity died mid-verify, app swiped away) falls back
+                // to the service's own handshake edge so the row is never
+                // stuck on "Connecting…" over a live tunnel with no UI.
+                when (intent.getStringExtra(EXTRA_VERIFY_PHASE)) {
+                    VERIFY_PHASE_VERIFYING -> {
+                        TunnelStatus.uiVerifying = true
+                        TunnelStatus.sessionVerified = false
+                    }
+                    VERIFY_PHASE_CONNECTED -> {
+                        TunnelStatus.uiVerifying = false
+                        TunnelStatus.sessionVerified = true
+                    }
+                    VERIFY_PHASE_ABANDONED -> TunnelStatus.uiVerifying = false
+                }
                 repostNotification()
             }
             ACTION_RESET_IDENTITIES -> {
@@ -2560,6 +2636,11 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
         // site, unlike the process-killing rejection the v1.9.3 crash had.
         exitGeoExecutor.shutdownNow()
         worker.shutdownNow()
+        // List-only sidecar from the offline server picker: if no Lantern
+        // tunnel ever went live, the bare Radiance process must not outlive
+        // the service. Guarded by tunnelAttemptActive/running inside the
+        // engine, so a real Lantern session is never touched here.
+        LanternEngine.stopIdleListOnly()
         super.onDestroy()
     }
 
@@ -2735,12 +2816,36 @@ class MsnGuardVpnService : VpnService(), NativeCore.CoreCallback, PsiphonTunnel.
                         // with no activity alive — the rotation is the service's
                         // job, not the card's.
                         evaluateExitCountry(ip)
+                        // Notification label: resolve the exit country HERE as
+                        // well, not only from the activity. A tile connect with
+                        // the app closed (or a slow activity lookup) used to leave
+                        // currentCountry blank for the whole session, so the
+                        // notification row never named the country. Psiphon
+                        // reports its own region via onConnectedServerRegion;
+                        // this covers the WARP/MASQUE/Tor/Lantern/Foxy family.
+                        if (currentCountry.isBlank()) {
+                            val labelGeneration = sessionGeneration
+                            runCatching {
+                                exitGeoExecutor.execute {
+                                    if (labelGeneration != sessionGeneration) return@execute
+                                    val actual = ExitGeo.countryOf(ip)
+                                    if (labelGeneration != sessionGeneration) return@execute
+                                    if (!actual.isNullOrBlank() && currentCountryIso.isBlank()) {
+                                        currentCountryIso = actual
+                                        currentCountry = PsiphonRegions.name(actual)
+                                        ConnectionLog.record("Exit country: $currentCountry ($actual)")
+                                        repostNotification()
+                                    }
+                                }
+                            }
+                        }
                         repostNotification()
                     }
                 }
                 "log" -> {
                     val message = event.getString("message")
                     ConnectionLog.record(message)
+                    reportCoreConnectMilestone(message)
                 }
             }
         } catch (e: Exception) {
@@ -3150,6 +3255,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 kotlinx.coroutines.runBlocking {
                     com.msnguard.vpn.foxy.FoxyTunnel.start(this@MsnGuardVpnService)
                 }
+                publishProgress(45) // Foxy session is up; routing comes next
                 sendStatus(STATUS_CONNECTING, Strings.t("Starting device routing…"), 70)
                 // Reference parity: FoxyVPN runs ONE tun2socks engine —
                 // hev-socks5-tunnel — with mapdns always on (DNS provider
@@ -3181,6 +3287,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     // DoH relay — exactly the false connection to avoid.
                     error("Could not start the Hev tun2socks engine")
                 }
+                publishProgress(90) // tun2socks engine running — verification remains
                 currentVpnIp = ""
                 sendStatus(STATUS_CONNECTED, Strings.t("Foxy connected"))
                 ConnectionLog.record("Foxy: connected — device tunnel up on port 1830")
@@ -3227,6 +3334,167 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     com.msnguard.vpn.foxy.FoxyTunnel.rxBytes,
                 )
             } catch (_: Exception) {
+            }
+        }, 1L, 1L, TimeUnit.SECONDS)
+    }
+
+    /**
+     * Public Lantern transport. Radiance runs as a novpn local proxy; this
+     * service remains the only Android VpnService and owns the one device TUN.
+     * The existing shared Hev engine forwards device packets to Radiance's
+     * loopback mixed SOCKS listener. No existing transport is modified.
+     */
+    private fun startLanternTunnel() {
+        // Latch a fresh attempt before queueing work. A stop or a newer attempt
+        // invalidates this token, so an old worker cannot tear down a new session.
+        val attempt = LanternEngine.armForStart()
+        worker.execute {
+            try {
+                if (!LanternEngine.isCurrent(attempt)) return@execute
+                if (proxyMode) error("Lantern requires whole-device VPN mode")
+                val address = Tun2SocksManager.selectPrivateAddress()
+                val mtu = Tun2SocksManager.VPN_INTERFACE_MTU
+                currentTunMtu = mtu
+                TunEngineManager.syncPrivateAddress(address)
+
+                val builder = Builder()
+                    .setSession("MSN-GUARD — Lantern")
+                    .setMtu(mtu)
+                    .addAddress(address.ipAddress, address.prefixLength)
+                    .addAddress("fd00::1", 64)
+                    .addRoute("0.0.0.0", 0)
+                    .addRoute("::", 0)
+                    .addRoute(address.subnet, address.prefixLength)
+                    // Hev's synthetic mapdns address resolves names inside the
+                    // tunnel and forwards DNS through Radiance's SOCKS UDP path.
+                    .addDnsServer(java.net.InetAddress.getByName(HevEngine.MAP_DNS_ADDRESS))
+                    .applyLanAccess(tun = address)
+                    .applyIranBypass()
+                    .applySplitTunneling()
+
+                ConnectionLog.record("Lantern: creating the app-owned Android TUN")
+                val establishedTun = synchronized(lanternLifecycleLock) {
+                    if (!LanternEngine.isCurrent(attempt)) return@execute
+                    val fd = builder.establish()
+                        ?: error("Android could not establish the Lantern VPN interface")
+                    if (!LanternEngine.isCurrent(attempt)) {
+                        runCatching { fd.close() }
+                        return@execute
+                    }
+                    tun = fd
+                    vpnModeActive.set(true)
+                    fd
+                }
+
+                if (!LanternEngine.isCurrent(attempt)) return@execute
+                sendStatus(STATUS_CONNECTING, Strings.t("Starting Lantern public servers…"), 15)
+                if (!LanternEngine.connect(this, attempt)) {
+                    if (!LanternEngine.isCurrent(attempt)) return@execute
+                    error(LanternEngine.errorMessage().ifBlank { "Could not connect to public Lantern servers" })
+                }
+                if (!LanternEngine.isCurrent(attempt)) return@execute
+                publishProgress(50) // Radiance session is up; routing comes next
+                sendStatus(STATUS_CONNECTING, Strings.t("Starting device routing…"), 75)
+                activeSocksPort = LanternEngine.SOCKS_PORT
+                val hevStarted = synchronized(lanternLifecycleLock) {
+                    if (!LanternEngine.isCurrent(attempt)) return@execute
+                    HevEngine.start(establishedTun, LanternEngine.SOCKS_PORT, mtu, dnsOnly = false)
+                }
+                if (!LanternEngine.isCurrent(attempt)) return@execute
+                if (!hevStarted) {
+                    error("Could not start the Hev device-routing engine for Lantern")
+                }
+                publishProgress(90) // Hev running — verification remains
+
+                synchronized(lanternLifecycleLock) {
+                    if (!LanternEngine.isCurrent(attempt)) return@execute
+                    currentVpnIp = ""
+                    TunnelStatus.isProxyMode = false
+                    TunnelStatus.isNativeTunMode = false
+                    sendStatus(STATUS_CONNECTED, Strings.t("Lantern connected"))
+                    ConnectionLog.record("Lantern: connected — device TUN → Hev → Radiance SOCKS 127.0.0.1:${LanternEngine.SOCKS_PORT}")
+                    repostNotification()
+                    startLanternTrafficPolling()
+                    startWatchdog()
+                }
+            } catch (error: Throwable) {
+                // A stale worker belongs to a stopped/replaced attempt. The
+                // corresponding stop path owns cleanup; never let this worker
+                // close the TUN or sidecar of a newer session.
+                val detail = error.message ?: error::class.java.simpleName
+                if (!LanternEngine.cancelConnect(attempt)) return@execute
+                ConnectionLog.record("Lantern start failed: $detail")
+                synchronized(lanternLifecycleLock) {
+                    if (!LanternEngine.isStoppingAttempt(attempt)) return@execute
+                    runCatching { TunEngineManager.stop(this) }
+                    LanternEngine.disconnectAsync(attempt)
+                    runCatching { tun?.close() }
+                    tun = null
+                    vpnModeActive.set(false)
+                }
+                if (!LanternEngine.isStoppingAttempt(attempt)) return@execute
+                if (stopRequested.get() || userInitiatedStop.get()) return@execute
+                failAndStop(detail)
+            }
+        }
+    }
+
+    /** Feeds Radiance's cumulative connection counters into the normal traffic UI. */
+    private fun startLanternTrafficPolling() {
+        torTrafficTask?.cancel(false)
+        // The generic s0 front path arms the WARP poller at session start
+        // (3.3.5), and a Lantern session runs through that path too. Its
+        // zero-snapshots are neutralized by the LanternEngine guard in the
+        // poller; cancel it here as well so a Lantern session does not keep a
+        // 1 Hz timer alive that can never produce a sample.
+        stopWarpTrafficPolling()
+        // 3.3.1 diagnostic (the warp-stats pattern, 2.3.15): the 3.3.0 field
+        // report — Lantern carries traffic, Down/Up show, Speed pinned at 0 —
+        // cannot be reproduced from source (every link reads correct), so the
+        // poll now records what it actually saw once a minute: the raw counter
+        // values plus how many of the last 60 ticks produced no sample. A
+        // frozen tx with live traffic, a mostly-skipped poller, or a growing
+        // tx with a zero speed each name a different culprit.
+        lanternStatsTick = 0
+        lanternStatsSamples = 0
+        lanternStatsSkipped = 0
+        torTrafficTask = ladderScheduler.scheduleAtFixedRate({
+            try {
+                if (!LanternEngine.isRunning) {
+                    lanternStatsSkipped++
+                    return@scheduleAtFixedRate
+                }
+                if (!shouldSampleTraffic()) {
+                    lanternStatsSkipped++
+                    return@scheduleAtFixedRate
+                }
+                // A failed counter read is SKIPPED, never fed in as zero — see
+                // trafficCountersOrNull. Feeding zeros rebased the baseline and
+                // flashed "0 B/s" while the tunnel was busy (v3.2.29 report).
+                val counters = LanternEngine.trafficCountersOrNull() ?: run {
+                    lanternStatsSkipped++
+                    return@scheduleAtFixedRate
+                }
+                lanternStatsSamples++
+                if (lanternStatsSamples == 1L) {
+                    ConnectionLog.record(
+                        "lantern traffic first sample: tx=" + counters.first + " rx=" + counters.second
+                    )
+                }
+                updateTrafficNotification(counters.first, counters.second)
+                lanternStatsTick++
+                if (lanternStatsTick >= 60) {
+                    lanternStatsTick = 0
+                    ConnectionLog.record(
+                        "lantern stats: tx=" + counters.first + " rx=" + counters.second +
+                            " (samples=" + lanternStatsSamples + " skipped=" + lanternStatsSkipped +
+                            " in the last minute)"
+                    )
+                    lanternStatsSamples = 0
+                    lanternStatsSkipped = 0
+                }
+            } catch (_: Exception) {
+                lanternStatsSkipped++
             }
         }, 1L, 1L, TimeUnit.SECONDS)
     }
@@ -3294,6 +3562,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 if (!TunEngineManager.start(this, tun!!, ShardSocksFront.LISTEN_PORT, mtu = shardMtu)) {
                     error("Could not start device routing")
                 }
+                publishProgress(90) // front + tun2socks running — verification remains
 
                 currentVpnIp = ""
                 val node = ShardManager.activeNode?.displayName ?: "a public node"
@@ -3505,6 +3774,16 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 // When a chained front is active its poller already feeds the pipeline.
                 // Guard against stacking two sources in the same second.
                 if (TorSocksFront.isRunning || ShardSocksFront.isRunning) return@scheduleAtFixedRate
+                // 3.3.5: the Lantern front too. Its own poller
+                // (startLanternTrafficPolling) feeds the pipeline with
+                // Radiance's cumulative counters, while this poller's
+                // NativeCore snapshot here is [0, 0] — no native core is
+                // running. Interleaving those zeros with the real counters
+                // trips the backwards-sample rebase in
+                // updateTrafficNotification every second, which is exactly the
+                // 3.3.4 field report: "lantern stats" grows in the log while
+                // Up/Down/Speed sit at 0 on the screen.
+                if (LanternEngine.isRunning) return@scheduleAtFixedRate
                 // 2.3.18: the screen-off throttle is back, narrower than before.
                 // 2.3.15 removed it because the guards swallowed samples while
                 // `connected` was still being latched — but that is now the only
@@ -3594,6 +3873,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                         repostNotification()
                         sendStatus(STATUS_CONNECTED)
                         ConnectionLog.record("aether SOCKS listener up (late) — connected")
+                        WarpUdpgwFront.warmDnsCache()
                         // 2.3.15: polling was armed in startTunnel, so this is a
                         // no-op guard, not a first start — but keep the call site
                         // so a future change to the arm order cannot regress this
@@ -3664,6 +3944,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         currentVpnIp = ""
         lastExitIp = ""
         currentCountry = ""
+        currentCountryIso = ""
         sendStatus(STATUS_CONNECTED, Strings.tf("SHARD connected via %s", node))
         ConnectionLog.record("SHARD: now on $node")
         repostNotification()
@@ -3693,8 +3974,14 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // tun2socks, so demanding it would report a healthy proxy as dead on the
         // first watchdog tick and auto-reconnect would loop forever.
         val needsRouting = psiphonVpnMode || currentProtocol.contains("TOR") ||
-            currentProtocol.contains("SHARD")
+            currentProtocol.contains("SHARD") || currentProtocol.contains("LANTERN")
         if (needsRouting && !TunEngineManager.isRunningAny) return "device routing stopped"
+
+        if (currentProtocol.contains("LANTERN")) {
+            if (!LanternEngine.isRunning) return "the Lantern/Radiance tunnel stopped"
+            if (!LanternEngine.isSocksReady()) return "the Lantern SOCKS listener stopped"
+            return null
+        }
 
         // SHARD: three things can die independently, and they are reported in the
         // order that decides what the caller does about it — the two repairable ones
@@ -4620,6 +4907,11 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
      * there is no longer a `vpnMode` parameter to branch on.
      */
     private fun startTunnel(config: String) {
+        // Satisfy the startForeground contract BEFORE any early return: a tile
+        // tap on an already-live (Foxy-invisible) session used to reach this
+        // guard and bounce without ever calling startForeground for the
+        // startForegroundService that brought us here.
+        startAsForeground()
         if (!connected.compareAndSet(false, true)) return
         // Claims the service for this session. Every worker below captures the value
         // it saw here, so a teardown block that runs late can recognise that a newer
@@ -4651,6 +4943,18 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
 
         currentProtocol = config.substringAfter("\"protocol\":\"").substringBefore('"').uppercase()
         currentVpnIp = ""
+        // Real connect steps for this transport — drives the "· n/N" counter
+        // on the connecting line (and gates the log-driven milestone mapper to
+        // this session's CONNECTING phase). Tor reports a continuous bootstrap
+        // percentage instead, so it gets no step counter.
+        connectStepsTotal = when {
+            currentProtocol.contains("TOR") -> 0
+            currentProtocol.contains("SHARD") -> 4
+            currentProtocol.contains("LANTERN") -> 5
+            currentProtocol.contains("FOXY") -> 5
+            currentProtocol.contains("PSIPHON") -> 4
+            else -> 5 // WireGuard / MASQUE / WoW / MIM and the chain ladder
+        }
         // MTU auto-scan: every connect starts its own scan context — no stale
         // value from the previous tunnel can reach a different transport
         // (MtuAutoScan doc explains why this matters for the chain's per-rung env).
@@ -4673,7 +4977,15 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // the chip is GOOL-only in the UI, and this guard is what enforces it
         // even for a stale pref left by an older build (setAiMode wrote GB
         // under MASQUE in ≤1.9.6) or a restored backup.
-        if (sessionExitCountry != null && currentProtocol != "GOOL") {
+        if (sessionExitCountry != null && (currentProtocol != "GOOL" ||
+                // Gool-over-masque: the exit follows where the masque tunnel
+                // hands the inner registration, not a gateway this service can
+                // force — a forced WG-style seed would be dialed as the masque
+                // outer peer and never handshake. The chase stays classic-only.
+                // WireGuard over MASQUE (3.2.45) arms the same masque carrier,
+                // so the chase is nulled there too.
+                (CoreConfig.goolOverMasque(this) || CoreConfig.wgOverMasque(this)))
+        ) {
             sessionExitCountry = null
         }
         // PREFERRED-EXIT PIN: the endpoint a previous session verified exits in
@@ -4790,6 +5102,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // notification would label a fresh tunnel with the previous exit's
         // country until something overwrote it.
         currentCountry = ""
+        currentCountryIso = ""
         // The previous tunnel's exit belongs to the previous tunnel. Cleared here
         // as well as in stopTunnel because a reconnect goes straight from one
         // startTunnel to the next, and a stale address would otherwise be handed
@@ -4900,6 +5213,18 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // what keeps the chain from being started as an ordinary Psiphon tunnel.
         if (currentProtocol.contains(CHAIN_PROTOCOL_MARKER)) {
             startChainTunnel()
+            return
+        }
+
+        // Lantern's novpn Radiance build supplies a loopback proxy only; the
+        // Android TUN and its lifecycle stay entirely inside this service.
+        if (currentProtocol.contains("LANTERN")) {
+            if (proxyMode) {
+                connected.set(false)
+                failAndStop("Lantern requires VPN mode — switch Tunnel type back to VPN")
+                return
+            }
+            startLanternTunnel()
             return
         }
 
@@ -5042,6 +5367,24 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     } else {
                         ConnectionLog.record("Identity relay: $relayProtocol stored")
                     }
+                }
+                // GOOL OVER MASQUE also needs the OUTER masque identity. On a
+                // fresh install — the user never connected with MASQUE, so no
+                // identity was ever provisioned — the engine would register it
+                // directly from the device, and the registration API does not
+                // answer on this network (3.2.40 field log: four 20s timeouts
+                // → watchdog → MTU retry loop); only this relay reaches it.
+                // Classic gool needs no masque identity, so the relay call is
+                // armed-mode only.
+                if (relayProtocol == "gool" &&
+                    (CoreConfig.goolOverMasque(this@MsnGuardVpnService) ||
+                        CoreConfig.wgOverMasque(this@MsnGuardVpnService)) &&
+                    !IdentityProvisioner.hasIdentity(this@MsnGuardVpnService, "masque")) {
+                    val outcome = IdentityRelayClient.provision(this@MsnGuardVpnService, "masque") { stopRequested.get() }
+                    ConnectionLog.record(
+                        if (outcome.success) "Identity relay: masque stored (Gool over MASQUE)"
+                        else "Identity relay: masque unavailable; core will try direct provisioning"
+                    )
                 }
                 NativeCore.attach(this)
                 // PattNG relays the core's own output line by line; an
@@ -5260,6 +5603,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 }
                 CoreConfig.applyEnv(patchedEnv)
                 val addresses = NativeCore.prepare(effectiveConfig)
+                publishProgress(35) // identity/config ready — TUN comes next
                 if (addresses.organization.isNotBlank()) {
                     ConnectionLog.record("Zero Trust organization ${addresses.organization}")
                 }
@@ -5279,7 +5623,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 // Forward chain keeps the existing final Xray listener.
                 val legacyUpstreamPort = if (reverseExitUp) CoreConfig.SOCKS_PORT else if (exitNodeUp) WarpExitManager.SOCKS_PORT else CoreConfig.SOCKS_PORT
                 val legacyFrontUp = activeEngine == TunEnginePref.LEGACY &&
-                    WarpUdpgwFront.start(legacyUpstreamPort)
+                    WarpUdpgwFront.start(legacyUpstreamPort, this@MsnGuardVpnService)
                 // Encrypted DNS: SmartDnsFront answers the device's DNS itself over
                 // DoT/DoH on the WARP egress and relays every other byte to the core.
                 // Only for the engines whose mapdns/fake-ip cannot speak DoT or DoH
@@ -5557,10 +5901,16 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
 
     private fun stopTunnel(notify: Boolean = true, teardownService: Boolean = true) {
         stopRequested.set(true)
+        val stoppingLantern = currentProtocol.contains("LANTERN")
+        if (stoppingLantern) LanternEngine.cancelConnect()
         // The watchdog must go first: it is what turns a teardown into a
         // reconnect, and leaving it armed while we dismantle the data path would
         // make it fire on the wreckage of a session that is deliberately ending.
-        stopWatchdog()
+        if (stoppingLantern) {
+            synchronized(lanternLifecycleLock) { stopWatchdog() }
+        } else {
+            stopWatchdog()
+        }
         stopTorProgressPolling()
         // Clear the session stamp here, not in sendStatus: the reconnect path and
         // onDestroy both call stopTunnel(notify = false), so relying on the
@@ -5580,8 +5930,22 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // Order matters: stop routing first so no more packets enter a tunnel
         // that is being torn down, then stop Psiphon itself.
         SmartDnsFront.stop()
-        TunEngineManager.stop(this)
-        stopTrafficPolling()
+        if (stoppingLantern) {
+            // Keep the complete Lantern TUN/Hev/sidecar teardown atomic with
+            // respect to a worker that may still be establishing the TUN.
+            synchronized(lanternLifecycleLock) {
+                runCatching { TunEngineManager.stop(this) }
+                LanternEngine.disconnectAsync()
+                stopTrafficPolling()
+                runCatching { tun?.close() }
+                tun = null
+                vpnModeActive.set(false)
+                connected.set(false)
+            }
+        } else {
+            TunEngineManager.stop(this)
+            stopTrafficPolling()
+        }
         stopWarpTrafficPolling()
         // Foxy's app-layer sockets (local SOCKS + H2 session) must come down on
         // every disconnect path — they are not owned by NativeCore/TunEngine.
@@ -5651,6 +6015,15 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             if (notify) sendStatus(STATUS_DISCONNECTED)
             // A reconnect re-enters startTunnel() on the worker thread, so the
             // service must survive; only a real disconnect stops it.
+            if (teardownService) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+            return
+        }
+
+        if (stoppingLantern) {
+            if (notify) sendStatus(STATUS_DISCONNECTED)
             if (teardownService) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -5869,6 +6242,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         warpListen: String,
         generationAtStart: Int,
     ): Boolean {
+        publishProgress(45) // entering the MTU/TUN ladder — the core runs next
         val storedMtu = MtuConfig.get(this, method)
         // Build ladder: stored → 1500 → Scan result. Deduplicated, in-range only.
         val ladder = mutableListOf<Int>()
@@ -5933,6 +6307,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 CoreConfig.applyEnv(patched)
             }
             val addresses = NativeCore.prepare(effectiveConfig)
+            publishProgress(35) // identity/config ready — TUN comes next
             tun = Builder()
                 .setSession("MSN-GUARD")
                 .setMtu(mtu)
@@ -6150,6 +6525,10 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 repostNotification()
                 sendStatus(STATUS_CONNECTED)
                 ConnectionLog.record("aether SOCKS listener up at " + listenAddress + " — connected")
+                // 3.2.47: the DNS cache's post-connect refresh pass — re-asks
+                // the nearly-expired names before the user opens an app. Purely
+                // additive: it only feeds the cache, never serves an app.
+                WarpUdpgwFront.warmDnsCache()
                 startWatchdog()
                 startWarpTrafficPolling()
                 return true
@@ -6186,6 +6565,8 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     repostNotification()
                     sendStatus(STATUS_CONNECTED)
                     ConnectionLog.record("aether SOCKS listener up at $listenAddress — connected")
+                    // 3.2.47: see the warm-up note at the other connect site.
+                    WarpUdpgwFront.warmDnsCache()
                     // Now the tunnel exists, so the watchdog has something to
                     // watch. Arming it earlier killed the engine while it was
                     // still registering (see the comment at the startProxy call).
@@ -6240,6 +6621,12 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 // This is the latch's normal end: the scheduled restart cannot clear
                 // it itself without racing the old session's teardown readers.
                 reconnectRequested.set(false)
+                // The notification names the exit country as METHOD-ISO
+                // (MASQUE-IR, LANTERN-NL). The aether core self-reports its
+                // exit (exit_ip event); every OTHER transport needs this
+                // probe-through-the-tunnel to name its exit at all, with the
+                // app open or closed.
+                scheduleExitLabelProbe()
             }
             STATUS_DISCONNECTED, STATUS_FAILED -> connectedSince = 0L
         }
@@ -6249,16 +6636,47 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         if (progress >= 0) connectProgress = progress
         if (status == STATUS_CONNECTED || status == STATUS_DISCONNECTED || status == STATUS_FAILED) {
             connectProgress = -1
+            connectStepsTotal = 0
+            lastConnectingDetail = null
+        } else if (status == STATUS_CONNECTING && detail != null) {
+            lastConnectingDetail = detail
         }
         sendBroadcast(Intent(ACTION_STATUS)
             .setPackage(packageName)
             .putExtra(EXTRA_STATUS, status)
             .putExtra(EXTRA_PROGRESS, connectProgress)
+            .putExtra(EXTRA_STEPS, connectStepsTotal)
             .apply { detail?.let { putExtra(EXTRA_DETAIL, it) } })
         TileService.requestListeningState(
             this,
             ComponentName(this, MsnGuardTileService::class.java),
         )
+    }
+
+    /**
+     * Maps the aether core's own log lines to real connect progress for the
+     * WARP family (WireGuard/MASQUE/WoW/MIM). PURELY COSMETIC — nothing here
+     * feeds a decision; a missed or late line only leaves the bar where it
+     * was. Guarded to CONNECTING-only and monotonic, so an out-of-order line
+     * cannot move the bar backwards.
+     */
+    private fun reportCoreConnectMilestone(message: String) {
+        if (connectStepsTotal <= 0 || connected.get() || stopRequested.get()) return
+        val pct = when {
+            message.contains("identity ready") -> 55
+            message.contains("verifying cached gateway") ||
+                message.contains("scan mode=") ||
+                message.contains("hunting for a working") -> 60
+            message.contains("selected V2 gateway") ||
+                message.contains("using cloudflare edge") ||
+                message.contains("connect-ip status: 200") ||
+                message.contains("tls established") -> 80
+            message.contains("exposing socks5") -> 90
+            message.contains("socks5 server listening") ||
+                message.contains("s0 listener up") -> 95
+            else -> return
+        }
+        if (pct > connectProgress) publishProgress(pct)
     }
 
     /**
@@ -6270,7 +6688,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
      */
     private fun publishProgress(percent: Int) {
         if (percent == connectProgress) return
-        sendStatus(STATUS_CONNECTING, null, percent)
+        sendStatus(STATUS_CONNECTING, lastConnectingDetail, percent)
     }
 
     /**
@@ -6566,7 +6984,16 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         val direct = when (currentProtocol) {
             "MASQUE" -> readLastconnPeer(File(filesDir, "aether-masque-lastconn.toml"))
             "WIREGUARD" -> readLastconnPeer(coreLastconnFile("wireguard"))
-            "GOOL" -> readLastconnPeer(coreLastconnFile("gool"))
+            // Gool-over-masque runs on the masque identity (aether-masque.toml),
+            // so run_masque saves the working gateway into the masque lastconn
+            // — the classic aether-gool-lastconn.toml belongs to the
+            // wireguard-in-wireguard run and stays untouched by that mode.
+            "GOOL" -> readLastconnPeer(
+                // Either carrier card arms the masque run (3.2.45): the
+                // gateway then lives in the masque lastconn.
+                if (CoreConfig.goolOverMasque(this) || CoreConfig.wgOverMasque(this)) File(filesDir, "aether-masque-lastconn.toml")
+                else coreLastconnFile("gool")
+            )
             "MIM" -> readLastconnPeer(coreLastconnFile("mim"))
             else -> ""
         }
@@ -6732,6 +7159,94 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
      * on proxy mode, where rotating would kill a listener another device is
      * actively using over the LAN.
      */
+    // ── Exit country label for the notification (METHOD-ISO) ────────────────
+
+    /**
+     * The local SOCKS listener of the live transport, mirrored from the
+     * activity's socksPort() so both measurements always agree. -1 when no
+     * listener exists for the current shape (e.g. the aether core in native
+     * TUN mode, which self-reports its exit via the exit_ip event instead).
+     */
+    private fun exitProbeSocksPort(): Int = when {
+        TorManager.isTorActive -> TorManager.FRONT_SOCKS_PORT
+        currentProtocol.contains("LANTERN") && LanternEngine.isRunning -> LanternEngine.SOCKS_PORT
+        com.msnguard.vpn.foxy.FoxyTunnel.isRunning -> com.msnguard.vpn.foxy.FoxyTunnel.SOCKS_PORT
+        WarpExitManager.isRunning ->
+            if (WarpUdpgwFront.isRunning) WarpUdpgwFront.LISTEN_PORT else WarpExitManager.SOCKS_PORT
+        ShardSocksFront.isRunning -> ShardSocksFront.LISTEN_PORT
+        TunnelStatus.isProxyMode -> CoreConfig.proxyListenPort(this)
+        else -> CoreConfig.SOCKS_PORT
+    }
+
+    /**
+     * One probe THROUGH the tunnel: geojs's ip/geo.json answers with both the
+     * exit address and its country, asked from the exit itself, so it works
+     * even when carrier-direct geo lookups are blocked — and it is the only
+     * source for transports whose core never reports an exit (Lantern, Tor,
+     * SHARD, Foxy). Runs on [exitGeoExecutor]; every write is generation-
+     * guarded so a late answer cannot label the next session.
+     */
+    private fun probeExitLabelOnce(generation: Int): Boolean {
+        if (generation != sessionGeneration) return false
+        if (currentCountryIso.isNotBlank()) return true
+        val port = exitProbeSocksPort()
+        if (port <= 0) return false
+        val proxy = java.net.Proxy(
+            java.net.Proxy.Type.SOCKS,
+            java.net.InetSocketAddress("127.0.0.1", port),
+        )
+        return try {
+            val connection = java.net.URL("https://get.geojs.io/v1/ip/geo.json")
+                .openConnection(proxy) as java.net.HttpURLConnection
+            connection.connectTimeout = 5_000
+            connection.readTimeout = 5_000
+            try {
+                if (connection.responseCode !in 200..299) return false
+                val body = connection.inputStream.bufferedReader().use { it.readText() }
+                val geo = org.json.JSONObject(body)
+                val ip = geo.optString("ip", "")
+                val code = geo.optString("country_code", "").trim().uppercase()
+                if (code.length == 2 && generation == sessionGeneration && currentCountryIso.isBlank()) {
+                    currentCountryIso = code
+                    if (ip.isNotBlank() && currentVpnIp.isBlank()) currentVpnIp = ip
+                    ConnectionLog.record("Exit country: ${PsiphonRegions.name(code)} ($code), probed through the tunnel")
+                    repostNotification()
+                    true
+                } else false
+            } finally {
+                connection.disconnect()
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Retry ladder for the exit label: CONNECTED is broadcast the moment the
+     * data path is up, but the local listeners and the tunnel itself need a
+     * moment before a probe through them can succeed. A few attempts spread
+     * over the first minute settle it; every attempt is a no-op once any
+     * source (exit_ip, Psiphon's report, the activity, a previous probe) has
+     * already named the exit.
+     */
+    private fun scheduleExitLabelProbe() {
+        val generation = sessionGeneration
+        val delays = longArrayOf(2_000L, 8_000L, 20_000L, 45_000L)
+        for (delay in delays) {
+            runCatching {
+                ladderScheduler.schedule({
+                    if (generation != sessionGeneration || !TunnelStatus.isActive()) return@schedule
+                    if (currentCountryIso.isNotBlank()) return@schedule
+                    runCatching {
+                        exitGeoExecutor.execute {
+                            probeExitLabelOnce(generation)
+                        }
+                    }
+                }, delay, TimeUnit.MILLISECONDS)
+            }
+        }
+    }
+
     private fun evaluateExitCountry(ip: String) {
         val wanted = sessionExitCountry ?: return
         if (exitCountryEvaluated) return
@@ -6890,6 +7405,12 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
     private fun startAsForeground() {
         val manager = getSystemService(NotificationManager::class.java)
         ensureNotificationChannel(manager)
+        // A fresh session starts unverified: until the activity's gate proves
+        // payload crosses, the row may only ever say "Connecting…" — a stale
+        // verified flag from the previous session would flip it to
+        // "VPN connected" at the first mid-connect repost.
+        TunnelStatus.uiVerifying = false
+        TunnelStatus.sessionVerified = false
         val cancelIntent = Intent(this, MsnGuardVpnService::class.java).apply { action = ACTION_CANCEL_CONNECT }
         val cancelPendingIntent = PendingIntent.getService(
             this, 5, cancelIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -7002,27 +7523,13 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             this, 3, pauseIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // Second line: what is carrying the traffic and where it comes out.
-        // Byte counters and speed are deliberately gone from here — see
-        // [updateTrafficNotification] for why they were the cause of the
-        // lock-screen wakeups, not just clutter.
+        // Second line: the method and its exit country (MASQUE-IR, LANTERN-NL).
+        // The ISO code is the notification's currency — it comes from the
+        // core's exit_ip event, Psiphon's region report, the activity's
+        // lookup, or the service's own probe through the tunnel, so every
+        // transport can name its exit even with the app closed.
         val method = prettyProtocol()
-        // SHARD names no country at all, by request: its pool is public and a node's
-        // advertised country is the publisher's label, not a measurement, so the two
-        // letters were being read as a promise about where the exit is. The other
-        // five transports keep theirs — Psiphon reports its region from the tunnel
-        // itself and the WARP/Tor paths get theirs from the activity's geolocation
-        // lookup, both of which describe the exit that is actually carrying traffic.
-        //
-        // Suppressed here rather than at the source: the active node's country is
-        // still what the main screen shows, and it belongs there. This is a
-        // notification-only decision.
-        val country = if (currentProtocol.contains("SHARD")) {
-            ""
-        } else {
-            currentCountry
-        }
-        val subtitle = if (country.isNotBlank()) "$method • $country" else method
+        val subtitle = if (currentCountryIso.isNotBlank()) "$method-$currentCountryIso" else method
 
         // Proxy mode must not claim "VPN connected": nothing is tunnelled device-wide,
         // and a user who reads that and then finds Chrome on their real IP would be
@@ -7037,6 +7544,13 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         val title = when {
             isPaused -> Strings.t("Paused")
             proxyMode -> Strings.tf("SOCKS proxy on %s", CoreConfig.proxyListenPort(this))
+            // 3.2.44: the row must not claim a tunnel the screen is still
+            // proving. The service's handshake edge and the UI's verification
+            // gate are different moments by design — the gate exists to catch
+            // handshake-only tunnels — so while the activity is verifying, the
+            // row holds "Connecting…" exactly like the dial. When no activity
+            // is verifying (app closed), it falls back to the handshake edge.
+            TunnelStatus.uiVerifying && !TunnelStatus.sessionVerified -> Strings.t("Connecting…")
             else -> Strings.t("VPN connected")
         }
 
@@ -7079,7 +7593,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         // `when` is derived by mapping the elapsedRealtime stamp we already keep
         // onto wall-clock time; using System.currentTimeMillis() directly would
         // restart the displayed timer on every repost.
-        if (connectedSince > 0L) {
+        if (connectedSince > 0L && !TunnelStatus.uiVerifying) {
             val elapsed = SystemClock.elapsedRealtime() - connectedSince
             builder.setWhen(System.currentTimeMillis() - elapsed)
                 .setUsesChronometer(true)
@@ -7121,6 +7635,10 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         currentProtocol.contains("MIM") -> Strings.t("Masque over Masque")
         currentProtocol.contains("MASQUE") -> Strings.t("MASQUE")
         currentProtocol.contains("WIREGUARD") -> Strings.t("WireGuard")
+        // A WireGuard connect armed with the masque carrier runs the engine's
+        // gool path (that is the whole point of the mapping), so the label
+        // would say WoW over a WireGuard session — name what the user picked.
+        currentProtocol.contains("GOOL") && CoreConfig.wgOverMasque(this) -> Strings.t("WireGuard")
         currentProtocol.contains("GOOL") -> Strings.t("WARP-on-WARP")
         currentProtocol.isBlank() -> Strings.t("Tunnel")
         else -> currentProtocol.lowercase().replaceFirstChar { it.uppercase() }
@@ -7602,6 +8120,18 @@ object ConnectionLog {
         if (versionStamp.isNotEmpty() && previous != versionStamp) {
             runCatching { stampFile.writeText(versionStamp) }
         }
+        // Restore the in-memory buffer from the mirror: after the process is
+        // killed (tile connect, always-on VPN) the log screen used to open
+        // EMPTY even though the file held the whole dead session — only
+        // COPY/SHARE read it. Same freshness rules as bind: a mirror from
+        // another version is already gone, so whatever is here is ours.
+        if (entries.isEmpty() && file.exists()) {
+            runCatching {
+                val lines = file.useLines { seq -> seq.filter { it.isNotBlank() }.toList() }
+                val tail = if (lines.size > MAX_ENTRIES) lines.takeLast(MAX_ENTRIES) else lines
+                tail.forEach { entries.addLast(it) }
+            }
+        }
     }
 
     @Synchronized
@@ -7615,6 +8145,20 @@ object ConnectionLog {
         if (entries.size == MAX_ENTRIES) entries.removeFirst()
         entries.addLast(line)
         runCatching { sink?.appendText(line + "\n") }
+            // Cap the mirror OUTSIDE bind() too: bind only runs when the
+            // activity opens, so a long service-only session (tile connect,
+            // always-on VPN) grew connection.log without limit. Rotate at
+            // MAX_FILE_BYTES by keeping the newer half.
+            .also {
+                val f = sink
+                if (f != null && f.exists() && f.length() > MAX_FILE_BYTES) {
+                    runCatching {
+                        val lines = f.useLines { seq -> seq.toList() }
+                        val keep = lines.drop(lines.size / 2)
+                        f.writeText(keep.joinToString("\n", postfix = "\n"))
+                    }
+                }
+            }
     }
 
     @Synchronized
