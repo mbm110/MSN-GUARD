@@ -144,7 +144,10 @@ func TestProbeTrafficThroughSocksInbound(t *testing.T) {
 		t.Fatal(err)
 	}
 	socksAddr := "127.0.0.1:18310"
-	if err := Init(dataDir, logDir, socksAddr); err != nil {
+	// The locale parameter (3.3.2) picks Radiance's direct-path DNS; the probe
+	// runs on CI runners outside Iran, so the plain non-Iran locale is the
+	// honest choice — it exercises Quad9, the same path a foreign user gets.
+	if err := Init(dataDir, logDir, socksAddr, "en-US"); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() { _ = Disconnect() })
