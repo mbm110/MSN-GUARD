@@ -10754,10 +10754,16 @@ class MainActivity : Activity() {
         const val VERIFY_RECONNECT_EXTENSION_MS = 20_000L
         /**
          * Cap on those extensions, so a truly stuck core still fails honestly
-         * instead of parking the dial on "Verifying" forever: 8 × 20s = 160s
-         * on top of the base budget.
+         * instead of parking the dial on "Verifying" forever. 3.3.4, the
+         * user's call after the 3.3.3 field log watched 8/8 fire on WireGuard:
+         * 4 × 20s = 80s of patience on top of the base budget — the connect
+         * either lands inside it or the gate gives up and the two-strike
+         * eviction (failFakeConnection → consecutiveFakeWireguard ≥ 2 →
+         * fresh scan) takes over sooner. Trade-off, stated plainly: a core
+         * whose own rescan needs more than ~80s now surfaces as a handshake-
+         * without-traffic failure instead of a long green-in-waiting.
          */
-        const val VERIFY_RECONNECT_EXTENSIONS = 8
+        const val VERIFY_RECONNECT_EXTENSIONS = 4
         /**
          * Grace period after the dial goes green before the core's own byte
          * counters are checked. 12s is past the point where a working tunnel has
