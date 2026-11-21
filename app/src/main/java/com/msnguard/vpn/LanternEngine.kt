@@ -32,6 +32,16 @@ object LanternEngine {
     private const val CONNECT_TIMEOUT_SECONDS = 180L
     private const val CONTROL_READY_TIMEOUT_MS = 10_000L
 
+    /**
+     * The country identity the sidecar's config fetches present to Lantern
+     * when the user picks the GLOBAL server pool (RADIANCE_COUNTRY →
+     * x-lantern-client-country; see the spawn comment). Any non-IR identity
+     * draws the global free pool instead of the pinned four-track IR pool.
+     * TR: nearest non-censored region to the user's line; the drawn sample
+     * itself rotates per fetch.
+     */
+    private const val LANTERN_CONFIG_COUNTRY = "TR"
+
     private val running = AtomicBoolean(false)
     private val generation = AtomicLong(0L)
     private val generationLock = Any()
@@ -231,12 +241,28 @@ object LanternEngine {
             // Executed PIEs do not inherit the app's Java native-loader namespace.
             // Make packaged dependencies visible to Android's executable linker.
             builder.environment()["LD_LIBRARY_PATH"] = context.applicationInfo.nativeLibraryDir
+            // 3.3.7: the SERVER POOL is a user choice (Settings → LANTERN →
+            // Server pool). Iran (default): NO country identity — Lantern
+            // geo-serves the pinned IR pool (3x Frankfurt + 1x Amsterdam,
+            // '-ir-free-' tags) from the device's own IP, the field-tested
+            // fast servers. Global: RADIANCE_COUNTRY presents a non-IR
+            // identity — verified in Radiance's config/fetcher.go, it sets
+            // x-lantern-client-country on every config fetch (boot, forced
+            // refresh, poll) — so the draw comes from the worldwide free pool
+            // (Milan, Ashburn, and more), which the official app shows abroad.
+            // TR: nearest non-censored region to the user's line; the drawn
+            // sample itself rotates per fetch. 3.2.49/50 measured the trade:
+            // more locations, slower throughput on Iranian lines.
+            if (CoreConfig.lanternPool(context) == "global") {
+                builder.environment()["RADIANCE_COUNTRY"] = LANTERN_CONFIG_COUNTRY
+            }
             // 3.2.50 revert: the sidecar again presents NO country identity, so
             // Lantern geo-serves the IR pool (3x Frankfurt + 1x Amsterdam,
             // tags suffixed "-ir-free-") — the field-tested fast servers. The
             // 3.2.49 global-pool draw (country override → Milan/Ashburn/...)
-            // worked but its throughput on the user's line was poor; the IR
-            // pool is the one to ship.
+            // worked but its throughput on the user's line was poor; 3.2.50
+            // pinned the IR pool. 3.3.7 makes it the user's call (above) —
+            // Iran stays the default.
 
             val started = try {
                 builder.start()

@@ -30,7 +30,7 @@ LDFLAGS="-s -w -checklinkname=0 -extldflags '-Wl,-z,max-page-size=16384 -Wl,-z,r
 export PATH="$(go env GOPATH)/bin:$PATH"
 cd "$BRIDGE_DIR"
 
-go mod download github.com/getlantern/radiance@v0.0.0-20261114050550-0f837799e530
+go mod download github.com/getlantern/radiance@v0.0.0-20261121161923-0c920c73b969
 go mod tidy
 echo "Resolved Radiance module checksums:"
 grep '^github.com/getlantern/radiance ' go.sum

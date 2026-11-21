@@ -30,7 +30,7 @@ jobs:
         run: |
           set -e
           cd core/lanternbridge
-          go mod download github.com/getlantern/radiance@v0.0.0-20261114050550-0f837799e530
+          go mod download github.com/getlantern/radiance@v0.0.0-20261121161923-0c920c73b969
           go mod tidy
           go test -tags="novpn,with_gvisor,with_quic,with_wireguard,with_utls,with_grpc,probe" \
             -run TestProbeTrafficThroughSocksInbound -v -timeout 420s . -count=1

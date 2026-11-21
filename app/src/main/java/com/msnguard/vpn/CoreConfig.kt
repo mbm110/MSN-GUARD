@@ -135,6 +135,20 @@ object CoreConfig {
         context.profiled().getString(LANTERN_DNS_REGION, "iran") ?: "iran"
 
     /**
+     * Which server pool Lantern draws (3.3.7): "iran" (default) — the sidecar
+     * presents no country identity, so Lantern geo-serves the pinned IR pool
+     * from the device's own IP — or "global", where LanternEngine sets
+     * RADIANCE_COUNTRY and the config fetch presents a non-IR identity
+     * (x-lantern-client-country) and draws the worldwide free pool. Read when
+     * the sidecar process starts: applies at the next connect.
+     */
+    const val LANTERN_POOL = "lantern_server_pool"
+
+    /** The chosen pool's coreName; see [LANTERN_POOL]. */
+    fun lanternPool(context: Context): String =
+        context.profiled().getString(LANTERN_POOL, "iran") ?: "iran"
+
+    /**
      * WireGuard over MASQUE (3.2.45): the WireGuard carrier's twin of
      * [GOOL_OVER_MASQUE_PREF] — armed, a WireGuard connect runs wireguard
      * INSIDE the masque tunnel (identity registered through it) on exactly the

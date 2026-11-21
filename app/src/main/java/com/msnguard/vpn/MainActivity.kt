@@ -210,6 +210,7 @@ class MainActivity : Activity() {
     /** Lantern settings rows: server picker, like the Psiphon ones. */
     private var lanternServerRow: OrbitSettingsRow? = null
     private var lanternDnsRow: OrbitSettingsRow? = null
+    private var lanternPoolRow: OrbitSettingsRow? = null
     private var cdnSniRow: OrbitSettingsRow? = null
 
     /** LAN-sharing switch; its subtitle carries the live proxy address. */
@@ -3779,6 +3780,18 @@ class MainActivity : Activity() {
                 chooseLanternDns { lanternDnsRow?.setValue(lanternDnsChoice().label) }
             }
             body.addView(lanternDnsRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+
+            // The server pool (3.3.7): whether Lantern draws the pinned IR
+            // pool or the worldwide free pool. Takes effect on the next
+            // connect — RADIANCE_COUNTRY is read when the sidecar starts
+            // (both the connect path and the offline picker's list boot).
+            lanternPoolRow = navRow(Strings.t("Server pool"), lanternPoolChoice().label) {
+                chooseLanternPool { lanternPoolRow?.setValue(lanternPoolChoice().label) }
+            }
+            body.addView(lanternPoolRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
@@ -10651,6 +10664,46 @@ class MainActivity : Activity() {
     private fun lanternDnsChoice(): LanternDnsRegion =
         LanternDnsRegion.entries.firstOrNull { it.coreName == CoreConfig.lanternDnsRegion(this) }
             ?: LanternDnsRegion.IRAN
+
+    /**
+     * The Lantern SERVER POOL the user draws from (3.3.7). IRAN is the
+     * default and must stay it: the sidecar presents no country identity, so
+     * Lantern geo-serves the pinned IR pool — the 3x Frankfurt + 1x
+     * Amsterdam tracks the field logs proved fast; the 3.2.49 global draw was
+     * slower on the user's line. GLOBAL presents a non-IR identity
+     * (RADIANCE_COUNTRY → x-lantern-client-country) and draws the worldwide
+     * free pool instead. Applies at the next connect, like the DNS region.
+     */
+    private enum class LanternPool(val enLabel: String, val coreName: String, val enDescription: String) {
+        IRAN("Iran", "iran", "Lantern's Iran pool — 3x Frankfurt + 1x Amsterdam; the fast servers for Iranian lines"),
+        GLOBAL("Global", "global", "The worldwide free pool (Milan, Ashburn, and more); more locations but slower on Iranian lines");
+
+        val label: String get() = Strings.t(enLabel)
+        val description: String get() = Strings.t(enDescription)
+    }
+
+    /** The chosen [LanternPool]; falls back to IRAN for unknown values. */
+    private fun lanternPoolChoice(): LanternPool =
+        LanternPool.entries.firstOrNull { it.coreName == CoreConfig.lanternPool(this) }
+            ?: LanternPool.IRAN
+
+    /**
+     * The pool chooser. Persisting the choice alone changes nothing running:
+     * RADIANCE_COUNTRY is read when the sidecar process starts, so the switch
+     * lands on the next connect (and the next offline picker boot).
+     */
+    private fun chooseLanternPool(after: (() -> Unit)? = null) = showChoiceSheet(
+        title = Strings.t("Server pool"),
+        subtitle = Strings.t("Which server pool Lantern draws from · applies next connection"),
+        options = LanternPool.entries.toList(),
+        selected = lanternPoolChoice(),
+        label = { it.label },
+        description = { it.description },
+    ) { chosen ->
+        preferences().edit().putString(CoreConfig.LANTERN_POOL, chosen.coreName).apply()
+        ConnectionLog.record("Lantern server pool set to ${chosen.coreName} (next connect)")
+        after?.invoke()
+    }
 
     /**
      * How the chain picks the WARP transport that carries Psiphon.
