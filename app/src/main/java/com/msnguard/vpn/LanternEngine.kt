@@ -336,14 +336,19 @@ object LanternEngine {
                                 }
                             }
                             val lower = line.lowercase()
-                            // 3.4.2 TEMP DIAGNOSTIC: also pass "tun" lines — the
-                            // handoff ack, OpenTun serving the fd, sing-tun's
-                            // tunnel start and any TUN-related errors. The 3.4.1
-                            // field log showed a connect that never finished but
-                            // every TUN line was filtered out, so the failure was
-                            // invisible. Remove once the connect path is verified.
+                            // 3.4.6 TEMP DIAGNOSTIC: also pass DNS/rule-set lines —
+                            // the 3.4.5 field log has the tunnel fully up (handoff,
+                            // engine connect, reachability) while apps get no DNS
+                            // answers and ga-ir never loads. The deciding lines
+                            // (Using AliDNS/Quad9 for locale, DoH dial targets, DNS
+                            // rule evaluation) carry none of the standing keywords.
+                            // Remove once the DNS path is verified.
                             if (lower.contains("error") || lower.contains("warn") ||
-                                lower.contains("connected") || lower.contains("tun")
+                                lower.contains("connected") || lower.contains("tun") ||
+                                lower.contains("dns") || lower.contains("rule-set") ||
+                                lower.contains("lookup") || lower.contains("locale") ||
+                                lower.contains("using") || lower.contains("fakeip") ||
+                                lower.contains("hijack") || lower.contains("exchange")
                             ) {
                                 // Spam gate: radiance/sing-box repeat identical errors
                                 // (e.g. "missing fakeip record" per connection) with only
@@ -629,7 +634,7 @@ object LanternEngine {
                         val request = TunRequest(line.removePrefix("OPEN "))
                         ConnectionLog.record(
                             "Lantern: engine requested the TUN " +
-                                "(mtu=${request.mtu}, v4=${request.inet4.joinToString(",")}, dns=${request.dnsServers.size})"
+                                "(mtu=${request.mtu}, v4=${request.inet4.joinToString(",")}, dns=${request.dnsServers.joinToString(",")}, routes4=${request.routes4.joinToString(",")})"
                         )
                         val reply = try {
                             val pfd = establishTun(request)
