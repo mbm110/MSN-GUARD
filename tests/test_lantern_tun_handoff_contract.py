@@ -38,8 +38,12 @@ class LanternTunHandoffContract(unittest.TestCase):
     def test_the_handoff_socket_serves_scm_rights(self):
         self.assertIn("tun-handoff.sock", MAIN)
         self.assertIn("ReadMsgUnix", MAIN)
-        self.assertIn("unix.ParseSocketControlMessage", MAIN)
-        self.assertIn("unix.ParseRights", MAIN)
+        # Stdlib parsing: syscall.ParseSocketControlMessage + a direct
+        # little-endian int32 unpack of the rights (ParseRights lives in
+        # x/sys only, and the module graph pins an x/sys without it).
+        self.assertIn("syscall.ParseSocketControlMessage", MAIN)
+        self.assertIn("syscall.SCM_RIGHTS", MAIN)
+        self.assertIn("binary.LittleEndian.Uint32", MAIN)
         self.assertIn("lanternbridge.SetTunFd", MAIN)
 
     def test_opentun_serves_a_fresh_dup_per_tunnel(self):

@@ -587,9 +587,14 @@ object LanternEngine {
         return try {
             LocalSocket().use { socket ->
                 socket.soTimeout = 10_000
+                // 3.4.3 TEMP diagnostic: connect() has no timeout, and the
+                // 3.4.2 field log showed no handoff outcome at all — these
+                // markers bracket the only three blocking calls.
+                ConnectionLog.record("Lantern: handoff — connecting to ${path.name}")
                 socket.connect(
                     LocalSocketAddress(path.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM)
                 )
+                ConnectionLog.record("Lantern: handoff — socket connected")
                 // The descriptor rides the NEXT write as an SCM_RIGHTS
                 // control message; the sidecar's handoff handler reads it
                 // with recvmsg and replies with a one-line ack.
@@ -598,6 +603,7 @@ object LanternEngine {
                     write("tun\n".toByteArray(Charsets.UTF_8))
                     flush()
                 }
+                ConnectionLog.record("Lantern: handoff — fd sent, awaiting ack")
                 val ack = BufferedReader(InputStreamReader(socket.inputStream)).readLine().orEmpty()
                 if (ack.startsWith("OK")) {
                     ConnectionLog.record("Lantern: TUN fd handed off to the sidecar ($ack)")

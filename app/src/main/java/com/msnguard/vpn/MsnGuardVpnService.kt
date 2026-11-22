@@ -3405,6 +3405,14 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     vpnModeActive.set(true)
                     fd
                 }
+                // 3.4.3 TEMP diagnostic: the 3.4.2 field log showed the
+                // sequence alive up to the handoff listener, then silence —
+                // neither handoff success, rejection nor failure appeared,
+                // so the stall is somewhere between establish() and the
+                // ack read. These step markers are app-side records
+                // (always visible) and get removed once the connect path
+                // is verified in the field.
+                ConnectionLog.record("Lantern: step 1/5 — TUN established (fd=${establishedTun.fd})")
 
                 if (!LanternEngine.isCurrent(attempt)) return@execute
                 sendStatus(STATUS_CONNECTING, Strings.t("Starting Lantern public servers…"), 15)
@@ -3418,13 +3426,16 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     error("Could not boot the Lantern engine for the TUN handoff")
                 }
                 if (!LanternEngine.isCurrent(attempt)) return@execute
+                ConnectionLog.record("Lantern: step 2/5 — sidecar booted for the handoff")
                 if (!LanternEngine.awaitTunHandoffSocket(this)) {
                     if (!LanternEngine.isCurrent(attempt)) return@execute
                     error("The Lantern engine did not expose its TUN handoff socket")
                 }
                 if (!LanternEngine.isCurrent(attempt)) return@execute
+                ConnectionLog.record("Lantern: step 3/5 — handoff socket present")
                 // The fd handoff MUST precede /connect: the engine's OpenTun
                 // serves the tunnel's TUN from the master this call stashes.
+                ConnectionLog.record("Lantern: step 4/5 — handing off the TUN fd")
                 if (!LanternEngine.handoffTun(this, establishedTun)) {
                     if (!LanternEngine.isCurrent(attempt)) return@execute
                     error(LanternEngine.errorMessage().ifBlank { "Could not hand the TUN to the Lantern engine" })
@@ -3434,6 +3445,8 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     if (!LanternEngine.isCurrent(attempt)) return@execute
                     error(LanternEngine.errorMessage().ifBlank { "Could not connect to public Lantern servers" })
                 }
+                if (!LanternEngine.isCurrent(attempt)) return@execute
+                ConnectionLog.record("Lantern: step 5/5 — engine connected")
                 if (!LanternEngine.isCurrent(attempt)) return@execute
                 publishProgress(90) // engine tunnel is up — verification remains
                 activeSocksPort = LanternEngine.SOCKS_PORT
