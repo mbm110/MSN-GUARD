@@ -33,8 +33,8 @@ class MasqueExitNodeContractTest(unittest.TestCase):
 
     def test_version_is_experimental_and_incremented(self):
         text = BUILD.read_text()
-        self.assertIn("versionCode = 516", text)
-        self.assertIn('versionName = "3.4.6"', text)
+        self.assertIn("versionCode = 517", text)
+        self.assertIn('versionName = "3.4.7"', text)
 
     def test_custom_exit_clears_freedom_ech_on_main_and_mtu_retry_env(self):
         service = SERVICE.read_text()

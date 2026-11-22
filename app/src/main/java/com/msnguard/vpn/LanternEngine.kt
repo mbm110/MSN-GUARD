@@ -91,6 +91,17 @@ object LanternEngine {
     /** Last time any picker surface (list/selection/ping) actually used the sidecar. */
     private val lastSidecarUse = AtomicLong(0L)
 
+    /**
+     * Cheap, network-free session liveness for UI-side guards
+     * ([TunnelStatus.isActive], the dial, tile and header): the session flag
+     * plus a live sidecar process. Deliberately NOT the /status-verifying
+     * [isRunning] — that one makes a 350ms control round-trip on every read,
+     * and isActive() is called on the main thread while rendering the dial.
+     * The watchdog keeps using [isRunning], which actually proves the tunnel.
+     */
+    val isSessionActive: Boolean
+        get() = running.get() && process?.isAlive == true
+
     /** Idle reaper cadence and how long a list-only sidecar may sit untouched. */
     private const val SIDECAR_IDLE_TICK_MS = 30_000L
     private const val SIDECAR_IDLE_TIMEOUT_MS = 4 * 60_000L

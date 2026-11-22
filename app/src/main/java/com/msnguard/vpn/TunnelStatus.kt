@@ -41,7 +41,8 @@ object TunnelStatus {
      * ACTION_CONNECT, which silently no-ops behind the connected guard.
      */
     fun isActive(): Boolean = NativeCore.isRunning() || TunEngineManager.isRunningAny ||
-        isProxyMode || com.msnguard.vpn.foxy.FoxyHevEngine.isRunning
+        isProxyMode || com.msnguard.vpn.foxy.FoxyHevEngine.isRunning ||
+        LanternEngine.isSessionActive
 
     /**
      * True when the whole device is being routed through tun2socks.
@@ -51,7 +52,7 @@ object TunnelStatus {
      * answer (e.g. the header's "all apps protected" claim).
      */
     val isWholeDeviceRouting: Boolean
-        get() = TunEngineManager.isRunningAny
+        get() = TunEngineManager.isRunningAny || LanternEngine.isSessionActive
 
     /**
      * True while the Rust core is driving an Android TUN directly.
