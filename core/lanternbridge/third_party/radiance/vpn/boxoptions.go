@@ -275,6 +275,26 @@ func cacheClearMarkerPath(basePath string) string {
 	return filepath.Join(basePath, cacheClearMarkerName)
 }
 
+// detourRuleSetsThroughTunnel reroutes remote rule-set downloads through the
+// tunnel's auto-select group. MSN 3.4.9 (vendored divergence): upstream
+// downloads them via "direct", whose host must be resolved with the direct
+// DoH resolvers — dead on the field line (DPI), so ga-ir never loaded and
+// retried every 10s (field logs 3.4.7/3.4.8: "fetch rule-set ga-ir ...
+// i/o timeout"). Through a proxy outbound the domain is passed to the remote
+// server, so no local DNS is needed and the rule-set loads once the tunnel
+// is up; sing-box retries the download otherwise.
+func detourRuleSetsThroughTunnel(rulesets []O.RuleSet) {
+	for i := range rulesets {
+		if rulesets[i].Type != C.RuleSetTypeRemote {
+			continue
+		}
+		if d := rulesets[i].RemoteOptions.DownloadDetour; d != "" && d != "direct" {
+			continue
+		}
+		rulesets[i].RemoteOptions.DownloadDetour = AutoSelectTag
+	}
+}
+
 // removeCacheFile deletes the tunnel cache if it exists.
 func removeCacheFile(basePath string) error {
 	err := os.Remove(cacheFilePath(basePath))
@@ -360,6 +380,7 @@ func buildOptions(bOptions BoxOptions) (O.Options, string, error) {
 	if len(smartRoutingRules) > 0 {
 		slog.Info("Adding smart-routing rules")
 		outbounds, rules, rulesets := smartRoutingRules.ToOptions(urlTestInterval, urlTestIdleTimeout)
+		detourRuleSetsThroughTunnel(rulesets)
 		opts.Outbounds = append(opts.Outbounds, outbounds...)
 		opts.Route.Rules = append(opts.Route.Rules, rules...)
 		opts.Route.RuleSet = append(opts.Route.RuleSet, rulesets...)
@@ -370,6 +391,7 @@ func buildOptions(bOptions BoxOptions) (O.Options, string, error) {
 	if len(adBlockRules) > 0 {
 		slog.Info("Adding ad-block rules")
 		rule, rulesets := bOptions.AdBlock.ToOptions()
+		detourRuleSetsThroughTunnel(rulesets)
 		opts.Route.Rules = append(opts.Route.Rules, rule)
 		opts.Route.RuleSet = append(opts.Route.RuleSet, rulesets...)
 	} else if len(bOptions.AdBlock) > 0 && len(adBlockRules) == 0 {

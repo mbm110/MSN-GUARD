@@ -71,15 +71,13 @@ class LanternServerPickerFirstLoadContract(unittest.TestCase):
         # had poor throughput on the user's Iranian line; Lantern geo-serves
         # IR the dedicated fast four-track pool, and that is what ships.
         # 3.3.7: the pool became a user setting (Settings → LANTERN → Server
-        # pool). 3.4.8: the assignment is now UNCONDITIONAL — the iran
-        # branch pins the "IR" header so fronted fetches also draw the
-        # pinned IR pool (field log 3.4.7: geo-detection only worked for
-        # direct fetches and the picker filled with global servers).
-        guard_idx = ENGINE.index('if (CoreConfig.lanternPool(context) == "global") {')
-        assign_idx = ENGINE.index('builder.environment()["RADIANCE_COUNTRY"] =')
-        # The assignment now WRAPS the guard: iran pins "IR", global keeps TR.
-        self.assertLess(assign_idx, guard_idx)
-        self.assertEqual(ENGINE.count('builder.environment()["RADIANCE_COUNTRY"]'), 1)
+        # pool). 3.4.9: the header pin is gone — the server-track probe proved
+        # the draw follows the config fetch's EXIT IP, not the header — and
+        # the pool is enforced client-side instead (RADIANCE_POOL=ir filters
+        # the vendored Radiance's server list to '-ir-free-' on every load).
+        self.assertIn('builder.environment()["RADIANCE_POOL"] = pool', ENGINE)
+        self.assertIn("val pool = CoreConfig.lanternPool(context)", ENGINE)
+        self.assertNotIn("RADIANCE_COUNTRY", ENGINE)
         # Still no config re-roll plumbing: a pool switch lands on the NEXT
         # sidecar boot, not a live forceConfigRefresh.
         self.assertNotIn("forceConfigRefresh", ENGINE)

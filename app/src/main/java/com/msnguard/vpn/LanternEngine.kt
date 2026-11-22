@@ -64,16 +64,6 @@ object LanternEngine {
         return path.exists()
     }
 
-    /**
-     * The country identity the sidecar's config fetches present to Lantern
-     * when the user picks the GLOBAL server pool (RADIANCE_COUNTRY →
-     * x-lantern-client-country; see the spawn comment). Any non-IR identity
-     * draws the global free pool instead of the pinned four-track IR pool.
-     * TR: nearest non-censored region to the user's line; the drawn sample
-     * itself rotates per fetch.
-     */
-    private const val LANTERN_CONFIG_COUNTRY = "TR"
-
     private val running = AtomicBoolean(false)
     private val generation = AtomicLong(0L)
     private val generationLock = Any()
@@ -285,33 +275,27 @@ object LanternEngine {
             // Make packaged dependencies visible to Android's executable linker.
             builder.environment()["LD_LIBRARY_PATH"] = context.applicationInfo.nativeLibraryDir
             // 3.3.7: the SERVER POOL is a user choice (Settings → LANTERN →
-            // Server pool). 3.4.8: BOTH choices now present an explicit
-            // x-lantern-client-country (verified in Radiance's
-            // config/fetcher.go: the env sets the header on EVERY fetch —
-            // boot, forced refresh, poll). Iran (default): the header is
-            // "IR", so the pinned IR pool (3x Frankfurt + 1x Amsterdam,
-            // '-ir-free-' tags) is drawn on EVERY fetch — the geo-detection
-            // path only drew it when the fetch went out directly, so a
-            // fronted (domainfront) fetch presented the front's non-IR exit
-            // and drew a rotating GLOBAL sample (field log 3.4.7: the picker
-            // listed many countries and the auto group carried dead
-            // samizdat/cardiff/global servers). Global: the header is TR —
-            // nearest non-censored region; the sample rotates per fetch.
-            // 3.2.49/50 measured the trade: more locations, slower
-            // throughput on Iranian lines.
-            builder.environment()["RADIANCE_COUNTRY"] =
-                if (CoreConfig.lanternPool(context) == "global") {
-                    LANTERN_CONFIG_COUNTRY
-                } else {
-                    "IR"
-                }
-            // 3.2.50 revert: the sidecar again presents NO country identity, so
-            // Lantern geo-serves the IR pool (3x Frankfurt + 1x Amsterdam,
-            // tags suffixed "-ir-free-") — the field-tested fast servers. The
-            // 3.2.49 global-pool draw (country override → Milan/Ashburn/...)
-            // worked but its throughput on the user's line was poor; 3.2.50
-            // pinned the IR pool. 3.3.7 makes it the user's call (above) —
-            // Iran stays the default.
+            // Server pool). 3.4.9: the pool is now enforced CLIENT-SIDE in the
+            // vendored Radiance (vpn/hostaccess.go pinPoolIfRequested). The
+            // 3.4.8 country header did NOT pin it — the server-track probe
+            // proved the draw follows the EXIT IP of the config fetch (header
+            // and locale are ignored), so the boot fetch drew the pinned IR
+            // pool only because it left from the Iranian line, while the 17:18
+            // mid-session refresh left through the tunnel (German exit) and
+            // refilled the auto group with 5 dead global servers — the session
+            // died minutes later (field log 3.4.8). RADIANCE_POOL=ir keeps
+            // only the '-ir-free-' servers in the tunnel, the auto group and
+            // the picker, whatever any fetch drew; a draw with no ir-free
+            // members keeps the previous list. Global: no filter — the
+            // worldwide sample rotates per fetch as upstream.
+            val pool = CoreConfig.lanternPool(context)
+            builder.environment()["RADIANCE_POOL"] = pool
+            // Visible per-session proof that both selectors are live: the
+            // pool filter above and the DNS locale above drive the sidecar.
+            ConnectionLog.record(
+                "Lantern: server pool=$pool (ir-free filter ${if (pool == "ir") "on" else "off"})" +
+                    "; DNS region=${CoreConfig.lanternDnsRegion(context)} -> locale $radianceLocale"
+            )
 
             val started = try {
                 builder.start()

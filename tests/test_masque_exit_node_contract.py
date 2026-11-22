@@ -35,8 +35,8 @@ class MasqueExitNodeContractTest(unittest.TestCase):
 
     def test_version_is_experimental_and_incremented(self):
         text = BUILD.read_text()
-        self.assertIn("versionCode = 518", text)
-        self.assertIn('versionName = "3.4.8"', text)
+        self.assertIn("versionCode = 519", text)
+        self.assertIn('versionName = "3.4.9"', text)
 
     def test_custom_exit_clears_freedom_ech_on_main_and_mtu_retry_env(self):
         # The env patching moved from the service into CoreConfig's env map

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Contract: the Lantern server pool setting (3.3.7) is real, not cosmetic.
 
-RADIANCE_COUNTRY is consumed by Radiance's config/fetcher.go: non-empty → the
-x-lantern-client-country header rides every config fetch (boot, forced
-refresh, poll), so Lantern serves the worldwide free pool instead of the
-geo-served IR pool (3x Frankfurt + 1x Amsterdam, '-ir-free-' tags). The
-3.2.49 field test drew Milan/Ashburn this way; 3.2.50 pinned the IR pool for
-throughput; 3.3.7 makes it the user's choice with Iran as the default.
+3.4.9: the pool is enforced CLIENT-SIDE. The server-track probe proved the
+server draws the pool from the EXIT IP of the config fetch — the
+x-lantern-client-country header and the locale are ignored — so the 3.4.8
+header pin could not survive a mid-session refresh that left through the
+tunnel (field log 3.4.8: the 17:18 refill swapped 5 dead global servers into
+the auto group and the session died). RADIANCE_POOL=ir now filters the
+server list to the pinned '-ir-free-' pool inside the vendored Radiance
+(vpn/hostaccess.go pinPoolIfRequested), on every load — boot and refresh
+alike; global keeps the upstream rotating worldwide sample.
 """
 
 import pathlib
@@ -19,38 +22,36 @@ ENGINE = (APP / "LanternEngine.kt").read_text()
 UI = (APP / "MainActivity.kt").read_text()
 STRINGS = (APP / "Strings.kt").read_text()
 RUSSIAN = (APP / "RussianStrings.kt").read_text()
-RADIANCE = pathlib.Path(
-    "/root/.hermes/cache/scratch/radiance-src/config/fetcher.go"
-)
-RADIANCE_ENV = pathlib.Path(
-    "/root/.hermes/cache/scratch/radiance-src/common/env/env.go"
-)
+VENDORED = ROOT / "core/lanternbridge/third_party/radiance"
+HOSTACCESS = (VENDORED / "vpn/hostaccess.go").read_text()
 
 
 class LanternPoolContract(unittest.TestCase):
-    def test_the_env_var_is_real_in_radiance(self):
-        # The header must exist in the vendored Radiance source — otherwise
-        # the setting is cosmetic.
-        fetcher = RADIANCE.read_text()
-        self.assertIn("x-lantern-client-country", fetcher)
-        env_go = RADIANCE_ENV.read_text()
-        self.assertIn('"RADIANCE_COUNTRY"', env_go)
+    def test_the_pool_filter_is_real_in_the_vendored_radiance(self):
+        # The filter must exist in the vendored Radiance — otherwise the
+        # setting is cosmetic.
+        self.assertIn('env.GetString("RADIANCE_POOL") != "ir"', HOSTACCESS)
+        self.assertIn('"-ir-free-"', HOSTACCESS)
+        # A draw with no ir-free members must keep the previous list, never
+        # empty the auto group.
+        self.assertIn("draw had no ir-free servers; keeping the previous list", HOSTACCESS)
+        # The filter runs inside allowedServers, which every server load
+        # (boot and config refresh) goes through.
+        self.assertIn("list = pinPoolIfRequested(list)", HOSTACCESS)
 
     def test_the_engine_sets_the_env_for_both_pools(self):
-        # 3.4.8: BOTH pools present an explicit x-lantern-client-country.
-        # Iran pins the IR header on every fetch so a fronted (domainfront)
-        # fetch can no longer draw a rotating global sample; global keeps TR.
-        self.assertIn(
-            'if (CoreConfig.lanternPool(context) == "global") {', ENGINE
-        )
-        self.assertIn(
-            'builder.environment()["RADIANCE_COUNTRY"] =', ENGINE,
-        )
-        # The identity must be a non-IR country or the draw stays IR.
-        self.assertIn('LANTERN_CONFIG_COUNTRY = "TR"', ENGINE)
-        # The iran branch must pin the IR header, not fall through to
-        # geo-detection.
-        self.assertIn('                    "IR"', ENGINE)
+        # 3.4.9: the pool value flows straight into RADIANCE_POOL; iran
+        # filters to the pinned IR pool, global leaves the sample unfiltered.
+        self.assertIn('builder.environment()["RADIANCE_POOL"] = pool', ENGINE)
+        self.assertIn("val pool = CoreConfig.lanternPool(context)", ENGINE)
+        # The old 3.4.8 country header is gone: the probe proved the server
+        # ignores it, so it must not linger as a second, conflicting knob.
+        self.assertNotIn("RADIANCE_COUNTRY", ENGINE)
+
+    def test_the_engine_logs_the_live_choice_per_session(self):
+        # Both selectors must be verifiable in the app log on every connect.
+        self.assertIn('"Lantern: server pool=$pool', ENGINE)
+        self.assertIn("DNS region=${CoreConfig.lanternDnsRegion(context)}", ENGINE)
 
     def test_the_pref_exists_with_iran_default(self):
         self.assertIn('const val LANTERN_POOL = "lantern_server_pool"', CORE)
