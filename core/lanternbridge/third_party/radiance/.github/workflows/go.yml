@@ -1,0 +1,43 @@
+# This workflow will build a golang project
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
+
+name: Go
+
+on:
+  push:
+    branches: [ "main", "refactor" ]
+  # No branch filter here — run CI on every pull request regardless of target
+  # branch. This catches PRs aimed at refactor, feature branches, or anything
+  # else, not just main. The previous filter ("branches: [ main ]") silently
+  # skipped CI for PRs into refactor, which is our active dev branch.
+  pull_request:
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: "go.mod"
+
+    - name: Check for slog overwrite calls in tests
+      run: |
+        if grep -rn 'slog\.SetDefault\|slog\.SetLogLoggerLevel' --include='*_test.go' .; then
+          echo "::error::Test files should not upate the slog.Default logger or level. This pollutes the output."
+          exit 1
+        fi
+
+    - name: Build
+      run: make build
+
+    - name: Check for log leaks
+      run: |
+        make logleak
+        GOOS=windows make logleak
+
+    - name: Test
+      run: make test

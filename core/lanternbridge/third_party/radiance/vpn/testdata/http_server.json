@@ -1,0 +1,16 @@
+{
+	"log": {
+		"disabled": true,
+		"level": "trace",
+		"output": "stdout",
+		"timestamp": true
+	},
+	"inbounds": [
+		{
+			"type": "mixed",
+			"tag": "server",
+			"listen": "127.0.0.1",
+			"listen_port": 8080
+		}
+	]
+}

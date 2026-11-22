@@ -1,0 +1,34 @@
+syntax = "proto3";
+option go_package = "/protos";
+
+message Plan {
+  string id = 1;
+  string description = 2;
+  bool bestValue = 3;
+  int64 usdPrice = 4;
+  map<string, int64> price = 5;
+  map<string, int64> expectedMonthlyPrice = 6;
+  string totalCostBilledOneTime = 7;
+  string oneMonthCost = 8;
+  string totalCost = 9;
+  string formattedBonus = 10;
+  string renewalText = 11;
+  map<string, int64> renewalBonusExpected = 13;
+  int64 originalUsdPrice = 14;
+  int64 originalUsdPrice1Y = 15;
+  int64 originalUsdPrice2Y = 16;
+  map<string, int64> originalPrice = 17;
+  map<string, int64> originalExpectedMonthlyPrice = 18;
+}
+
+message PaymentProviders {
+  string name = 1;
+  repeated string icons = 3;
+  map<string, string> data = 4;
+  bool supportsSubscription = 2 [json_name = "supportsSubscription"];
+}
+
+message PaymentMethod {
+  string method = 1;
+  PaymentProviders provider = 2;
+}

@@ -1,0 +1,35 @@
+dns:
+  - https:
+      name: cloudflare-dns.com.
+      address: cloudflare.net.
+  - https:
+      name: doh.dns.sb
+      address: cloudflare.net:443
+  - https:
+      name: "2001:4860:4860::8844"
+  - https:
+      name: "8.8.4.4"
+  - https:
+      name: "1.0.0.1"
+  - https:
+      name: "2606:4700:4700::1001"
+  - https:
+      name: "223.5.5.5"
+  - https:
+      name: "2620:119:35::35"
+  - https:
+      name: "208.67.220.220"
+  - https:
+      name: "2620:119:53::53"
+  - https:
+      name: "208.67.222.222"
+
+tls:
+  - "" # Direct dialer
+  - split:1
+  - split:2,20*5
+  # disorder must precede split: configurl pipes left to right, so the rightmost
+  # entry is outermost, and disorder type-asserts its inner conn to *net.TCPConn.
+  # Spelled the other way round it never dials.
+  - disorder:1|split:200
+  - tlsfrag:1

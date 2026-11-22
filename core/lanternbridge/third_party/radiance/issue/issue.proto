@@ -1,0 +1,50 @@
+syntax = "proto3";
+package issue;
+option go_package = "github.com/getlantern/radiance/issue";
+
+// 
+// Copied from lantern-cloud:
+// https://github.com/getlantern/lantern-cloud/blob/270e9f3f08192fe5eee5001a80c7635d4bed3689/cmd/api/apipb/proto/types.proto#L618-L659
+//
+
+message ReportIssueResponse {
+}
+
+message ReportIssueRequest {
+    enum ISSUE_TYPE {
+        PAYMENT_FAIL = 0;
+        CANNOT_LOGIN = 1;
+        ALWAYS_SPINNING = 2;
+        NO_ACCESS = 3;
+        SLOW = 4;
+        CANNOT_LINK_DEVICE = 5;
+        CRASHES = 6;
+        OTHER = 9;
+        UPDATE_FAIL = 10;
+        SPLIT_TUNNEL = 11;
+        SMART_ROUTING = 12;
+        SERVER_SELECTION = 13;
+        UPGRADE_FAIL = 14;
+    }
+    
+	ISSUE_TYPE type = 1;
+    string country_code = 2;
+    string app_version = 3;
+    string subscription_level = 4;
+    string platform = 5;
+    string description = 6;
+    string user_email = 7;
+    string device_id = 8;
+    string user_id = 9;
+    string device = 11;
+    string model = 12;
+    string os_version = 13;
+    string language = 14;
+    repeated Attachment attachments = 15;
+    
+    message Attachment {
+        string type = 1;
+        string name = 2;
+        bytes content = 3;
+    }
+}

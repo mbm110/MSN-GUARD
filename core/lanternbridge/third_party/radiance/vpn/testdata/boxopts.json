@@ -1,0 +1,76 @@
+{
+	"log": {
+		"disabled": true
+	},
+	"dns": {
+		"servers": [
+			{
+				"type": "local",
+				"tag": "local"
+			}
+		]
+	},
+	"inbounds": [
+		{
+			"type": "socks",
+			"tag": "socks-in",
+			"listen": "127.0.0.1"
+		}
+	],
+	"outbounds": [
+		{
+			"type": "direct",
+			"tag": "direct"
+		},
+		{
+			"type": "http",
+			"tag": "http-out",
+			"server": "127.0.0.1",
+			"server_port": 4080
+		},
+		{
+			"type": "socks",
+			"tag": "socks-out",
+			"server": "127.0.0.1",
+			"server_port": 5080
+		},
+		{
+			"type": "mutableurltest",
+			"tag": "auto",
+			"outbounds": [
+				"http-out",
+				"socks-out"
+			]
+		},
+		{
+			"type": "mutableselector",
+			"tag": "manual",
+			"outbounds": [
+				"http-out",
+				"socks-out"
+			]
+		}
+	],
+	"route": {
+		"default_domain_resolver": "local",
+		"rules": [
+			{
+				"clash_mode": "auto",
+				"outbound": "auto"
+			},
+			{
+				"clash_mode": "manual",
+				"outbound": "manual"
+			}
+		]
+	},
+	"experimental": {
+		"cache_file": {
+			"enabled": true,
+			"cache_id": "test_cache"
+		},
+		"clash_api": {
+			"default_mode": "auto"
+		}
+	}
+}

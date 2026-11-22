@@ -25,3 +25,18 @@ replace github.com/sagernet/gvisor => github.com/sagernet/gvisor v0.0.0-20260727
 replace golang.getoutline.org/sdk/x => github.com/getlantern/outline-sdk/x v0.3.0-lantern.1
 
 require github.com/getlantern/radiance v0.0.0-20261121161923-0c920c73b969
+
+// MSN fork of the pinned Radiance (upstream 0c920c73b969), vendored at
+// third_party/radiance with a single delta: on Android the TUN stack is
+// ALWAYS gvisor. Upstream's kernel check picks the "system" stack on
+// >= 5.10 kernels; that stack terminates app TCP through a local listener
+// inside the ENGINE process, which does not survive MSN's split-process
+// architecture (the engine is a sidecar fed by an SCM_RIGHTS dup of the
+// app's TUN fd — field-verified on 3.4.5-3.4.7: with the system stack,
+// apps' UDP and DNS flow through the fd while no app TCP connection ever
+// reaches the router). gvisor is pure userspace on the same fd — the path
+// that already works — and is what upstream itself uses on the < 5.10
+// Android majority. A directory replace needs no go.sum entry and no
+// network resolution; revert to the upstream pin by deleting this replace.
+// See wrapper reference lantern-android-wrapper.md before re-bumping.
+replace github.com/getlantern/radiance => ./third_party/radiance

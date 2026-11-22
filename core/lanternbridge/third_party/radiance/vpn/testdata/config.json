@@ -1,0 +1,67 @@
+{
+	"smart_routing": [
+		{
+			"category": "direct",
+			"rule_sets": [
+				{
+					"tag": "sr-direct",
+					"url": "https://ruleset.com/direct.srs"
+				}
+			],
+			"outbounds": [
+				"direct"
+			]
+		},
+		{
+			"category": "openai",
+			"rule_sets": [
+				{
+					"tag": "openai",
+					"url": "https://ruleset.com/openai.srs"
+				}
+			],
+			"outbounds": [
+				"http1-out",
+				"socks1-out"
+			]
+		}
+	],
+	"ad_block": [
+		{
+			"tag": "adblock-1",
+			"url": "https://ruleset.com/adblock-1.srs"
+		},
+		{
+			"tag": "adblock-2",
+			"url": "https://ruleset.com/adblock-2.srs"
+		}
+	],
+	"options": {
+		"outbounds": [
+			{
+				"type": "http",
+				"tag": "http1-out",
+				"server": "127.0.0.1",
+				"server_port": 4080
+			},
+			{
+				"type": "http",
+				"tag": "http2-out",
+				"server": "127.0.0.1",
+				"server_port": 4443
+			},
+			{
+				"type": "socks",
+				"tag": "socks1-out",
+				"server": "127.0.0.1",
+				"server_port": 5080
+			},
+			{
+				"type": "socks",
+				"tag": "socks2-out",
+				"server": "127.0.0.1",
+				"server_port": 5443
+			}
+		]
+	}
+}

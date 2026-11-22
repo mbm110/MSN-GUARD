@@ -1,0 +1,33 @@
+FROM golang:1.26.10 AS builder
+
+COPY docker/trust /usr/local/lib/lantern-trust
+RUN apt-get update && apt-get install -y git git-lfs bsdmainutils ca-certificates openssl && sh /usr/local/lib/lantern-trust/update-trust.sh
+
+ARG TARGETOS
+ARG TARGETARCH
+# The Soar DNS-tunnel server; without them the soar transport is left out.
+ARG SOAR_ZONE
+ARG SOAR_PUBLIC_KEY
+
+WORKDIR /src
+
+COPY . .
+
+ENV GOCACHE=/root/.cache/go-build
+RUN --mount=type=cache,target="$GOCACHE" GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
+    -ldflags "-X github.com/getlantern/radiance/kindling/soar.Zone=${SOAR_ZONE} -X github.com/getlantern/radiance/kindling/soar.PublicKey=${SOAR_PUBLIC_KEY}" \
+    -o /kindling-tester ./cmd/kindling-tester/...
+
+FROM debian:bookworm-slim
+
+COPY docker/trust /usr/local/lib/lantern-trust
+RUN apt-get update && apt-get install -y ca-certificates openssl && sh /usr/local/lib/lantern-trust/update-trust.sh && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /kindling-tester /kindling-tester
+
+# TRANSPORT is set at build time (e.g. --build-arg TRANSPORT=proxyless).
+# The entrypoint exports it as the transport-specific env var expected by the binary.
+ARG TRANSPORT
+ENV TRANSPORT=${TRANSPORT}
+
+ENTRYPOINT ["sh", "-c", "/kindling-tester"]

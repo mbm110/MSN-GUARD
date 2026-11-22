@@ -1,0 +1,66 @@
+name: Refresh embedded fronted.yaml.gz
+
+# kindling/fronted/fronted.yaml.gz is the last-resort fallback config used
+# when both the live fetch and on-disk cache miss. The canonical copy lives
+# in getlantern/domainfront and is updated daily by an external pipeline. Mirror
+# that here so a fresh install bootstrap doesn't fall back to a stale copy.
+
+on:
+  schedule:
+    # Run a few hours after the upstream daily commit (~00:15 UTC).
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Serialize concurrent runs (cron + manual dispatch can race). cancel-in-progress
+# is false so a manual dispatch during a cron run still completes rather than
+# leaving the repo in a half-updated state.
+concurrency:
+  group: refresh-fronted-config
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download latest fronted.yaml.gz
+        run: |
+          curl -fsSL \
+            -o kindling/fronted/fronted.yaml.gz.new \
+            https://raw.githubusercontent.com/getlantern/domainfront/refs/heads/main/fronted.yaml.gz
+          gzip -t kindling/fronted/fronted.yaml.gz.new
+          test -s kindling/fronted/fronted.yaml.gz.new
+
+      - name: Diff and replace
+        id: diff
+        run: |
+          if cmp -s kindling/fronted/fronted.yaml.gz.new kindling/fronted/fronted.yaml.gz; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            rm kindling/fronted/fronted.yaml.gz.new
+          else
+            mv kindling/fronted/fronted.yaml.gz.new kindling/fronted/fronted.yaml.gz
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Open a PR rather than pushing directly: main is protected by a
+      # "Changes must be made through a pull request" repo rule. The PR
+      # branch is reused day-to-day so a stale unmerged refresh gets
+      # superseded by the next one rather than piling up as separate PRs.
+      - name: Open / update refresh PR
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@8a45c9a0f9071f4b1e4a0f3b660a1e9e3d9f0d7f # v7
+        with:
+          commit-message: "fronted: refresh embedded fronted.yaml.gz"
+          title: "fronted: refresh embedded fronted.yaml.gz"
+          body: |
+            Automated daily refresh of `kindling/fronted/fronted.yaml.gz`
+            from `getlantern/domainfront@main`. Safe to merge once CI passes.
+          branch: chore/refresh-fronted-config
+          delete-branch: true
+          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
