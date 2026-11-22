@@ -464,8 +464,8 @@ func serializeTunOptions(options box.TunOptions) ([]byte, error) {
 
 func routePrefixes(iter box.RoutePrefixIterator) ([]string, error) {
 	var out []string
-	for it.HasNext() {
-		prefix := it.Next()
+	for iter.HasNext() {
+		prefix := iter.Next()
 		if prefix == nil {
 			continue
 		}
