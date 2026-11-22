@@ -336,7 +336,15 @@ object LanternEngine {
                                 }
                             }
                             val lower = line.lowercase()
-                            if (lower.contains("error") || lower.contains("warn") || lower.contains("connected")) {
+                            // 3.4.2 TEMP DIAGNOSTIC: also pass "tun" lines — the
+                            // handoff ack, OpenTun serving the fd, sing-tun's
+                            // tunnel start and any TUN-related errors. The 3.4.1
+                            // field log showed a connect that never finished but
+                            // every TUN line was filtered out, so the failure was
+                            // invisible. Remove once the connect path is verified.
+                            if (lower.contains("error") || lower.contains("warn") ||
+                                lower.contains("connected") || lower.contains("tun")
+                            ) {
                                 // Spam gate: radiance/sing-box repeat identical errors
                                 // (e.g. "missing fakeip record" per connection) with only
                                 // ids/durations varying. Cap repeats so the in-app log
