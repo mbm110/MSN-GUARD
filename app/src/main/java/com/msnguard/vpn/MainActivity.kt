@@ -180,13 +180,14 @@ class MainActivity : Activity() {
     private val autoPingRunnable = object : Runnable {
         override fun run() {
             // The foreground check is what makes this cheap: a real HTTP request
-            // every 5s wakes the radio, and in the background nothing consumes
-            // the result. Liveness is not lost — the core's own health check
-            // (every 3s, 10s staleness limit) drops a dead tunnel regardless of
-            // whether this screen is up.
+            // every 15s wakes the radio briefly, and in the background nothing
+            // consumes the result. Liveness is not lost — the core's own health
+            // check (every 3s, 10s staleness limit) drops a dead tunnel
+            // regardless of whether this screen is up. 3.4.10 battery report:
+            // 5s woke the radio for no observable benefit.
             if (isTunnelActive() && autoPingRunning && uiForeground) {
                 pingConnection()
-                autoPingHandler.postDelayed(this, 5000L)
+                autoPingHandler.postDelayed(this, 15000L)
             }
         }
     }
@@ -944,7 +945,7 @@ class MainActivity : Activity() {
     private fun startAutoPing() {
         autoPingRunning = true
         autoPingHandler.removeCallbacks(autoPingRunnable)
-        autoPingHandler.postDelayed(autoPingRunnable, 5000L)
+        autoPingHandler.postDelayed(autoPingRunnable, 15000L)
     }
 
     private fun stopAutoPing() {

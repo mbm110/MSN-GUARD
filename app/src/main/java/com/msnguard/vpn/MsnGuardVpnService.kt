@@ -3583,7 +3583,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                 }
                 updateTrafficNotification(counters.first, counters.second)
                 lanternStatsTick++
-                if (lanternStatsTick >= 60) {
+                if (lanternStatsTick >= 12) {
                     lanternStatsTick = 0
                     ConnectionLog.record(
                         "lantern stats: tx=" + counters.first + " rx=" + counters.second +
@@ -3596,7 +3596,7 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             } catch (_: Exception) {
                 lanternStatsSkipped++
             }
-        }, 1L, 1L, TimeUnit.SECONDS)
+        }, 1L, 5L, TimeUnit.SECONDS)
     }
 
     private fun startShardTunnel() {

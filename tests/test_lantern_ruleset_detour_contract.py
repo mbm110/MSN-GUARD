@@ -28,8 +28,13 @@ class RuleSetDetourContract(unittest.TestCase):
         self.assertIn("rulesets[i].RemoteOptions.DownloadDetour = AutoSelectTag", BOXOPTIONS)
 
     def test_both_ruleset_sources_are_rerouted(self):
-        # Smart routing (ga-ir) and ad-block rule-sets both get the detour.
-        self.assertEqual(BOXOPTIONS.count("detourRuleSetsThroughTunnel(rulesets)"), 2)
+        # 3.4.10: ONE pass over the fully assembled opts.Route.RuleSet — the
+        # rule-sets arrive from three sources (server options, smart routing,
+        # ad block) and patching only two of them left the server's ga-ir
+        # entry dialing direct (field log 3.4.9: errors ran the whole
+        # session).
+        self.assertEqual(BOXOPTIONS.count("detourRuleSetsThroughTunnel(") - 1, 1)
+        self.assertIn("detourRuleSetsThroughTunnel(opts.Route.RuleSet)", BOXOPTIONS)
 
 
 if __name__ == "__main__":

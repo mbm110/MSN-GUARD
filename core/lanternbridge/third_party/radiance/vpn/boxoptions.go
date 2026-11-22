@@ -380,7 +380,6 @@ func buildOptions(bOptions BoxOptions) (O.Options, string, error) {
 	if len(smartRoutingRules) > 0 {
 		slog.Info("Adding smart-routing rules")
 		outbounds, rules, rulesets := smartRoutingRules.ToOptions(urlTestInterval, urlTestIdleTimeout)
-		detourRuleSetsThroughTunnel(rulesets)
 		opts.Outbounds = append(opts.Outbounds, outbounds...)
 		opts.Route.Rules = append(opts.Route.Rules, rules...)
 		opts.Route.RuleSet = append(opts.Route.RuleSet, rulesets...)
@@ -391,7 +390,6 @@ func buildOptions(bOptions BoxOptions) (O.Options, string, error) {
 	if len(adBlockRules) > 0 {
 		slog.Info("Adding ad-block rules")
 		rule, rulesets := bOptions.AdBlock.ToOptions()
-		detourRuleSetsThroughTunnel(rulesets)
 		opts.Route.Rules = append(opts.Route.Rules, rule)
 		opts.Route.RuleSet = append(opts.Route.RuleSet, rulesets...)
 	} else if len(bOptions.AdBlock) > 0 && len(adBlockRules) == 0 {
@@ -481,6 +479,15 @@ func buildOptions(bOptions BoxOptions) (O.Options, string, error) {
 
 	// catch-all rule to ensure no fallthrough
 	opts.Route.Rules = append(opts.Route.Rules, catchAllBlockerRule())
+
+	// MSN 3.4.10: reroute EVERY remote rule-set download through the tunnel,
+	// once, over the fully assembled rule-set list — rule-sets reach this
+	// point from three sources (the server's own options, smart routing,
+	// ad block) and 3.4.9 only patched the latter two, so the server's
+	// ga-ir entry kept dialing direct and timing out every 10s (field log
+	// 3.4.9: the errors ran the whole session).
+	detourRuleSetsThroughTunnel(opts.Route.RuleSet)
+
 	slog.Debug("Finished building options", "env", common.Env())
 
 	opts, err := jsonRoundTrip(bOptions.BasePath, opts)

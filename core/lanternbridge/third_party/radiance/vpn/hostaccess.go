@@ -52,7 +52,11 @@ func allowedServices(services []O.Service) []O.Service {
 // fetch drew; a draw with no ir-free members keeps the previous list rather
 // than emptying the group.
 func pinPoolIfRequested(list servers.ServerList) servers.ServerList {
-	if env.GetString("RADIANCE_POOL") != "ir" {
+	// The stored setting value is "iran" (LanternPool.IRAN.coreName); 3.4.9
+	// shipped the filter keyed on "ir" and it never matched — the 3.4.9
+	// field log shows "ir-free filter off" with the IR draw arriving by
+	// geo-detection luck alone.
+	if p := env.GetString("RADIANCE_POOL"); p != "iran" && p != "ir" {
 		return list
 	}
 	irOnly := slices.DeleteFunc(slices.Clone(list.Servers), func(s *servers.Server) bool {

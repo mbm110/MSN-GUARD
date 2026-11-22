@@ -293,9 +293,15 @@ object LanternEngine {
             // Visible per-session proof that both selectors are live: the
             // pool filter above and the DNS locale above drive the sidecar.
             ConnectionLog.record(
-                "Lantern: server pool=$pool (ir-free filter ${if (pool == "ir") "on" else "off"})" +
+                "Lantern: server pool=$pool (ir-free filter ${if (pool == "iran") "on" else "off"})" +
                     "; DNS region=${CoreConfig.lanternDnsRegion(context)} -> locale $radianceLocale"
             )
+            // Battery (3.4.10 field report: 40%/hot phone): the sidecar's
+            // stdout pipe fed the app's log pump every INFO line sing-box
+            // emitted — 2-4 lines per connection, for the whole session.
+            // warn keeps errors in-app while the pipe goes quiet; the sidecar
+            // still writes its own rotating file log for deep diagnosis.
+            builder.environment()["RADIANCE_LOG_LEVEL"] = "warn"
 
             val started = try {
                 builder.start()

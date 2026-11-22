@@ -30,7 +30,7 @@ class LanternPoolContract(unittest.TestCase):
     def test_the_pool_filter_is_real_in_the_vendored_radiance(self):
         # The filter must exist in the vendored Radiance — otherwise the
         # setting is cosmetic.
-        self.assertIn('env.GetString("RADIANCE_POOL") != "ir"', HOSTACCESS)
+        self.assertIn('p != "iran" && p != "ir"', HOSTACCESS)
         self.assertIn('"-ir-free-"', HOSTACCESS)
         # A draw with no ir-free members must keep the previous list, never
         # empty the auto group.
@@ -47,6 +47,15 @@ class LanternPoolContract(unittest.TestCase):
         # The old 3.4.8 country header is gone: the probe proved the server
         # ignores it, so it must not linger as a second, conflicting knob.
         self.assertNotIn("RADIANCE_COUNTRY", ENGINE)
+        # The filter key must match the stored setting value — 3.4.9 shipped
+        # keyed on "ir" while the pref stores "iran" and never matched.
+        self.assertIn('if (pool == "iran") "on" else "off"', ENGINE)
+
+    def test_the_sidecar_log_pump_is_quiet_for_battery(self):
+        # 3.4.10 battery report (40%/hot phone): the stdout pipe fed the app's
+        # log pump every INFO line sing-box emitted, all session long. warn
+        # keeps errors in-app and the pipe quiet.
+        self.assertIn('builder.environment()["RADIANCE_LOG_LEVEL"] = "warn"', ENGINE)
 
     def test_the_engine_logs_the_live_choice_per_session(self):
         # Both selectors must be verifiable in the app log on every connect.
