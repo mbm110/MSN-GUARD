@@ -450,13 +450,15 @@ object LanternEngine {
         }
 
         return LocalSocket().use { socket ->
-            socket.soTimeout = timeoutMs
             val namespace = if (socketPath.startsWith("@")) {
                 LocalSocketAddress.Namespace.ABSTRACT
             } else {
                 LocalSocketAddress.Namespace.FILESYSTEM
             }
             socket.connect(LocalSocketAddress(socketPath.removePrefix("@"), namespace))
+            // After connect — see the handoff service's comment: any option
+            // call before connect() throws IOException("socket not created").
+            socket.soTimeout = timeoutMs
             socket.outputStream.write((request.toString() + "\n").toByteArray(Charsets.UTF_8))
             socket.outputStream.flush()
             val response = BufferedReader(InputStreamReader(socket.inputStream)).readLine()
@@ -608,7 +610,14 @@ object LanternEngine {
         val thread = Thread({
             try {
                 LocalSocket().use { socket ->
-                    socket.soTimeout = 0 // OPEN requests wait for the engine
+                    // Connect FIRST — LocalSocketImpl throws IOException
+                    // "socket not created" for any option call (soTimeout,
+                    // setFileDescriptorsForSend, …) made before connect(),
+                    // because the fd only exists once connect() has run.
+                    // This one line was the real 3.4.0 "socket not created"
+                    // field failure, misread then as a missing socket file.
+                    // soTimeout 0 (the default) is what we want anyway: OPEN
+                    // requests wait for the engine with no read deadline.
                     socket.connect(
                         LocalSocketAddress(path.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM)
                     )
