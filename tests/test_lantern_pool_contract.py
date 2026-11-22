@@ -36,18 +36,21 @@ class LanternPoolContract(unittest.TestCase):
         env_go = RADIANCE_ENV.read_text()
         self.assertIn('"RADIANCE_COUNTRY"', env_go)
 
-    def test_the_engine_sets_the_env_only_on_global(self):
-        # Iran (default) presents NO country identity — geo-served IR pool.
-        # Global sets the identity that draws the worldwide pool.
+    def test_the_engine_sets_the_env_for_both_pools(self):
+        # 3.4.8: BOTH pools present an explicit x-lantern-client-country.
+        # Iran pins the IR header on every fetch so a fronted (domainfront)
+        # fetch can no longer draw a rotating global sample; global keeps TR.
         self.assertIn(
             'if (CoreConfig.lanternPool(context) == "global") {', ENGINE
         )
         self.assertIn(
-            'builder.environment()["RADIANCE_COUNTRY"] = LANTERN_CONFIG_COUNTRY',
-            ENGINE,
+            'builder.environment()["RADIANCE_COUNTRY"] =', ENGINE,
         )
         # The identity must be a non-IR country or the draw stays IR.
         self.assertIn('LANTERN_CONFIG_COUNTRY = "TR"', ENGINE)
+        # The iran branch must pin the IR header, not fall through to
+        # geo-detection.
+        self.assertIn('                    "IR"', ENGINE)
 
     def test_the_pref_exists_with_iran_default(self):
         self.assertIn('const val LANTERN_POOL = "lantern_server_pool"', CORE)

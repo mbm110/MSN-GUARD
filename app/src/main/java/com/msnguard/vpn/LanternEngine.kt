@@ -285,20 +285,26 @@ object LanternEngine {
             // Make packaged dependencies visible to Android's executable linker.
             builder.environment()["LD_LIBRARY_PATH"] = context.applicationInfo.nativeLibraryDir
             // 3.3.7: the SERVER POOL is a user choice (Settings → LANTERN →
-            // Server pool). Iran (default): NO country identity — Lantern
-            // geo-serves the pinned IR pool (3x Frankfurt + 1x Amsterdam,
-            // '-ir-free-' tags) from the device's own IP, the field-tested
-            // fast servers. Global: RADIANCE_COUNTRY presents a non-IR
-            // identity — verified in Radiance's config/fetcher.go, it sets
-            // x-lantern-client-country on every config fetch (boot, forced
-            // refresh, poll) — so the draw comes from the worldwide free pool
-            // (Milan, Ashburn, and more), which the official app shows abroad.
-            // TR: nearest non-censored region to the user's line; the drawn
-            // sample itself rotates per fetch. 3.2.49/50 measured the trade:
-            // more locations, slower throughput on Iranian lines.
-            if (CoreConfig.lanternPool(context) == "global") {
-                builder.environment()["RADIANCE_COUNTRY"] = LANTERN_CONFIG_COUNTRY
-            }
+            // Server pool). 3.4.8: BOTH choices now present an explicit
+            // x-lantern-client-country (verified in Radiance's
+            // config/fetcher.go: the env sets the header on EVERY fetch —
+            // boot, forced refresh, poll). Iran (default): the header is
+            // "IR", so the pinned IR pool (3x Frankfurt + 1x Amsterdam,
+            // '-ir-free-' tags) is drawn on EVERY fetch — the geo-detection
+            // path only drew it when the fetch went out directly, so a
+            // fronted (domainfront) fetch presented the front's non-IR exit
+            // and drew a rotating GLOBAL sample (field log 3.4.7: the picker
+            // listed many countries and the auto group carried dead
+            // samizdat/cardiff/global servers). Global: the header is TR —
+            // nearest non-censored region; the sample rotates per fetch.
+            // 3.2.49/50 measured the trade: more locations, slower
+            // throughput on Iranian lines.
+            builder.environment()["RADIANCE_COUNTRY"] =
+                if (CoreConfig.lanternPool(context) == "global") {
+                    LANTERN_CONFIG_COUNTRY
+                } else {
+                    "IR"
+                }
             // 3.2.50 revert: the sidecar again presents NO country identity, so
             // Lantern geo-serves the IR pool (3x Frankfurt + 1x Amsterdam,
             // tags suffixed "-ir-free-") — the field-tested fast servers. The

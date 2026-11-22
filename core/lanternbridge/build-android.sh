@@ -36,7 +36,11 @@ cd "$BRIDGE_DIR"
 go mod download github.com/getlantern/radiance@v0.0.0-20261121161923-0c920c73b969
 go mod tidy
 echo "Resolved Radiance module checksums:"
-grep '^github.com/getlantern/radiance ' go.sum
+# The local ./third_party/radiance replace removes the module checksum from
+# go.sum, so the grep is informational only: report the pin line when the
+# module is fetched from the proxy, and nothing when the local replace owns
+# the source. grep's exit 1 on no match must not fail the build (bash -e).
+grep '^github.com/getlantern/radiance ' go.sum || echo "(local replace: third_party/radiance owns the source)"
 go mod verify
 # Compile the Radiance dependency graph and run only our local bridge/sidecar
 # tests. Do not run upstream integration tests or contact public Lantern servers

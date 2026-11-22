@@ -71,11 +71,14 @@ class LanternServerPickerFirstLoadContract(unittest.TestCase):
         # had poor throughput on the user's Iranian line; Lantern geo-serves
         # IR the dedicated fast four-track pool, and that is what ships.
         # 3.3.7: the pool became a user setting (Settings → LANTERN → Server
-        # pool) — Iran stays the default, so the identity is set ONLY inside
-        # the global guard, never unconditionally.
+        # pool). 3.4.8: the assignment is now UNCONDITIONAL — the iran
+        # branch pins the "IR" header so fronted fetches also draw the
+        # pinned IR pool (field log 3.4.7: geo-detection only worked for
+        # direct fetches and the picker filled with global servers).
         guard_idx = ENGINE.index('if (CoreConfig.lanternPool(context) == "global") {')
-        assign_idx = ENGINE.index('builder.environment()["RADIANCE_COUNTRY"] = LANTERN_CONFIG_COUNTRY')
-        self.assertLess(guard_idx, assign_idx)
+        assign_idx = ENGINE.index('builder.environment()["RADIANCE_COUNTRY"] =')
+        # The assignment now WRAPS the guard: iran pins "IR", global keeps TR.
+        self.assertLess(assign_idx, guard_idx)
         self.assertEqual(ENGINE.count('builder.environment()["RADIANCE_COUNTRY"]'), 1)
         # Still no config re-roll plumbing: a pool switch lands on the NEXT
         # sidecar boot, not a live forceConfigRefresh.

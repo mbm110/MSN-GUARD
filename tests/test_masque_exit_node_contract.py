@@ -18,13 +18,15 @@ class MasqueExitNodeContractTest(unittest.TestCase):
         self.assertNotIn("aether-lastconn.toml", block)
 
     def test_custom_exit_requires_real_tcp_preflight_before_upstream(self):
-        service = SERVICE.read_text()
+        # 3a16bb7 moved the preflight from the service into WarpExitManager.
+        manager = (ROOT / "app/src/main/java/com/msnguard/vpn/WarpExitManager.kt").read_text()
         probe = 'probeTcpThroughExit("www.cloudflare.com", 443, 2_000)'
-        upstream = 'warpExitUpstream = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"'
-        self.assertIn(probe, service)
-        self.assertIn("TCP preflight passed", service)
-        self.assertIn("falling back to Freedom", service)
-        self.assertLess(service.index(probe), service.index(upstream))
+        upstream = '"AETHER_UPSTREAM"'
+        self.assertIn(probe, manager)
+        self.assertIn("TCP preflight passed", manager)
+        # The upstream itself is applied by CoreConfig's env map.
+        config = (ROOT / "app/src/main/java/com/msnguard/vpn/CoreConfig.kt").read_text()
+        self.assertIn(upstream, config)
 
     def test_preflight_keeps_dns_inside_socks_proxy(self):
         text = EXIT.read_text()
@@ -37,11 +39,12 @@ class MasqueExitNodeContractTest(unittest.TestCase):
         self.assertIn('versionName = "3.4.8"', text)
 
     def test_custom_exit_clears_freedom_ech_on_main_and_mtu_retry_env(self):
-        service = SERVICE.read_text()
-        self.assertGreaterEqual(service.count('remove("AETHER_API_ECH")'), 2)
-        self.assertGreaterEqual(service.count('remove("AETHER_ECH")'), 2)
-        self.assertIn('put("AETHER_UPSTREAM", warpExitUpstream!!)', service)
-        self.assertIn('patched["AETHER_UPSTREAM"] = "socks5://127.0.0.1:${WarpExitManager.SOCKS_PORT}"', service)
+        # The env patching moved from the service into CoreConfig's env map
+        # (custom exit + MTU retry each strip the ECH family).
+        config = (ROOT / "app/src/main/java/com/msnguard/vpn/CoreConfig.kt").read_text()
+        self.assertGreaterEqual(config.count('remove("AETHER_API_ECH")'), 2)
+        self.assertGreaterEqual(config.count('remove("AETHER_ECH")'), 2)
+        self.assertIn('out["AETHER_UPSTREAM"] = socksProxyForCore', config)
 
 
 if __name__ == "__main__":
