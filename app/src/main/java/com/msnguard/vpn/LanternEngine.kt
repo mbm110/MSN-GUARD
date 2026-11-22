@@ -45,6 +45,25 @@ object LanternEngine {
     /** Name of the Unix socket the sidecar accepts the TUN fd on (in data-dir). */
     private const val TUN_HANDOFF_SOCKET = "tun-handoff.sock"
 
+    /** The sidecar's data dir — where [TUN_HANDOFF_SOCKET] appears at boot. */
+    private fun sidecarDataDir(context: Context): File =
+        File(context.applicationContext.filesDir, "lantern-radiance/data")
+
+    /**
+     * Wait (max [timeoutMs]) for the sidecar's TUN handoff socket to appear.
+     * The sidecar creates it right after its control socket at boot; the
+     * connect path must not send the fd before the listener exists.
+     */
+    fun awaitTunHandoffSocket(context: Context, timeoutMs: Long = 10_000L): Boolean {
+        val path = File(sidecarDataDir(context), TUN_HANDOFF_SOCKET)
+        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            if (path.exists()) return true
+            Thread.sleep(200L)
+        }
+        return path.exists()
+    }
+
     /**
      * The country identity the sidecar's config fetches present to Lantern
      * when the user picks the GLOBAL server pool (RADIANCE_COUNTRY →
@@ -556,8 +575,7 @@ object LanternEngine {
      * the TUN and the connect fails cleanly.
      */
     fun handoffTun(context: Context, fd: ParcelFileDescriptor): Boolean {
-        val data = File(context.applicationContext.filesDir, "lantern-radiance/data")
-        val path = File(data, TUN_HANDOFF_SOCKET)
+        val path = File(sidecarDataDir(context), TUN_HANDOFF_SOCKET)
         return try {
             LocalSocket().use { socket ->
                 socket.soTimeout = 10_000

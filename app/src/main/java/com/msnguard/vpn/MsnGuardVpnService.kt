@@ -3408,6 +3408,21 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
 
                 if (!LanternEngine.isCurrent(attempt)) return@execute
                 sendStatus(STATUS_CONNECTING, Strings.t("Starting Lantern public servers…"), 15)
+                // Boot the sidecar FIRST: its handoff listener is created at
+                // boot (the 3.4.0 field build failed here — the connect tried
+                // to send the fd to a socket that did not exist yet). The
+                // list-only boot official-app-parity path is reused; connect()
+                // will not spawn a second process.
+                if (!LanternEngine.ensureSidecar(this)) {
+                    if (!LanternEngine.isCurrent(attempt)) return@execute
+                    error("Could not boot the Lantern engine for the TUN handoff")
+                }
+                if (!LanternEngine.isCurrent(attempt)) return@execute
+                if (!LanternEngine.awaitTunHandoffSocket(this)) {
+                    if (!LanternEngine.isCurrent(attempt)) return@execute
+                    error("The Lantern engine did not expose its TUN handoff socket")
+                }
+                if (!LanternEngine.isCurrent(attempt)) return@execute
                 // The fd handoff MUST precede /connect: the engine's OpenTun
                 // serves the tunnel's TUN from the master this call stashes.
                 if (!LanternEngine.handoffTun(this, establishedTun)) {

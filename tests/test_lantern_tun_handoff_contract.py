@@ -52,8 +52,15 @@ class LanternTunHandoffContract(unittest.TestCase):
     def test_the_app_hands_off_before_connect_and_runs_no_hev(self):
         self.assertIn("fun handoffTun(context: Context, fd: ParcelFileDescriptor)", ENGINE)
         self.assertIn("setFileDescriptorsForSend(arrayOf(fd.fileDescriptor))", ENGINE)
+        # The sidecar must be booted and its handoff socket awaited BEFORE the
+        # fd is sent (the first 3.4.0 field build failed on a socket that did
+        # not exist yet), and everything precedes /connect.
+        boot_idx = SERVICE.index("LanternEngine.ensureSidecar(this)")
+        socket_idx = SERVICE.index("LanternEngine.awaitTunHandoffSocket(this)")
         handoff_idx = SERVICE.index("LanternEngine.handoffTun(this, establishedTun)")
         connect_idx = SERVICE.index("LanternEngine.connect(this, attempt)")
+        self.assertLess(boot_idx, socket_idx)
+        self.assertLess(socket_idx, handoff_idx)
         self.assertLess(handoff_idx, connect_idx)
         # The Hev bridge is gone from the Lantern path...
         lantern = SERVICE[SERVICE.index("private fun startLanternTunnel()"):]
