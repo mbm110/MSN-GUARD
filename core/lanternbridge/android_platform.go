@@ -88,6 +88,7 @@ static int enumerate_interfaces(struct iface_result *out, int max) {
 import "C"
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -383,22 +384,94 @@ func (p *androidPlatform) UsePlatformAutoDetectInterfaceControl() bool {
 	return false
 }
 func (p *androidPlatform) AutoDetectInterfaceControl(fd int32) error { return nil }
-// OpenTun is the official-app data path: sing-tun asks the platform for the
-// Android TUN (the official Kotlin app returns VpnService.establish()'s fd
-// here). This sidecar receives the fd from the app process over the private
-// Unix handoff socket (see handoff.go) and returns a fresh dup per tunnel —
-// sing-tun closes its copy on tunnel teardown, and restarts call OpenTun
-// again. The diagnostic line reports what the engine asked for so a field
-// log can confirm the Builder matches (address/MTU/stack).
+// OpenTun is the official-app data path, reference semantics: sing-tun calls
+// this DURING the tunnel start, and the platform answers with a freshly
+// established VpnService fd built from the ENGINE'S OWN TunOptions — exactly
+// what getlantern/lantern's LanternVpnService.openTun does with
+// createVPNBuilder(tunOptions). The split-process twin relays the serialized
+// options over the handoff socket; the app mirrors createVPNBuilder,
+// closes any previous interface first (the reference's stale-descriptor
+// comment), establish()es and returns the fd via SCM_RIGHTS.
 func (p *androidPlatform) OpenTun(options box.TunOptions) (int32, error) {
-	fd, err := openTunFd()
+	payload, err := serializeTunOptions(options)
 	if err != nil {
 		platformLog("tun handoff refused: " + err.Error())
 		return -1, err
 	}
-	platformLog(fmt.Sprintf("tun handoff: passed fd %d to sing-box (mtu=%d auto-route=%v)",
+	fd, err := requestTun(payload, 120*time.Second)
+	if err != nil {
+		platformLog("tun handoff refused: " + err.Error())
+		return -1, err
+	}
+	platformLog(fmt.Sprintf("tun handoff: passing fd %d to sing-box (mtu=%d auto-route=%v)",
 		fd, options.GetMTU(), options.GetAutoRoute()))
 	return int32(fd), nil
+}
+
+// tunRequestOptions is the OPEN payload the app's Builder mirror consumes —
+// the exact field set the reference's createVPNBuilder reads from TunOptions.
+type tunRequestOptions struct {
+	MTU           int32    `json:"mtu"`
+	Inet4Address  []string `json:"inet4_address"`  // "10.10.1.1/30"
+	Inet6Address  []string `json:"inet6_address"`  // "fdfe:dcba:9876::1/126"
+	AutoRoute     bool     `json:"auto_route"`
+	DNSServers    []string `json:"dns_servers"`
+	Routes4       []string `json:"routes4"`        // inet4_route_address
+	Routes6       []string `json:"routes6"`        // inet6_route_address
+	Excludes4     []string `json:"excludes4"`      // inet4_route_exclude_address
+	Excludes6     []string `json:"excludes6"`      // inet6_route_exclude_address
+	RouteRanges4  []string `json:"route_ranges4"`  // pre-TIRAMISU fallback
+	RouteRanges6  []string `json:"route_ranges6"`
+}
+
+func serializeTunOptions(options box.TunOptions) ([]byte, error) {
+	req := tunRequestOptions{
+		MTU:       options.GetMTU(),
+		AutoRoute: options.GetAutoRoute(),
+	}
+	var err error
+	if req.Inet4Address, err = routePrefixes(options.GetInet4Address()); err != nil {
+		return nil, err
+	}
+	if req.Inet6Address, err = routePrefixes(options.GetInet6Address()); err != nil {
+		return nil, err
+	}
+	if req.Routes4, err = routePrefixes(options.GetInet4RouteAddress()); err != nil {
+		return nil, err
+	}
+	if req.Routes6, err = routePrefixes(options.GetInet6RouteAddress()); err != nil {
+		return nil, err
+	}
+	if req.Excludes4, err = routePrefixes(options.GetInet4RouteExcludeAddress()); err != nil {
+		return nil, err
+	}
+	if req.Excludes6, err = routePrefixes(options.GetInet6RouteExcludeAddress()); err != nil {
+		return nil, err
+	}
+	if req.RouteRanges4, err = routePrefixes(options.GetInet4RouteRange()); err != nil {
+		return nil, err
+	}
+	if req.RouteRanges6, err = routePrefixes(options.GetInet6RouteRange()); err != nil {
+		return nil, err
+	}
+	if dnsIter, dnsErr := options.GetDNSServerAddress(); dnsErr == nil {
+		for it := dnsIter; it.HasNext(); {
+			req.DNSServers = append(req.DNSServers, it.Next())
+		}
+	}
+	return json.Marshal(req)
+}
+
+func routePrefixes(iter box.RoutePrefixIterator) ([]string, error) {
+	var out []string
+	for it.HasNext() {
+		prefix := it.Next()
+		if prefix == nil {
+			continue
+		}
+		out = append(out, prefix.String())
+	}
+	return out, nil
 }
 func (p *androidPlatform) UseProcFS() bool { return false }
 func (p *androidPlatform) FindConnectionOwner(int32, string, int32, string, int32) (*box.ConnectionOwner, error) {

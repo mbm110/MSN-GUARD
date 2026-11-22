@@ -3351,103 +3351,51 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
      * structurally gone. No existing transport is modified — Hev still
      * fronts every other method exactly as before.
      */
+    /**
+     * Public Lantern transport, 3.4.4 — the reference data path.
+     * getlantern/lantern's LanternVpnService does NOT pre-establish a TUN: the
+     * engine's openTun(tunOptions) callback builds the VpnService Builder from
+     * the ENGINE'S OWN options at tunnel-start time and returns establish().fd.
+     * The split-process twin: the sidecar's OpenTun relays an OPEN line over the
+     * handoff socket, and this service's [establishLanternTun] — the
+     * createVPNBuilder mirror — answers with a freshly established fd via
+     * SCM_RIGHTS. No pre-staged fd, no boot race, and the connect worker never
+     * silently bails (the 3.4.0–3.4.3 stall: ensureSidecar's armForStart()
+     * invalidated the connect attempt; the worker died at the next isCurrent()
+     * check and the idle reaper killed the orphaned sidecar 240s later).
+     */
     private fun startLanternTunnel() {
-        // Latch a fresh attempt before queueing work. A stop or a newer attempt
-        // invalidates this token, so an old worker cannot tear down a new session.
         val attempt = LanternEngine.armForStart()
         worker.execute {
             try {
                 if (!LanternEngine.isCurrent(attempt)) return@execute
                 if (proxyMode) error("Lantern requires whole-device VPN mode")
-                // The engine's own TUN plan (radiance vpn/boxoptions_default.go:
-                // tunPrefix4 10.10.1.1/30, tunPrefix6 fdfe:dcba:9876::1/126) — the
-                // Builder must mirror what the box will configure, like the
-                // official app does from OpenTun's TunOptions.
-                val mtu = Tun2SocksManager.VPN_INTERFACE_MTU
-                currentTunMtu = mtu
-                val address = Tun2SocksManager.PrivateAddress(
-                    ipAddress = "10.10.1.1",
-                    subnet = "10.10.1.0",
-                    prefixLength = 30,
-                    router = "10.10.1.2",
-                )
-                TunEngineManager.syncPrivateAddress(address)
-
-                val builder = Builder()
-                    .setSession("MSN-GUARD — Lantern")
-                    .setMtu(mtu)
-                    .addAddress(address.ipAddress, address.prefixLength)
-                    .addAddress("fdfe:dcba:9876::1", 126)
-                    .addRoute("0.0.0.0", 0)
-                    .addRoute("::", 0)
-                    .addRoute(address.subnet, address.prefixLength)
-                    // A resolver the box answers: any address routed into the TUN
-                    // is DNS-hijacked by the engine's route rules (protocol: dns
-                    // → hijack) and answered from its own fake-IP store — the
-                    // official loop. 172.19.0.2 is outside the 198.18.0.0/15 fake
-                    // range (a destination there without a record would be
-                    // rejected) and outside the TUN's own subnet.
-                    .addDnsServer(java.net.InetAddress.getByName("172.19.0.2"))
-                    .applyLanAccess(tun = address)
-                    .applyIranBypass()
-                    .applySplitTunneling()
-
-                ConnectionLog.record("Lantern: creating the app-owned Android TUN")
-                val establishedTun = synchronized(lanternLifecycleLock) {
-                    if (!LanternEngine.isCurrent(attempt)) return@execute
-                    val fd = builder.establish()
-                        ?: error("Android could not establish the Lantern VPN interface")
-                    if (!LanternEngine.isCurrent(attempt)) {
-                        runCatching { fd.close() }
-                        return@execute
-                    }
-                    tun = fd
-                    vpnModeActive.set(true)
-                    fd
-                }
-                // 3.4.3 TEMP diagnostic: the 3.4.2 field log showed the
-                // sequence alive up to the handoff listener, then silence —
-                // neither handoff success, rejection nor failure appeared,
-                // so the stall is somewhere between establish() and the
-                // ack read. These step markers are app-side records
-                // (always visible) and get removed once the connect path
-                // is verified in the field.
-                ConnectionLog.record("Lantern: step 1/5 — TUN established (fd=${establishedTun.fd})")
-
-                if (!LanternEngine.isCurrent(attempt)) return@execute
                 sendStatus(STATUS_CONNECTING, Strings.t("Starting Lantern public servers…"), 15)
-                // Boot the sidecar FIRST: its handoff listener is created at
-                // boot (the 3.4.0 field build failed here — the connect tried
-                // to send the fd to a socket that did not exist yet). The
-                // list-only boot official-app-parity path is reused; connect()
-                // will not spawn a second process.
-                if (!LanternEngine.ensureSidecar(this)) {
+                ConnectionLog.record("Lantern: step 1/4 — booting the engine")
+                // Boot the sidecar WITHOUT re-arming: ensureSidecarForConnect
+                // reuses THIS connect attempt (see its comment).
+                if (!LanternEngine.ensureSidecarForConnect(this, attempt)) {
                     if (!LanternEngine.isCurrent(attempt)) return@execute
-                    error("Could not boot the Lantern engine for the TUN handoff")
+                    error("Could not boot the Lantern engine")
                 }
                 if (!LanternEngine.isCurrent(attempt)) return@execute
-                ConnectionLog.record("Lantern: step 2/5 — sidecar booted for the handoff")
-                if (!LanternEngine.awaitTunHandoffSocket(this)) {
+                ConnectionLog.record("Lantern: step 2/4 — engine booted")
+                // The app-side of the reference openTun: this service waits for
+                // the engine's OPEN request and establish()es with the engine's
+                // own options. It must be armed BEFORE /connect — ConnectVPN
+                // calls OpenTun during the tunnel start.
+                if (!LanternEngine.startTunHandoffService(this, ::establishLanternTun)) {
                     if (!LanternEngine.isCurrent(attempt)) return@execute
-                    error("The Lantern engine did not expose its TUN handoff socket")
+                    error(LanternEngine.errorMessage().ifBlank { "Could not arm the TUN handoff service" })
                 }
                 if (!LanternEngine.isCurrent(attempt)) return@execute
-                ConnectionLog.record("Lantern: step 3/5 — handoff socket present")
-                // The fd handoff MUST precede /connect: the engine's OpenTun
-                // serves the tunnel's TUN from the master this call stashes.
-                ConnectionLog.record("Lantern: step 4/5 — handing off the TUN fd")
-                if (!LanternEngine.handoffTun(this, establishedTun)) {
-                    if (!LanternEngine.isCurrent(attempt)) return@execute
-                    error(LanternEngine.errorMessage().ifBlank { "Could not hand the TUN to the Lantern engine" })
-                }
-                if (!LanternEngine.isCurrent(attempt)) return@execute
+                ConnectionLog.record("Lantern: step 3/4 — handing off the TUN on the engine's request")
                 if (!LanternEngine.connect(this, attempt)) {
                     if (!LanternEngine.isCurrent(attempt)) return@execute
                     error(LanternEngine.errorMessage().ifBlank { "Could not connect to public Lantern servers" })
                 }
                 if (!LanternEngine.isCurrent(attempt)) return@execute
-                ConnectionLog.record("Lantern: step 5/5 — engine connected")
-                if (!LanternEngine.isCurrent(attempt)) return@execute
+                ConnectionLog.record("Lantern: step 4/4 — engine connected")
                 publishProgress(90) // engine tunnel is up — verification remains
                 activeSocksPort = LanternEngine.SOCKS_PORT
 
@@ -3473,6 +3421,9 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     if (!LanternEngine.isStoppingAttempt(attempt)) return@execute
                     runCatching { TunEngineManager.stop(this) }
                     LanternEngine.disconnectAsync(attempt)
+                    stopWarpTrafficPolling()
+                    // The handoff service's socket dies with the sidecar; the
+                    // TUN it established (if any) belongs to this dead session.
                     runCatching { tun?.close() }
                     tun = null
                     vpnModeActive.set(false)
@@ -3484,7 +3435,107 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         }
     }
 
-    /** Feeds Radiance's cumulative connection counters into the normal traffic UI. */
+    /**
+     * The createVPNBuilder mirror (getlantern/lantern's LanternVpnService) —
+     * called from the handoff service when the ENGINE requests the TUN, with
+     * the engine's own serialized TunOptions: addresses, MTU, DNS and routes
+     * all come from the request, exactly like the reference builds from
+     * sing-tun's options. MSN app policy (LAN access, Iran bypass, split
+     * tunneling) applies on top. The previous interface is dropped first —
+     * the reference's stale-descriptor rule — before establish().
+     */
+    private fun establishLanternTun(request: LanternEngine.TunRequest): ParcelFileDescriptor =
+        synchronized(lanternLifecycleLock) {
+            val builder = Builder()
+                .setSession("MSN-GUARD — Lantern")
+                .setMtu(request.mtu)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                builder.setMetered(false)
+            }
+            for ((address, prefix) in request.inet4) builder.addAddress(address, prefix)
+            for ((address, prefix) in request.inet6) builder.addAddress(address, prefix)
+            if (request.autoRoute) {
+                // The engine's own resolver list when it has one; Radiance
+                // ships none (its route rules hijack port 53 inside the box),
+                // and 172.19.0.2 keeps the hijack loop closed under MSN's
+                // iran-bypass/split rules (outside 198.18.0.0/15 and the TUN
+                // subnet, routed into the TUN → protocol:dns hijack).
+                val dns = request.dnsServers.ifEmpty { listOf("172.19.0.2") }
+                for (server in dns) {
+                    builder.addDnsServer(java.net.InetAddress.getByName(server))
+                }
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                    if (request.routes4.isNotEmpty()) {
+                        for ((address, prefix) in request.routes4) builder.addRoute(address, prefix)
+                    } else if (request.inet4.isNotEmpty()) {
+                        builder.addRoute("0.0.0.0", 0)
+                    }
+                    if (request.routes6.isNotEmpty()) {
+                        for ((address, prefix) in request.routes6) builder.addRoute(address, prefix)
+                    } else if (request.inet6.isNotEmpty()) {
+                        builder.addRoute("::", 0)
+                    }
+                    for ((address, prefix) in request.excludes4) builder.excludeRoute(address, prefix)
+                    for ((address, prefix) in request.excludes6) builder.excludeRoute(address, prefix)
+                } else {
+                    if (request.routeRanges4.isNotEmpty()) {
+                        for ((address, prefix) in request.routeRanges4) builder.addRoute(address, prefix)
+                    } else if (request.inet4.isNotEmpty()) {
+                        builder.addRoute("0.0.0.0", 0)
+                    }
+                    if (request.routeRanges6.isNotEmpty()) {
+                        for ((address, prefix) in request.routeRanges6) builder.addRoute(address, prefix)
+                    } else if (request.inet6.isNotEmpty()) {
+                        builder.addRoute("::", 0)
+                    }
+                }
+            }
+            val v4 = request.inet4.firstOrNull()
+                ?: error("the engine requested no IPv4 TUN address")
+            val plan = Tun2SocksManager.PrivateAddress(
+                ipAddress = v4.first,
+                subnet = prefixToSubnet(v4.first, v4.second),
+                prefixLength = v4.second,
+                router = prefixToGateway(v4.first, v4.second),
+            )
+            TunEngineManager.syncPrivateAddress(plan)
+            builder.applyLanAccess(tun = plan).applyIranBypass().applySplitTunneling()
+            // Reference openTun rule: explicitly drop the previous fd first —
+            // a stale descriptor surviving restarts/upgrades wedges the tunnel.
+            runCatching { tun?.close() }
+            val pfd = builder.establish()
+                ?: error("Android could not establish the VPN interface (revoked?)")
+            tun = pfd
+            currentTunMtu = request.mtu
+            vpnModeActive.set(true)
+            ConnectionLog.record(
+                "Lantern: TUN established from the engine's plan (fd=${pfd.fd}, mtu=${request.mtu})"
+            )
+            pfd
+        }
+
+    /** "10.10.1.1/30" → "10.10.1.0" (the network of the engine's TUN prefix). */
+    private fun prefixToSubnet(address: String, prefix: Int): String {
+        val octets = java.net.InetAddress.getByName(address).address
+        var host = 0
+        for (octet in octets) host = (host shl 8) or (octet.toInt() and 0xFF)
+        val net = if (prefix == 0) 0 else host and (-1 shl (32 - prefix))
+        return listOf(
+            (net ushr 24) and 0xFF,
+            (net ushr 16) and 0xFF,
+            (net ushr 8) and 0xFF,
+            net and 0xFF,
+        ).joinToString(".")
+    }
+
+    /** "10.10.1.1/30" → "10.10.1.2" (the first host of the engine's TUN subnet). */
+    private fun prefixToGateway(address: String, prefix: Int): String {
+        val subnet = prefixToSubnet(address, prefix)
+        val octets = java.net.InetAddress.getByName(subnet).address.map { it.toInt() and 0xFF }
+        val last = if (prefix >= 31) octets[3] else (octets[3] + 1).coerceAtMost(254)
+        return "${octets[0]}.${octets[1]}.${octets[2]}.$last"
+    }
+
     private fun startLanternTrafficPolling() {
         torTrafficTask?.cancel(false)
         // The generic s0 front path arms the WARP poller at session start

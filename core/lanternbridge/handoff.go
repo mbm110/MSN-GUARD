@@ -2,53 +2,87 @@ package lanternbridge
 
 import (
 	"fmt"
-	"sync/atomic"
-	"syscall"
+	"time"
 )
 
 // The TUN fd handoff (3.4.0) — the official-app data path for MSN's Lantern.
 //
-// The app process owns the Android VpnService and its Builder; the sidecar
-// owns the tunnel. The app hands the established TUN's file descriptor to the
-// sidecar over a private Unix socket with SCM_RIGHTS (cmd/lanternsidecar's
-// handoff listener). androidPlatform.OpenTun then returns a fresh dup of the
-// master for every tunnel (re)start — the same role the official app's
-// gomobile OpenTun plays with VpnService.establish().
+// 3.4.4 restructure, mirroring the reference app exactly: the ENGINE drives
+// the TUN. In the official Lantern app (getlantern/lantern,
+// LanternVpnService.openTun) sing-tun calls the platform's openTun(tunOptions)
+// DURING the tunnel start, and the app builds the VpnService Builder from the
+// engine's own options at that moment and returns establish().fd — no TUN
+// exists before the engine asks for one. The 3.4.0–3.4.3 pre-staged push
+// (establish first, hand the fd over before /connect) raced the sidecar boot
+// and hung in the field; the reference semantics remove the race by
+// construction: nothing flows until OpenTun runs, inside ConnectVPN.
 //
-// Why a master + dup: sing-tun closes the descriptor it returned when a tunnel
-// stops, and a tunnel restart calls OpenTun AGAIN. Handing back the raw fd of
-// a previous tunnel would return a closed number; the master outlives every
-// restart and each OpenTun gets its own dup.
-var tunMasterFd atomic.Int64
+// The split-process twin: OpenTun serializes the engine's TunOptions into one
+// OPEN json line, pushes it onto the request channel and blocks for the app's
+// reply. The sidecar's handoff socket server (cmd/lanternsidecar's
+// serveTunHandoff) relays that line to the app's long-lived connection, which
+// mirrors the reference's createVPNBuilder(tunOptions) — close the previous
+// interface first (openTun's stale-descriptor comment), establish() with the
+// engine's own address plan, then return the fd via SCM_RIGHTS. Tunnel
+// restarts simply issue another OPEN on the same connection.
 
-// SetTunFd stores the app's TUN fd as the handoff master, closing any
-// previous master (a new VPN session replaces the old TUN device).
-func SetTunFd(fd int) {
-	if old := tunMasterFd.Swap(int64(fd)); old >= 0 {
-		closeFd(int(old))
+// TunHandoffRequest is one engine→app OPEN request in flight. The relay
+// (cmd/lanternsidecar) pulls it, sends the payload to the app and delivers
+// the app's answer through Reply.
+type TunHandoffRequest struct {
+	// Payload is the OPEN line (json, no newline) to relay to the app.
+	Payload []byte
+	// result carries the app's reply: the established fd, or the error.
+	result chan tunHandoffReply
+}
+
+type tunHandoffReply struct {
+	fd  int
+	err error
+}
+
+// tunHandoffRequests is the rendezvous between OpenTun (sing-tun's tunnel
+// goroutine, inside ConnectVPN) and the handoff relay (the app's single
+// long-lived connection). OpenTun pushes; the relay pulls.
+var tunHandoffRequests = make(chan TunHandoffRequest, 4)
+
+// PullTunRequest blocks until the engine issues an OPEN request (or the
+// timeout passes). The relay serves one request at a time; the small
+// timeout keeps the relay responsive to connection shutdown.
+func PullTunRequest(timeout time.Duration) (TunHandoffRequest, bool) {
+	select {
+	case req := <-tunHandoffRequests:
+		return req, true
+	case <-time.After(timeout):
+		return TunHandoffRequest{}, false
 	}
 }
 
-// CloseTunFd drops the master (sidecar shutdown).
-func CloseTunFd() {
-	if old := tunMasterFd.Swap(-1); old >= 0 {
-		closeFd(int(old))
-	}
+// Reply delivers the app's answer (or the relay error) to the waiting OpenTun
+// call. Buffered, so a stale reply after a timeout never blocks the relay.
+func (r TunHandoffRequest) Reply(fd int, err error) {
+	r.result <- tunHandoffReply{fd: fd, err: err}
 }
 
-// openTunFd returns a fresh dup of the master for one tunnel lifetime.
-func openTunFd() (int, error) {
-	master := int(tunMasterFd.Load())
-	if master < 0 {
-		return -1, fmt.Errorf("the app has not handed off the Android TUN fd yet")
+// requestTun relays one OPEN request to the app and waits for the fd. The
+// timeout covers both "the app has not connected yet" and "the app stalled":
+// the app connects right around dispatching /connect, so the wait is normally
+// milliseconds, but a bounded patience keeps a dead app from wedging the
+// tunnel goroutine forever.
+func requestTun(payload []byte, timeout time.Duration) (int, error) {
+	req := TunHandoffRequest{Payload: payload, result: make(chan tunHandoffReply, 1)}
+	select {
+	case tunHandoffRequests <- req:
+	case <-time.After(timeout):
+		return -1, fmt.Errorf("no handoff connection is serving the app side (the app never connected)")
 	}
-	dup, err := dupFd(master)
-	if err != nil {
-		return -1, fmt.Errorf("dup handed-off TUN fd: %w", err)
+	select {
+	case reply := <-req.result:
+		if reply.err != nil {
+			return -1, reply.err
+		}
+		return reply.fd, nil
+	case <-time.After(timeout):
+		return -1, fmt.Errorf("the app did not answer the TUN request in time")
 	}
-	return dup, nil
 }
-
-func dupFd(fd int) (int, error) { return syscall.Dup(fd) }
-
-func closeFd(fd int) { _ = syscall.Close(fd) }

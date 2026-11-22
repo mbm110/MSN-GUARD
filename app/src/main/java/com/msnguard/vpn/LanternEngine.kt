@@ -582,45 +582,145 @@ object LanternEngine {
      * Builder established the interface; without it the engine cannot open
      * the TUN and the connect fails cleanly.
      */
-    fun handoffTun(context: Context, fd: ParcelFileDescriptor): Boolean {
-        val path = File(sidecarDataDir(context), TUN_HANDOFF_SOCKET)
-        return try {
-            LocalSocket().use { socket ->
-                socket.soTimeout = 10_000
-                // 3.4.3 TEMP diagnostic: connect() has no timeout, and the
-                // 3.4.2 field log showed no handoff outcome at all — these
-                // markers bracket the only three blocking calls.
-                ConnectionLog.record("Lantern: handoff — connecting to ${path.name}")
-                socket.connect(
-                    LocalSocketAddress(path.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM)
-                )
-                ConnectionLog.record("Lantern: handoff — socket connected")
-                // The descriptor rides the NEXT write as an SCM_RIGHTS
-                // control message; the sidecar's handoff handler reads it
-                // with recvmsg and replies with a one-line ack.
-                socket.setFileDescriptorsForSend(arrayOf(fd.fileDescriptor))
-                socket.outputStream.apply {
-                    write("tun\n".toByteArray(Charsets.UTF_8))
-                    flush()
-                }
-                ConnectionLog.record("Lantern: handoff — fd sent, awaiting ack")
-                val ack = BufferedReader(InputStreamReader(socket.inputStream)).readLine().orEmpty()
-                if (ack.startsWith("OK")) {
-                    ConnectionLog.record("Lantern: TUN fd handed off to the sidecar ($ack)")
-                    true
-                } else {
-                    lastError = "TUN handoff rejected: $ack"
-                    ConnectionLog.record("Lantern: $lastError")
-                    false
-                }
-            }
-        } catch (error: Throwable) {
-            lastError = "TUN handoff failed: ${error.message}"
+    /**
+     * The app-side twin of the reference openTun (3.4.4): the ENGINE drives the
+     * TUN. getlantern/lantern's LanternVpnService.openTun builds the VpnService
+     * Builder from sing-tun's own TunOptions at tunnel-start time and returns
+     * establish().fd — no TUN exists before the engine asks. This service
+     * connects to the sidecar's handoff socket and waits; each OPEN line
+     * carries the engine's serialized options, [establishTun] builds and
+     * establish()es with them (closing any previous interface first, the
+     * reference's stale-descriptor rule), and the fd rides the OK reply back
+     * via SCM_RIGHTS. Tunnel restarts simply issue another OPEN on the same
+     * connection — no pre-staged fd, no boot race (the 3.4.0–3.4.3 stall).
+     */
+    fun startTunHandoffService(
+        context: Context,
+        establishTun: (TunRequest) -> ParcelFileDescriptor,
+    ): Boolean {
+        if (handoffThread?.isAlive == true) return true
+        if (!awaitTunHandoffSocket(context)) {
+            lastError = "the sidecar did not expose its TUN handoff socket"
             ConnectionLog.record("Lantern: $lastError")
-            Log.e(TAG, "TUN handoff failed", error)
-            false
+            return false
         }
+        val path = File(sidecarDataDir(context), TUN_HANDOFF_SOCKET)
+        val thread = Thread({
+            try {
+                LocalSocket().use { socket ->
+                    socket.soTimeout = 0 // OPEN requests wait for the engine
+                    socket.connect(
+                        LocalSocketAddress(path.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM)
+                    )
+                    ConnectionLog.record("Lantern: handoff service connected — waiting for engine TUN requests")
+                    val reader = BufferedReader(InputStreamReader(socket.inputStream))
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        if (!line.startsWith("OPEN ")) continue
+                        val request = TunRequest(line.removePrefix("OPEN "))
+                        ConnectionLog.record(
+                            "Lantern: engine requested the TUN " +
+                                "(mtu=${request.mtu}, v4=${request.inet4.joinToString(",")}, dns=${request.dnsServers.size})"
+                        )
+                        val reply = try {
+                            val pfd = establishTun(request)
+                            // The descriptor rides the NEXT write as an
+                            // SCM_RIGHTS control message; the sidecar's relay
+                            // reads the OK line and the fd in one message.
+                            socket.setFileDescriptorsForSend(arrayOf(pfd.fileDescriptor))
+                            "OK ${pfd.fd}"
+                        } catch (error: Throwable) {
+                            lastError = "TUN establish failed: ${error.message}"
+                            ConnectionLog.record("Lantern: $lastError")
+                            Log.e(TAG, "TUN establish failed", error)
+                            "ERR ${error.message ?: error.javaClass.simpleName}"
+                        }
+                        socket.outputStream.apply {
+                            write((reply + "\n").toByteArray(Charsets.UTF_8))
+                            flush()
+                        }
+                    }
+                }
+            } catch (error: Throwable) {
+                ConnectionLog.record("Lantern: handoff service ended (${error.message ?: error.javaClass.simpleName})")
+            }
+        }, "lantern-tun-handoff").apply {
+            isDaemon = true
+            start()
+        }
+        handoffThread = thread
+        return true
     }
+
+    /** One engine OPEN request — the TunOptions fields createVPNBuilder mirrors. */
+    class TunRequest(payload: String) {
+        val mtu: Int
+        val inet4: List<Pair<String, Int>>
+        val inet6: List<Pair<String, Int>>
+        val autoRoute: Boolean
+        val dnsServers: List<String>
+        val routes4: List<Pair<String, Int>>
+        val routes6: List<Pair<String, Int>>
+        val excludes4: List<Pair<String, Int>>
+        val excludes6: List<Pair<String, Int>>
+        val routeRanges4: List<Pair<String, Int>>
+        val routeRanges6: List<Pair<String, Int>>
+
+        init {
+            val json = org.json.JSONObject(payload)
+            mtu = json.optInt("mtu", 1500)
+            autoRoute = json.optBoolean("auto_route", true)
+            inet4 = parsePrefixes(json, "inet4_address")
+            inet6 = parsePrefixes(json, "inet6_address")
+            dnsServers = json.optJSONArray("dns_servers")?.let { arr ->
+                (0 until arr.length()).map { arr.getString(it) }
+            } ?: emptyList()
+            routes4 = parsePrefixes(json, "routes4")
+            routes6 = parsePrefixes(json, "routes6")
+            excludes4 = parsePrefixes(json, "excludes4")
+            excludes6 = parsePrefixes(json, "excludes6")
+            routeRanges4 = parsePrefixes(json, "route_ranges4")
+            routeRanges6 = parsePrefixes(json, "route_ranges6")
+        }
+
+        private fun parsePrefixes(json: org.json.JSONObject, key: String): List<Pair<String, Int>> =
+            json.optJSONArray(key)?.let { arr ->
+                (0 until arr.length()).mapNotNull { entry ->
+                    val cidr = arr.getString(entry)
+                    val slash = cidr.lastIndexOf('/')
+                    if (slash <= 0) null else cidr.take(slash) to cidr.substring(slash + 1).toInt()
+                }
+            } ?: emptyList()
+    }
+
+    /**
+     * Boot the sidecar WITHOUT invalidating the connect attempt (3.4.4 fix):
+     * ensureSidecar() calls armForStart() when the process is not running,
+     * which bumps the generation and made the connect worker silently bail at
+     * its next isCurrent() check — the sidecar booted, the worker vanished,
+     * and the idle reaper killed the sidecar 240s later ("list-only sidecar
+     * idle 240s — stopping" in the field log). The connect path must reuse its
+     * own attempt token: startProcess(context, attempt) does exactly that.
+     */
+    fun ensureSidecarForConnect(context: Context, attempt: Long): Boolean {
+        if (controlAlive(800)) return true
+        if (process?.isAlive == true) {
+            val deadline = android.os.SystemClock.elapsedRealtime() + 15_000L
+            while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                if (process?.isAlive != true) break
+                if (controlSocketPath.isNotBlank() && controlAlive(1500)) return true
+                Thread.sleep(200L)
+            }
+            return controlAlive(1500)
+        }
+        // startProcess reuses the CONNECT's attempt: no armForStart() here.
+        // Its awaitControlReady already gates readiness; the list-only idle
+        // reaper stays un-armed, which is fine — the connect that follows
+        // within seconds keeps the sidecar busy.
+        return startProcess(context, attempt)
+    }
+
+    private var handoffThread: Thread? = null
 
     /**
      * Cumulative byte counters from Radiance's active connection tracker.

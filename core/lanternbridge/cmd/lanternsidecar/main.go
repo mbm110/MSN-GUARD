@@ -173,12 +173,14 @@ func serveControl(listener net.Listener, token string) error {
 	}
 }
 
-// serveTunHandoff accepts TUN fd handoffs from the app. The socket lives in
-// the sidecar's private data dir (0600, app UID), so only the app itself can
-// reach it; each connection is one handoff: the app sends a short payload
-// carrying the fd via SCM_RIGHTS (Kotlin LocalSocket.setFileDescriptorsForSend)
-// and reads a one-line ack. A second handoff replaces the master — the old
-// TUN device belongs to a dead session.
+// serveTunHandoff relays engine→app TUN requests — the reference openTun
+// semantics across the process boundary (3.4.4). The socket lives in the
+// sidecar's private data dir (0600, app UID), so only the app itself can
+// reach it. The app connects once per sidecar lifetime and waits; when the
+// engine starts (or restarts) a tunnel, OpenTun serializes its own TunOptions
+// into an OPEN line, the relay forwards it to the app, the app mirrors the
+// reference's createVPNBuilder(tunOptions), establish()es and returns the fd
+// via SCM_RIGHTS; the relay passes it back to the blocked OpenTun call.
 func serveTunHandoff(path string) error {
 	_ = os.Remove(path)
 	listener, err := net.Listen("unix", path)
@@ -198,35 +200,60 @@ func serveTunHandoff(path string) error {
 		if err != nil {
 			return err
 		}
-		handleTunHandoff(conn)
+		relayTunHandoff(conn)
 	}
 }
 
-func handleTunHandoff(conn net.Conn) {
+// relayTunHandoff serves one app connection for its whole lifetime: each
+// engine OPEN request becomes one OPEN line out and one reply (fd or error)
+// in. A dead app connection fails only the request in flight; the accept loop
+// takes the app's next connection (it reconnects on its next connect cycle).
+func relayTunHandoff(conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-
 	unixConn, ok := conn.(*net.UnixConn)
 	if !ok {
-		_, _ = conn.Write([]byte("ERR not a unix connection\n"))
 		return
 	}
-	buf := make([]byte, 128)
+	for {
+		req, ok := lanternbridge.PullTunRequest(24 * time.Hour)
+		if !ok {
+			continue // nothing to serve yet; keep waiting
+		}
+		fd, err := relayOneTunRequest(unixConn, req.Payload)
+		req.Reply(fd, err)
+		if err != nil {
+			log.Printf("tun handoff relay: connection failed: %v", err)
+			return
+		}
+		log.Printf("tun handoff relay: app returned fd=%d", fd)
+	}
+}
+
+// relayOneTunRequest sends one OPEN line and reads the app's reply. The app's
+// reply line and its SCM_RIGHTS descriptor arrive in ONE unix message, so the
+// reply is read raw with ReadMsgUnix — a bufio.Reader would swallow the
+// control data (the 3.4.4 note: never buffer a message that carries an fd).
+func relayOneTunRequest(unixConn *net.UnixConn, payload []byte) (int, error) {
+	_ = unixConn.SetDeadline(time.Now().Add(120 * time.Second))
+	if _, err := fmt.Fprintf(unixConn, "OPEN %s\n", payload); err != nil {
+		return -1, fmt.Errorf("send OPEN to the app: %w", err)
+	}
+	buf := make([]byte, 256)
 	oob := make([]byte, 128)
 	n, oobn, _, _, err := unixConn.ReadMsgUnix(buf, oob)
 	if err != nil {
-		_, _ = conn.Write([]byte("ERR " + err.Error() + "\n"))
-		return
+		return -1, fmt.Errorf("read the app's reply: %w", err)
+	}
+	text := strings.TrimSpace(string(buf[:n]))
+	if !strings.HasPrefix(text, "OK ") {
+		return -1, fmt.Errorf("app rejected the TUN request: %s", strings.TrimPrefix(text, "ERR "))
 	}
 	if oobn == 0 {
-		_, _ = conn.Write([]byte("ERR no file descriptor received\n"))
-		return
+		return -1, fmt.Errorf("the app's reply carried no descriptor")
 	}
-	// SCM_RIGHTS: parse each control message and take the descriptor(s).
 	messages, err := syscall.ParseSocketControlMessage(oob[:oobn])
 	if err != nil {
-		_, _ = conn.Write([]byte("ERR " + err.Error() + "\n"))
-		return
+		return -1, fmt.Errorf("parse the app's control message: %w", err)
 	}
 	var fds []int
 	for _, msg := range messages {
@@ -235,22 +262,19 @@ func handleTunHandoff(conn net.Conn) {
 			// descriptors; Android ABIs are little-endian. Stdlib syscall has
 			// ParseSocketControlMessage but not ParseRights (that one lives
 			// in x/sys), so unpack the rights directly.
-			data := msg.Data
-			for off := 0; off+4 <= len(data); off += 4 {
-				fds = append(fds, int(binary.LittleEndian.Uint32(data[off:])))
+			for off := 0; off+4 <= len(msg.Data); off += 4 {
+				fds = append(fds, int(binary.LittleEndian.Uint32(msg.Data[off:])))
 			}
 		}
 	}
 	if len(fds) == 0 {
-		_, _ = conn.Write([]byte("ERR no SCM_RIGHTS descriptor in the message\n"))
-		return
+		return -1, fmt.Errorf("the app's reply carried no SCM_RIGHTS descriptor")
 	}
-	lanternbridge.SetTunFd(fds[0])
+	fd := fds[0]
 	for _, extra := range fds[1:] {
 		_ = syscall.Close(extra)
 	}
-	log.Printf("tun handoff accepted: fd=%d payload=%q", fds[0], string(buf[:n]))
-	_, _ = conn.Write([]byte("OK " + fmt.Sprint(fds[0]) + "\n"))
+	return fd, nil
 }
 
 func handleControl(conn net.Conn, token string) {
