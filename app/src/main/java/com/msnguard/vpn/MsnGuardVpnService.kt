@@ -3475,8 +3475,12 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
                     } else if (request.inet6.isNotEmpty()) {
                         builder.addRoute("::", 0)
                     }
-                    for ((address, prefix) in request.excludes4) builder.excludeRoute(address, prefix)
-                    for ((address, prefix) in request.excludes6) builder.excludeRoute(address, prefix)
+                    for ((address, prefix) in request.excludes4) {
+                        builder.excludeRoute(IpPrefix(InetAddress.getByName(address), prefix))
+                    }
+                    for ((address, prefix) in request.excludes6) {
+                        builder.excludeRoute(IpPrefix(InetAddress.getByName(address), prefix))
+                    }
                 } else {
                     if (request.routeRanges4.isNotEmpty()) {
                         for ((address, prefix) in request.routeRanges4) builder.addRoute(address, prefix)
