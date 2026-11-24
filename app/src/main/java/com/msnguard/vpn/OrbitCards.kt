@@ -416,7 +416,7 @@ class ChainModeCard(
      * selected. Repaints immediately for the same reason [setOuterSummary] does.
      */
     fun setInner(name: String) {
-        // Display name as given — the caller passes the localized "تور"/"سایفون"
+        // Display name as given — the caller passes the localized "Tor"/"Psiphon"
         // (or "Tor"/"Psiphon"); uppercasing here would break the Persian glyphs.
         innerName = name
         titleView.text = if (AppLanguage.current() == "en") {

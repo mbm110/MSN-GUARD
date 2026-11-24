@@ -32,8 +32,16 @@ object TunnelStatus {
     var isProxyMode: Boolean = false
         internal set
 
-    /** True when either data path is up: Rust core (proxy/other protocols) or any TUN engine (VPN). */
-    fun isActive(): Boolean = NativeCore.isRunning() || TunEngineManager.isRunningAny || isProxyMode
+    /**
+     * True when either data path is up: Rust core (proxy/other protocols), any
+     * shared TUN engine (VPN), the proxy-only Psiphon path — or Foxy's OWN Hev
+     * engine, which lives outside TunEngineManager by design (isolated config,
+     * timeouts and fd). Without it the dial, the tile and the header all read a
+     * live Foxy session as "Disconnected" and a second tile tap routes to
+     * ACTION_CONNECT, which silently no-ops behind the connected guard.
+     */
+    fun isActive(): Boolean = NativeCore.isRunning() || TunEngineManager.isRunningAny ||
+        isProxyMode || com.msnguard.vpn.foxy.FoxyHevEngine.isRunning
 
     /**
      * True when the whole device is being routed through tun2socks.
@@ -60,5 +68,25 @@ object TunnelStatus {
      */
     @Volatile
     var isNativeTunMode: Boolean = false
+        internal set
+
+    /**
+     * The UI's verification gate is still proving that payload crosses.
+     *
+     * The service's "connected" (the SOCKS listener answered) and the dial's
+     * "connected" (beginVerification passed a real probe through the tunnel)
+     * are two different moments by design — the gate exists to catch
+     * handshake-only tunnels. The notification reads these so its row and the
+     * screen never disagree: while [uiVerifying] is set the row still says
+     * "Connecting…", and it claims "VPN connected" only once the UI itself
+     * did ([sessionVerified]). Set by MainActivity, cleared by both sides.
+     */
+    @Volatile
+    var uiVerifying: Boolean = false
+        internal set
+
+    /** The UI's verification passed for this session; see [uiVerifying]. */
+    @Volatile
+    var sessionVerified: Boolean = false
         internal set
 }

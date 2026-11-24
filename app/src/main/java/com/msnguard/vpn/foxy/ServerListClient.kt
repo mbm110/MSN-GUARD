@@ -24,7 +24,6 @@ private const val MAX_CITIES_PER_COUNTRY = 128
 private const val MAX_SERVERS_PER_CITY = 256
 private const val MAX_PROTOCOLS_PER_SERVER = 32
 private val SAFE_HOST = Regex("^[A-Za-z0-9.-]{1,253}$")
-
 private fun readBounded(input: java.io.InputStream, limit: Int): String {
     val output = ByteArrayOutputStream()
     val buffer = ByteArray(16 * 1024)
@@ -51,9 +50,6 @@ private fun stableServerKey(server: VpnServerNode): String =
     "${server.hostname.lowercase()}:${server.port}:${server.protocols.joinToString("|") { it.name.lowercase() }}"
 
 private fun stableCountryKey(country: VpnCountry): String = country.code.trim().uppercase()
-
-private const val REMOTE_SETTINGS_URL =
-    "https://firefox.settings.services.mozilla.com/v1/buckets/main/collections/vpn-serverlist/records"
 
 const val RECOMMENDED_COUNTRY_CODE = "REC"
 

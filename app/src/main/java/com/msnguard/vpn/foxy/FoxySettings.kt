@@ -49,6 +49,48 @@ object FoxySettings {
         prefs(ctx).edit().putInt(MULTIPLEX_PREF_KEY, streams.coerceIn(1, 64)).apply()
     }
 
+    // ------------------------------------------------------------------
+    // Relayer policy (FoxyVPN 2.0.3/2.0.4 port). Provider choice and the
+    // custom relayer URL are user prefs; the candidate relayer list, routed
+    // categories and failover codes still come from FoxyRemoteConfig.
+    // ------------------------------------------------------------------
+
+    private const val RELAYER_PROVIDER_PREF_KEY = "foxy_relayer_provider"
+    private const val CUSTOM_RELAYER_URL_PREF_KEY = "foxy_custom_relayer_url"
+
+    /** App context captured at init so the relayer interceptor (no Context
+     *  in its signature) can read the user's relayer preferences. */
+    @Volatile
+    private var cachedContext: android.content.Context? = null
+
+    fun init(context: android.content.Context) {
+        cachedContext = context.applicationContext
+    }
+
+    fun relayerProvider(ctx: android.content.Context): String =
+        prefs(ctx).getString(RELAYER_PROVIDER_PREF_KEY, null)?.trim()?.takeIf { it.isNotBlank() }
+            ?: RELAYER_AUTOMATIC
+
+    fun customRelayerUrl(ctx: android.content.Context): String =
+        prefs(ctx).getString(CUSTOM_RELAYER_URL_PREF_KEY, null)?.trim().orEmpty()
+
+    /** Provider without a Context (null when the app context was not captured). */
+    internal fun relayerProviderOrNull(): String? = cachedContext?.let { relayerProvider(it) }
+
+    /** Custom relayer URL without a Context ("" when unavailable). */
+    internal fun customRelayerUrlOrNull(): String = cachedContext?.let { customRelayerUrl(it) } ?: ""
+
+    fun saveRelayer(ctx: android.content.Context, provider: String, customUrl: String) {
+        prefs(ctx).edit()
+            .putString(RELAYER_PROVIDER_PREF_KEY, provider.trim())
+            .putString(CUSTOM_RELAYER_URL_PREF_KEY, customUrl.trim())
+            .apply()
+    }
+
+    /** Custom relayer URL validation for the settings row (http/https, host
+     *  present) — the top-level helper lives in FoxyRelayer.kt. */
+    fun validCustomRelayerUrl(value: String): Boolean = isValidRelayerUrl(value)
+
     // Compatibility defaults for existing call sites.
     fun tlsSplitMode(): TlsSplitMode = TlsSplitMode.OFF
     fun upstreamProxyEnabled(): Boolean = false

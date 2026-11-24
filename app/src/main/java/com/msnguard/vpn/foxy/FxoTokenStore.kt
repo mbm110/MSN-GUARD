@@ -42,17 +42,20 @@ class FxoTokenStore(context: Context) {
         .getOrElse { throw StorageException("Could not read Firefox session epoch", it) }
 
     fun loadAuth(): RuntimeAuth? = runCatching {
-        val access = prefs.getString(KEY_ACCESS_TOKEN, null)?.takeIf { it.isNotBlank() } ?: return@runCatching null
+        // Reference v2.0.4: a refresh-token-only store is still a session —
+        // restore it and let ensureFreshAccessToken renew the access token.
+        val access = prefs.getString(KEY_ACCESS_TOKEN, null)?.takeIf { it.isNotBlank() }
         val refresh = prefs.getString(KEY_REFRESH_TOKEN, null)?.takeIf { it.isNotBlank() }
+        if (access == null && refresh == null) return@runCatching null
         val expiresAt = prefs.getLong(KEY_EXPIRES_AT, 0L)
-        RuntimeAuth(access, refresh, expiresAt)
+        RuntimeAuth(access ?: "", refresh, expiresAt)
     }.onFailure {
         FoxyLog.w(TAG, "could not read the stored session", it)
     }.getOrNull()
 
     fun hasValidAccessToken(): Boolean {
         val auth = loadAuth() ?: return false
-        if (auth.expiresAtEpochSeconds <= 0L) return false
+        if (auth.accessToken.isBlank() || auth.expiresAtEpochSeconds <= 0L) return false
         val nowSeconds = System.currentTimeMillis() / 1000
         return auth.expiresAtEpochSeconds - nowSeconds > CLOCK_SKEW_TOLERANCE_SECONDS
     }
@@ -88,6 +91,22 @@ class FxoTokenStore(context: Context) {
 
     fun clear() {
         prefs.edit().clear().apply()
+    }
+
+    /**
+     * Session-only wipe for an automatic sign-out: tokens, expiry, epoch and
+     * any pending verification session go, but the saved email hint stays for
+     * the next sign-in. [clear] remains the full wipe used by explicit
+     * user-driven paths.
+     */
+    fun clearSession() {
+        prefs.edit()
+            .remove(KEY_ACCESS_TOKEN)
+            .remove(KEY_REFRESH_TOKEN)
+            .remove(KEY_EXPIRES_AT)
+            .remove(KEY_SESSION_EPOCH)
+            .remove(KEY_PENDING_SESSION_TOKEN)
+            .apply()
     }
 
     companion object {

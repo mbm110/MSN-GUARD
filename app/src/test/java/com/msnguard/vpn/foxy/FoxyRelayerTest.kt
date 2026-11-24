@@ -39,9 +39,11 @@ class FoxyRelayerTest {
 
     @Test fun invalidRelayerUrlsAreRejected() {
         assertTrue(isValidRelayerUrl("https://relay.example/path"))
-        assertFalse(isValidRelayerUrl("http://relay.example"))
+        // Reference v2.0.4 accepts plain http relayers too.
+        assertTrue(isValidRelayerUrl("http://relay.example"))
         assertFalse(isValidRelayerUrl("https://user:secret@relay.example"))
         assertFalse(isValidRelayerUrl("https://relay.example/#fragment"))
+        assertFalse(isValidRelayerUrl("https://relay.example:99999"))
     }
 
     @Test fun unselectedCategoryStaysDirect() {

@@ -49,8 +49,8 @@ data class EndpointsConfig(
 )
 
 val DEFAULT_RELAYERS: Map<String, String> = emptyMap()
-val DEFAULT_RELAYER_ROUTES: Set<String> = setOf("guardian")
-val DEFAULT_FAILOVER_CODES: Set<Int> = setOf(451)
+val DEFAULT_RELAYER_ROUTES: Set<String> = setOf("guardian", "fxa", "config", "server_list")
+val DEFAULT_FAILOVER_CODES: Set<Int> = setOf(406, 451)
 
 data class RemoteConfig(
     val version: Int,
@@ -105,7 +105,10 @@ private val DEFAULT_SOLVER =
     ComponentConfig(
         headers =
             mapOf(
-                "User-Agent" to resolvePlaceholders("MozillaVPN/2.24.0 (sys:android {android_version})"),
+                "User-Agent" to
+                    resolvePlaceholders(
+                        "Mozilla/5.0 (Android {android_version}; Mobile; rv:159.0) Gecko/159.0 Firefox/159.0"
+                    ),
                 "Accept-Encoding" to "identity",
             ),
     )
@@ -161,6 +164,10 @@ object FoxyRemoteConfig {
     fun init(context: Context) {
         val app = context.applicationContext
         appContext = app
+        // Capture the app context for FoxySettings too: the relayer
+        // interceptor runs without a Context and needs the user's relayer
+        // preferences.
+        FoxySettings.init(app)
         val file = File(app.filesDir, FILE_NAME)
         if (file.isFile && file.length() > 0) {
             val text = runCatching { file.readText() }.getOrNull().orEmpty()

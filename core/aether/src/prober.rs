@@ -499,7 +499,14 @@ impl ScanMode {
                 concurrency: 16,
                 per_probe_timeout: Duration::from_millis(6000),
                 overall_deadline: Duration::from_secs(120),
-                quiet_after_first: Duration::from_secs(20),
+                // 20s of quiet time after reaching the target cost ~14s of
+                // connect latency for nothing: in the v3.2.28 field log the
+                // best gateway (647ms) was already found BEFORE the target
+                // was reached, and the whole extra 19s of sampling found
+                // nothing better. 6s still collects the probes already in
+                // flight (per-probe rtt on a throttled link is 1-5s) before
+                // finalizing the selection.
+                quiet_after_first: Duration::from_secs(6),
                 target_successes: 6,
                 early_exit_first: false,
                 full_subnet: false,

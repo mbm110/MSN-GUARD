@@ -123,6 +123,18 @@ object LogRedactor {
     private val PATH = Regex("""/(?:data|system|storage|sdcard|proc|vendor)/[^\s,;:)"']*""")
 
     /**
+     * Credential-shaped strings, as a safety net: no current call-site logs a
+     * token or password, but one wrong `ConnectionLog.record` away from a leak
+     * this catches Authorization headers, Bearer/JWTs, long base64/hex blobs
+     * and key=value secret assignments before they reach the mirror file.
+     */
+    private val SECRET = Regex(
+        """(?i)(authorization\s*:\s*\S+\s+\S+|bearer\s+[A-Za-z0-9._~+/-]{16,}|""" +
+            """(?:token|password|passwd|secret|api[_-]?key)\s*[=:]\s*\S+)"""
+    )
+    private val SECRET_BLOB = Regex("""\b[A-Za-z0-9+/]{40,}={0,2}\b|\b[0-9a-fA-F]{40,}\b""")
+
+    /**
      * A publisher's node label, which is the worst leak in the log and the one no
      * structural rule catches — it is free text somebody else wrote.
      *
@@ -297,7 +309,14 @@ object LogRedactor {
      */
     fun redact(line: String): String {
         if (line.isEmpty()) return line
-        var out = PATH.replace(line) { "f" + digest(it.value, 4) }
+        // Credentials first, before anything else can split them: keyword-anchored
+        // secrets always, and bare 40+ base64/hex blobs only on lines that smell
+        // like auth — a blanket blob pass would also digest harmless long labels.
+        var pre = SECRET.replace(line) { "s" + digest(it.value, 4) }
+        if (pre.contains(Regex("(?i)token|auth|password|secret|bearer"))) {
+            pre = SECRET_BLOB.replace(pre) { "s" + digest(it.value, 4) }
+        }
+        var out = PATH.replace(pre) { "f" + digest(it.value, 4) }
         // Flags first: that collapses `AL 🇦🇱` to one spaceless field, which is what
         // lets LABEL_RUN match the label without reaching back into the prose.
         out = FLAG.replace(out) { "" }
