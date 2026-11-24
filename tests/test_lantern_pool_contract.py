@@ -140,6 +140,35 @@ class LanternPoolContract(unittest.TestCase):
         # Helpers and user pairings are never pool members.
         self.assertIn("lbA.IsHelperTag(srv.Tag) || lbA.IsReverseHelperTag(srv.Tag)", BRIDGE)
 
+    def test_the_dead_lantern_session_reconnects_automatically(self):
+        # 3.4.13 field log 3.4.12: the Iran-pool session died (every ir-free
+        # server exhausted, the watchdog dropped the tunnel) and the app just
+        # showed "try another protocol". The app must reconnect itself, fast;
+        # bounded at three dead-on-arrival sessions so it never flip-flops.
+        self.assertIn("else if (selectedProtocol == Protocol.LANTERN) {", UI)
+        self.assertIn("consecutiveFakeLantern++", UI)
+        self.assertIn("automatic reconnect after a dead session", UI)
+        self.assertIn("if (consecutiveFakeLantern >= 3) {", UI)
+        # A verified session resets the loop — one healthy connect clears it.
+        self.assertGreaterEqual(
+            UI.count("consecutiveFakeLantern = 0"), 2,
+            "verification and the give-up branch must both reset the counter",
+        )
+        self.assertIn("Tunnel stopped passing traffic — tap the dial to reconnect", STRINGS)
+        self.assertIn("Tunnel stopped passing traffic — tap the dial to reconnect", RUSSIAN)
+
+    def test_a_pool_switch_offline_boots_the_new_pools_sidecar(self):
+        # 3.4.13 field log 3.4.12: switching pools with NO tunnel up left the
+        # list-only sidecar on the OLD pool's env — its SR-REJECT pin refused
+        # the new pool's draw and the Server sheet opened EMPTY. The switch
+        # must kill the stale sidecar and prefetch the new pool's list.
+        self.assertIn("LanternEngine.stopIdleListOnly()", UI)
+        self.assertIn("pool changed offline", UI)
+        self.assertIn("ensureSidecar(this@MainActivity)", UI)
+        self.assertIn("servers pre-fetched for pool", UI)
+        # Silent prefetch: no progress dialog on a Settings screen.
+        self.assertIn("NO dialog", UI)
+
     def test_all_rows_are_translated(self):
         for key in (
             "Server pool",

@@ -657,6 +657,7 @@ internal object RussianStrings {
         "Tunnel and VPN events" to "События туннеля и VPN",
         "Tunnel controls" to "Управление туннелем",
         "Tunnel handshake succeeded but no traffic passes — try another protocol" to "Рукопожатие туннеля выполнено, но трафик не проходит — попробуйте другой протокол",
+        "Tunnel stopped passing traffic — tap the dial to reconnect" to "Туннель перестал передавать трафик — нажмите диск, чтобы переподключиться",
         "Tunnel internals" to "Внутренние данные туннеля",
         "Tunnel is active; HTTP health check failed" to "Туннель активен, но проверка состояния по HTTP не пройдена",
         "Tunnel is up but no traffic is passing" to "Туннель работает, но трафик не проходит",

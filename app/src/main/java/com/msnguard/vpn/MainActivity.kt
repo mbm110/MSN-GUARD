@@ -129,6 +129,9 @@ class MainActivity : Activity() {
     // side it loops forever on Verifying. After N fails, evict the cached
     // peer so the next retry actually scans.
     private var consecutiveFakeWireguard = 0
+    // 3.4.13: consecutive dead-on-arrival Lantern sessions (watchdog drops
+    // the tunnel right after connect); bounds the auto-reconnect loop.
+    private var consecutiveFakeLantern = 0
     private var pendingConfig: String? = null
     /**
      * The backup JSON built before the file picker opened.
@@ -1283,6 +1286,7 @@ class MainActivity : Activity() {
                     if (moved) {
                         ConnectionLog.record("Tunnel is passing traffic — verified from inside the tunnel")
                         consecutiveFakeWireguard = 0
+                        consecutiveFakeLantern = 0
                         showConnected()
                         // Latency is cosmetic, so a failure here must not undo a
                         // verification that already succeeded on real bytes.
@@ -1347,6 +1351,7 @@ class MainActivity : Activity() {
                 if (verified != null) {
                     ConnectionLog.record("Reachability probe passed in $attempts attempt(s) — ${verified.first}")
                     consecutiveFakeWireguard = 0
+                    consecutiveFakeLantern = 0
                     showConnected()
                     chipLatency.text = Strings.tf("Latency %s ms", verified.second.toInt())
                     // Second opinion, from inside the tunnel. A probe that rode
@@ -1456,6 +1461,32 @@ class MainActivity : Activity() {
                 }, 600)
                 return
             }
+        } else if (selectedProtocol == Protocol.LANTERN) {
+            // 3.4.13 field log 3.4.12: an Iran-pool session held 28 minutes,
+            // then every ir-free server went dead at once (six 'cycle
+            // exhausted' sweeps, the fresh draws carried no ir-free member
+            // either) and the watchdog dropped the tunnel — and the app just
+            // sat there showing "try another protocol". The user's ask: the
+            // app must reconnect itself, fast, onto whatever server answers.
+            // A fresh Lantern connect re-boot's the sidecar, re-draws the
+            // pool and lets auto-select pick whatever passed its probe this
+            // time — exactly the "reconnect to a healthy server" behavior.
+            // Bound the loop: after three consecutive dead-on-arrival
+            // Lantern sessions, stop and report instead of flip-flopping.
+            consecutiveFakeLantern++
+            ConnectionLog.record("Dead Lantern session $consecutiveFakeLantern/3 — reconnecting automatically")
+            if (consecutiveFakeLantern >= 3) {
+                consecutiveFakeLantern = 0
+                ConnectionLog.record("Lantern failed 3 times in a row — stopping auto-reconnect")
+                showFailure(Strings.t("Tunnel stopped passing traffic — tap the dial to reconnect"))
+                return
+            }
+            sessionHandler.postDelayed({
+                if (isFinishing || isDestroyed) return@postDelayed
+                ConnectionLog.record("Lantern: automatic reconnect after a dead session")
+                connect(configJson())
+            }, 1_200)
+            return
         } else {
             consecutiveFakeWireguard = 0
         }
@@ -10728,6 +10759,49 @@ class MainActivity : Activity() {
                 ConnectionLog.record("Lantern: restarting the engine for pool ${chosen.coreName}")
                 startService(Intent(this, MsnGuardVpnService::class.java)
                     .setAction(MsnGuardVpnService.ACTION_RECONNECT))
+            } else {
+                // 3.4.13 field log 3.4.12: with NO tunnel up, the list-only
+                // sidecar is still running on the OLD pool's env — a fresh
+                // draw of the new pool (e.g. the worldwide sample after a
+                // switch to Global) is rejected by the still-armed old pin
+                // (SR-REJECT), /pool has nothing left to keep, and the
+                // Server sheet opens EMPTY. Kill the list-only sidecar
+                // here; the prefetch below re-boots it on the new pool's
+                // env right away so the next picker open is instant.
+                ConnectionLog.record("Lantern: pool changed offline — restarting the list-only sidecar on the new pool")
+                LanternEngine.stopIdleListOnly()
+                // Prefetch: boot the sidecar on the NEW pool and pull the
+                // fresh list now, in the background. When the user then
+                // opens the Server sheet it answers from the ready manager
+                // (no empty-state round trip), and the parse rebuilds the
+                // cache the sheet reads.
+                Thread {
+                    val booted = runCatching {
+                        LanternEngine.ensureSidecar(this@MainActivity)
+                    }.getOrDefault(false)
+                    if (booted) {
+                        // Silent bounded wait (NO dialog — the user is in
+                        // Settings, not waiting on a picker): same
+                        // non-empty-list gate as awaitLanternServerConfig,
+                        // without its progress sheet.
+                        var snapshot = LanternEngine.serversSnapshot(timeoutMs = 5_000)
+                        val deadline = System.currentTimeMillis() + 45_000L
+                        while (System.currentTimeMillis() < deadline) {
+                            val count = snapshot?.optJSONArray("servers")?.length() ?: 0
+                            if (count > 0) break
+                            Thread.sleep(1_500L)
+                            snapshot = LanternEngine.serversSnapshot(timeoutMs = 3_000)
+                        }
+                        if (snapshot != null && (snapshot.optJSONArray("servers")?.length() ?: 0) > 0) {
+                            parseLanternSnapshot(snapshot, trustCurrent = true)
+                            ConnectionLog.record(
+                                "Lantern: ${lanternServersCache.size} servers pre-fetched for pool ${chosen.coreName}"
+                            )
+                        } else {
+                            ConnectionLog.record("Lantern: pool prefetch returned no list yet")
+                        }
+                    }
+                }.apply { isDaemon = true; start() }
             }
         }
         after?.invoke()

@@ -690,6 +690,7 @@ object Strings {
         "Tunnel and VPN events" to Triple("Tunnel and VPN events", "رویدادهای تونل و وی‌پی‌ان", "隧道与 VPN 事件记录"),
         "Tunnel controls" to Triple("Tunnel controls", "کنترل‌های تونل", "隧道控制"),
         "Tunnel handshake succeeded but no traffic passes — try another protocol" to Triple("Tunnel handshake succeeded but no traffic passes — try another protocol", "هندشیک تانل موفق شد ولی هیچ ترافیکی رد نمی‌شود — یک پروتکل دیگر را امتحان کن", "隧道握手成功但无流量通过 — 请尝试其他协议"),
+        "Tunnel stopped passing traffic — tap the dial to reconnect" to Triple("Tunnel stopped passing traffic — tap the dial to reconnect", "عبور ترافیک از تونل قطع شد — برای اتصال مجدد روی دایره بزن", "隧道已停止传输流量 — 点击圆盘重新连接"),
         "Tunnel internals" to Triple("Tunnel internals", "جزئیات داخلی تونل", "记录隧道内部运行细节"),
         "Tunnel is active; HTTP health check failed" to Triple("Tunnel is active; HTTP health check failed", "تونل فعال است؛ بررسی سلامت HTTP ناموفق بود", "隧道已运行；HTTP 健康检查失败"),
         "Tunnel is up but no traffic is passing" to Triple("Tunnel is up but no traffic is passing", "تونل بالا آمده اما ترافیکی عبور نمی‌کند", "隧道已建立但没有流量通过"),
