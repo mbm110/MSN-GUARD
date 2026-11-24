@@ -49,8 +49,10 @@ class LanternPoolContract(unittest.TestCase):
 
     def test_the_filter_is_fail_closed(self):
         # 3.4.11 SR-REJECT: a draw with no ir-free members must be REJECTED
-        # (nil list), never passed through fail-open like 3.4.9/3.4.10 did.
-        self.assertIn("if len(irOnly) == 0 {\n\t\treturn nil\n\t}", HOSTACCESS)
+        # (an empty list), never passed through fail-open like 3.4.9/3.4.10
+        # did.
+        self.assertIn("if len(irOnly) == 0 {", HOSTACCESS)
+        self.assertIn("return servers.ServerList{}", HOSTACCESS)
         # allowedServers must treat the rejected (nil) draw as empty rather
         # than crash or fall back to the unfiltered list.
         self.assertIn("if list = pinPoolIfRequested(list); list.Servers == nil {", HOSTACCESS)

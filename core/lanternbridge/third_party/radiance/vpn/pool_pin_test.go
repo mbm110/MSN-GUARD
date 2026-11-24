@@ -24,7 +24,7 @@ func TestPinPoolRejectsDrawWithoutIrFreeServers(t *testing.T) {
 		{Tag: "samizdat-out-samizdat-free-oci-v2-2", IsLantern: true},
 	}}
 	got := pinPoolIfRequested(global)
-	assert.Nil(t, got.Servers, "a draw with no ir-free member must be rejected whole, not passed through")
+	assert.Empty(t, got.Servers, "a draw with no ir-free member must be rejected whole, not passed through")
 }
 
 func TestPinPoolKeepsOnlyIrFreeOfMixedDraw(t *testing.T) {

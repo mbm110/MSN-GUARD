@@ -1,6 +1,7 @@
 package vpn
 
 import (
+	"log/slog"
 	"slices"
 	"strings"
 
@@ -82,7 +83,9 @@ func pinPoolIfRequested(list servers.ServerList) servers.ServerList {
 		return !strings.Contains(s.Tag, "-ir-free-")
 	})
 	if len(irOnly) == 0 {
-		return nil
+		// SR-REJECT: return a list with no servers — the caller treats an
+		// empty server list as "nothing changed" and keeps the held pool.
+		return servers.ServerList{}
 	}
 	list.Servers = irOnly
 	return list
