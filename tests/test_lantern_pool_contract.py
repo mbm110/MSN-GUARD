@@ -128,7 +128,7 @@ class LanternPoolContract(unittest.TestCase):
         self.assertIn("val previous = lanternPoolChoice()", UI)
         self.assertIn("if (chosen != previous) {", UI)
         self.assertIn("LanternEngine.switchServerPool(chosen.coreName)", UI)
-        self.assertIn("lanternServersCache = null", UI)
+        self.assertIn("lanternServersCache = emptyList()", UI)
         self.assertIn("MsnGuardVpnService.ACTION_RECONNECT", UI)
         # The sidecar endpoint and the bridge partition behind it.
         self.assertIn('request.Path == "/pool"', SIDECAR)

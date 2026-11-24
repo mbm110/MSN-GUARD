@@ -10719,7 +10719,7 @@ class MainActivity : Activity() {
             if (switchErr != null) {
                 ConnectionLog.record("Lantern: server pool switch failed: $switchErr")
             }
-            lanternServersCache = null // the snapshot behind the old rows is stale
+            lanternServersCache = emptyList() // the snapshot behind the old rows is stale
             if (TunnelStatus.isActive()) {
                 // RADIANCE_POOL only applies at sidecar boot: restart the
                 // engine on the new pool now rather than hinting the next
