@@ -100,7 +100,9 @@ func probeTrafficTotals(t *testing.T) (tx, rx int64, raw string) {
 }
 
 // probeFetch pushes one HTTP round trip through the SOCKS inbound and reports
-// how many bytes crossed.
+// how many bytes crossed. It sleeps briefly before returning (the deferred
+// close then lands after the poller has seen the connection open), so the
+// retention phase observes it as active at least once.
 func probeFetch(t *testing.T, socksAddr, host, path string) (up, down int64) {
 	t.Helper()
 	conn := probeDialSocks(t, socksAddr, host, 80)
@@ -126,6 +128,11 @@ func probeFetch(t *testing.T, socksAddr, host, path string) (up, down int64) {
 	}
 	up = int64(len(request))
 	down = int64(n)
+	// Let the 150ms retention poller observe this connection while it is
+	// still open, whatever the network speed — otherwise a sub-150ms fetch
+	// is invisible to the retention fold by design (see the comment at the
+	// retention phase) and the probe races on fast CI networks.
+	time.Sleep(250 * time.Millisecond)
 	t.Logf("probe fetch %s%s: pushed %d bytes up, read %d bytes down", host, path, up, down)
 	return up, down
 }
@@ -259,6 +266,14 @@ func TestProbeTrafficThroughSocksInbound(t *testing.T) {
 	// through SOCKS, TrafficJSON read once afterwards: {"rx":0,"tx":0}).
 	up1, down1 := probeFetch(t, socksAddr, "www.example.com", "/")
 	up2, down2 := probeFetch(t, socksAddr, "www.example.com", "/")
+	// Determinism (probe fix, not a product change): a fetch that closes
+	// entirely between two 150ms poller ticks is never seen active, so its
+	// bytes cannot fold — the retention rule needs the poller to observe
+	// the connection while it is open. The green run of this probe had 5s
+	// round trips (faraway exit) and never raced; a fast CI network (30ms
+	// fetches) closed both inside one tick window and failed the phase.
+	// Hold each fetch open briefly: probeFetch sleeps after the body read,
+	// giving the poller at least one guaranteed observation.
 	time.Sleep(700 * time.Millisecond)
 	tx3, rx3, raw3 := probeTrafficTotals(t)
 	t.Logf("counters after 2 short fetches: %s", raw3)
