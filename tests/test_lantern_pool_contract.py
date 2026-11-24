@@ -6,10 +6,22 @@ server draws the pool from the EXIT IP of the config fetch — the
 x-lantern-client-country header and the locale are ignored — so the 3.4.8
 header pin could not survive a mid-session refresh that left through the
 tunnel (field log 3.4.8: the 17:18 refill swapped 5 dead global servers into
-the auto group and the session died). RADIANCE_POOL=ir now filters the
-server list to the pinned '-ir-free-' pool inside the vendored Radiance
+the auto group and the session died). RADIANCE_POOL=ir filters the server
+list to the pinned '-ir-free-' pool inside the vendored Radiance
 (vpn/hostaccess.go pinPoolIfRequested), on every load — boot and refresh
 alike; global keeps the upstream rotating worldwide sample.
+
+3.4.11 SR-REJECT (field log 3.4.10): the 3.4.9/3.4.10 filter was FAIL-OPEN.
+On the 3.4.10 field network the probe returned ZERO ir-free servers on
+EVERY fetch (two non-IR exits, repeated same-account fetches; the header,
+the fa-IR locale and preferred_location=IR are all ignored), so the
+default Iran setting filtered nothing and the device ran the worldwide
+pool to its death. The pin is now fail-closed in three places: the draw is
+rejected as a whole when it carries no ir-free member (updateServers keeps
+the manager's held pool: the picker, the boot box options and the tunnel
+stop rotating into the dead worldwide sample), buildOptions drops the
+non-ir-free members at boot, and only an explicit "global" setting leaves
+every draw unfiltered.
 """
 
 import pathlib
@@ -24,6 +36,8 @@ STRINGS = (APP / "Strings.kt").read_text()
 RUSSIAN = (APP / "RussianStrings.kt").read_text()
 VENDORED = ROOT / "core/lanternbridge/third_party/radiance"
 HOSTACCESS = (VENDORED / "vpn/hostaccess.go").read_text()
+BOXOPTIONS = (VENDORED / "vpn/boxoptions.go").read_text()
+BACKEND = (VENDORED / "backend/radiance.go").read_text()
 
 
 class LanternPoolContract(unittest.TestCase):
@@ -32,12 +46,37 @@ class LanternPoolContract(unittest.TestCase):
         # setting is cosmetic.
         self.assertIn('p != "iran" && p != "ir"', HOSTACCESS)
         self.assertIn('"-ir-free-"', HOSTACCESS)
-        # A draw with no ir-free members must keep the previous list, never
-        # empty the auto group.
-        self.assertIn("draw had no ir-free servers; keeping the previous list", HOSTACCESS)
-        # The filter runs inside allowedServers, which every server load
-        # (boot and config refresh) goes through.
-        self.assertIn("list = pinPoolIfRequested(list)", HOSTACCESS)
+
+    def test_the_filter_is_fail_closed(self):
+        # 3.4.11 SR-REJECT: a draw with no ir-free members must be REJECTED
+        # (nil list), never passed through fail-open like 3.4.9/3.4.10 did.
+        self.assertIn("if len(irOnly) == 0 {\n\t\treturn nil\n\t}", HOSTACCESS)
+        # allowedServers must treat the rejected (nil) draw as empty rather
+        # than crash or fall back to the unfiltered list.
+        self.assertIn("if list = pinPoolIfRequested(list); list.Servers == nil {", HOSTACCESS)
+
+    def test_the_manager_rejects_worldwide_draws_under_iran(self):
+        # 3.4.11 SR-REJECT: the same draw must not refill the manager either
+        # (updateServers) — that was the hole 3.4.9/3.4.10 left open: the
+        # tunnel kept the previous list while the picker and the boot box
+        # options still took the worldwide sample.
+        self.assertIn("if vpn.IrPoolSelected() {", BACKEND)
+        self.assertIn(
+            'slog.Warn("RADIANCE_POOL=iran: draw had no ir-free servers; keeping the held pool",',
+            BACKEND,
+        )
+        # Only Lantern servers are filtered; helpers never carry the marker.
+        self.assertIn("srv.IsLantern && !lbA.IsHelperTag(srv.Tag) &&", BACKEND)
+
+    def test_the_boot_box_options_pin_the_pool(self):
+        # buildOptions must drop the non-ir-free members at boot too, or a
+        # worldwide draw still starts the tunnel alongside the held pool.
+        self.assertIn("if irPoolSelected() {", BOXOPTIONS)
+        self.assertIn("isLanternOutboundIn(bOptions, o.Tag)", BOXOPTIONS)
+        self.assertIn("isLanternOutboundIn(bOptions, e.Tag)", BOXOPTIONS)
+        # The client-info injector's tag list must match what survives.
+        self.assertIn("func isLanternOutboundIn(bOptions BoxOptions, tag string) bool {", BOXOPTIONS)
+        self.assertIn("if IrPoolSelected() {", BACKEND)
 
     def test_the_engine_sets_the_env_for_both_pools(self):
         # 3.4.9: the pool value flows straight into RADIANCE_POOL; iran
@@ -70,7 +109,7 @@ class LanternPoolContract(unittest.TestCase):
         self.assertIn('IRAN("Iran", "iran",', UI)
         self.assertIn('GLOBAL("Global", "global",', UI)
         self.assertIn("private fun chooseLanternPool(", UI)
-        self.assertIn('CoreConfig.LANTERN_POOL, chosen.coreName', UI)
+        self.assertIn("CoreConfig.LANTERN_POOL, chosen.coreName", UI)
         # Falls back to IRAN for unknown stored values.
         self.assertIn("?: LanternPool.IRAN", UI)
 

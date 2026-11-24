@@ -1,7 +1,6 @@
 package vpn
 
 import (
-	"log/slog"
 	"slices"
 	"strings"
 
@@ -49,8 +48,28 @@ func allowedServices(services []O.Service) []O.Service {
 // picked a dead samizdat, and the session died minutes later.
 // RADIANCE_POOL=ir keeps ONLY the pinned IR pool (servers tagged
 // '-ir-free-') in the tunnel, the auto group and the picker, whatever any
-// fetch drew; a draw with no ir-free members keeps the previous list rather
-// than emptying the group.
+// fetch drew.
+//
+// MSN 3.4.11 SR-REJECT (field log 3.4.10): the 3.4.9/3.4.10 filter was
+// FAIL-OPEN — "a draw with no ir-free members keeps the previous list"
+// meant the unfiltered worldwide draw flowed straight into the tunnel. On
+// the 3.4.10 network the server-track probe returned ZERO '-ir-free-'
+// servers on every fetch (verified 2026-11-23 from two non-IR exits and
+// from repeated same-account fetches; the x-lantern-client-country header,
+// the fa-IR locale and preferred_location=IR are all ignored, and Lantern's
+// geo-detection did not serve the IR pool to the fetching IP either), so
+// the default Iran setting filtered nothing while the device ran six
+// worldwide servers, the s0 probe died at connect twice, and the session
+// that did come up ran NL/US exits until auto-select exhausted itself and
+// the tunnel died at 11:00 — exactly the user's report: "does not connect
+// to the Iran pool, connects to the worldwide pool; connection dies at
+// the start or in the middle." SR-REJECT closes that: when Iran is
+// selected, a draw with NO ir-free members is REJECTED as a whole via
+// irPoolSelected(); updateServers then skips the non-ir-free offers so the
+// manager, the picker, the auto group and the boot box options keep the
+// ir-free servers they already hold, and the tunnel keeps serving them
+// instead of rotating into a dead worldwide draw. Only a setting of
+// "global" (the explicit user choice) leaves every draw unfiltered.
 func pinPoolIfRequested(list servers.ServerList) servers.ServerList {
 	// The stored setting value is "iran" (LanternPool.IRAN.coreName); 3.4.9
 	// shipped the filter keyed on "ir" and it never matched — the 3.4.9
@@ -63,15 +82,31 @@ func pinPoolIfRequested(list servers.ServerList) servers.ServerList {
 		return !strings.Contains(s.Tag, "-ir-free-")
 	})
 	if len(irOnly) == 0 {
-		slog.Warn("RADIANCE_POOL=ir: draw had no ir-free servers; keeping the previous list")
-		return list
+		return nil
 	}
 	list.Servers = irOnly
 	return list
 }
 
+// irPoolSelected reports whether the Iran pool is pinned for this process.
+func irPoolSelected() bool {
+	p := env.GetString("RADIANCE_POOL")
+	return p == "iran" || p == "ir"
+}
+
+// IrPoolSelected is the exported form for the backend, which pins the
+// manager's pool (updateServers) with the same setting the tunnel filter
+// uses, so the picker, the boot box options and the running tunnel all
+// enforce one choice.
+func IrPoolSelected() bool { return irPoolSelected() }
+
 func allowedServers(list servers.ServerList) servers.ServerList {
-	list = pinPoolIfRequested(list)
+	if list = pinPoolIfRequested(list); list.Servers == nil {
+		// A rejected draw carries no servers; the caller (updateOutbounds,
+		// updateNonSelectableOutbounds) treats an empty server list as
+		// "nothing to change" and keeps the tunnel on its current pool.
+		return list
+	}
 	list.Servers = slices.DeleteFunc(slices.Clone(list.Servers), func(s *servers.Server) bool {
 		return dropDenied("server", s.Tag, s.CheckHostAccess())
 	})

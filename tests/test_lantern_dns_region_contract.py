@@ -21,8 +21,8 @@ UI = (APP / "MainActivity.kt").read_text()
 STRINGS = (APP / "Strings.kt").read_text()
 RUSSIAN = (APP / "RussianStrings.kt").read_text()
 RADIANCE = pathlib.Path(
-    "/root/.hermes/cache/scratch/radiance-src/vpn/dnsoptions.go"
-)
+    __file__
+).resolve().parents[1] / "core/lanternbridge/third_party/radiance/vpn/dnsoptions.go"
 
 
 class LanternDnsRegionContract(unittest.TestCase):

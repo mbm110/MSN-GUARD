@@ -363,6 +363,23 @@ func buildOptions(bOptions BoxOptions) (O.Options, string, error) {
 	bOptions.Options.Outbounds = allowedOutbounds(bOptions.Options.Outbounds)
 	bOptions.Options.Endpoints = allowedEndpoints(bOptions.Options.Endpoints)
 	bOptions.Options.Services = allowedServices(bOptions.Options.Services)
+	// MSN 3.4.11 SR-REJECT: pin the Iran pool at boot too. getBoxOptions
+	// merges the server's config draw with the manager's retained servers,
+	// so without this pin a geo-detection miss (a worldwide draw, which on
+	// the 3.4.10 field network was EVERY draw) would start the tunnel with
+	// six dead worldwide members while the manager holds the ir-free pool.
+	// The tunnel filter (allowedServers) covers live updates only; this is
+	// the same selection applied to the box's own members at build time.
+	// Non-Lantern (user-added) outbounds have no pool and always survive:
+	// they arrive from the manager's servers, not the config draw.
+	if irPoolSelected() {
+		bOptions.Options.Outbounds = slices.DeleteFunc(bOptions.Options.Outbounds, func(o O.Outbound) bool {
+			return isLanternOutboundIn(bOptions, o.Tag) && !strings.Contains(o.Tag, "-ir-free-")
+		})
+		bOptions.Options.Endpoints = slices.DeleteFunc(bOptions.Options.Endpoints, func(e O.Endpoint) bool {
+			return isLanternOutboundIn(bOptions, e.Tag) && !strings.Contains(e.Tag, "-ir-free-")
+		})
+	}
 	if err := hostaccess.CheckOptions(bOptions.Options); err != nil {
 		return O.Options{}, "", err
 	}
@@ -553,6 +570,16 @@ func mergeAndCollectTags(dst, src *O.Options, nonSelectable []string) []string {
 		}
 	}
 	return tags
+}
+
+// isLanternOutboundIn reports whether tag names a Lantern server among the
+// options' members: one of bOptions.LanternServerTags, which getBoxOptions
+// seeds from the config draw and the managed servers. User-added and helper
+// outbounds never carry IsLantern, so a false keeps them out of the Iran
+// pool pin in buildOptions; the tag markers ('-ir-free-') then never apply
+// to them at all.
+func isLanternOutboundIn(bOptions BoxOptions, tag string) bool {
+	return slices.Contains(bOptions.LanternServerTags, tag)
 }
 
 // appendMissingDNSServers adds each extra server whose tag is absent, without

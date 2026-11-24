@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -1452,6 +1453,41 @@ func (r *LocalBackend) updateServers(list servers.ServerList, evict bool) (err e
 		err = errors.Join(err, r.reconcileLiveHelpersLocked())
 		r.restoreSavedSelectionLocked()
 	}()
+	// MSN 3.4.11 SR-REJECT: with the Iran pool selected, a draw that carries
+	// no '-ir-free-' server is a geo-detection miss (the server draws the
+	// pool from the config fetch's exit IP; on the 3.4.10 field network no
+	// fetch served the IR pool at all). Reject the non-ir-free offers so the
+	// manager, the picker and the box options keep the ir-free servers the
+	// device already holds instead of rotating into a dead worldwide pool —
+	// the pre-3.4.11 filter kept the previous list in the TUNNEL but still
+	// let this same draw refill the manager and the picker. Helpers and
+	// user-added servers never carry the -ir-free- marker and are kept; the
+	// ir-free offers of a mixed draw are kept too.
+	if vpn.IrPoolSelected() {
+		hasIr := false
+		for _, srv := range list.Servers {
+			if strings.Contains(srv.Tag, "-ir-free-") {
+				hasIr = true
+				break
+			}
+		}
+		if !hasIr {
+			kept := slices.DeleteFunc(list.Servers, func(srv *servers.Server) bool {
+				return srv.IsLantern && !lbA.IsHelperTag(srv.Tag) &&
+					!strings.Contains(srv.Tag, "-ir-free-")
+			})
+			if len(kept) < len(list.Servers) {
+				slog.Warn("RADIANCE_POOL=iran: draw had no ir-free servers; keeping the held pool",
+					"offered", len(list.Servers), "kept", len(kept))
+			}
+			list.Servers = kept
+		} else {
+			list.Servers = slices.DeleteFunc(list.Servers, func(srv *servers.Server) bool {
+				return srv.IsLantern && !lbA.IsHelperTag(srv.Tag) &&
+					!strings.Contains(srv.Tag, "-ir-free-")
+			})
+		}
+	}
 	existing := r.srvManager.AllServers()
 	existingTags := serverTagSet(existing)
 	incomingHelpers := make(map[string]struct{})
@@ -2151,6 +2187,17 @@ func lanternServerTags(cfg *config.Config, managed []*servers.Server) []string {
 		if srv.IsLantern {
 			add(srv.Tag)
 		}
+	}
+	if IrPoolSelected() {
+		// MSN 3.4.11 SR-REJECT: the pin in buildOptions drops the
+		// non-ir-free members; the injector's tag list must match what
+		// survives, or a dropped worldwide tag lingers here and the
+		// injector keeps attributing data usage to an outbound that no
+		// longer exists.
+		tags = slices.DeleteFunc(tags, func(tag string) bool {
+			return !strings.Contains(tag, "-ir-free-") && !lbA.IsHelperTag(tag) &&
+				!lbA.IsReverseHelperTag(tag)
+		})
 	}
 	return tags
 }
