@@ -144,6 +144,13 @@ func TestProbeTrafficThroughSocksInbound(t *testing.T) {
 		t.Fatal(err)
 	}
 	socksAddr := "127.0.0.1:18310"
+	// 3.4.11: Init's socksAddress argument is inert since 3.4.0 (the TUN
+	// build has no SOCKS inbound), so the novpn mixed inbound this probe
+	// dials takes its address from RADIANCE_SOCKS_ADDRESS — and without it
+	// the default 1080 left every probe run since 3.4.0 red with "SOCKS
+	// inbound never listened". t.Setenv publishes the address before Init
+	// reads it at box build time.
+	t.Setenv("RADIANCE_SOCKS_ADDRESS", socksAddr)
 	// The locale parameter (3.3.2) picks Radiance's direct-path DNS; the probe
 	// runs on CI runners outside Iran, so the plain non-Iran locale is the
 	// honest choice — it exercises Quad9, the same path a foreign user gets.
