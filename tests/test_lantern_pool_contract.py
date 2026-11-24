@@ -38,6 +38,8 @@ VENDORED = ROOT / "core/lanternbridge/third_party/radiance"
 HOSTACCESS = (VENDORED / "vpn/hostaccess.go").read_text()
 BOXOPTIONS = (VENDORED / "vpn/boxoptions.go").read_text()
 BACKEND = (VENDORED / "backend/radiance.go").read_text()
+MANAGER = (VENDORED / "servers/manager.go").read_text()
+MANAGER_TEST = (VENDORED / "servers/manager_test.go").read_text()
 BRIDGE = (ROOT / "core/lanternbridge/bridge.go").read_text()
 SIDECAR = (ROOT / "core/lanternbridge/cmd/lanternsidecar/main.go").read_text()
 
@@ -168,6 +170,34 @@ class LanternPoolContract(unittest.TestCase):
         self.assertIn("servers pre-fetched for pool", UI)
         # Silent prefetch: no progress dialog on a Settings screen.
         self.assertIn("NO dialog", UI)
+
+    def test_the_persisted_manager_loads_only_the_selected_pool(self):
+        # 3.4.14 field log 3.4.13: after switching pools back and forth the
+        # Iran picker showed 6→12→16→18 servers — servers.json accumulates
+        # across sidecar boots (a global boot persists the worldwide sample,
+        # an iran boot persists the ir-free sample) and loadServers never
+        # filtered, so the two pools MERGED. The user's contract: the pools
+        # are SEPARATE lists — Iran = the '-ir-free-' members only, Global =
+        # the worldwide members only. The disk gate runs where every entry
+        # enters the manager; the file itself stays intact so the other
+        # pool's boot still finds its members.
+        self.assertIn("func poolSplitKeep(srv *Server) bool {", MANAGER)
+        # Iran keeps ir-free, Global drops ir-free — BOTH directions pinned.
+        self.assertIn(
+            'irPool := p == "iran" || p == "ir"', MANAGER,
+            "the env read must mirror vpn/hostaccess.go's irPoolSelected",
+        )
+        self.assertIn('return strings.Contains(srv.Tag, "-ir-free-")', MANAGER)
+        self.assertIn('return !strings.Contains(srv.Tag, "-ir-free-")', MANAGER)
+        # User-added servers and helpers are never pool members.
+        self.assertIn("if !srv.IsLantern {", MANAGER)
+        self.assertIn("if lbA.IsHelperTag(srv.Tag) {", MANAGER)
+        # The gate is applied at BOTH disk-load call sites.
+        self.assertEqual(MANAGER.count("if !poolSplitKeep(srv) {"), 2,
+                        "loadServerList and loadOldFormat must both filter")
+        # And pinned by a Go test that fails against the old code.
+        self.assertIn("func TestLoadServersFiltersToSelectedPool", MANAGER_TEST)
+        self.assertIn("func TestLoadServersKeepsHelpersOnBothPools", MANAGER_TEST)
 
     def test_all_rows_are_translated(self):
         for key in (

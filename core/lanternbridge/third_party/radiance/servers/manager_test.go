@@ -341,10 +341,19 @@ func TestRetryableHTTPClient(t *testing.T) {
 // validServerJSON returns the on-wire JSON for a parseable shadowsocks server
 // with the given tag.
 func validServerJSON(t *testing.T, tag string) []byte {
+	return validLanternServerJSON(t, tag, false)
+}
+
+// validLanternServerJSON returns the on-disk JSON for a server carrying the
+// chosen IsLantern flag — servers.json persists the flag in its
+// "isLantern" field (see the serverJSON marshal), which is what
+// poolSplitKeep's user-added exemption reads after a disk round-trip.
+func validLanternServerJSON(t *testing.T, tag string, isLantern bool) []byte {
 	t.Helper()
 	srv := &Server{
 		Tag:  tag,
 		Type: "shadowsocks",
+		IsLantern: isLantern,
 		Options: option.Outbound{
 			Tag:  tag,
 			Type: "shadowsocks",
@@ -359,6 +368,7 @@ func validServerJSON(t *testing.T, tag string) []byte {
 	require.NoError(t, err)
 	return b
 }
+
 
 func TestLoadServersSalvagesParseableEntries(t *testing.T) {
 	mgr := testManager(t)
@@ -499,4 +509,72 @@ func TestRetryableHTTPClientLogsOmitAccessToken(t *testing.T) {
 	assert.Contains(t, logs.String(), "request failed")
 	assert.Contains(t, logs.String(), "share-link")
 	assert.NotContains(t, logs.String(), accessToken)
+}
+
+// MSN 3.4.14 POOL-SPLIT: the persisted manager must load ONLY the
+// selected pool's Lantern members; the other pool's persisted members
+// (written by a previous boot on the other pool) stay on disk but must
+// not enter the manager — the picker merges them otherwise (field log
+// 3.4.13: Iran showed 6→12→16→18 across switches). Helpers and
+// user-added servers are not pool members and must survive everywhere.
+func TestLoadServersFiltersToSelectedPool(t *testing.T) {
+	irTag := "shadowsocks-out-ss2022-triangle-lightsail-fra-ir-free-9dafabd3"
+	worldwideTag := "shadowsocks-out-ss2022-cardiff-oci-free-vps-c5211bf5"
+	for _, tc := range []struct {
+		name     string
+		pool     string
+		kept     string
+		dropped  string
+	}{{
+		name:    "iran pool keeps only ir-free members",
+		pool:    "iran",
+		kept:    irTag,
+		dropped: worldwideTag,
+	}, {
+		name:    "global pool keeps only worldwide members",
+		pool:    "global",
+		kept:    worldwideTag,
+		dropped: irTag,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("RADIANCE_POOL", tc.pool)
+			mgr := testManager(t)
+			serverJSON := []byte("[" +
+				string(validLanternServerJSON(t, tc.kept, true)) + "," +
+				string(validLanternServerJSON(t, tc.dropped, true)) + "]")
+			require.NoError(t, os.WriteFile(mgr.serversFile, serverJSON, 0o600))
+
+			require.NoError(t, mgr.loadServers())
+
+			_, found := mgr.GetServerByTag(tc.kept)
+			assert.True(t, found, "selected pool member must load")
+			_, found = mgr.GetServerByTag(tc.dropped)
+			assert.False(t, found, "the OTHER pool's member must NOT load")
+			// The disk file is untouched — the other pool's boot finds its
+			// members still there.
+			raw, err := os.ReadFile(mgr.serversFile)
+			require.NoError(t, err)
+			assert.Contains(t, string(raw), tc.dropped)
+		})
+	}
+}
+
+// POOL-SPLIT, helpers keep loading on both pools: a helper's pairing is
+// pool-independent and outlives a pool switch; dropping it would strand a
+// live pairing.
+func TestLoadServersKeepsHelpersOnBothPools(t *testing.T) {
+	helperTag := "helper-0123456789ab"
+	for _, pool := range []string{"iran", "global"} {
+		t.Run("pool="+pool, func(t *testing.T) {
+			t.Setenv("RADIANCE_POOL", pool)
+			mgr := testManager(t)
+			serverJSON := []byte("[" + string(validLanternServerJSON(t, helperTag, true)) + "]")
+			require.NoError(t, os.WriteFile(mgr.serversFile, serverJSON, 0o600))
+
+			require.NoError(t, mgr.loadServers())
+
+			_, found := mgr.GetServerByTag(helperTag)
+			assert.True(t, found, "helper must survive every pool")
+		})
+	}
 }

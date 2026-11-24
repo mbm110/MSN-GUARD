@@ -33,6 +33,7 @@ import (
 
 	"github.com/getlantern/radiance/bypass"
 	"github.com/getlantern/radiance/common/atomicfile"
+	"github.com/getlantern/radiance/common/env"
 	"github.com/getlantern/radiance/common/fileperm"
 	"github.com/getlantern/radiance/internal"
 	"github.com/getlantern/radiance/internal/hostaccess"
@@ -583,11 +584,51 @@ const (
 	modeUser    = "user"
 )
 
+// MSN 3.4.14 POOL-SPLIT: filter the PERSISTED manager to the selected
+// pool at load time. The servers.json file accumulates across sidecar
+// boots: a boot on 'global' pulls the worldwide sample, a later boot on
+// 'iran' pulls the ir-free sample, and loadServers() — unlike
+// updateServers() — never applied ANY pool filter, so the picker merged
+// both pools and the counts climbed 6→12→16→18 across switches (field
+// log 3.4.13: "the Iran pool does NOT have 18 servers"). The user's
+// contract: Iran = only the '-ir-free-' members (a handful of
+// Frankfurt/Amsterdam tracks), Global = everything else Lantern; the two
+// pools are SEPARATE lists, never merged. Gate here, where every disk
+// entry enters the manager, so the in-memory manager — and therefore the
+// picker, /servers, and every later eviction — can only ever hold the
+// selected pool's members (plus helpers and user-added servers, which
+// are not pool members and never match the marker). Helpers keep loading
+// on both pools (a helper's pairing can outlive a pool switch); a
+// user-added server (IsLantern=false) is not a pool member either. The
+// draw path (updateServers) keeps its own live SR-REJECT — this is the
+// boot-time complement, fencing what the previous boot persisted.
+//
+// The env read is INLINED (not vpn.IrPoolSelected) because package vpn
+// imports this package — an import cycle would not compile. Keep the key
+// and spellings in sync with vpn/hostaccess.go's irPoolSelected.
+func poolSplitKeep(srv *Server) bool {
+	if !srv.IsLantern {
+		return true // user-added server: not a pool member
+	}
+	if lbA.IsHelperTag(srv.Tag) {
+		return true // helper pairings are pool-independent
+	}
+	p := env.GetString("RADIANCE_POOL")
+	irPool := p == "iran" || p == "ir"
+	if irPool {
+		return strings.Contains(srv.Tag, "-ir-free-")
+	}
+	return !strings.Contains(srv.Tag, "-ir-free-")
+}
+
 // loadServers reads servers.json into the in-memory map, salvaging every
 // parseable, allowed entry. A single unparseable server (e.g. an outbound type
 // or option field this build's sing-box doesn't recognize after a version
 // downgrade) or one denied by [Server.CheckHostAccess] is skipped rather than
 // discarding the whole file.
+//
+// Entries outside the selected server pool are skipped the same way (see
+// poolSplitKeep) — they stay on disk untouched for the other pool's boots.
 //
 // It returns a non-nil error enumerating any skipped entries (or a wholly
 // unparseable file); the in-memory state is still valid when it does.
@@ -632,6 +673,9 @@ func (m *Manager) loadServerList(buf []byte) error {
 			skippedErrors = append(skippedErrors, fmt.Errorf("server %q: %w", srv.Tag, err))
 			continue
 		}
+		if !poolSplitKeep(srv) {
+			continue // outside the selected pool — the other pool's member
+		}
 		m.servers[srv.Tag] = srv.WithTLSVerification()
 	}
 
@@ -667,6 +711,9 @@ func (m *Manager) loadOldFormat(buf []byte) error {
 		if err := srv.CheckHostAccess(); err != nil {
 			deniedErrors = append(deniedErrors, fmt.Errorf("server %q: %w", srv.Tag, err))
 			return
+		}
+		if !poolSplitKeep(srv) {
+			return // outside the selected pool — the other pool's member
 		}
 		m.servers[srv.Tag] = srv.WithTLSVerification()
 	}
