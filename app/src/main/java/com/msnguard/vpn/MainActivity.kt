@@ -553,10 +553,21 @@ class MainActivity : Activity() {
         )
 
         appUpdater = AppUpdater(this)
-        // Registers the periodic SHARD list refresh. Idempotent, so calling it on
-        // every launch is how the job gets re-registered after an app update — a
-        // package replace clears JobScheduler's registrations for the app.
-        ShardRefreshJob.schedule(this)
+        // 3.4.15 EXIT-STOP: the SHARD-list JobScheduler job is GONE. The
+        // user's standing rule (2026-11-24): once the user disconnects and
+        // leaves the app, the app must draw ZERO battery — no background
+        // wake-ups of any kind. A periodic job that wakes the process every
+        // 6 hours while the app is closed violated it by design. The
+        // foreground refreshIfDue calls below already keep every list fresh
+        // each time the app opens: they return without I/O when the cache
+        // is young, and their min-interval/single-flight flags prevent any
+        // double fetch. What stays here instead is a CANCEL: any device
+        // upgrading from an older build still carries the old registration
+        // in its JobScheduler table (manifest-declared services are how it
+        // re-registers), and one pending job could still fire once after
+        // "uninstall-grade" silence. Cancelling the id here, on every
+        // launch, retires those stale registrations for good.
+        ShardRefreshJob.cancel(this)
         // And one opportunistic refresh now. The job's window is up to six hours
         // wide; someone who installs the app and taps SHARD immediately should not
         // have to wait for it. Returns without I/O if the list is already fresh.
