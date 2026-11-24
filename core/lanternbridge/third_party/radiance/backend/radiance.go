@@ -2188,7 +2188,7 @@ func lanternServerTags(cfg *config.Config, managed []*servers.Server) []string {
 			add(srv.Tag)
 		}
 	}
-	if IrPoolSelected() {
+	if vpn.IrPoolSelected() {
 		// MSN 3.4.11 SR-REJECT: the pin in buildOptions drops the
 		// non-ir-free members; the injector's tag list must match what
 		// survives, or a dropped worldwide tag lingers here and the

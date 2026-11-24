@@ -78,7 +78,8 @@ class LanternPoolContract(unittest.TestCase):
         self.assertIn("isLanternOutboundIn(bOptions, e.Tag)", BOXOPTIONS)
         # The client-info injector's tag list must match what survives.
         self.assertIn("func isLanternOutboundIn(bOptions BoxOptions, tag string) bool {", BOXOPTIONS)
-        self.assertIn("if IrPoolSelected() {", BACKEND)
+        self.assertIn("if vpn.IrPoolSelected() {", BACKEND)
+        self.assertIn("if vpn.IrPoolSelected() {\n\t\t// MSN 3.4.11 SR-REJECT: the pin in buildOptions", BACKEND)
 
     def test_the_engine_sets_the_env_for_both_pools(self):
         # 3.4.9: the pool value flows straight into RADIANCE_POOL; iran
