@@ -377,6 +377,28 @@ func handleControl(conn net.Conn, token string) {
 			Data:   json.RawMessage(lanternbridge.ServersJSON()),
 		})
 
+	case request.Method == "POST" && request.Path == "/pool":
+		// MSN 3.4.12: evict the other pool's servers from the manager so the
+		// picker reflects the switch at once; the new pool's RADIANCE_POOL
+		// env applies on the next sidecar boot (the caller restarts it).
+		var body struct {
+			Pool string `json:"pool"`
+		}
+		if len(request.Body) > 0 {
+			_ = json.Unmarshal(request.Body, &body)
+		}
+		if err := lanternbridge.SwitchPool(body.Pool); err != nil {
+			_ = writeControl(conn, controlResponse{
+				OK: false, Status: lanternbridge.Status(), Error: err.Error(),
+			})
+			return
+		}
+		_ = writeControl(conn, controlResponse{
+			OK:     true,
+			Status: lanternbridge.Status(),
+			Data:   json.RawMessage(lanternbridge.ServersJSON()),
+		})
+
 	case request.Method == "POST" && request.Path == "/ping":
 		// Blocking probe of every server (up to ~60s); the connection deadline
 		// above already covers it.

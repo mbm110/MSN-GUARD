@@ -38,6 +38,8 @@ VENDORED = ROOT / "core/lanternbridge/third_party/radiance"
 HOSTACCESS = (VENDORED / "vpn/hostaccess.go").read_text()
 BOXOPTIONS = (VENDORED / "vpn/boxoptions.go").read_text()
 BACKEND = (VENDORED / "backend/radiance.go").read_text()
+BRIDGE = (ROOT / "core/lanternbridge/bridge.go").read_text()
+SIDECAR = (ROOT / "core/lanternbridge/cmd/lanternsidecar/main.go").read_text()
 
 
 class LanternPoolContract(unittest.TestCase):
@@ -115,6 +117,28 @@ class LanternPoolContract(unittest.TestCase):
         self.assertIn("CoreConfig.LANTERN_POOL, chosen.coreName", UI)
         # Falls back to IRAN for unknown stored values.
         self.assertIn("?: LanternPool.IRAN", UI)
+
+    def test_the_switch_is_real_mid_session(self):
+        # 3.4.12 field report: picking Global while running still showed the
+        # four Iran rows — the button was cosmetic. The switch must (1) evict
+        # the other pool from the LIVE manager and (2) restart the engine so
+        # the new RADIANCE_POOL (read only at sidecar boot) takes effect.
+        self.assertIn("fun switchServerPool(pool: String): String?", ENGINE)
+        self.assertIn('request("POST", "/pool", JSONObject().put("pool", pool)', ENGINE)
+        self.assertIn("val previous = lanternPoolChoice()", UI)
+        self.assertIn("if (chosen != previous) {", UI)
+        self.assertIn("LanternEngine.switchServerPool(chosen.coreName)", UI)
+        self.assertIn("lanternServersCache = null", UI)
+        self.assertIn("MsnGuardVpnService.ACTION_RECONNECT", UI)
+        # The sidecar endpoint and the bridge partition behind it.
+        self.assertIn('request.Path == "/pool"', SIDECAR)
+        self.assertIn("lanternbridge.SwitchPool(body.Pool)", SIDECAR)
+        self.assertIn("func SwitchPool(pool string) error {", BRIDGE)
+        # Both directions: iran evicts non-ir-free, global evicts ir-free.
+        self.assertIn('return !strings.Contains(tag, "-ir-free-")', BRIDGE)
+        self.assertIn('return strings.Contains(tag, "-ir-free-")', BRIDGE)
+        # Helpers and user pairings are never pool members.
+        self.assertIn("lbA.IsHelperTag(srv.Tag) || lbA.IsReverseHelperTag(srv.Tag)", BRIDGE)
 
     def test_all_rows_are_translated(self):
         for key in (

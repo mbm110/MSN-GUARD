@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/getlantern/radiance/backend"
 	"github.com/getlantern/radiance/common/settings"
 	"github.com/getlantern/radiance/vpn"
+	lbA "github.com/getlantern/lantern-box/adapter"
 )
 
 type byteTotals struct {
@@ -455,6 +457,53 @@ func SelectServer(tag string) error {
 	}
 	if err := b.SelectServer(tag); err != nil {
 		return fmt.Errorf("select Lantern server: %w", err)
+	}
+	return nil
+}
+
+// SwitchPool makes the Server Pool setting a real partition, both ways
+// (MSN 3.4.12). The 3.4.11 SR-REJECT pin stopped a worldwide draw from
+// entering the manager under "iran", but the reverse move was one-way:
+// switching to "global" kept every '-ir-free-' server the manager already
+// held (the 3.4.11 field report picked Global and the picker still showed
+// the same four Iran servers), and switching back kept any worldwide
+// servers already stored. The manager and tunnel therefore still carried
+// BOTH pools and the button stayed cosmetic mid-session.
+// SwitchPool evicts the other pool's Lantern servers from the manager (and
+// the running tunnel, via RemoveServers) so the next draw of the selected
+// pool is the only thing the picker and auto group can hold: helpers and
+// user-added servers are never pool-tagged and always stay.
+// The new pool's RADIANCE_POOL env is applied by the caller at sidecar
+// boot; this call only clears what the new pool must not show.
+func SwitchPool(pool string) error {
+	b := currentBackend()
+	if b == nil {
+		return errors.New("Radiance is not initialized")
+	}
+	var mismatch func(tag string) bool
+	switch pool {
+	case "iran", "ir":
+		mismatch = func(tag string) bool { return !strings.Contains(tag, "-ir-free-") }
+	default: // "global" and anything unknown: the worldwide sample
+		mismatch = func(tag string) bool { return strings.Contains(tag, "-ir-free-") }
+	}
+	var toEvict []string
+	for _, srv := range b.AllServers() {
+		if srv == nil || !srv.IsLantern {
+			continue
+		}
+		if lbA.IsHelperTag(srv.Tag) || lbA.IsReverseHelperTag(srv.Tag) {
+			continue // pairings are the user's own, never pool members
+		}
+		if mismatch(srv.Tag) {
+			toEvict = append(toEvict, srv.Tag)
+		}
+	}
+	if len(toEvict) == 0 {
+		return nil
+	}
+	if err := b.RemoveServers(toEvict); err != nil {
+		return fmt.Errorf("switch Lantern pool: %w", err)
 	}
 	return nil
 }

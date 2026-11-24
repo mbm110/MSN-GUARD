@@ -862,6 +862,31 @@ object LanternEngine {
         else response?.optString("error")?.ifBlank { "server probe failed" } ?: "server probe failed"
     }
 
+    /**
+     * Make a Server Pool switch visible at once (MSN 3.4.12). The 3.4.11
+     * SR-REJECT pin was one-way: picking Global kept the Iran servers the
+     * manager already held, so the picker showed the same four rows and the
+     * button read cosmetic. This evicts the other pool's servers from the
+     * running manager via the sidecar's /pool endpoint; the new pool's
+     * RADIANCE_POOL env itself still lands on the next sidecar boot (the
+     * caller restarts the engine when a tunnel is live).
+     *
+     * Returns an error, or null on success (including "no sidecar": then the
+     * preference alone applies on the next connect, same as before).
+     */
+    fun switchServerPool(pool: String): String? {
+        if (controlToken.isBlank() || controlSocketPath.isBlank()) return null
+        touchSidecarUse()
+        val response = runCatching {
+            request("POST", "/pool", JSONObject().put("pool", pool), timeoutMs = 4_000)
+        }.getOrNull()
+        // No response (sidecar down / process gone): not an error — the stored
+        // preference is the source of truth for the next boot.
+        response ?: return null
+        return if (response.optBoolean("ok")) null
+        else response.optString("error").ifBlank { "server pool switch failed" }
+    }
+
     /** True when the control endpoint answers /health. */
     private fun controlAlive(timeoutMs: Int): Boolean =
         controlToken.isNotBlank() && controlSocketPath.isNotBlank() &&

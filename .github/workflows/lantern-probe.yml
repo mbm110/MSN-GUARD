@@ -34,3 +34,14 @@ jobs:
           go mod tidy
           go test -tags="novpn,with_gvisor,with_quic,with_wireguard,with_utls,with_grpc,probe" \
             -run TestProbeTrafficThroughSocksInbound -v -timeout 420s . -count=1
+
+      - name: Run the Server Pool switch probe
+        env:
+          GOTOOLCHAIN: go1.26.10
+        run: |
+          set -e
+          cd core/lanternbridge
+          # 3.4.12: pins the SwitchPool partition (evict the other pool's
+          # Lantern servers, keep helpers and user servers) in CI.
+          go test -tags="novpn,with_gvisor,with_quic,with_wireguard,with_utls,with_grpc,probe" \
+            -run TestSwitchPoolEvictsTheOtherPoolOnly -v -timeout 240s . -count=1

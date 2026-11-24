@@ -10690,8 +10690,16 @@ class MainActivity : Activity() {
 
     /**
      * The pool chooser. Persisting the choice alone changes nothing running:
-     * RADIANCE_COUNTRY is read when the sidecar process starts, so the switch
+     * RADIANCE_POOL is read when the sidecar process starts, so the switch
      * lands on the next connect (and the next offline picker boot).
+     *
+     * MSN 3.4.12: the switch is no longer cosmetic mid-session. The stored
+     * preference still rules the next boot, but a LIVE session now (1)
+     * evicts the other pool's servers from the running manager via /pool so
+     * the picker stops showing them, and (2) restarts the engine when the
+     * tunnel is up — RADIANCE_POOL only applies at sidecar boot, and without
+     * the restart the old pool's filter would keep shaping the tunnel (the
+     * 3.4.11 field report: Global picked, the four Iran rows never left).
      */
     private fun chooseLanternPool(after: (() -> Unit)? = null) = showChoiceSheet(
         title = Strings.t("Server pool"),
@@ -10701,8 +10709,27 @@ class MainActivity : Activity() {
         label = { it.label },
         description = { it.description },
     ) { chosen ->
+        val previous = lanternPoolChoice()
         preferences().edit().putString(CoreConfig.LANTERN_POOL, chosen.coreName).apply()
         ConnectionLog.record("Lantern server pool set to ${chosen.coreName} (next connect)")
+        if (chosen != previous) {
+            // Evict the other pool's rows from the live manager so the very
+            // next picker refresh (same settings screen) shows the truth.
+            val switchErr = LanternEngine.switchServerPool(chosen.coreName)
+            if (switchErr != null) {
+                ConnectionLog.record("Lantern: server pool switch failed: $switchErr")
+            }
+            lanternServersCache = null // the snapshot behind the old rows is stale
+            if (TunnelStatus.isActive()) {
+                // RADIANCE_POOL only applies at sidecar boot: restart the
+                // engine on the new pool now rather than hinting the next
+                // connect. Reconnect uses the same proven connect path (VPN
+                // consent already granted for this session).
+                ConnectionLog.record("Lantern: restarting the engine for pool ${chosen.coreName}")
+                startService(Intent(this, MsnGuardVpnService::class.java)
+                    .setAction(MsnGuardVpnService.ACTION_RECONNECT))
+            }
+        }
         after?.invoke()
     }
 
