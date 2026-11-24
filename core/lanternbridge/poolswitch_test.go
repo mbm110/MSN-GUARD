@@ -29,14 +29,12 @@ func TestSwitchPoolEvictsTheOtherPoolOnly(t *testing.T) {
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// Init is once per process: when the traffic probe (same probe build
-	// tag) already initialized the backend, reuse it instead of failing.
+	// Init is once per process: reuse the backend when the traffic probe
+	// (same probe build tag) already initialized it in this binary. CI runs
+	// each probe as its own `go test` invocation, so this is belt-and-braces.
 	if b := currentBackend(); b == nil {
 		if err := Init(dataDir, logDir, "127.0.0.1:18390", "en-US"); err != nil {
 			t.Fatalf("Init: %v", err)
-		}
-		if b = currentBackend(); b == nil {
-			t.Fatal("backend must be initialized")
 		}
 	}
 	t.Cleanup(func() { _ = Disconnect() })
@@ -51,27 +49,29 @@ func TestSwitchPoolEvictsTheOtherPoolOnly(t *testing.T) {
 	userTag := "my-own-server"
 	helperTag := "helper-0123456789ab"
 
-	// Stage one Lantern server of each pool, one user server, one helper.
-	irList := servers.ServerList{Servers: []*servers.Server{
-		{Tag: irTag, IsLantern: true},
+	// Stage the way the product does. Lantern members arrive via the config
+	// draw path (updateServers — exposed for the probe as
+	// ProbeStageLanternServers; IsLantern stays true, exactly like a fetch),
+	// NOT via AddServers: that is the user-supplied path and deliberately
+	// clears IsLantern, so a Lantern member staged through it is
+	// indistinguishable from a user server and must NOT be evicted — the
+	// first CI run failed exactly there. The helper's exemption is judged
+	// by its tag (lbA.IsHelperTag), which is what SwitchPool checks.
+	draw := servers.ServerList{Servers: []*servers.Server{
+		{Tag: irTag, Type: "shadowsocks", IsLantern: true},
+		{Tag: worldwideTag, Type: "shadowsocks", IsLantern: true},
 	}}
-	if err := b.AddServers(irList); err != nil {
-		t.Fatalf("add ir-free: %v", err)
-	}
-	worldwideList := servers.ServerList{Servers: []*servers.Server{
-		{Tag: worldwideTag, IsLantern: true},
-	}}
-	if err := b.AddServers(worldwideList); err != nil {
-		t.Fatalf("add worldwide: %v", err)
+	if err := b.ProbeStageLanternServers(draw); err != nil {
+		t.Fatalf("stage draw: %v", err)
 	}
 	userList := servers.ServerList{Servers: []*servers.Server{
-		{Tag: userTag},
+		{Tag: userTag, Type: "direct"},
 	}}
 	if err := b.AddServers(userList); err != nil {
 		t.Fatalf("add user server: %v", err)
 	}
 	helperList := servers.ServerList{Servers: []*servers.Server{
-		{Tag: helperTag, IsLantern: true},
+		{Tag: helperTag, Type: "direct"},
 	}}
 	if err := b.AddServers(helperList); err != nil {
 		t.Fatalf("add helper: %v", err)
@@ -103,9 +103,7 @@ func TestSwitchPoolEvictsTheOtherPoolOnly(t *testing.T) {
 		t.Error("helper pairings are never pool members")
 	}
 
-	// 2) Switch back to iran: the worldwide member leaves, and the held
-	// ir-free set is whatever a later iran draw brings — here nothing, so
-	// the manager is left empty rather than holding the other pool.
+	// 2) Switch back to iran: the worldwide member leaves.
 	if err := SwitchPool("iran"); err != nil {
 		t.Fatalf("SwitchPool(iran): %v", err)
 	}
