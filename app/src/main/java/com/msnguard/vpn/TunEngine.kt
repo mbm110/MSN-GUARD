@@ -29,8 +29,22 @@ object TunEnginePref {
     private val ALL = setOf(LEGACY, ZEPTUN, HEV)
 
     fun get(ctx: Context): String {
-        val v = ctx.profiled().getString(KEY, LEGACY) ?: LEGACY
-        return if (v in ALL) v else LEGACY
+        // 3.4.16: the default TUN engine is now HEV, not BadVPN. Field
+        // comparison (3.4.15, WireGuard on the user's Iranian line): on
+        // BadVPN every app DNS query rides the full local chain
+        // (TUN → lwIP → udpgw → SOCKS UDP associate → tunnel → resolver)
+        // and Telegram's first open stalls seconds on "Connecting"; on
+        // Hev, mapdns answers DNS locally in-process (the Hev mapdns
+        // synthetic resolver is the interface's only resolver) and carries
+        // the domain to the SOCKS edge, so Telegram connects instantly —
+        // the same class of behavior as Lantern's in-engine DNS and the
+        // thing the rival Aether client still lacks. Zeptun behaves the
+        // same way (own fake-ip table); BadVPN has no local DNS answer at
+        // all and stays available as the explicit compatibility choice.
+        // An explicit user pick always wins: only the absent/stored-invalid
+        // case lands here.
+        val v = ctx.profiled().getString(KEY, HEV) ?: HEV
+        return if (v in ALL) v else HEV
     }
     fun label(key: String, ctx: Context): String = when (key) {
         ZEPTUN -> Strings.t("Zeptun")
