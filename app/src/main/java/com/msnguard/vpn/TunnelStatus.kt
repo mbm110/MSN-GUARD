@@ -52,7 +52,8 @@ object TunnelStatus {
      * answer (e.g. the header's "all apps protected" claim).
      */
     val isWholeDeviceRouting: Boolean
-        get() = TunEngineManager.isRunningAny || LanternEngine.isSessionActive
+        get() = TunEngineManager.isRunningAny || LanternEngine.isSessionActive ||
+            com.msnguard.vpn.foxy.FoxyHevEngine.isRunning
 
     /**
      * True while the Rust core is driving an Android TUN directly.
