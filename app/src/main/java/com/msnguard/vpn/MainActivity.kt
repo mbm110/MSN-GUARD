@@ -29,6 +29,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings as AndroidSettings
 import android.text.InputType
+import android.text.TextUtils
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
@@ -9243,7 +9244,7 @@ class MainActivity : Activity() {
             } else {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
-                singleLine = true
+                isSingleLine = true
             }
         }
         row.tag = valueLabel  // fetchFoxyQuota updates this in place
