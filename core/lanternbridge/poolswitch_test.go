@@ -9,6 +9,7 @@
 package lanternbridge
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,19 +17,43 @@ import (
 	"github.com/getlantern/radiance/servers"
 )
 
+// TestSwitchPoolEvictsTheOtherPoolOnly: the CI flake (run 45780407888) was
+// nothing the test asserts — all SwitchPool claims passed and the failure
+// came AFTER the test body, when t.TempDir() tried to RemoveAll the data
+// dir while Radiance's async goroutines (the config draw's saveServers and
+// prewarmOfflineURLTests) were still writing inside it
+// ("unlinkat .../data: directory not empty"). Init is once per process, so
+// the probe binary keeps its backend alive — a backend with civilians in
+// the directory under test. TempDir cleanup must own the tree alone.
+//
+// Fix: OWN data dir, still fresh per run (name + pid), cleaned best-effort
+// BEFORE Init — because currentBackend() is nil until Init runs, this test's
+// dir is pristine and the run under test is the only one that ever writes
+// there — and not removed by the framework afterwards: a leftover is a log
+// line on the runner, never a red X on a passing assertion.
+func switchPoolDataDir(t *testing.T) (dataDir, logDir string) {
+	t.Helper()
+	dir := filepath.Join(os.TempDir(), "msn-poolswitch-probe", filepath.Base(t.Name()), fmt.Sprintf("%d", os.Getpid()))
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("reset probe dir: %v", err)
+	}
+	dataDir = filepath.Join(dir, "data")
+	logDir = filepath.Join(dir, "logs")
+	for _, d := range []string{dataDir, logDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	return dataDir, logDir
+}
+
 func TestSwitchPoolEvictsTheOtherPoolOnly(t *testing.T) {
 	if testing.Short() {
 		t.Skip("backend test")
 	}
-	dir := t.TempDir()
-	dataDir := filepath.Join(dir, "data")
-	logDir := filepath.Join(dir, "logs")
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(logDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dataDir, logDir := switchPoolDataDir(t)
+	// switchPoolDataDir already made both; keep the belt-and-braces MkdirAll
+	// the original had, harmless on an existing dir.
 	// Init is once per process: reuse the backend when the traffic probe
 	// (same probe build tag) already initialized it in this binary. CI runs
 	// each probe as its own `go test` invocation, so this is belt-and-braces.
