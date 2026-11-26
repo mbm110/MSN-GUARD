@@ -298,6 +298,7 @@ class MainActivity : Activity() {
     private var trafficMonitorPage: View? = null
     private var dnsPage: View? = null
     private var donatePage: View? = null
+    private var coffeePage: View? = null
     private var mtuPage: View? = null
     private var warpSettingPage: View? = null
     private var mtuScanning: Boolean = false
@@ -4122,6 +4123,14 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) })
+            // MSN 3.4.19: buy a coffee — the Persian button text stays Persian in
+            // every language (never routed through Strings.t), like the user asked.
+            body.addView(navRow("یک فنجان قهوه ☕", iconRes = R.drawable.ic_heart) {
+                openCoffeeScreen()
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
             body.addView(label("MSN-GUARD ${appVersion()}", 11.5f, Sculpt.withAlpha(MUTED, 0.7f)).apply {
                 gravity = Gravity.CENTER_HORIZONTAL
                 letterSpacing = spacing(0.06f)
@@ -7053,6 +7062,83 @@ class MainActivity : Activity() {
     }
 
     // ─────────────────────────────────────────────────────────────────
+    // Buy-a-coffee screen (MSN 3.4.19). Shaped like the Foxy page: a full-page
+    // FrameLayout over pageHost, sculpted card, its own back handling. Both the
+    // title and every Persian line stay literal — they must read Persian in all
+    // four app languages, so they are never routed through Strings.t.
+    // ─────────────────────────────────────────────────────────────────
+    private fun openCoffeeScreen() {
+        coffeePage?.let(pageHost::removeView)
+        val page = FrameLayout(this).apply { setBackgroundColor(CANVAS); isClickable = true }
+        val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(16), dp(24), dp(24))
+        }
+        content.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(createHeaderBackButton { closeCoffeeScreen() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+        })
+        content.addView(label("یک فنجان قهوه ☕", 22f, INK, TypefaceStyle.MEDIUM).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(4), dp(6), dp(4), dp(0))
+        })
+
+        val coffeeCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Sculpt.sculptedBackground(resources.displayMetrics.density, SURFACE_VARIANT, 18, stroke = DIVIDER)
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+        }
+
+        // The message, always Persian, exactly as the user wrote it.
+        coffeeCard.addView(label(
+            "برنامه MSN-GUARD همیشه رایگانه، و رایگان می‌مونه. اگه یه جایی به کارت اومد، یه قهوه مهمونم کن ☕",
+            14f, INK,
+        ), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(6) })
+
+        // The accept button — Persian literal, never translated. The blue ring
+        // shape comes from the app's own roundedBackground stroke (the same
+        // helper every Foxy button uses), sized like the Foxy Status action
+        // button (44dp, radius 10).
+        val coffeeBtn = foxyActionButton("باشه مهمونت میکنم", true).apply {
+            setTextColor(palette.neonBlue)
+            background = roundedBackground(Color.TRANSPARENT, 10, palette.neonBlue, 2)
+        }
+        coffeeBtn.setOnClickListener { openCoffeeLink() }
+        coffeeCard.addView(coffeeBtn, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(44),
+        ).apply { topMargin = dp(16) })
+
+        content.addView(coffeeCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(14) })
+
+        scroll.addView(content, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+        page.addView(scroll, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+        page.setOnApplyWindowInsetsListener { _, insets ->
+            content.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24)); insets
+        }
+        coffeePage = page
+        pageHost.addView(page)
+        page.requestApplyInsets()
+        animatePageOpen(page)
+    }
+
+    private fun openCoffeeLink() {
+        openLink("https://daramet.com/MSN.GUARD")
+    }
+
+    private fun closeCoffeeScreen() {
+        coffeePage?.let { animatePageClose(it) { coffeePage = null } }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
     // MTU screen — one row per transport, same pattern as every other
     // settings page in this activity (FrameLayout pageHost > ScrollView).
     // ─────────────────────────────────────────────────────────────────
@@ -8661,6 +8747,7 @@ class MainActivity : Activity() {
             trafficMonitorPage != null -> closeTrafficMonitorScreen()
             dnsPage != null -> closeDnsScreen()
             donatePage != null -> closeDonateScreen()
+            coffeePage != null -> closeCoffeeScreen()
             tunnelControlsPage != null -> closeTunnelControlsScreen()
             warpSettingPage != null -> closeWarpSettingScreen()
             foxySettingPage != null -> closeFoxySettingScreen()
