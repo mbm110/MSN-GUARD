@@ -132,6 +132,11 @@ class MainActivity : Activity() {
     // 3.4.13: consecutive dead-on-arrival Lantern sessions (watchdog drops
     // the tunnel right after connect); bounds the auto-reconnect loop.
     private var consecutiveFakeLantern = 0
+    // 3.4.21: mid-session engine-death recoveries started by the liveness
+    // sensor (LanternEngine.onEngineHealthVerdict). Bounds its own loop the
+    // same way consecutiveFakeLantern bounds the dead-on-arrival one.
+    private var consecutiveEngineDeaths = 0
+    @Volatile private var engineRecoveryInFlight = false
     private var pendingConfig: String? = null
     /**
      * The backup JSON built before the file picker opened.
@@ -809,6 +814,16 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
+        // 3.4.21: the mid-session liveness sensor. The callback fires on the
+        // sidecar's log thread, so bounce to the UI thread before touching
+        // activity state. Registered here (not onCreate) so a recreated
+        // activity picks it up too; LanternEngine is an object, the setter is
+        // idempotent, and onStop leaves the last callback in place harmlessly
+        // (the in-flight guard and runOnUiThread isFinishing checks stop a
+        // dead activity from acting).
+        LanternEngine.onEngineHealthVerdict = { reason ->
+            runOnUiThread { if (!isFinishing && !isDestroyed) onLanternEngineDeath(reason) }
+        }
         val filter = IntentFilter(MsnGuardVpnService.ACTION_STATUS)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -1024,13 +1039,24 @@ class MainActivity : Activity() {
                         selectedProtocol == Protocol.WIREGUARD &&
                             CoreConfig.warpExitChainMode(this@MainActivity, CoreConfig.WarpTransport.WIREGUARD) == CoreConfig.WARP_EXIT_CHAIN_WARP_OVER_V2RAY &&
                             TunEnginePref.get(this@MainActivity) != TunEnginePref.LEGACY
+                    // 3.4.21 field log (msn-guard-log__2_): in an engine-owned
+                    // Lantern session the app is excluded from the TUN and
+                    // neither tun2socks nor proxy-mode is set, so the old
+                    // `!isNativeTunMode` fallback alone read the carrier-link
+                    // probe as tunnel-proof. A dead front path then left the
+                    // dial green for 1h42m while retry noise crossed the TUN.
+                    // A Lantern session's health probe is carrier-side: it may
+                    // paint latency, never a verdict. (The engine's own liveness
+                    // sensor in LanternEngine owns Lantern's verdicts now.)
+                    val lanternCarrierProbe = selectedProtocol == Protocol.LANTERN &&
+                        !Tun2SocksManager.isRunning && !TunnelStatus.isProxyMode
                     val probeRodeTunnel = TunnelStatus.isActive() &&
-                        !reverseWireguardEngineProbe &&
+                        !reverseWireguardEngineProbe && !lanternCarrierProbe &&
                         (Tun2SocksManager.isRunning || TunnelStatus.isProxyMode || !TunnelStatus.isNativeTunMode)
                     if (reachable != null) {
                         pingFailureStreak = 0
                         if (visualState == OrbitDialView.State.DEGRADED) showConnected(restored = true)
-                    } else if (movedBytes >= BUSY_TUNNEL_RX_BYTES || counterRestarted) {
+                    } else if (movedBytes >= BUSY_TUNNEL_RX_BYTES && !lanternCarrierProbe || counterRestarted) {
                         // A probe that timed out while the TUN carried real payload
                         // says nothing about the tunnel's health. Measured: under a
                         // speed-test-shaped load one shared tor pushed probe RTT to
@@ -1313,6 +1339,9 @@ class MainActivity : Activity() {
                         ConnectionLog.record("Tunnel is passing traffic — verified from inside the tunnel")
                         consecutiveFakeWireguard = 0
                         consecutiveFakeLantern = 0
+                        // 3.4.21: a verified session is a healthy session —
+                        // the engine-death recovery counter starts clean.
+                        consecutiveEngineDeaths = 0
                         showConnected()
                         // Latency is cosmetic, so a failure here must not undo a
                         // verification that already succeeded on real bytes.
@@ -1378,6 +1407,8 @@ class MainActivity : Activity() {
                     ConnectionLog.record("Reachability probe passed in $attempts attempt(s) — ${verified.first}")
                     consecutiveFakeWireguard = 0
                     consecutiveFakeLantern = 0
+                    // 3.4.21: same clean slate as the byte gate above.
+                    consecutiveEngineDeaths = 0
                     showConnected()
                     chipLatency.text = Strings.tf("Latency %s ms", verified.second.toInt())
                     // Second opinion, from inside the tunnel. A probe that rode
@@ -1520,6 +1551,77 @@ class MainActivity : Activity() {
         // case): the service thinks that session succeeded, so the failure is
         // reported here. The teardown above IS the disconnect.
         showFailure(Strings.t("Tunnel handshake succeeded but no traffic passes — try another protocol"))
+    }
+
+    /**
+     * MSN 3.4.21 — mid-session Lantern engine death, from the liveness
+     * sensor ([LanternEngine.onEngineHealthVerdict]).
+     *
+     * The 2026-11-26 field log: the engine's front path died at 13:40 and the
+     * tunnel sat "connected" for 1h42m — app retries crossing the TUN read as
+     * busy traffic, so the byte-based watchdog never fired, while the engine
+     * printed its own death in plain text the whole time. Here we listen to
+     * the engine instead: tear the dead session down and reconnect at once.
+     *
+     * Safety rails, mirroring the 3.4.13 auto-reconnect exactly:
+     *  - only when the dial is CONNECTED (a CONNECTING session's errors are
+     *    the connect path's business, not ours);
+     *  - one recovery in flight ([engineRecoveryInFlight] until the sensor
+     *    is re-armed), so a burst of verdicts cannot stack reconnects;
+     *  - bounded: after 3 consecutive failed recoveries, stop and report —
+     *    the user must not be trapped in a silent loop; a manual connect
+     *    resets the counter.
+     */
+    private fun onLanternEngineDeath(reason: String) {
+        if (engineRecoveryInFlight) return
+        // A live session reads CONNECTED, or DEGRADED when a probe already
+        // painted it amber — both are a session worth recovering. Anything
+        // else (CONNECTING, FAILED, DISCONNECTED) is the connect path's
+        // business: hand the verdict back so the sensor keeps watching.
+        if (visualState != OrbitDialView.State.CONNECTED && visualState != OrbitDialView.State.DEGRADED) {
+            LanternEngine.healthVerdictHandled()
+            return
+        }
+        if (selectedProtocol != Protocol.LANTERN) {
+            LanternEngine.healthVerdictHandled()
+            return
+        }
+        engineRecoveryInFlight = true
+        val cause = if (reason == "keepalive")
+            "the engine's connection went silent (no recent network activity)"
+        else
+            "no Lantern server could be reached (front path dead)"
+        ConnectionLog.record("Lantern: session died mid-connection — $cause. Recovering…")
+        consecutiveEngineDeaths++
+        if (consecutiveEngineDeaths >= 3) {
+            consecutiveEngineDeaths = 0
+            engineRecoveryInFlight = false
+            LanternEngine.healthVerdictHandled()
+            ConnectionLog.record("Lantern recovery failed 3 times in a row — stopping auto-recovery")
+            showFailure(Strings.t("Tunnel stopped passing traffic — tap the dial to reconnect"))
+            return
+        }
+        // The recover itself is the same path the user taps: a clean
+        // disconnect so the service tears down the dead engine, then a fresh
+        // connect — which re-boots the sidecar, re-draws the pool with the
+        // phone's own Iranian IP (no tunnel), pings, and lets auto-select
+        // land on whatever answers.
+        startService(Intent(this, MsnGuardVpnService::class.java)
+            .setAction(MsnGuardVpnService.ACTION_DISCONNECT))
+        sessionHandler.postDelayed({
+            if (isFinishing || isDestroyed) {
+                engineRecoveryInFlight = false
+                LanternEngine.healthVerdictHandled()
+                return@postDelayed
+            }
+            ConnectionLog.record("Lantern: automatic recovery reconnect ($consecutiveEngineDeaths/3)")
+            suppressNextDisconnectedPaint = true
+            connect(configJson())
+            // The connect path paints its own states; the sensor re-arms the
+            // moment the new session's log lines start flowing.
+            engineRecoveryInFlight = false
+            LanternEngine.healthVerdictHandled()
+        }, 1_200)
     }
 
     /**

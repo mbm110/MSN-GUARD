@@ -107,6 +107,101 @@ object LanternEngine {
     @Volatile private var sidecarPort: Int = 0
     @Volatile private var lastError = ""
 
+    // ─────────────────────────────────────────────────────────────────
+    // MSN 3.4.21 MID-SESSION LIVENESS SENSOR. The 2026-11-26 field log
+    // (msn-guard-log__2_): the Lantern front path died at 13:40 and the
+    // app sat "connected" for 1h42m while every app's retries crossed the
+    // TUN — the byte-based watchdog read that noise as a busy, healthy
+    // tunnel and never fired. The engine, though, SAID it plainly in its
+    // own stream: bursts of `mutableautoselect[auto]: dial ... i/o
+    // timeout / context deadline exceeded` (front path dead — no member
+    // can dial), and `no recent network activity` (the live connection's
+    // keepalive gave up). This sensor reads that same sidecar stdout the
+    // log thread already walks — event-driven, no polling loop of our
+    // own, no battery: nothing runs unless the engine itself errors.
+    //
+    // Verdicts are debounced (a window of N matches within a span, one
+    // verdict in flight, a cooldown after each verdict) and only fire
+    // while a real session is active — the list-only sidecar and the
+    // boot phase produce the same errors while hunting for a first
+    // connection and must not be read as a session dying.
+    // ─────────────────────────────────────────────────────────────────
+    private const val FRONT_PATH_TRIGGERS = 3
+    private const val FRONT_PATH_SPAN_MS = 60_000L
+    private const val KEEPALIVE_TRIGGERS = 2
+    private const val KEEPALIVE_SPAN_MS = 60_000L
+    private const val VERDICT_COOLDOWN_MS = 90_000L
+
+    /** Set by MainActivity; called on the sidecar log thread. */
+    @Volatile var onEngineHealthVerdict: ((reason: String) -> Unit)? = null
+
+    private data class SensorState(
+        val frontPathHits: ArrayDeque<Long> = ArrayDeque(),
+        val keepaliveHits: ArrayDeque<Long> = ArrayDeque(),
+        var verdictAt: Long = 0L,
+        var verdictInFlight: Boolean = false,
+    )
+
+    private val sensorState = SensorState()
+    private val sensorLock = Any()
+
+    /**
+     * Feed one lowercased sidecar line to the sensor. Called from the log
+     * thread for every line, BEFORE the spam gate, so a burst the display
+     * dedupes is still fully counted — three identical `i/o timeout`s in
+     * a minute are a dying front path even if the log shows one.
+     */
+    private fun feedHealthSensor(lower: String) {
+        val cb = onEngineHealthVerdict ?: return
+        if (!isSessionActive) return  // list-only/boot errors are not session deaths
+        val now = android.os.SystemClock.elapsedRealtime()
+        synchronized(sensorLock) {
+            val s = sensorState
+            if (s.verdictInFlight) return
+            if (s.verdictAt != 0L && now - s.verdictAt < VERDICT_COOLDOWN_MS) return
+
+            if (lower.contains("mutableautoselect") &&
+                (lower.contains("i/o timeout") || lower.contains("context deadline exceeded"))) {
+                s.frontPathHits.addLast(now)
+                while (s.frontPathHits.size > FRONT_PATH_TRIGGERS ||
+                    (s.frontPathHits.isNotEmpty() && now - s.frontPathHits.first() > FRONT_PATH_SPAN_MS)) {
+                    s.frontPathHits.removeFirst()
+                    if (s.frontPathHits.isEmpty()) break
+                }
+                if (s.frontPathHits.size >= FRONT_PATH_TRIGGERS) {
+                    s.verdictAt = now
+                    s.verdictInFlight = true
+                    s.frontPathHits.clear()
+                    s.keepaliveHits.clear()
+                    cb("front-path")
+                    return
+                }
+            }
+            if (lower.contains("no recent network activity")) {
+                s.keepaliveHits.addLast(now)
+                while (s.keepaliveHits.size > KEEPALIVE_TRIGGERS ||
+                    (s.keepaliveHits.isNotEmpty() && now - s.keepaliveHits.first() > KEEPALIVE_SPAN_MS)) {
+                    s.keepaliveHits.removeFirst()
+                    if (s.keepaliveHits.isEmpty()) break
+                }
+                if (s.keepaliveHits.size >= KEEPALIVE_TRIGGERS) {
+                    s.verdictAt = now
+                    s.verdictInFlight = true
+                    s.frontPathHits.clear()
+                    s.keepaliveHits.clear()
+                    cb("keepalive")
+                    return
+                }
+            }
+        }
+    }
+
+    /** The recovery finished (whatever its outcome); re-arm the sensor. */
+    fun healthVerdictHandled() = synchronized(sensorLock) {
+        sensorState.verdictInFlight = false
+    }
+
+
     private fun binary(context: Context): File =
         File(context.applicationInfo.nativeLibraryDir, "liblantern.so")
 
@@ -343,6 +438,10 @@ object LanternEngine {
                                 }
                             }
                             val lower = line.lowercase()
+                            // 3.4.21: every line feeds the health sensor first —
+                            // before the spam gate, so a display-deduped burst
+                            // still counts fully toward the verdict.
+                            feedHealthSensor(lower)
                             // 3.4.6 TEMP DIAGNOSTIC: also pass DNS/rule-set lines —
                             // the 3.4.5 field log has the tunnel fully up (handoff,
                             // engine connect, reachability) while apps get no DNS
