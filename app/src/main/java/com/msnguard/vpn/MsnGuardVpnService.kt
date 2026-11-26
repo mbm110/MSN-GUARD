@@ -6750,6 +6750,12 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
             .putExtra(EXTRA_PROGRESS, connectProgress)
             .putExtra(EXTRA_STEPS, connectStepsTotal)
             .apply { detail?.let { putExtra(EXTRA_DETAIL, it) } })
+        // 3.4.23: remember the edge at the exact moment it is broadcast. If
+        // the UI is stopped (screen off) its receiver is unregistered and this
+        // broadcast lands on nobody — lastServiceStatus is what the activity
+        // reads back on resume to replay the missed edge through the same
+        // verification gate the broadcast would have fed.
+        TunnelStatus.lastServiceStatus = status
         TileService.requestListeningState(
             this,
             ComponentName(this, MsnGuardTileService::class.java),

@@ -73,6 +73,29 @@ object TunnelStatus {
         internal set
 
     /**
+     * MSN 3.4.23: the service's LAST broadcast status, set inside sendStatus.
+     *
+     * Why this exists (field bug, 2026-11): tap Connect, screen off while the
+     * dial still reads CONNECTING. The service connects in the background is
+     * fine — but its STATUS_CONNECTED broadcast reaches nobody, because
+     * MainActivity unregisters its receiver in onStop. On return the screen
+     * stays "Connecting" forever over a working tunnel: adoptRunningTunnel
+     * refuses to touch a CONNECTING paint ("the gate owns the paint") and the
+     * gate never started, so nobody republishes the state.
+     *
+     * This field is the replay path: it is written exactly where the broadcast
+     * is sent, so "last status == CONNECTED" is the same fact the missed
+     * broadcast carried — no guessing, no probing, no battery. The activity
+     * reads it on resume/recreate to detect a missed edge and feeds it to the
+     * SAME verification gate the broadcast would have reached
+     * (beginVerification), so the screen still never claims connected on a
+     * handshake-only tunnel.
+     */
+    @Volatile
+    var lastServiceStatus: String = ""
+        internal set
+
+    /**
      * The UI's verification gate is still proving that payload crosses.
      *
      * The service's "connected" (the SOCKS listener answered) and the dial's

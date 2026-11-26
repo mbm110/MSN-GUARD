@@ -897,6 +897,24 @@ class MainActivity : Activity() {
         // visibly passing traffic. Field report, and the exact reason this call is
         // here and not only in onCreate.
         adoptRunningTunnel()
+        // 3.4.23: the field report's sharper case — the user tapped Connect and
+        // the screen went dark WHILE the dial still read CONNECTING. The service
+        // then connected with the receiver unregistered, so the CONNECTED
+        // broadcast reached nobody and the gate never started; adoptRunningTunnel
+        // above refuses to touch a CONNECTING paint ("the gate owns the paint"),
+        // which left the dial stuck on Connecting over a working tunnel for as
+        // long as the session lived. Replay the missed edge: the service wrote
+        // its last status at the exact moment it broadcast, so this is the same
+        // fact the UI missed — routed through the SAME verification gate the
+        // broadcast would have fed (beginVerification proves a real probe/bytes
+        // before it ever paints connected), never a blind paint.
+        if (visualState == OrbitDialView.State.CONNECTING && !verifyInFlight &&
+            TunnelStatus.lastServiceStatus == MsnGuardVpnService.STATUS_CONNECTED &&
+            TunnelStatus.isActive()
+        ) {
+            ConnectionLog.record("UI resume: replaying the CONNECTED edge missed while the screen was off")
+            beginVerification()
+        }
         // The LAN-sharing subtitle carries a live network address, and the usual way
         // to get one is to leave for the system Wi-Fi/hotspot screen and come back.
         // Every row this touches is null unless the settings page is on screen, so
