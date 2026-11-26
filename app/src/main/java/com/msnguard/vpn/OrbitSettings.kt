@@ -45,7 +45,10 @@ class OrbitSectionHeader(
         // cards, so the settings page and the home page read as one design
         // language instead of two unrelated accents (mint tick vs blue frames).
         addView(TickView(context, palette.neonBlue), LayoutParams(dp(3), dp(13)).apply {
-            rightMargin = dp(9)
+            // 3.4.25 (audit §6.2): start/end margins flip with the layout
+            // direction; physical ones do not and put the gap on the wrong
+            // side of the value in RTL Persian.
+            marginEnd = dp(9)
         })
         addView(TextView(context).apply {
             this.text = text
@@ -138,7 +141,7 @@ class OrbitSettingsRow(
             addView(android.widget.ImageView(context).apply {
                 setImageResource(res)
                 setColorFilter(accent)
-            }, LayoutParams(dp(19), dp(19)).apply { rightMargin = dp(13) })
+            }, LayoutParams(dp(19), dp(19)).apply { marginEnd = dp(13) })
         }
 
         titleView = TextView(context).apply {
@@ -182,10 +185,10 @@ class OrbitSettingsRow(
         addView(valueView, LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(10) })
+        ).apply { marginStart = dp(10) })
 
         addView(ChevronGlyph(context, Sculpt.withAlpha(palette.muted, 0.8f)), LayoutParams(dp(18), dp(18)).apply {
-            leftMargin = dp(6)
+            marginStart = dp(6)
         })
 
         contentDescription = listOfNotNull(title, value).joinToString(", ")
@@ -376,7 +379,7 @@ class OrbitToggleRow(
             addView(thumb)
             setOnClickListener { toggle() }
         }
-        addView(track, LayoutParams(trackWidth, trackHeight).apply { leftMargin = dp(12) })
+        addView(track, LayoutParams(trackWidth, trackHeight).apply { marginStart = dp(12) })
 
         renderSwitch()
         // Tapping anywhere on the row toggles it. A 27dp track is a small target

@@ -5,8 +5,8 @@
 
     <!-- Quick Tile strings -->
     <string name="vpn_tile_label">MSN-GUARD</string>
-    <string name="vpn_connected">متصل شد</string>
-    <string name="vpn_disconnected">متصل نیست</string>
+    <string name="vpn_connected">متصل است</string>
+    <string name="vpn_disconnected">قطع شده</string>
     <string name="vpn_connecting">در حال اتصال…</string>
     <string name="vpn_disconnect">قطع اتصال</string>
 

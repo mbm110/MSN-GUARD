@@ -749,8 +749,11 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply {
-            leftMargin = dp(20)
-            rightMargin = dp(20)
+            // 3.4.25 (audit §6.2): start/end margins — physical left/right do
+            // not flip in RTL, so the header sat 20dp off the wrong edge in
+            // Persian.
+            marginStart = dp(20)
+            marginEnd = dp(20)
             topMargin = dp(10)
         })
         mainRoot.setOnApplyWindowInsetsListener { _, insets ->
@@ -3250,7 +3253,7 @@ class MainActivity : Activity() {
     private fun createScannerOption(target: ScanTarget, onSelect: (ScanTarget) -> Unit): SelectionOption {
         val selected = target == defaultScan()
         val title = label(target.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.08f) }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.08f) }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -3282,7 +3285,7 @@ class MainActivity : Activity() {
     ): SelectionOption {
         val selected = discovery == defaultEndpointDiscovery()
         val title = label(discovery.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.08f) }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.08f) }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -3311,7 +3314,7 @@ class MainActivity : Activity() {
     private fun createScanModeOption(mode: ScanMode, onSelect: (ScanMode) -> Unit): SelectionOption {
         val selected = mode == defaultScanMode()
         val title = label(mode.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.08f) }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.08f) }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -3343,7 +3346,7 @@ class MainActivity : Activity() {
     ): SelectionOption {
         val selected = transport == defaultMasqueTransport()
         val title = label(transport.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.08f) }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.08f) }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
@@ -4538,7 +4541,7 @@ class MainActivity : Activity() {
         val options = mutableMapOf<ObfuscationProfile, SelectionOption>()
         ObfuscationProfile.entries.forEachIndexed { index, profile ->
             val title = label(profile.label, 16f, INK, TypefaceStyle.MEDIUM)
-            val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.08f) }
+            val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.08f) }
             val row = LinearLayout(this).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 orientation = LinearLayout.HORIZONTAL
@@ -4554,7 +4557,7 @@ class MainActivity : Activity() {
                 addView(indicator, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { leftMargin = dp(12) })
+                ).apply { marginStart = dp(12) })
                 setOnClickListener {
                     preferences().edit().putString(OBFUSCATION_PROFILE, profile.coreName).apply()
                     options.forEach { (item, option) -> setSelectionState(option, item == profile, animate = true) }
@@ -5954,7 +5957,7 @@ class MainActivity : Activity() {
                 addView(indicator, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { leftMargin = dp(12) })
+                ).apply { marginStart = dp(12) })
                 setOnClickListener {
                     AppLanguage.set(this@MainActivity, code)
                     ConnectionLog.record("First-run language chosen: ${AppLanguage.label(code)}")
@@ -6827,14 +6830,14 @@ class MainActivity : Activity() {
         })
         sheet.addView(label(subtitle, 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        ).apply { marginStart = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
         // Rows live in their own container so a long list can be wrapped in a
         // ScrollView without the header and subtitle scrolling away with it.
         val optionsHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val rows = mutableMapOf<T, SelectionOption>()
         options.forEachIndexed { index, item ->
             val optionTitle = label(label(item), 16f, INK, TypefaceStyle.MEDIUM)
-            val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.08f) }
+            val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.08f) }
             val row = LinearLayout(this).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 orientation = LinearLayout.HORIZONTAL
@@ -6855,7 +6858,7 @@ class MainActivity : Activity() {
                 addView(indicator, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { leftMargin = dp(12) })
+                ).apply { marginStart = dp(12) })
                 setOnClickListener {
                     // Refusal comes first, and nothing moves if it fires: the
                     // marker, the callback and the stored preference all stay on
@@ -8964,7 +8967,7 @@ class MainActivity : Activity() {
         onSelect: (SplitTunnelSettings.Mode) -> Unit,
     ): SelectionOption {
         val title = label(mode.label, 16f, INK, TypefaceStyle.MEDIUM)
-        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = spacing(0.08f) }
+        val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.08f) }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(18), 0, dp(18), 0)
@@ -9200,15 +9203,25 @@ class MainActivity : Activity() {
     private fun foxySectionHead(title: String): LinearLayout {
         val bar = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         bar.addView(label(title.uppercase(), 11.5f, MUTED, TypefaceStyle.MEDIUM).apply {
-            // Violet Ink / Ice Light head: small tracked uppercase, nothing else
-            letterSpacing = 0.11f
+            // Violet Ink / Ice Light head: small tracked uppercase, nothing else.
+            // 3.4.25 (audit §6.3): letter-spacing on Arabic script disconnects
+            // the letters inside Persian words — OrbitSectionHeader already
+            // zeroes it for non-English; the same rule applies here.
+            letterSpacing = if (AppLanguage.current() == "fa") 0f else 0.11f
             setPadding(dp(2), 0, 0, 0)
         })
         return bar
     }
 
     /** Connection info row: a framed neon card — fill = surface, hairline stroke
-     *  in the row's own neon accent (server=violet, status=blue, quota=amber). */
+     *  in the row's own neon accent (server=violet, status=blue, quota=amber).
+     *
+     *  3.4.25 (audit §6.1, the screenshots): the row had NO gap between title
+     *  and value, so in RTL Persian the two ran together as one string
+     *  (قطع شدوضعیت). The value now carries its own start margin, is capped
+     *  at 55% of the row, and wraps to two lines in fa/zh/ru (single line
+     *  with an ellipsis in English); the title wraps too and pins to the
+     *  start edge so long Persian titles cannot push the value around. */
     private fun foxyInfoRow(title: String, value: String, valueColor: Int, accent: Int): LinearLayout {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -9217,14 +9230,32 @@ class MainActivity : Activity() {
             minimumHeight = dp(52)
             background = Sculpt.sculptedBackground(resources.displayMetrics.density, foxyC(SURFACE.toLong(), 0xFFFFFFFF), 16, stroke = accent)
         }
-        row.addView(label(title, 13f, MUTED), LinearLayout.LayoutParams(
+        val localized = AppLanguage.current() != "en"
+        row.addView(label(title, 13f, MUTED).apply {
+            maxLines = 2
+            gravity = Gravity.START
+        }, LinearLayout.LayoutParams(
             0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
         ))
-        val valueLabel = label(value, 13.5f, valueColor)
+        val valueLabel = label(value, 13.5f, valueColor).apply {
+            if (localized) {
+                maxLines = 2
+            } else {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                singleLine = true
+            }
+        }
         row.tag = valueLabel  // fetchFoxyQuota updates this in place
         row.addView(valueLabel, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ))
+            0, ViewGroup.LayoutParams.WRAP_CONTENT,
+            if (localized) 0.55f else 0.5f,
+        ).apply {
+            // The physical gap that was missing in RTL: marginStart flips with
+            // the layout direction, so the 12dp sits between title and value
+            // in English AND in Persian.
+            marginStart = dp(12)
+        })
         return row
     }
 
@@ -9261,7 +9292,9 @@ class MainActivity : Activity() {
             text = title
             textSize = 13.5f
             gravity = Gravity.CENTER
-            letterSpacing = 0.02f
+            // 3.4.25 (audit §6.3): zero the tracking on Persian — the buttons
+            // carry translated text and letter-spacing breaks Arabic joining.
+            letterSpacing = if (AppLanguage.current() == "fa") 0f else 0.02f
             textSize = 12.5f
             isClickable = true
             isFocusable = true
@@ -9281,7 +9314,12 @@ class MainActivity : Activity() {
         content.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(createHeaderBackButton { closeFoxySettingScreen() }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            addView(label("\uD83E\uDD8A  " + Strings.t("Foxy Account & Setting"), 21f, INK, TypefaceStyle.MEDIUM).apply { setPadding(dp(4), 0, 0, 0) })
+            addView(label("\uD83E\uDD8A  " + Strings.t("Foxy Account & Setting"), 21f, INK, TypefaceStyle.MEDIUM).apply {
+                setPadding(dp(4), 0, 0, 0)
+                // 3.4.25 (audit §6.5): the long Persian title + emoji can clip
+                // on a 360dp phone — let it take a second line instead.
+                maxLines = 2
+            })
         })
 
         val pending = com.msnguard.vpn.foxy.FoxyTunnel.signInStatus(this)
@@ -9307,11 +9345,13 @@ class MainActivity : Activity() {
 
         val chip = label(Strings.t("ACCOUNT: not signed in"), 11f, foxyC(0xFFC7C7D1, 0xFF4E6069), TypefaceStyle.MEDIUM).apply {
             setPadding(dp(14), dp(8), dp(14), dp(8))
-            letterSpacing = 0.10f
+            // 3.4.25 (audit §6.3): the chip carries translated text — all-caps
+            // tracking on Persian breaks the letter joining.
+            letterSpacing = if (AppLanguage.current() == "fa") 0f else 0.10f
             background = roundedBackground(Color.TRANSPARENT, 14, foxyC(0xFF3A3A46, palette.divider.toLong()))
         }
         when (pending) {
-            "pending" -> { chip.text = "WAITING: check your email for the code"; chip.setTextColor(foxyViolet()); chip.background = roundedBackground(Color.TRANSPARENT, 14, foxyC(0xFF3A3A46, palette.divider.toLong())) }
+            "pending" -> { chip.text = Strings.t("Waiting — check your email for the code"); chip.setTextColor(foxyViolet()); chip.background = roundedBackground(Color.TRANSPARENT, 14, foxyC(0xFF3A3A46, palette.divider.toLong())) }
             "active" -> {
                 chip.text = Strings.t("ACCOUNT: signed in")
                 chip.setTextColor(0xFF6B5BD6.toInt())
