@@ -13,16 +13,16 @@ replace github.com/tetratelabs/wazero => github.com/getlantern/wazero v1.11.0-wa
 
 replace github.com/refraction-networking/water => github.com/getlantern/water v0.7.1-alpha.0.20260309190745-bd547c14b4aa
 
-// Upstream Radiance and lantern-box v0.0.240 both force sagernet/gvisor
+// Upstream Radiance and lantern-box v0.0.243 both force sagernet/gvisor
 // (the getlantern/gvisor target no longer resolves): that tag carries the
 // WritePacketDirect API and the new udp.NewForwarder signature that
 // sing-tun needs, and semver would never select it on its own.
 replace github.com/sagernet/gvisor => github.com/sagernet/gvisor v0.0.0-20260727.0-sing-box-mod.1
 
 // Upstream Radiance added this replace with the Proxyless/outline work
-// (lantern-box v0.0.240 era); a replace in a dependency does not propagate,
+// (lantern-box v0.0.243 era); a replace in a dependency does not propagate,
 // so mirror it at the root like the other pins.
-replace golang.getoutline.org/sdk/x => github.com/getlantern/outline-sdk/x v0.3.0-lantern.1
+replace golang.getoutline.org/sdk/x => github.com/getlantern/outline-sdk/x v0.3.0-lantern.2
 
 require github.com/getlantern/radiance v0.0.0-20261121161923-0c920c73b969
 

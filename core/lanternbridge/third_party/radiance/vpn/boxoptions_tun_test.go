@@ -4,6 +4,7 @@ package vpn
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"net"
 	"net/netip"
@@ -35,29 +36,43 @@ import (
 )
 
 func TestBaseOpts_TunIPv6Address(t *testing.T) {
-	opts := baseOpts(t.TempDir())
-	require.NotEmpty(t, opts.Inbounds, "expected inbounds in baseOpts output")
+	for _, v6 := range []bool{true, false} {
+		t.Run(fmt.Sprintf("v6=%v", v6), func(t *testing.T) {
+			setHasGlobalIPv6(t, v6)
+			opts := baseOpts(t.TempDir())
+			require.NotEmpty(t, opts.Inbounds, "expected inbounds in baseOpts output")
 
-	var tunOpts *O.TunInboundOptions
-	for _, in := range opts.Inbounds {
-		if in.Type == "tun" {
-			var ok bool
-			tunOpts, ok = in.Options.(*O.TunInboundOptions)
-			require.True(t, ok, "expected *TunInboundOptions for tun inbound")
-			break
-		}
-	}
-	require.NotNil(t, tunOpts, "expected a tun inbound")
-	require.NotEmpty(t, tunOpts.Address, "expected at least the v4 TUN address")
-	assert.Equal(t, "10.10.1.1/30", tunOpts.Address[0].String(), "first TUN address should be the v4 prefix")
+			var tunOpts *O.TunInboundOptions
+			for _, in := range opts.Inbounds {
+				if in.Type == "tun" {
+					var ok bool
+					tunOpts, ok = in.Options.(*O.TunInboundOptions)
+					require.True(t, ok, "expected *TunInboundOptions for tun inbound")
+					break
+				}
+			}
+			require.NotNil(t, tunOpts, "expected a tun inbound")
+			require.NotEmpty(t, tunOpts.Address, "expected at least the v4 TUN address")
+			assert.Equal(t, "10.10.1.1/30", tunOpts.Address[0].String(), "first TUN address should be the v4 prefix")
 
-	if common.HasGlobalIPv6() {
-		require.Len(t, tunOpts.Address, 2, "expected v4 + v6 ULA on TUN when system has global v6")
-		assert.Equal(t, "fdfe:dcba:9876::1/126", tunOpts.Address[1].String(),
-			"v6 ULA should be appended after the v4 address")
-	} else {
-		require.Len(t, tunOpts.Address, 1, "expected v4-only TUN when system has no global v6")
+			if v6 {
+				require.Len(t, tunOpts.Address, 2, "expected v4 + v6 ULA on TUN when system has global v6")
+				assert.Equal(t, "fdfe:dcba:9876::1/126", tunOpts.Address[1].String(),
+					"v6 ULA should be appended after the v4 address")
+			} else {
+				require.Len(t, tunOpts.Address, 1, "expected v4-only TUN when system has no global v6")
+			}
+		})
 	}
+}
+
+// setHasGlobalIPv6 fixes hasGlobalIPv6 for the test. Tests that call it must not
+// run in parallel: hasGlobalIPv6 is a package variable. (Upstream cecc0f9, MSN 3.4.18.)
+func setHasGlobalIPv6(t *testing.T, v6 bool) {
+	orig := hasGlobalIPv6
+	hasGlobalIPv6 = func() bool { return v6 }
+	t.Cleanup(func() { hasGlobalIPv6 = orig })
+}
 }
 
 func TestBaseRoutingRules_RejectsTunSelfDial(t *testing.T) {
@@ -198,6 +213,12 @@ func TestBuildOptions_StartsWithSystemDNS(t *testing.T) {
 	options, _ := testBoxOptions(t)
 	opts, _, err := buildOptions(BoxOptions{BasePath: t.TempDir(), Options: options})
 	require.NoError(t, err)
+	// Without global IPv6 here, as on CI, the TUN gets no v6 address and no early
+	// reject; add it anyway so sing-box validates the rule when the box starts.
+	if !tunHasIPv6(opts) {
+		opts.Route.Rules = withEarlyIPv6Reject(opts.Route.Rules)
+	}
+	require.True(t, slices.ContainsFunc(opts.Route.Rules, isEarlyIPv6Reject), "start the box with the early IPv6 reject")
 	opts.Inbounds = nil
 	opts.Log = &O.LogOptions{Disabled: true}
 	opts.Experimental = nil
@@ -410,4 +431,45 @@ func (r *recordingSystemDNS) queriedNames() []string {
 	r.access.Lock()
 	defer r.access.Unlock()
 	return slices.Clone(r.queried)
+}
+
+// TestBuildOptions_EarlyIPv6RejectFollowsTheTUN pins the full IPv6 clamp:
+// no v6 TUN → no early reject and no ::/0 backstop; v6 TUN → the early
+// 2000::/3 refuse sits just before sniffing and the ::/0 reject stays after
+// split-tunnel, before the selector rules. (Upstream cecc0f9, MSN 3.4.18.)
+func TestBuildOptions_EarlyIPv6RejectFollowsTheTUN(t *testing.T) {
+	for _, v6 := range []bool{true, false} {
+		t.Run(fmt.Sprintf("v6=%v", v6), func(t *testing.T) {
+			setHasGlobalIPv6(t, v6)
+			options, _ := testBoxOptions(t)
+			opts, _, err := buildOptions(BoxOptions{BasePath: t.TempDir(), Options: options})
+			require.NoError(t, err)
+			require.Equal(t, v6, tunHasIPv6(opts))
+			early := slices.IndexFunc(opts.Route.Rules, isEarlyIPv6Reject)
+			late := slices.IndexFunc(opts.Route.Rules, func(r O.Rule) bool {
+				o := r.DefaultOptions
+				return o.RuleAction.Action == C.RuleActionTypeReject && slices.Contains(o.RawDefaultRule.IPCIDR, "::/0")
+			})
+			if !v6 {
+				assert.Equal(t, -1, early)
+				assert.Equal(t, -1, late)
+				return
+			}
+			require.NotEqual(t, -1, late, "expected the ::/0 reject with a v6 TUN")
+			split := slices.IndexFunc(opts.Route.Rules, func(r O.Rule) bool {
+				return slices.Contains(r.DefaultOptions.RawDefaultRule.RuleSet, splitTunnelTag)
+			})
+			selector := slices.IndexFunc(opts.Route.Rules, func(r O.Rule) bool {
+				mode := r.DefaultOptions.RawDefaultRule.ClashMode
+				return mode == AutoSelectTag || mode == ManualSelectTag
+			})
+			assert.Greater(t, late, split, "the ::/0 reject must follow split-tunnel so direct-routed v6 UDP keeps flowing")
+			assert.Less(t, late, selector, "the ::/0 reject must precede the selector rules")
+			sniff := slices.IndexFunc(opts.Route.Rules, func(r O.Rule) bool {
+				return r.DefaultOptions.RuleAction.Action == C.RuleActionTypeSniff
+			})
+			require.NotEqual(t, -1, early, "expected the early IPv6 reject with a v6 TUN")
+			assert.Equal(t, sniff-1, early, "the early IPv6 reject must sit just before sniffing")
+		})
+	}
 }

@@ -32,7 +32,7 @@ replace github.com/refraction-networking/water => github.com/getlantern/water v0
 // (quic.EarlyConnection became *quic.Conn). lantern-box and kindling carry the
 // same replace, but a replace only applies in the main module. Drop once an
 // upstream x release includes OutlineFoundation/outline-sdk#657.
-replace golang.getoutline.org/sdk/x => github.com/getlantern/outline-sdk/x v0.3.0-lantern.1
+replace golang.getoutline.org/sdk/x => github.com/getlantern/outline-sdk/x v0.3.0-lantern.2
 
 // sing-box/sing-tun/tailscale need gvisor's v0.0.0-20260727.0-sing-box-mod.1
 // API (WritePacketDirect, the new udp.NewForwarder signature). That tag's first
@@ -50,7 +50,7 @@ require (
 	github.com/getlantern/common v1.2.1-0.20261119180934-02036a2e32ad
 	github.com/getlantern/domainfront v0.0.0-20261026202828-9727b2f2a34a
 	github.com/getlantern/kindling v0.0.0-20261118170249-97dd2fc5eff5
-	github.com/getlantern/lantern-box v0.0.240
+	github.com/getlantern/lantern-box v0.0.243
 	github.com/getlantern/pluriconfig v0.0.0-20251126214241-8cc8bc561535
 	github.com/getlantern/publicip v0.0.0-20260328175246-2c460fe80c6b
 	github.com/getlantern/samizdat v0.0.3-0.20261117205503-f66a0285afd9

@@ -48,6 +48,10 @@ var (
 	tunPrefix6 = netip.MustParsePrefix("fdfe:dcba:9876::1/126")
 )
 
+// hasGlobalIPv6 decides whether the TUN gets a v6 address. Tests replace it
+// (setHasGlobalIPv6), so they must not run in parallel. (Upstream cecc0f9, MSN 3.4.18.)
+var hasGlobalIPv6 = common.HasGlobalIPv6
+
 // baseInbounds returns the tunnel-build inbounds: the TUN device (per-platform
 // stack/routing applied here) plus the loopback bypass proxy that carries
 // kindling's bootstrap traffic outside the tunnel.
@@ -57,7 +61,7 @@ func baseInbounds() []O.Inbound {
 	// ULA-only interfaces don't indicate real public v6, so gate the TUN v6 address
 	// on genuine global v6 connectivity.
 	tunAddress := []netip.Prefix{tunPrefix4}
-	if common.HasGlobalIPv6() {
+	if hasGlobalIPv6() {
 		tunAddress = append(tunAddress, tunPrefix6)
 		slog.Info("vpn: TUN with IPv6 ULA (system has global v6)")
 	} else {

@@ -23,6 +23,7 @@ import (
 	O "github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/json"
 	"github.com/sagernet/sing/common/json/badoption"
+	N "github.com/sagernet/sing/common/network"
 
 	"github.com/getlantern/radiance/common"
 	"github.com/getlantern/radiance/common/atomicfile"
@@ -196,15 +197,17 @@ func baseRoutingRules() []O.Rule {
 	// 0. 	(iOS-only) admission gate for rejecting new connections during high memory usage.
 	// 		Only enabled long enough to allow memory to be returned to the OS. Prepended as the
 	// 		first rule to minimize any additional memory allocation while it's being reclaimed.
+	// 0b.   Reject TCP from the TUN to public IPv6, before sniffing, when the TUN has a
+	//       v6 address (earlyRejectIPv6Rule, added in buildOptions).
 	// 1.    Enable traffic sniffing
 	// 2.    Hijack DNS to allow sing-box to handle DNS requests
 	// 3.    Route bypass proxy traffic directly (for kindling connections)
 	// 4.    Route private IPs to direct outbound
 	// 5.    Split tunnel rule (user-configurable)
 	// 6.    Smart-routing, ad-block, and config-file rules (added in buildOptions).
-	// 7.    Reject IPv6 (::/0), only when the TUN captured a v6 address; placed here
-	//       so direct-routed v6 is preserved while proxied v6 fails over to IPv4. Added
-	//	      in buildOptions.
+	// 7.    Reject any other IPv6 (::/0) when the TUN has a v6 address: UDP, TCP to port 53,
+	//       TCP from other inbounds, and v6 outside 2000::/3 (rejectIPv6Rule, added in
+	//       buildOptions).
 	// 8,9.  Group rules for auto and manual selector modes (added in buildOptions).
 	// 10.   Catch-all blocking rule (added in buildOptions). This ensures that any traffic not covered
 	//       by previous rules does not automatically bypass the VPN.
@@ -477,6 +480,12 @@ func buildOptions(bOptions BoxOptions) (O.Options, string, error) {
 	}
 
 	if tunHasIPv6(opts) {
+		// MSN 3.4.18 (upstream cecc0f9): the late ::/0 reject reached TCP
+		// clients as a failed TLS handshake mid-connection instead of a
+		// refused one, so they never retried over IPv4. Refuse public v6
+		// BEFORE the sniff rule with a reset to the SYN (earlyRejectIPv6Rule)
+		// and keep the late ::/0 reject as the backstop for everything else.
+		opts.Route.Rules = withEarlyIPv6Reject(opts.Route.Rules)
 		opts.Route.Rules = append(opts.Route.Rules, rejectIPv6Rule())
 	}
 
@@ -762,15 +771,59 @@ func highMemoryRejectRule() O.Rule {
 	return rejectRule(O.RawDefaultRule{ClashMode: rejectMode})
 }
 
-// rejectIPv6Rule rejects all IPv6 destinations so applications fall back to IPv4 —
-// a backstop for v6 that escapes AAAA suppression (literal addresses, HTTPS-record
-// hints, apps using their own DNS). The default reject method (ICMP unreachable /
-// RST) makes Happy Eyeballs fail over at once; "drop" would blackhole and stall.
-// Must be appended after the direct-routing rules so intentionally-direct v6 is kept.
+// rejectIPv6Rule rejects all IPv6 with unreachable or a reset, never a silent
+// drop, after the direct rules.
 func rejectIPv6Rule() O.Rule {
 	rule := rejectRule(O.RawDefaultRule{IPCIDR: []string{"::/0"}})
 	rule.DefaultOptions.RuleAction.RejectOptions.NoDrop = true
 	return rule
+}
+
+// earlyRejectIPv6Rule refuses TCP from the TUN to public IPv6 other than DNS.
+// Placed before sniffing, it applies before sing-box accepts the connection, so
+// clients retry over IPv4. It also precedes the direct rules: a site reachable
+// only over public IPv6 can't go direct. (Upstream Radiance cecc0f9, MSN 3.4.18.)
+func earlyRejectIPv6Rule() O.Rule {
+	return O.Rule{
+		Type: C.RuleTypeLogical,
+		LogicalOptions: O.LogicalRule{
+			RawLogicalRule: O.RawLogicalRule{
+				Mode: C.LogicalTypeAnd,
+				Rules: []O.Rule{
+					{Type: C.RuleTypeDefault, DefaultOptions: O.DefaultRule{RawDefaultRule: O.RawDefaultRule{
+						Inbound: []string{inboundTag},
+						Network: []string{N.NetworkTCP},
+						IPCIDR:  []string{"2000::/3"},
+					}}},
+					{Type: C.RuleTypeDefault, DefaultOptions: O.DefaultRule{RawDefaultRule: O.RawDefaultRule{
+						Port:   []uint16{53},
+						Invert: true,
+					}}},
+				},
+			},
+			RuleAction: O.RuleAction{
+				Action: C.RuleActionTypeReject,
+				RejectOptions: O.RejectActionOptions{
+					Method: C.RuleActionRejectMethodDefault,
+					NoDrop: true,
+				},
+			},
+		},
+	}
+}
+
+// withEarlyIPv6Reject inserts earlyRejectIPv6Rule just before the TUN's sniff
+// rule. Without one, it returns rules unchanged, leaving rejectIPv6Rule.
+func withEarlyIPv6Reject(rules []O.Rule) []O.Rule {
+	i := slices.IndexFunc(rules, func(r O.Rule) bool {
+		o := r.DefaultOptions
+		return r.Type == C.RuleTypeDefault && o.RuleAction.Action == C.RuleActionTypeSniff &&
+			slices.Contains(o.RawDefaultRule.Inbound, inboundTag)
+	})
+	if i < 0 {
+		return rules
+	}
+	return slices.Insert(slices.Clone(rules), i, earlyRejectIPv6Rule())
 }
 
 func newDNSServerOptions(typ, tag, server, domainResolver string) O.DNSServerOptions {

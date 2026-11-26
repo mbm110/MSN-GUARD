@@ -306,6 +306,7 @@ func TestBuildOptions_RejectsIPv6WhenCaptured(t *testing.T) {
 
 	if !tunHasIPv6(opts) {
 		require.Equal(t, -1, rejectIdx, "no ::/0 reject expected when the TUN has no IPv6 address")
+		require.Equal(t, -1, slices.IndexFunc(opts.Route.Rules, isEarlyIPv6Reject), "no early reject without a v6 TUN")
 		return
 	}
 
@@ -321,8 +322,15 @@ func TestBuildOptions_RejectsIPv6WhenCaptured(t *testing.T) {
 
 	require.NotEqual(t, -1, splitIdx, "expected split-tunnel rule in built options")
 	require.NotEqual(t, -1, selectorIdx, "expected at least one selector mode rule in built options")
-	assert.Greater(t, rejectIdx, splitIdx, "IPv6 reject must come after split-tunnel so split-direct v6 keeps flowing")
+	assert.Greater(t, rejectIdx, splitIdx, "the ::/0 reject must follow split-tunnel so direct-routed v6 UDP keeps flowing")
 	assert.Less(t, rejectIdx, selectorIdx, "IPv6 reject must come before selector rules so proxied v6 is rejected")
+
+	earlyIdx := slices.IndexFunc(opts.Route.Rules, isEarlyIPv6Reject)
+	sniffIdx := slices.IndexFunc(opts.Route.Rules, func(r O.Rule) bool {
+		return r.DefaultOptions.RuleAction.Action == C.RuleActionTypeSniff
+	})
+	require.NotEqual(t, -1, earlyIdx, "expected the early public-IPv6 reject when the TUN has IPv6")
+	assert.Equal(t, sniffIdx-1, earlyIdx, "the early IPv6 reject must sit just before sniffing")
 }
 
 func TestRejectIPv6Rule(t *testing.T) {
@@ -333,6 +341,46 @@ func TestRejectIPv6Rule(t *testing.T) {
 		"must not use the drop method — a silent blackhole stalls instead of failing over to IPv4")
 	assert.True(t, r.DefaultOptions.RuleAction.RejectOptions.NoDrop,
 		"NoDrop must be set so the reject returns unreachable instead of dropping")
+}
+
+func TestWithEarlyIPv6RejectPrecedesSniff(t *testing.T) {
+	rules := withEarlyIPv6Reject(baseRoutingRules())
+	earlyIdx := slices.IndexFunc(rules, isEarlyIPv6Reject)
+	sniffIdx := slices.IndexFunc(rules, func(r O.Rule) bool {
+		return r.DefaultOptions.RuleAction.Action == C.RuleActionTypeSniff
+	})
+	require.NotEqual(t, -1, earlyIdx, "expected the early IPv6 reject")
+	require.NotEqual(t, -1, sniffIdx, "expected the sniff rule")
+	assert.Equal(t, sniffIdx-1, earlyIdx, "the early IPv6 reject must sit just before sniffing")
+	assert.Len(t, rules, len(baseRoutingRules())+1)
+
+	r := rules[earlyIdx].LogicalOptions
+	assert.Equal(t, C.LogicalTypeAnd, r.Mode)
+	assert.Equal(t, C.RuleActionTypeReject, r.RuleAction.Action)
+	assert.True(t, r.RuleAction.RejectOptions.NoDrop, "NoDrop keeps the reject from turning into a drop")
+	assert.NotEqual(t, C.RuleActionRejectMethodDrop, r.RuleAction.RejectOptions.Method)
+	match := r.Rules[0].DefaultOptions.RawDefaultRule
+	assert.Equal(t, []string{inboundTag}, []string(match.Inbound), "only the TUN's traffic is rejected early")
+	assert.Equal(t, []string{"tcp"}, []string(match.Network), "UDP already rejects in pre-match, after its direct rules")
+	assert.Equal(t, []string{"2000::/3"}, []string(match.IPCIDR))
+}
+
+func TestEarlyIPv6RejectSparesDNS(t *testing.T) {
+	r := earlyRejectIPv6Rule().LogicalOptions
+	require.Len(t, r.Rules, 2)
+	spared := r.Rules[1].DefaultOptions.RawDefaultRule
+	assert.True(t, spared.Invert)
+	assert.Equal(t, []uint16{53}, []uint16(spared.Port), "DNS to a public v6 resolver must still reach hijack-dns")
+}
+
+func isEarlyIPv6Reject(r O.Rule) bool {
+	return r.Type == C.RuleTypeLogical && len(r.LogicalOptions.Rules) > 0 &&
+		slices.Contains(r.LogicalOptions.Rules[0].DefaultOptions.RawDefaultRule.IPCIDR, "2000::/3")
+}
+
+func TestWithEarlyIPv6RejectNeedsTheSniffRule(t *testing.T) {
+	rules := []O.Rule{rejectIPv6Rule()}
+	assert.Equal(t, rules, withEarlyIPv6Reject(rules))
 }
 
 func TestTunHasIPv6(t *testing.T) {
