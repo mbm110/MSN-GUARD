@@ -819,6 +819,21 @@ internal object RussianStrings {
         "Freedom — direct" to "Freedom — напрямую",
         "Through your V2Ray config" to "Через вашу конфигурацию V2Ray",
         "Freedom — dial direct" to "Freedom — подключаться напрямую",
+        "Relayer" to "Ретранслятор",
+        "Direct connection" to "Прямое подключение",
+        "Relay Foxy requests through a backup server when direct access is blocked." to "Перенаправляет запросы Foxy через резервный сервер, когда прямой доступ заблокирован.",
+        "Custom relayer URL" to "Свой адрес ретранслятора",
+        "Enter a valid http or https URL" to "Введите корректный адрес http или https",
+        "LANTERN" to "LANTERN",
+        "FOXY" to "FOXY",
+        "Refresh server pings" to "Обновить задержку серверов",
+        "Pick the Lantern server to use" to "Выберите сервер Lantern",
+        "updated just now" to "обновлено только что",
+        "updated" to "обновлено",
+        "Connect with Lantern once, then pick a server here" to "Подключитесь к Lantern один раз, затем выберите сервер здесь",
+        "Auto - Lantern picks and follows the fastest server" to "Автоматически — Lantern выбирает и отслеживает самый быстрый сервер",
+        "no ping" to "нет задержки",
+        "current" to "текущий",
     )
 
     fun t(english: String): String = table[english]?.ifBlank { english } ?: english

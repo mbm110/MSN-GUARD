@@ -12,9 +12,17 @@ CORE = (ROOT / "core/aether/src/lib.rs").read_text()
 
 class WarpUiContract(unittest.TestCase):
     def test_masque_first_connect_budget_is_80_seconds(self):
-        budget = UI.split("private fun autoScanBudgetMs(protocol: Protocol)", 1)[1].split("\n    }", 1)[0]
-        self.assertIn("Protocol.MASQUE -> if (CoreConfig.mimArmed(this)) 75_000L else 80_000L", budget)
-        self.assertIn("autoScanBudgetMs(AUTO_SCAN_LADDER[rung])", UI)
+        # 3.4.x: the standalone autoScanBudgetMs()/AUTO_SCAN_LADDER the 2026-10
+        # pin wanted was removed in the ladder refactor. The FIRST-CONNECT
+        # patience now lives in two places, both pinned here:
+        #  1. the MTU rung budget in the service (MASQUE 300s: 4×20s API
+        #     retries can precede the 120s H2 gateway scan — 80s alone fires
+        #     "no s0 listener" while a healthy core is still scanning),
+        #  2. the verify gate's capped extensions (4 × 20s = 80s on top of the
+        #     base budget).
+        self.assertIn("MtuConfig.Method.MASQUE -> 300_000L", SERVICE)
+        self.assertIn("const val VERIFY_RECONNECT_EXTENSION_MS = 20_000L", UI)
+        self.assertIn("const val VERIFY_RECONNECT_EXTENSIONS = 4", UI)
 
     def test_vault_reflects_identity_created_on_home_screen(self):
         self.assertIn("IdentityRelayClient.provision(this@MsnGuardVpnService, relayProtocol)", SERVICE)

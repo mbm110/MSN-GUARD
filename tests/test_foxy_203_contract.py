@@ -35,7 +35,12 @@ console.log('WebChannel fixture passed');
         self.assertIn('token == dispatchedSessionToken', notify)
         self.assertNotIn('token == pendingSessionToken', notify)
         self.assertIn('loginScope.cancel()', source)
-        self.assertIn('if (result.isSuccess) finish(result)', source)
+        # 2.0.3/2.0.4: the exchange runs on loginScope, and success finishes
+        # inside the job guarded by the attempt counter — the literal the old
+        # 203 pin wanted (`if (result.isSuccess) finish(result)` at top level)
+        # no longer exists by design.
+        self.assertIn('if (result.isSuccess) {', source)
+        self.assertIn('finish(result)', source)
         self.assertNotIn('Thread {', source)
 
     def test_control_plane_uses_reference_system_dns_default(self):
@@ -47,9 +52,12 @@ console.log('WebChannel fixture passed');
     def test_verification_exits_immediately_and_refresh_has_fastly_fallback(self):
         source = (FOXY / 'FxaAuth.kt').read_text()
         complete = source.split('private suspend fun completeLogin', 1)[1].split('private suspend fun exchangeSession', 1)[0]
-        self.assertIn('0 until 100', complete)
-        self.assertIn('verified = true; break', complete)
-        self.assertIn('delay(3000L)', complete)
+        # 2.0.4: the count lives in MAX_CONFIRM_ATTEMPTS (== 100), so the loop
+        # literal changed shape — pin the constant and its value instead.
+        self.assertIn('for (attempt in 0 until MAX_CONFIRM_ATTEMPTS)', complete)
+        self.assertIn('const val MAX_CONFIRM_ATTEMPTS = 100', source)
+        self.assertIn('confirmed = true; break', complete)
+        self.assertIn('CONFIRM_POLL_DELAY_MS', complete)
         refresh = source.split('suspend fun ensureFreshAccessToken', 1)[1].split('suspend fun currentAccessToken', 1)[0]
         self.assertIn('catch (_: FastlyBlockedException)', refresh)
         self.assertIn('endpoints.controlPlane.oauthFallback', refresh)

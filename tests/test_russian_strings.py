@@ -21,7 +21,9 @@ class RussianStringsContract(unittest.TestCase):
         keys = [key for key, _ in RUSSIAN_ROWS]
         self.assertEqual(len(keys), len(set(keys)))
         self.assertEqual(set(keys), set(SOURCE_KEYS))
-        self.assertEqual(len(keys), 793)
+        # 831 since the Lantern/Foxy/relayer rows (2026-11); the count pins
+        # accidental deletions, not additions — new strings only ever ADD.
+        self.assertEqual(len(keys), 831)
 
     def test_placeholders_and_russian_copy(self):
         for key, value in RUSSIAN_ROWS:
