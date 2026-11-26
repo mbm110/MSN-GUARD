@@ -785,6 +785,20 @@ class MainActivity : Activity() {
         // the user picks a language while the real UI is already behind it — not
         // a blank splash. Records a choice on any exit path, so it shows once.
         showLanguagePickerOnce()
+        // MSN 3.4.20: the coffee popup. After the first-run language pick (the
+        // user has just chosen how they want to read), on fresh installs only.
+        // Checked in the FOREGROUND on activity start — no JobScheduler, no
+        // WorkManager, no alarms, no battery: the EXIT-STOP rule. "بعداً"
+        // re-arms 7 days from the CURRENT launch day (install day on the
+        // first run), stored as a plain preference; "دیگه نشون نده" is
+        // permanent. Clearing the app's data resets it, which is correct —
+        // that is a new install by definition.
+        // Guard: on the very first launch the language sheet is up right now —
+        // stacking the popup under it would hide the note behind the picker.
+        // The picker's row handler calls recreate(), so this check runs again
+        // on the rebuilt activity with the sheet gone, and the popup then
+        // lands on a clean first frame in the language just chosen.
+        if (AppLanguage.hasChosen(this)) maybeShowCoffeePopup()
         // Reattach to a tunnel that is already up. Without this the dial opens in
         // the disconnected state while the VPN is running, and the session timer
         // would only start on the next status broadcast. [adoptRunningTunnel]
@@ -5866,6 +5880,174 @@ class MainActivity : Activity() {
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
             setGravity(Gravity.BOTTOM)
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // MSN 3.4.20: the coffee popup — the author's note on fresh installs.
+    //
+    // WHEN: after the user picks the first-run language, and ONLY when the
+    // active language is English or Persian (explicit user requirement:
+    // Chinese/Russian users must not see it). Re-checked on every foreground
+    // launch; "بعداً" re-arms it 7 days from the CURRENT launch day, so the
+    // app "knows" the install day without any background machinery — the
+    // EXIT-STOP rule: no JobScheduler, no WorkManager, no alarms, no
+    // battery. The day is a plain preference; clearing app data is a new
+    // install by definition and shows it again. The ✕ at the top closes
+    // the popup with exactly the «بعداً» behavior.
+    // ─────────────────────────────────────────────────────────────────
+    private fun maybeShowCoffeePopup() {
+        val lang = AppLanguage.current()
+        if (lang != "en" && lang != "fa") return  // only English or Persian
+        val prefs = preferences()
+        when (prefs.getInt(COFFEE_POPUP_STATE, COFFEE_POPUP_UNDECIDED)) {
+            COFFEE_POPUP_NEVER -> return
+            else -> {
+                val dueAt = prefs.getLong(COFFEE_POPUP_DUE_AT, 0L)
+                if (dueAt > 0L && System.currentTimeMillis() < dueAt) return
+            }
+        }
+        showCoffeePopup()
+    }
+
+    private fun showCoffeePopup() {
+        val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        dialog.setCancelable(true)
+        dialog.setCanceledOnTouchOutside(false)
+
+        // The card: rounded 28dp like the first-run sheet, the ✕ on its head.
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(10), dp(24), dp(24))
+            background = roundedBackground(SURFACE, 28, SURFACE)
+        }
+
+        // The ✕ head row — same behavior as «بعداً»: dismiss and arm +7 days.
+        val headRow = LinearLayout(this).apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL }
+        val closeX = TextView(this).apply {
+            text = "✕"
+            textSize = 16f
+            setTextColor(MUTED)
+            gravity = Gravity.CENTER
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(12), dp(12), dp(12), dp(4))
+        }
+        closeX.setOnClickListener { dismissCoffeeAsLater(dialog) }
+        headRow.addView(closeX)
+        card.addView(headRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+
+        card.addView(label("☕ یک فنجان قهوه", 22f, INK, TypefaceStyle.MEDIUM).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(4), dp(2), dp(4), dp(4))
+        })
+        // The note is the popup's whole message; never translated, never
+        // re-worded — the author's voice, exactly as the user wrote it.
+
+        val message = label(
+            "درود دوستان، بنده MSN-GUARD رو تنهایی ساختم، با کلی زحمت و صرف زمان و تست و خطا، فقط برای اینکه یه چیزی داشته باشیم که وقتی اینترنت سخت می‌شه، واقعاً کار کنه.\n" +
+                "از اول هم قرارم این بوده که این برنامه همیشه رایگان بمونه. نه اشتراک می‌فروشم و نه قراره یه روز بیدار بشید ببینید یه قابلیتش قفل شده.\n" +
+                "ولی نگه داشتنش خرج داره؛ وقت، سرور، تست روی گوشی‌های مختلف... اگه MSN-GUARD یه جایی به کارتون اومده، یه لبخند کوچیک رو لبتون آورده، یا یه شب که همه‌چی قطع بود وصلتون کرده، می‌تونید با یه فنجان قهوه ازم تشکر کنید ☕\n" +
+                "اجباری نیست، اصلاً. همین که اینجایید و ازش استفاده می‌کنید، خودش بزرگ‌ترین حمایته. ولی اگه دوست داشتید، هر فنجون قهوه یعنی یه ساعت بیشتر وقت برای آپدیت بعدی، یه باگ کمتر، یه سرور بهتر.\n" +
+                "☕ یه قهوه مهمونم کن\n" +
+                "مرسی که هستید.",
+            13.5f, INK,
+        ).apply {
+            setLineSpacing(dp(3).toFloat(), 1f)
+            typeface = faceFor("fa")
+        }
+        card.addView(message, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(10) })
+
+        // The three buttons in the Foxy action-button family, each with its
+        // own colored ring: coffee = green, «بعداً» = blue, «دیگه نشون نده» =
+        // quiet divider grey.
+        val buttonsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(0), dp(18), dp(0), dp(0))
+        }
+        val coffeeBtn = foxyActionButton("یه قهوه مهمونم کن ☕", true).apply {
+            setTextColor(foxyC(0xFF27C93F, 0xFF0A7340))
+            background = roundedBackground(Color.TRANSPARENT, 10, foxyC(0xFF27C93F, 0xFF17A05E), 2)
+        }
+        coffeeBtn.setOnClickListener {
+            preferences().edit().putInt(COFFEE_POPUP_STATE, COFFEE_POPUP_NEVER).apply()
+            dialog.dismiss()
+            openLink("https://daramet.com/MSN.GUARD")
+        }
+        val laterBtn = foxyActionButton("بعداً", true).apply {
+            setTextColor(palette.neonBlue)
+            background = roundedBackground(Color.TRANSPARENT, 10, palette.neonBlue, 2)
+        }
+        laterBtn.setOnClickListener { dismissCoffeeAsLater(dialog) }
+        val neverBtn = foxyActionButton("دیگه نشون نده", true).apply {
+            setTextColor(foxyC(0xFFFF5F56, 0xFFDC2626))
+            background = roundedBackground(Color.TRANSPARENT, 10, foxyC(0xFFFF5F56, 0xFFDC2626), 2)
+        }
+        neverBtn.setOnClickListener {
+            preferences().edit().putInt(COFFEE_POPUP_STATE, COFFEE_POPUP_NEVER).apply()
+            dialog.dismiss()
+        }
+        // Persian reads right-to-left, so the primary (coffee) button sits on
+        // the right end; in English the row flips to the natural LTR order.
+        val rtl = AppLanguage.current() == "fa"
+        val order = if (rtl) listOf(laterBtn, neverBtn, coffeeBtn) else listOf(coffeeBtn, laterBtn, neverBtn)
+        val weights = if (rtl) listOf(0.85f, 1.2f, 1.45f) else listOf(1.45f, 0.85f, 1.2f)
+        order.forEachIndexed { i, btn ->
+            buttonsRow.addView(btn, LinearLayout.LayoutParams(
+                0, dp(44), weights[i],
+            ).apply {
+                marginStart = if (i == 0) 0 else dp(8)
+            })
+        }
+        card.addView(buttonsRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+
+        // Long Persian message → the card scrolls; ScrollView inside a
+        // WRAP_CONTENT dialog window never exceeds the screen (Android caps
+        // it) — the language sheet uses the same pattern with its 72dp rows.
+        val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
+        scroll.addView(card, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+        dialog.setContentView(FrameLayout(this).apply {
+            setPadding(dp(16), 0, dp(16), dp(16))
+            addView(scroll, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        })
+        // Any dismiss path that did not record a choice (back button) behaves
+        // like «بعداً»: never nag on every launch.
+        dialog.setOnDismissListener {
+            if (preferences().getInt(COFFEE_POPUP_STATE, COFFEE_POPUP_UNDECIDED) == COFFEE_POPUP_UNDECIDED) {
+                armCoffeePopupLater()
+            }
+        }
+        dialog.show()
+        dialog.window?.apply {
+            mirrorDialog(dialog)
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.62f)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+        }
+    }
+
+    /** «بعداً» and the ✕: same behavior — dismiss and re-arm for 7 days out. */
+    private fun dismissCoffeeAsLater(dialog: Dialog) {
+        armCoffeePopupLater()
+        dialog.dismiss()
+    }
+
+    private fun armCoffeePopupLater() {
+        preferences().edit()
+            .putInt(COFFEE_POPUP_STATE, COFFEE_POPUP_LATER)
+            .putLong(COFFEE_POPUP_DUE_AT, System.currentTimeMillis() + 7L * 24 * 60 * 60 * 1000)
+            .apply()
     }
 
     private fun chooseEgressRegion(after: (() -> Unit)? = null) {
@@ -11158,6 +11340,16 @@ class MainActivity : Activity() {
         const val IP_POST_TEARDOWN_DELAY_MS = 1_200L
         const val SETTINGS = "settings"
         const val DEFAULT_SCAN = "default_scan"
+
+        // MSN 3.4.20: the coffee popup's state machine. Plain preferences, no
+        // background machinery (EXIT-STOP). UNDECIDED + no due date = first
+        // launch after a fresh install; LATER carries the 7-day re-arm
+        // timestamp; NEVER is permanent until the app data is cleared.
+        const val COFFEE_POPUP_STATE = "coffee_popup_state"
+        const val COFFEE_POPUP_DUE_AT = "coffee_popup_due_at"
+        const val COFFEE_POPUP_UNDECIDED = 0
+        const val COFFEE_POPUP_LATER = 1
+        const val COFFEE_POPUP_NEVER = 2
         const val DEFAULT_SCAN_MODE = "default_scan_mode"
         const val ENDPOINT_DISCOVERY = "endpoint_discovery"
         const val DEFAULT_MASQUE_TRANSPORT = "default_masque_transport"
