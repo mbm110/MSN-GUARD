@@ -6,15 +6,23 @@ MAIN = (ROOT / "app/src/main/java/com/msnguard/vpn/MainActivity.kt").read_text()
 
 
 class CoffeePopupContract(unittest.TestCase):
-    """3.4.20: the first-run coffee popup. The user's spec, pinned:
-    - a modern popup right after the first-run language choice,
+    """3.4.20 + 3.4.22: the coffee popup. The user's spec, pinned:
+    - NEVER on the language pick — first appears only once the app has been
+      installed 7 full days (packageManager.firstInstallTime, which survives
+      data/log wipes; only a true uninstall resets it), then every 7 days
+      after each «بعداً»,
     - EN/FA languages only; the ✕ behaves exactly like «بعداً»,
     - the author's Persian note, verbatim, never routed through Strings.t,
     - three Foxy-family ring buttons, each its own color, per the user's
       explicit palette: «یه قهوه مهمونم کن» GREEN, «بعداً» BLUE,
       «دیگه نشون نده» RED,
+    - ROW ORDER (right-to-left per the user's 3.4.22 spec): coffee at the
+      START edge — which is the RIGHT of the mirrored RTL popup, LEFT of
+      the LTR one — «بعداً» in the middle, «دیگه نشون نده» at the far end.
+      The popup window is direction-mirrored (mirrorDialog), so the FIRST
+      child in code = the START edge in BOTH locales: coffee is child #1.
     - coffee → the browser opens daramet.com/MSN.GUARD and never show again,
-    - بعداً → re-shows in 7 days (install-day arithmetic in preferences),
+    - بعداً → re-shows in 7 days (plain preferences; no scheduler),
     - دیگه نشون نده → never again,
     - zero background work: no scheduler, no alarms, no receivers."""
 
@@ -32,6 +40,24 @@ class CoffeePopupContract(unittest.TestCase):
         popup = MAIN.find("if (AppLanguage.hasChosen(this)) maybeShowCoffeePopup()")
         self.assertGreater(lang, 0)
         self.assertGreater(popup, lang, "the popup check must follow the language pick, behind hasChosen")
+
+    def test_never_in_the_first_week_of_install(self):
+        # The 3.4.22 grace: the first appearance waits 7 full days from the
+        # REAL install day. firstInstallTime is the package manager's record
+        # — it survives clearing data and logs; only an uninstall resets it.
+        self.assertIn("packageManager.getPackageInfo(packageName, 0).firstInstallTime", MAIN)
+        self.assertIn(
+            "if (System.currentTimeMillis() < installAt + 7L * 24 * 60 * 60 * 1000) return",
+            MAIN,
+            "the 7-day-from-install gate is missing")
+
+    def test_coffee_is_the_first_child_the_start_edge_in_both_locales(self):
+        # The window is mirrored (RTL in fa), so child #1 = the RIGHT end in
+        # Persian and the LEFT end in English — the user's right-to-left
+        # order with «یه قهوه مهمونم کن» at the start edge, «بعداً» middle,
+        # «دیگه نشون نده» far end — one order for both locales.
+        self.assertIn("val order = listOf(coffeeBtn, laterBtn, neverBtn)", MAIN)
+        self.assertNotIn("val rtl = AppLanguage.current() == \"fa\"", MAIN)
 
     def test_only_english_or_persian(self):
         self.assertIn('if (lang != "en" && lang != "fa") return', MAIN)

@@ -790,19 +790,17 @@ class MainActivity : Activity() {
         // the user picks a language while the real UI is already behind it — not
         // a blank splash. Records a choice on any exit path, so it shows once.
         showLanguagePickerOnce()
-        // MSN 3.4.20: the coffee popup. After the first-run language pick (the
-        // user has just chosen how they want to read), on fresh installs only.
-        // Checked in the FOREGROUND on activity start — no JobScheduler, no
-        // WorkManager, no alarms, no battery: the EXIT-STOP rule. "بعداً"
-        // re-arms 7 days from the CURRENT launch day (install day on the
-        // first run), stored as a plain preference; "دیگه نشون نده" is
-        // permanent. Clearing the app's data resets it, which is correct —
-        // that is a new install by definition.
-        // Guard: on the very first launch the language sheet is up right now —
-        // stacking the popup under it would hide the note behind the picker.
-        // The picker's row handler calls recreate(), so this check runs again
-        // on the rebuilt activity with the sheet gone, and the popup then
-        // lands on a clean first frame in the language just chosen.
+        // MSN 3.4.22: the coffee popup. NEVER on the first run — the user
+        // asked for a 7-day grace: first appearance only once the app has
+        // been installed for a full week (packageManager.firstInstallTime,
+        // so it survives log/data wipes and is a NEW day only on a true
+        // reinstall), then every 7 days after each «بعداً». Checked in the
+        // FOREGROUND on activity start — no JobScheduler, no WorkManager,
+        // no alarms, no battery: the EXIT-STOP rule. "بعداً"
+        // re-arms 7 days from the CURRENT day; "دیگه نشون نده" is
+        // permanent. Clearing the app's data keeps firstInstallTime intact,
+        // so a data wipe does not throw the user back to day zero — and an
+        // UNINSTALL resets it, which is correct: that is a new install.
         if (AppLanguage.hasChosen(this)) maybeShowCoffeePopup()
         // Reattach to a tunnel that is already up. Without this the dial opens in
         // the disconnected state while the VPN is running, and the session timer
@@ -6001,6 +5999,12 @@ class MainActivity : Activity() {
         val lang = AppLanguage.current()
         if (lang != "en" && lang != "fa") return  // only English or Persian
         val prefs = preferences()
+        // The 7-day grace: never in the first week of the app's life on this
+        // device. firstInstallTime comes from the package manager — it survives
+        // clearing data/logs (only an uninstall resets it), exactly the "the
+        // app must remember the install day" the spec asked for.
+        val installAt = packageManager.getPackageInfo(packageName, 0).firstInstallTime
+        if (System.currentTimeMillis() < installAt + 7L * 24 * 60 * 60 * 1000) return
         when (prefs.getInt(COFFEE_POPUP_STATE, COFFEE_POPUP_UNDECIDED)) {
             COFFEE_POPUP_NEVER -> return
             else -> {
@@ -6093,11 +6097,14 @@ class MainActivity : Activity() {
             preferences().edit().putInt(COFFEE_POPUP_STATE, COFFEE_POPUP_NEVER).apply()
             dialog.dismiss()
         }
-        // Persian reads right-to-left, so the primary (coffee) button sits on
-        // the right end; in English the row flips to the natural LTR order.
-        val rtl = AppLanguage.current() == "fa"
-        val order = if (rtl) listOf(laterBtn, neverBtn, coffeeBtn) else listOf(coffeeBtn, laterBtn, neverBtn)
-        val weights = if (rtl) listOf(0.85f, 1.2f, 1.45f) else listOf(1.45f, 0.85f, 1.2f)
+        // 3.4.22: the row order. The popup window is direction-mirrored
+        // (mirrorDialog), so the FIRST child sits at the START edge — the
+        // RIGHT in RTL Persian, the LEFT in LTR English. The user's spec
+        // (right-to-left): coffee on the right, «بعداً» middle, «دیگه نشون
+        // نده» left. So coffee is child #1 in BOTH locales, and the row
+        // reads naturally in each.
+        val order = listOf(coffeeBtn, laterBtn, neverBtn)
+        val weights = listOf(1.45f, 0.85f, 1.2f)
         order.forEachIndexed { i, btn ->
             buttonsRow.addView(btn, LinearLayout.LayoutParams(
                 0, dp(44), weights[i],
