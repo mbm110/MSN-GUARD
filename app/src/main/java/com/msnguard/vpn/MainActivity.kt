@@ -1674,7 +1674,7 @@ class MainActivity : Activity() {
         // furniture, not information. What belongs here is live state: a small
         // LED that mirrors the dial, plus the settings entry.
         statusLed.layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply {
-            rightMargin = dp(8)
+            marginEnd = dp(8)
         }
         addView(statusLed, statusLed.layoutParams)
         addView(label(Strings.t("MSN-GUARD"), 13f, MUTED, TypefaceStyle.MEDIUM).apply {
@@ -1871,9 +1871,9 @@ class MainActivity : Activity() {
 
         val tiles = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(tileDown, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(9) })
-            addView(tileUp, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(0); rightMargin = dp(9) })
-            addView(tileSpeed, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(0) })
+            addView(tileDown, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(9) })
+            addView(tileUp, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(0); marginEnd = dp(9) })
+            addView(tileSpeed, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(0) })
         }
         addView(tiles, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2290,7 +2290,7 @@ class MainActivity : Activity() {
         content.addView(label(Strings.t("Tunnel and VPN events"), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(16) })
+        ).apply { marginStart = dp(48); topMargin = dp(-8); bottomMargin = dp(16) })
         // The five ERROR/WARN/INFO/DEBUG/TRACE chips that used to sit here are
         // gone. They wrote `log_level` to preferences, and CoreConfig does read
         // that key — but only when a config is BUILT, i.e. at the next connect.
@@ -2326,7 +2326,7 @@ class MainActivity : Activity() {
             }
             tabViews[tab] = tabView
             logTabs.addView(tabView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                rightMargin = dp(4)
+                marginEnd = dp(4)
             })
         }
         tabViews.forEach { (tab, view) ->
@@ -2427,10 +2427,10 @@ class MainActivity : Activity() {
         }
         paintChip(wrapChip, true)
         toolRow.addView(pauseChip, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-            rightMargin = dp(4)
+            marginEnd = dp(4)
         })
         toolRow.addView(wrapChip, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-            rightMargin = dp(4)
+            marginEnd = dp(4)
         })
         toolRow.addView(clearChip, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         content.addView(toolRow, LinearLayout.LayoutParams(
@@ -2446,8 +2446,8 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         ).apply {
-            leftMargin = dp(24)
-            rightMargin = dp(24)
+            marginStart = dp(24)
+            marginEnd = dp(24)
             topMargin = dp(16)
             bottomMargin = dp(16)
         })
@@ -2708,7 +2708,7 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { leftMargin = dp(6) }
+            ).apply { marginStart = dp(6) }
         }
 
     private fun appVersionOrNull(): String? =
@@ -3017,7 +3017,7 @@ class MainActivity : Activity() {
             14f, MUTED,
         ), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        ).apply { marginStart = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
         val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         buttons.addView(createSettingsButton(Strings.t("Cancel")) { dialog.dismiss() }, LinearLayout.LayoutParams(0, dp(52), 1f))
         buttons.addView(createSettingsButton(
@@ -3030,7 +3030,7 @@ class MainActivity : Activity() {
             dialog.dismiss()
             toastShort(Strings.t("Settings reset to defaults"))
             recreate()
-        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginStart = dp(10) })
         sheet.addView(buttons, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(52),
         ).apply { topMargin = dp(16) })
@@ -3071,7 +3071,7 @@ class MainActivity : Activity() {
             14f, MUTED,
         ), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        ).apply { marginStart = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
         val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         buttons.addView(createSettingsButton(Strings.t("Cancel")) { dialog.dismiss() }, LinearLayout.LayoutParams(0, dp(52), 1f))
         buttons.addView(createSettingsButton(
@@ -3086,7 +3086,7 @@ class MainActivity : Activity() {
                 .setAction(MsnGuardVpnService.ACTION_RESET_IDENTITIES))
             showDisconnected(Strings.t("Identity reset"))
             dialog.dismiss()
-        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginStart = dp(10) })
         sheet.addView(buttons, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(52),
         ).apply { topMargin = dp(16) })
@@ -3137,7 +3137,7 @@ class MainActivity : Activity() {
         content.addView(label(Strings.t("Choose Aether's endpoint-discovery budget and address families"), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
+        ).apply { marginStart = dp(4); bottomMargin = dp(24) })
         val options = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val discoveryOptions = mutableMapOf<EndpointDiscovery, SelectionOption>()
         val transportOptions = mutableMapOf<MasqueTransport, SelectionOption>()
@@ -3219,7 +3219,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(48),
             Gravity.TOP,
-        ).apply { leftMargin = dp(24); rightMargin = dp(24); topMargin = dp(8) })
+        ).apply { marginStart = dp(24); marginEnd = dp(24); topMargin = dp(8) })
 
         page.setOnApplyWindowInsetsListener { _, insets ->
             (scroll.layoutParams as FrameLayout.LayoutParams).apply {
@@ -3275,7 +3275,7 @@ class MainActivity : Activity() {
             addView(indicator, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { leftMargin = dp(12) })
+            ).apply { marginStart = dp(12) })
         }
         return SelectionOption(row, title, indicator, 18).also { setSelectionState(it, selected, animate = false) }
     }
@@ -3307,7 +3307,7 @@ class MainActivity : Activity() {
             addView(indicator, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { leftMargin = dp(12) })
+            ).apply { marginStart = dp(12) })
         }
         return SelectionOption(row, title, indicator, 18).also { setSelectionState(it, selected, animate = false) }
     }
@@ -3336,7 +3336,7 @@ class MainActivity : Activity() {
             addView(indicator, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { leftMargin = dp(12) })
+            ).apply { marginStart = dp(12) })
         }
         return SelectionOption(row, title, indicator, 18).also { setSelectionState(it, selected, animate = false) }
     }
@@ -3368,7 +3368,7 @@ class MainActivity : Activity() {
             addView(indicator, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { leftMargin = dp(12) })
+            ).apply { marginStart = dp(12) })
         }
         return SelectionOption(row, title, indicator, 18).also { setSelectionState(it, selected, animate = false) }
     }
@@ -3406,7 +3406,7 @@ class MainActivity : Activity() {
         content.addView(label(Strings.t("Choose how MSN-GUARD connects"), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
+        ).apply { marginStart = dp(4); bottomMargin = dp(24) })
 
         val options = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         Protocol.entries.forEachIndexed { index, protocol ->
@@ -4075,7 +4075,7 @@ class MainActivity : Activity() {
                 hint = "e.g. 104.16.0.1"
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    rightMargin = dp(8)
+                    marginEnd = dp(8)
                 }
                 // Load current value if set
                 val prefs = profiled()
@@ -4291,7 +4291,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(48),
             Gravity.TOP,
-        ).apply { leftMargin = dp(24); rightMargin = dp(24); topMargin = dp(8) })
+        ).apply { marginStart = dp(24); marginEnd = dp(24); topMargin = dp(8) })
 
         page.setOnApplyWindowInsetsListener { _, insets ->
             (scroll.layoutParams as FrameLayout.LayoutParams).apply {
@@ -4344,7 +4344,7 @@ class MainActivity : Activity() {
         })
         content.addView(label(Strings.t("Applied on your next connection"), 13.5f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(22) })
+        ).apply { marginStart = dp(48); topMargin = dp(-8); bottomMargin = dp(22) })
         // Title and current value are separate columns now, so a long value
         // (a manual endpoint) truncates on its own instead of shoving the title.
         fun addControl(title: String, value: String?, action: () -> Unit): OrbitSettingsRow =
@@ -4538,7 +4538,7 @@ class MainActivity : Activity() {
         })
         sheet.addView(label(Strings.t("Adjust traffic-shape padding for filtered networks"), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        ).apply { marginStart = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
         val options = mutableMapOf<ObfuscationProfile, SelectionOption>()
         ObfuscationProfile.entries.forEachIndexed { index, profile ->
             val title = label(profile.label, 16f, INK, TypefaceStyle.MEDIUM)
@@ -5442,7 +5442,7 @@ class MainActivity : Activity() {
         })
         sheet.addView(label(description, 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        ).apply { marginStart = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
         sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { height = dp(140) })
         val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         buttons.addView(createSettingsButton(Strings.t("Clear")) {
@@ -5454,7 +5454,7 @@ class MainActivity : Activity() {
             preferences().edit().putString(pref, field.text.toString()).apply()
             after()
             dialog.dismiss()
-        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginStart = dp(10) })
         sheet.addView(buttons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(16) })
         dialog.setContentView(FrameLayout(this).apply {
             setPadding(dp(16), 0, dp(16), dp(16))
@@ -5570,7 +5570,7 @@ class MainActivity : Activity() {
             14f, MUTED,
         ), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(16) })
+        ).apply { marginStart = dp(48); topMargin = dp(-4); bottomMargin = dp(16) })
         sheet.addView(field, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(132),
         ))
@@ -5621,7 +5621,7 @@ class MainActivity : Activity() {
             } else {
                 toastShort(Strings.t("Saved — applies on the next connect"))
             }
-        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginStart = dp(10) })
         sheet.addView(buttons, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(52),
         ).apply { topMargin = dp(16) })
@@ -5942,6 +5942,10 @@ class MainActivity : Activity() {
                 // is crisp joined-script and "中文" has full glyph coverage even
                 // on a device whose system font lacks them.
                 typeface = faceFor(code)
+                // RTL ROW RULE (3.4.25): the language NAME pins to the row's
+                // START edge; the checkmark lands at the END edge.
+                gravity = Gravity.START
+                textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_START
             }
             val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM)
                 .apply { letterSpacing = spacing(0.08f) }
@@ -6388,7 +6392,7 @@ class MainActivity : Activity() {
             14f, MUTED,
         ), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        ).apply { marginStart = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
         val entry = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         entry.addView(field, LinearLayout.LayoutParams(0, dp(56), 1f))
         entry.addView(createSettingsButton(Strings.t("Apply")) {
@@ -6407,7 +6411,7 @@ class MainActivity : Activity() {
             ConnectionLog.record(Strings.tf("SOCKS port set to %s — applies on the next connect", typed))
             toastShort(Strings.tf("SOCKS port set to %s", typed))
             dialog.dismiss()
-        }, LinearLayout.LayoutParams(dp(112), dp(56)).apply { leftMargin = dp(10) })
+        }, LinearLayout.LayoutParams(dp(112), dp(56)).apply { marginStart = dp(10) })
         sheet.addView(entry, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ))
@@ -6555,7 +6559,7 @@ class MainActivity : Activity() {
         })
         sheet.addView(label(Strings.t("Numeric IPv4 or bracketed IPv6 address with port. Bypasses discovery."), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        ).apply { marginStart = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
         sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
         val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         buttons.addView(createSettingsButton(Strings.t("Clear")) {
@@ -6576,7 +6580,7 @@ class MainActivity : Activity() {
                             }.apply()
                             manualEndpointRow?.setValue(manualEndpoint() ?: Strings.t("Automatic"))
                             dialog.dismiss()
-                        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+                        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginStart = dp(10) })
                 sheet.addView(buttons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(16) })
         dialog.setContentView(FrameLayout(this).apply {
             setPadding(dp(16), 0, dp(16), dp(16))
@@ -6624,7 +6628,7 @@ class MainActivity : Activity() {
         })
         sheet.addView(label(Strings.t("The second hop of a nested tunnel (WoW, Masque over Masque). Blank means the inner tunnel uses the same address as the outer one."), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        ).apply { marginStart = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
         sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
         val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         buttons.addView(createSettingsButton(Strings.t("Clear")) {
@@ -6645,7 +6649,7 @@ class MainActivity : Activity() {
             }.apply()
             innerEndpointRow?.setValue(manualInnerEndpoint() ?: Strings.t("Same as outer"))
             dialog.dismiss()
-        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { leftMargin = dp(10) })
+        }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginStart = dp(10) })
         sheet.addView(buttons, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(16) })
         dialog.setContentView(FrameLayout(this).apply {
             setPadding(dp(16), 0, dp(16), dp(16))
@@ -6703,7 +6707,7 @@ class MainActivity : Activity() {
         })
         sheet.addView(label(subtitle, 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(16) })
+        ).apply { marginStart = dp(48); topMargin = dp(-4); bottomMargin = dp(16) })
         fields.forEach { (name, field) ->
             sheet.addView(label(name, 11f, MUTED).apply { letterSpacing = spacing(0.08f) }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -6837,7 +6841,12 @@ class MainActivity : Activity() {
         val optionsHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val rows = mutableMapOf<T, SelectionOption>()
         options.forEachIndexed { index, item ->
-            val optionTitle = label(label(item), 16f, INK, TypefaceStyle.MEDIUM)
+            // RTL ROW RULE (3.4.25): the option TITLE pins to the START edge
+            // of the sheet row — right edge in Persian, left in English.
+            val optionTitle = label(label(item), 16f, INK, TypefaceStyle.MEDIUM).apply {
+                gravity = Gravity.START
+                textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_START
+            }
             val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.08f) }
             val row = LinearLayout(this).apply {
                 gravity = Gravity.CENTER_VERTICAL
@@ -6851,7 +6860,10 @@ class MainActivity : Activity() {
                 // (the language picker showed its own name twice); skip it.
                 val desc = description(item)
                 if (desc.isNotBlank()) {
-                    labels.addView(label(desc, 13f, MUTED), LinearLayout.LayoutParams(
+                    labels.addView(label(desc, 13f, MUTED).apply {
+                        gravity = Gravity.START
+                        textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_START
+                    }, LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                     ).apply { topMargin = dp(2) })
                 }
@@ -7183,7 +7195,7 @@ class MainActivity : Activity() {
         content.addView(label(Strings.t("Traffic carried by MSN-GUARD. Per-app attribution is not available from encrypted tunnel counters."), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(4); bottomMargin = dp(24) })
+        ).apply { marginStart = dp(4); bottomMargin = dp(24) })
         trafficSpeedValue = addTrafficMetric(content, Strings.t("LIVE SPEED"))
         trafficSessionValue = addTrafficMetric(content, Strings.t("THIS SESSION"))
         scroll.addView(content)
@@ -7257,7 +7269,7 @@ class MainActivity : Activity() {
             14f, MUTED,
         ), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(4); bottomMargin = dp(20) })
+        ).apply { marginStart = dp(4); bottomMargin = dp(20) })
 
         // The field is kept here so the Save button below can read what the
         // user actually typed. saveDnsLists() reads from SharedPreferences, and
@@ -7348,7 +7360,7 @@ class MainActivity : Activity() {
             14f, MUTED,
         ), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(4); topMargin = dp(6); bottomMargin = dp(20) })
+        ).apply { marginStart = dp(4); topMargin = dp(6); bottomMargin = dp(20) })
 
         DONATE_ADDRESSES.forEach { (chain, address) ->
             content.addView(donateCard(chain, address), LinearLayout.LayoutParams(
@@ -7484,7 +7496,7 @@ class MainActivity : Activity() {
             Strings.t("Applies on the next connect — per transport, 68–1500. Empty returns the default."),
             14f, MUTED,
         ), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            leftMargin = dp(4); topMargin = dp(4); bottomMargin = dp(10)
+            marginStart = dp(4); topMargin = dp(4); bottomMargin = dp(10)
         })
 
         // Master switch between the description and the methods list. ON:
@@ -7609,7 +7621,7 @@ class MainActivity : Activity() {
             chipViews.add(chip)
             chipProtos.add(proto)
             rail.addView(chip, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                if (rail.indexOfChild(chip) > 0) leftMargin = dp(6)
+                if (rail.indexOfChild(chip) > 0) marginStart = dp(6)
             })
         }
         content.addView(rail, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10); bottomMargin = dp(14) })
@@ -7735,7 +7747,7 @@ class MainActivity : Activity() {
                 refreshExitBox()
             }
         }
-        exitToggleRow.addView(exitDirectBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) })
+        exitToggleRow.addView(exitDirectBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
         exitToggleRow.addView(exitNodeBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         exitBox.addView(exitToggleRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         fun chainButton(title: String, description: String, reverse: Boolean): TextView = TextView(this).apply {
@@ -7756,11 +7768,11 @@ class MainActivity : Activity() {
         }
         v2rayOverWarpBtn = chainButton("V2ray Over Warp", "Connection to V2ray through Warp", false)
         warpOverV2rayBtn = chainButton("Warp Over V2ray", "Connection to Warp through V2ray with Cloudflare IP", true)
-        chainModesRow.addView(v2rayOverWarpBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) })
+        chainModesRow.addView(v2rayOverWarpBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
         chainModesRow.addView(warpOverV2rayBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         exitBox.addView(chainModesRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
         val exitRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        exitRow.addView(exitField, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(10) })
+        exitRow.addView(exitField, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(10) })
         val localApplyBtn = createSettingsButton(Strings.t("Save"), backgroundOverride = primary, textColorOverride = primaryContainer) {
             val raw = exitField.text.toString().trim()
             if (raw.isEmpty()) { exitField.error = Strings.t("Paste a config first"); return@createSettingsButton }
@@ -7867,8 +7879,8 @@ class MainActivity : Activity() {
             }
         }
         val scannerRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        scannerRow.addView(scannerNormalBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) })
-        scannerRow.addView(scannerPtechV4Btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) })
+        scannerRow.addView(scannerNormalBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
+        scannerRow.addView(scannerPtechV4Btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
         scannerRow.addView(scannerPtechV6Btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         scannerBox.addView(scannerRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
         scannerBox.addView(label(Strings.t("Revert: switch back to Normal — no CIDR override is sent, the engine scans its own prefixes + Scan Mode IP version."), 10f, MUTED))
@@ -7924,7 +7936,7 @@ class MainActivity : Activity() {
             card.addView(title, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             card.addView(sub, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             vaultCards.add(card); vaultCardProtos.add(proto)
-            rowLinear!!.addView(card, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { if (idx % 2 == 1) leftMargin = dp(10) })
+            rowLinear!!.addView(card, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { if (idx % 2 == 1) marginStart = dp(10) })
         }
         fun refreshVaultCards() {
             for (i in vaultCards.indices) {
@@ -8008,9 +8020,9 @@ class MainActivity : Activity() {
             typeface = Typefaces.medium(this@MainActivity); isClickable = true; isFocusable = true
             setOnClickListener { vaultMethod = "plain"; refreshMethodRow() }
         }
-        methodRow.addView(relayBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) })
-        methodRow.addView(echBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) })
-        methodRow.addView(shardBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) })
+        methodRow.addView(relayBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
+        methodRow.addView(echBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
+        methodRow.addView(shardBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
         methodRow.addView(plainBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         vaultBox.addView(methodRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) })
         refreshMethodRow()
@@ -8143,10 +8155,10 @@ class MainActivity : Activity() {
         val dialog = Dialog(this).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
         val sheet = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(24), dp(24), dp(24)); background = roundedBackground(SURFACE, 28, SURFACE) }
         sheet.addView(LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; addView(createHeaderBackButton { dialog.dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48))); addView(label(Strings.t("Custom exit"), 18f, INK, TypefaceStyle.MEDIUM)) })
-        sheet.addView(label(Strings.t("Paste a VLESS URL or outbound JSON. Masque scan will be chained through it; other transports ignore it."), 13f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(14) })
+        sheet.addView(label(Strings.t("Paste a VLESS URL or outbound JSON. Masque scan will be chained through it; other transports ignore it."), 13f, MUTED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(48); topMargin = dp(-4); bottomMargin = dp(14) })
         sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         val actions = LinearLayout(this).apply { gravity = Gravity.END; orientation = LinearLayout.HORIZONTAL }
-        actions.addView(createSettingsButton(Strings.t("Clear")) { run { val (mk, ck) = CoreConfig.warpKeys(transport); val _tag = when(transport){ CoreConfig.WarpTransport.MASQUE->"Masque"; CoreConfig.WarpTransport.WIREGUARD->"WireGuard"; else->"WoW" }; preferences().edit().remove(ck).putString(mk, CoreConfig.WARP_EXIT_MODE_FREEDOM).commit(); requestFreshScanAfterExitSwitch(_tag + " Direct") }; ConnectionLog.record("Warp Setting: cleared, back to Freedom"); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() }, LinearLayout.LayoutParams(dp(90), dp(46)).apply { rightMargin = dp(8) })
+        actions.addView(createSettingsButton(Strings.t("Clear")) { run { val (mk, ck) = CoreConfig.warpKeys(transport); val _tag = when(transport){ CoreConfig.WarpTransport.MASQUE->"Masque"; CoreConfig.WarpTransport.WIREGUARD->"WireGuard"; else->"WoW" }; preferences().edit().remove(ck).putString(mk, CoreConfig.WARP_EXIT_MODE_FREEDOM).commit(); requestFreshScanAfterExitSwitch(_tag + " Direct") }; ConnectionLog.record("Warp Setting: cleared, back to Freedom"); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() }, LinearLayout.LayoutParams(dp(90), dp(46)).apply { marginEnd = dp(8) })
         actions.addView(createSettingsButton(Strings.t("Save")) { val raw = field.text.toString().trim(); if (raw.isEmpty()) { field.error = Strings.t("Paste a config first"); return@createSettingsButton }; run { val (mk, ck) = CoreConfig.warpKeys(transport); val _tag = when(transport){ CoreConfig.WarpTransport.MASQUE->"Masque"; CoreConfig.WarpTransport.WIREGUARD->"WireGuard"; else->"WoW" }; preferences().edit().putString(ck, raw).putString(mk, CoreConfig.WARP_EXIT_MODE_CUSTOM).commit(); requestFreshScanAfterExitSwitch(_tag + " Exit-Node") }; ConnectionLog.record("Warp Setting: custom exit saved (" + raw.take(48) + ")"); toastShort(Strings.t("Warp exit saved")); dialog.dismiss(); warpSettingPage?.let { pageHost.removeView(it); warpSettingPage = null }; openWarpSettingScreen() })
         sheet.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) })
         dialog.setContentView(FrameLayout(this).apply { addView(sheet); setPadding(dp(16), 0, dp(16), dp(16)) })
@@ -8180,7 +8192,7 @@ class MainActivity : Activity() {
         sheet.addView(label(
             Strings.t("Empty restores the default. Applies on the next connect."),
             14f, MUTED,
-        ), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(16) })
+        ), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(48); topMargin = dp(-4); bottomMargin = dp(16) })
 
         // The scanner button sits between the hint and the field so it reads as
         // part of "how do I fill this in" rather than as a footer action.
@@ -8260,7 +8272,7 @@ class MainActivity : Activity() {
             dialog.dismiss()
             mtuPage?.let { pageHost.removeView(it); mtuPage = null }
             openMtuScreen()
-        }, LinearLayout.LayoutParams(dp(110), dp(56)).apply { leftMargin = dp(10) })
+        }, LinearLayout.LayoutParams(dp(110), dp(56)).apply { marginStart = dp(10) })
         sheet.addView(entry, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         dialog.setContentView(FrameLayout(this).apply {
             setPadding(dp(16), 0, dp(16), dp(16))
@@ -8673,7 +8685,7 @@ class MainActivity : Activity() {
         content.addView(label(Strings.t("Choose which apps use MSN-GUARD. Changes apply next connection."), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(20) })
+        ).apply { marginStart = dp(48); topMargin = dp(-8); bottomMargin = dp(20) })
         content.addView(label(Strings.t("MODE"), 12f, MUTED).apply { letterSpacing = spacing(0.1f) })
         val modeOptions = mutableMapOf<SplitTunnelSettings.Mode, SelectionOption>()
         SplitTunnelSettings.Mode.entries.forEachIndexed { index, mode ->
@@ -8699,8 +8711,8 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         ).apply {
-            leftMargin = dp(24)
-            rightMargin = dp(24)
+            marginStart = dp(24)
+            marginEnd = dp(24)
             topMargin = dp(16)
             bottomMargin = dp(16)
         })
@@ -8744,7 +8756,7 @@ class MainActivity : Activity() {
         content.addView(label(Strings.t(if (mode == SplitTunnelSettings.Mode.INCLUDE) "Select apps to include" else "Select apps to exclude"), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-8); bottomMargin = dp(16) })
+        ).apply { marginStart = dp(48); topMargin = dp(-8); bottomMargin = dp(16) })
 
         val searchField = EditText(this).apply {
             hint = Strings.t("Search apps…")
@@ -8764,7 +8776,7 @@ class MainActivity : Activity() {
         content.addView(searchField, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { bottomMargin = dp(16); leftMargin = dp(4); rightMargin = dp(4) })
+        ).apply { bottomMargin = dp(16); marginStart = dp(4); marginEnd = dp(4) })
 
         val progressBar = ProgressBar(this).apply {
             isIndeterminate = true
@@ -8825,8 +8837,8 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         ).apply {
-            leftMargin = dp(24)
-            rightMargin = dp(24)
+            marginStart = dp(24)
+            marginEnd = dp(24)
             topMargin = dp(16)
             bottomMargin = dp(16)
         })
@@ -9234,7 +9246,11 @@ class MainActivity : Activity() {
         val localized = AppLanguage.current() != "en"
         row.addView(label(title, 13f, MUTED).apply {
             maxLines = 2
+            // RTL ROW RULE (3.4.25): the TITLE pins to the START edge — right
+            // edge in Persian, left in English. Without this the Persian title
+            // floats in the middle of its wide box (the screenshot bug).
             gravity = Gravity.START
+            textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_START
         }, LinearLayout.LayoutParams(
             0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
         ))
@@ -9246,6 +9262,11 @@ class MainActivity : Activity() {
                 ellipsize = TextUtils.TruncateAt.END
                 isSingleLine = true
             }
+            // RTL ROW RULE (3.4.25): the VALUE pins to the END edge — the left
+            // edge in Persian, the right in English. English keeps its exact
+            // previous look (END == RIGHT there).
+            gravity = Gravity.END
+            textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_END
         }
         row.tag = valueLabel  // fetchFoxyQuota updates this in place
         row.addView(valueLabel, LinearLayout.LayoutParams(
@@ -9410,7 +9431,7 @@ class MainActivity : Activity() {
         // mock footer: green dot + "Traffic exits via the Fastly edge — HTTP/2 CONNECT"
         val fastlyLine = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(2), dp(12), 0, 0) }
         fastlyLine.addView(View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(7), dp(7)).apply { rightMargin = dp(7) }
+            layoutParams = LinearLayout.LayoutParams(dp(7), dp(7)).apply { marginEnd = dp(7) }
             background = roundedBackground(0xFF22C55E.toInt(), 4, 0xFF22C55E.toInt())
         })
         fastlyLine.addView(label(Strings.t("Traffic exits via the Fastly edge — HTTP/2 CONNECT"), 11f, foxyC(0xFF9A9AA6, 0xFF5B6D75)))
@@ -9621,7 +9642,7 @@ class MainActivity : Activity() {
         })
         sheet.addView(label(Strings.t("Relay Foxy requests through a backup server when direct access is blocked."), 14f, MUTED), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
+        ).apply { marginStart = dp(48); topMargin = dp(-4); bottomMargin = dp(20) })
         sheet.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
         sheet.addView(createSettingsButton(Strings.t("Save")) {
             val url = field.text.toString().trim()

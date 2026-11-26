@@ -79,12 +79,16 @@ class GoolCard(
         titleView = TextView(context).apply {
             text = title
             textSize = 11f
-            letterSpacing = spacing(0.1f)
+            // fa tracking breaks joining — the card carries translated text.
+            letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.1f)
             typeface = Typefaces.medium(context)
             if (AppLanguage.current() != "en") {
                 setLineSpacing(0f, Typefaces.lineHeightMult())
             }
             setSingleLine(true)
+            // RTL ROW RULE: the card title pins to the START edge.
+            gravity = Gravity.START
+            textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_START
         }
         subtitleView = TextView(context).apply {
             textSize = 9.5f
@@ -93,6 +97,9 @@ class GoolCard(
             }
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
+            // RTL ROW RULE: the subtitle sits under the START-pinned title.
+            gravity = Gravity.START
+            textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_START
         }
         column.addView(titleView)
         column.addView(
@@ -105,14 +112,17 @@ class GoolCard(
         addView(
             column,
             LayoutParams(0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                leftMargin = px(11)
-                if (AppLanguage.current() != "en") rightMargin = px(14)
+                // RTL ROW RULE (3.4.25): start/end margins flip with the
+                // locale; physical ones put the gap on the wrong side in fa.
+                marginStart = px(11)
+                if (AppLanguage.current() != "en") marginEnd = px(14)
             }
         )
 
         badgeView = TextView(context).apply {
             textSize = 8.5f
-            letterSpacing = spacing(0.12f)
+            // fa: tracked badge text breaks letter joining.
+            letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.12f)
             typeface = Typefaces.medium(context)
             gravity = Gravity.CENTER
             val localized = AppLanguage.current() != "en"

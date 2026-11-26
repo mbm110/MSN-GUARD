@@ -82,12 +82,15 @@ class SmartSplitCard(
         titleView = TextView(context).apply {
             text = Strings.t("SMART SPLIT")
             textSize = 11f
-            letterSpacing = spacing(0.1f)
+            letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.1f)
             typeface = Typefaces.medium(context)
             if (AppLanguage.current() != "en") {
                 setLineSpacing(0f, Typefaces.lineHeightMult())
             }
             setSingleLine(true)
+            // RTL ROW RULE: the card title pins to the START edge.
+            gravity = Gravity.START
+            textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_START
         }
         subtitleView = TextView(context).apply {
             textSize = 9.5f
@@ -96,6 +99,9 @@ class SmartSplitCard(
             }
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
+            // RTL ROW RULE: the subtitle sits under the START-pinned title.
+            gravity = Gravity.START
+            textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_START
         }
         column.addView(titleView)
         column.addView(
@@ -108,14 +114,15 @@ class SmartSplitCard(
         addView(
             column,
             LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                leftMargin = px(11)
-                if (AppLanguage.current() != "en") rightMargin = px(14)
+                // RTL ROW RULE (3.4.25): start/end margins flip with the locale.
+                marginStart = px(11)
+                if (AppLanguage.current() != "en") marginEnd = px(14)
             }
         )
 
         badgeView = TextView(context).apply {
             textSize = 8.5f
-            letterSpacing = spacing(0.12f)
+            letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.12f)
             typeface = Typefaces.medium(context)
             gravity = Gravity.CENTER
             val localized = AppLanguage.current() != "en"

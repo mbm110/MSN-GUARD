@@ -114,7 +114,8 @@ class ExitNodeCard(
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = px(1) })
         addView(column, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-            leftMargin = px(12)
+            // RTL ROW RULE (3.4.25): flips with the locale direction.
+            marginStart = px(12)
         })
 
         spark = SparkLineView(context, palette.mint).apply { seed() }
@@ -269,7 +270,7 @@ class OrbitActionBar(
                 Gravity.CENTER,
             ))
             addView(cell, LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
-                leftMargin = if (index == 0) 0 else px(9)
+                marginStart = if (index == 0) 0 else px(9)
             })
         }
     }
@@ -355,17 +356,23 @@ class ChainModeCard(
         titleView = TextView(context).apply {
             text = Strings.t("PSIPHON OVER WARP")
             textSize = 11f
-            letterSpacing = spacing(0.1f)
+            letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.1f)
             typeface = Typefaces.medium(context)
             if (AppLanguage.current() != "en") {
                 setLineSpacing(0f, Typefaces.lineHeightMult())
             }
             setSingleLine(true)
+            // RTL ROW RULE (3.4.25): the card title pins to the START edge.
+            gravity = Gravity.START
+            textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_START
         }
         subtitleView = TextView(context).apply {
             textSize = 9.5f
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
+            // RTL ROW RULE: the subtitle sits under the START-pinned title.
+            gravity = Gravity.START
+            textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_START
         }
         column.addView(titleView)
         column.addView(subtitleView, LayoutParams(
@@ -373,13 +380,14 @@ class ChainModeCard(
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = px(1) })
         addView(column, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-            leftMargin = px(11)
-            if (AppLanguage.current() != "en") rightMargin = px(14)
+            // RTL ROW RULE (3.4.25): start/end margins flip with the locale.
+            marginStart = px(11)
+            if (AppLanguage.current() != "en") marginEnd = px(14)
         })
 
         badgeView = TextView(context).apply {
             textSize = 8.5f
-            letterSpacing = spacing(0.12f)
+            letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.12f)
             typeface = Typefaces.medium(context)
             gravity = Gravity.CENTER
             setPadding(px(9), px(4), px(9), px(4))

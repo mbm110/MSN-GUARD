@@ -7,6 +7,9 @@ import android.graphics.Typeface
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.View.LAYOUT_DIRECTION_RTL
+import android.view.View.TEXT_ALIGNMENT_VIEW_START
+import android.view.View.TEXT_ALIGNMENT_VIEW_END
 import android.view.animation.PathInterpolator
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -161,6 +164,14 @@ class OrbitSettingsRow(
                 maxLines = 2
                 ellipsize = null
             }
+            // RTL ROW RULE (3.4.25): the TITLE pins to the START edge of the
+            // row in EVERY locale. Without an explicit START gravity a Persian
+            // title right-aligns inside its wide box and reads as "centered in
+            // the middle of the row" — the exact bug in the screenshots.
+            // START follows the row's direction: right edge in fa, left in
+            // en/zh/ru. English layout is untouched (START == LEFT there).
+            gravity = Gravity.START
+            textAlignment = TEXT_ALIGNMENT_VIEW_START
         }
         addView(titleView, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
@@ -178,13 +189,19 @@ class OrbitSettingsRow(
                 maxLines = 2
                 ellipsize = null
             }
+            // RTL ROW RULE (3.4.25): the VALUE pins to the END edge — the
+            // opposite edge from the title, in every locale. English keeps
+            // its exact one-line look; fa/zh/ru keep the 2-line wrap.
+            gravity = Gravity.END
+            textAlignment = TEXT_ALIGNMENT_VIEW_END
             visibility = if (value.isNullOrBlank()) GONE else VISIBLE
         }
         // The value gets at most half the row: past that the title starts
         // truncating, and the title is what the user is scanning for.
+        // WRAP_CONTENT + END gravity: the box hugs the text, so END pins the
+        // text to the row's END edge — the chevron keeps its gap after it.
         addView(valueView, LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.5f,
         ).apply { marginStart = dp(10) })
 
         addView(ChevronGlyph(context, Sculpt.withAlpha(palette.muted, 0.8f)), LayoutParams(dp(18), dp(18)).apply {
@@ -348,6 +365,9 @@ class OrbitToggleRow(
             text = subtitle
             textSize = 12.5f
             setTextColor(Sculpt.withAlpha(palette.muted, 0.95f))
+            // RTL ROW RULE: the subtitle sits under the START-pinned title.
+            gravity = Gravity.START
+            textAlignment = TEXT_ALIGNMENT_VIEW_START
         }
         val texts = LinearLayout(context).apply {
             orientation = VERTICAL
@@ -359,6 +379,9 @@ class OrbitToggleRow(
                 if (AppLanguage.current() != "en") {
                     setLineSpacing(0f, Typefaces.lineHeightMult())
                 }
+                // RTL ROW RULE: title pins to the row's START edge.
+                gravity = Gravity.START
+                textAlignment = TEXT_ALIGNMENT_VIEW_START
             })
             addView(subtitleView, LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -401,8 +424,17 @@ class OrbitToggleRow(
         renderSwitch()
     }
 
-    private fun restingThumbX(): Float =
-        if (isOn) (trackWidth - thumbSize - thumbInset).toFloat() else thumbInset.toFloat()
+    private fun restingThumbX(): Float {
+        // RTL ROW RULE (3.4.25): the track mirrors with the layout direction,
+        // so "on" is the end nearest the row's END edge — left in Persian.
+        // Physical translationX does not flip by itself.
+        val rtl = layoutDirection == LAYOUT_DIRECTION_RTL
+        return if (isOn) {
+            if (rtl) thumbInset.toFloat() else (trackWidth - thumbSize - thumbInset).toFloat()
+        } else {
+            if (rtl) (trackWidth - thumbSize - thumbInset).toFloat() else thumbInset.toFloat()
+        }
+    }
 
     private fun renderSwitch() {
         track.background = Sculpt.sculptedBackground(
