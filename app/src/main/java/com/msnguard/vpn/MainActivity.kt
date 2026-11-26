@@ -10933,12 +10933,14 @@ class MainActivity : Activity() {
         // are built from `Protocol.entries`, so this list decides what a first-time
         // user reaches for — and the first cell is what most of them will tap.
         //
-        // WireGuard leads on purpose: it is the cheapest handshake among the eight and it
-        // either works immediately or fails immediately, which is the right first
-        // move for a user who does not know what any of these words mean. MASQUE
-        // follows because it survives the carriers WireGuard is blocked on.
-        WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel", true),
+        // 3.4.24 (user request): MASQUE now leads the rail — WireGuard second.
+        // Nothing else moves: the slot cards bind to the SELECTED protocol, not
+        // to a position, so the MiM card still appears under MASQUE and the
+        // WireGuard-over-Masque card under WireGuard wherever they sit. The
+        // persisted protocol pref stores the core NAME ("wireguard"/"masque"),
+        // not an index, so existing users keep their selection across the swap.
         MASQUE("MASQUE", "masque", "HTTP/3 or HTTP/2 tunnel", true),
+        WIREGUARD("WireGuard", "wireguard", "WireGuard tunnel", true),
         WARP_IN_WARP("WARP-on-WARP", "gool", "Double-layer tunnel", true),
 
         /** Public Lantern servers via Radiance; MSN-GUARD owns the Android TUN.
