@@ -790,7 +790,7 @@ object Strings {
         "WIREGUARD OVER MASQUE" to Triple("WIREGUARD OVER MASQUE", "WireGuard روی MASQUE", "WIREGUARD over MASQUE"),
         "plain wireguard, a local exit" to Triple("plain wireguard, a local exit", "WireGuard ساده، خروجی محلی", "普通 WireGuard，本地出口"),
         "only for the WireGuard transport" to Triple("only for the WireGuard transport", "فقط مخصوص روش WireGuard", "仅适用于 WireGuard 传输"),
-        "chain a second masque hop inside the first" to Triple("chain a second masque hop inside the first", "MASQUE دوم را درون MASQUE اول زنجیر کنید", "在第一层 MASQUE 内再串联一层"),
+        "chain a second masque hop inside the first" to Triple("chain a second masque hop inside the first", "ساده، خروجی محلی Masque", "在第一层 MASQUE 内再串联一层"),
         "two hops — the network sees the outer one" to Triple("two hops — the network sees the outer one", "دو هاپ — شبکه فقط هاپ بیرونی را می‌بیند", "两跳 — 网络只看见外层"),
         "only for the SHARD transport" to Triple("only for the SHARD transport", "فقط مخصوص پروتکل SHARD", "仅适用于 SHARD 传输"),
         "over WARP is active" to Triple("over WARP is active", "روی WARP فعال است", "over WARP 已运行"),
@@ -941,11 +941,45 @@ object Strings {
         if (l == "en") return row?.first ?: english
         if (l == "ru") return RussianStrings.t(english)
         row ?: return english
-        return when (l) {
+        val out = when (l) {
             "fa" -> row.second.ifBlank { english }
             "zh" -> row.third.ifBlank { english }
             else -> english
         }
+        // 3.4.28 BIDI FIX (the "reversed chain names" field report): a Persian
+        // value that STARTS with a Latin word ("Psiphon روی WARP", "Tor درون
+        // WARP آماده‌به‌کار…") resolves its paragraph direction from the first
+        // strong character — which is Latin, so the paragraph lays out LTR and a
+        // right-to-left reader sees the segments reversed: "WARP روی Psiphon".
+        // One RLM (U+200F) in front makes the paragraph RTL; the logical order
+        // is untouched, so the same sentence now reads left-to-right INSIDE the
+        // line but positions correctly for a Persian reader: Psiphon at the
+        // right edge, روی after it, WARP at the left — exactly what was written.
+        // Zero-width, no visual glyph, and skipped for English/zh/ru.
+        if (l == "fa" && startsLatinEndsRtl(out)) return "\u200F" + out
+        return out
+    }
+
+    /**
+     * True when [s] begins with a Latin strong character but contains Arabic-
+     * script text — the mixed string whose paragraph direction first-strong
+     * resolves the WRONG way (LTR) for a Persian reader.
+     */
+    private fun startsLatinEndsRtl(s: String): Boolean {
+        var firstStrong = ' '
+        for (c in s) {
+            val b = Character.getDirectionality(c)
+            if (b == Character.DIRECTIONALITY_LEFT_TO_RIGHT) { firstStrong = 'L'; break }
+            if (b == Character.DIRECTIONALITY_RIGHT_TO_LEFT ||
+                b == Character.DIRECTIONALITY_RIGHT_TO_LEFT_ARABIC) { firstStrong = 'R'; break }
+        }
+        if (firstStrong != 'L') return false
+        for (c in s) {
+            val b = Character.getDirectionality(c)
+            if (b == Character.DIRECTIONALITY_RIGHT_TO_LEFT ||
+                b == Character.DIRECTIONALITY_RIGHT_TO_LEFT_ARABIC) return true
+        }
+        return false
     }
 
     /**

@@ -120,7 +120,7 @@ class MainActivity : Activity() {
     private lateinit var pageHost: FrameLayout
     private lateinit var appUpdater: AppUpdater
     private var predictiveBackCallback: Any? = null
-    private var selectedProtocol = Protocol.WIREGUARD
+    private var selectedProtocol = Protocol.MASQUE
     // v1.8.7: English keeps the exact v1.8.5 layout; fa/zh get tighter text
     // blocks and a dial no smaller than the English one. See fitConsoleToViewport.
     private val localizedTypography: Boolean get() = AppLanguage.current() != "en"
@@ -10769,8 +10769,17 @@ class MainActivity : Activity() {
     )
 
     private fun savedProtocol(): Protocol {
-        val name = preferences().getString(DEFAULT_PROTOCOL, Protocol.WIREGUARD.coreName)
-        return Protocol.entries.firstOrNull { it.coreName == name && it.androidAvailable } ?: Protocol.WIREGUARD
+        // 3.4.28 (user request): the FIRST-RUN default transport follows the
+        // language picked at install — MASQUE for en/fa, Lantern for zh/ru.
+        // Only the DEFAULT: the moment the user taps a transport the stored
+        // name wins, exactly as before. Existing installs already have the
+        // key written, so they are untouched by this.
+        val fallback = when (AppLanguage.current()) {
+            "zh", "ru" -> Protocol.LANTERN
+            else -> Protocol.MASQUE
+        }
+        val name = preferences().getString(DEFAULT_PROTOCOL, fallback.coreName)
+        return Protocol.entries.firstOrNull { it.coreName == name && it.androidAvailable } ?: fallback
     }
 
 

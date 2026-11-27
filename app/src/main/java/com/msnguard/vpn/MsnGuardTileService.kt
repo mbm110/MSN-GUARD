@@ -191,7 +191,12 @@ class MsnGuardTileService : TileService() {
     private fun configJson(): String {
         val prefs = getSharedPreferences(SETTINGS, MODE_PRIVATE)
         val armed = prefs.getBoolean(CHAIN_ARMED, CHAIN_ARMED_DEFAULT)
-        val picked = prefs.getString(DEFAULT_PROTOCOL, Protocol.WIREGUARD.coreName)
+        // 3.4.28: language-following first-run default, same rule as the main
+        // screen — MASQUE for en/fa. The tile's Protocol enum carries only the
+        // five core transports (no Lantern), so zh/ru keep MASQUE here too; the
+        // language-specific Lantern default lives on the main screen only.
+        val fallback = Protocol.MASQUE
+        val picked = prefs.getString(DEFAULT_PROTOCOL, fallback.coreName) ?: fallback.coreName
         // Same rule as the main screen: this marker is Psiphon's, so it only applies
         // when Psiphon is the selected transport.
         return if (armed && picked == Protocol.PSIPHON.coreName) {

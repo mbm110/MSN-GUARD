@@ -59,8 +59,10 @@ class RailOrderContract(unittest.TestCase):
                          "the eight transports must appear in exactly this order")
 
     def test_persisted_selection_is_by_name_not_index(self):
+        # 3.4.28: the default is now language-following (MASQUE for en/fa,
+        # Lantern for zh/ru) — but the persistence is still BY NAME.
         self.assertIn(
-            'preferences().getString(DEFAULT_PROTOCOL, Protocol.WIREGUARD.coreName)',
+            'preferences().getString(DEFAULT_PROTOCOL, fallback.coreName)',
             MAIN)
         self.assertIn(
             'preferences().edit().putString(DEFAULT_PROTOCOL, protocol.coreName).apply()',
@@ -68,6 +70,8 @@ class RailOrderContract(unittest.TestCase):
         self.assertIn(
             "Protocol.entries.firstOrNull { it.coreName == name && it.androidAvailable }",
             MAIN)
+        # the language rule itself, pinned:
+        self.assertIn('"zh", "ru" -> Protocol.LANTERN', MAIN)
 
     def test_slot_cards_bind_to_the_selected_protocol_not_a_position(self):
         self.assertIn("val masqueSelected = selectedProtocol == Protocol.MASQUE", MAIN)
