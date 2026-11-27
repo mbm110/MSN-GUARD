@@ -40,6 +40,19 @@ class LanternMidSessionRecoveryContract(unittest.TestCase):
         self.assertIn('lower.contains("i/o timeout") || lower.contains("context deadline exceeded")', ENGINE)
         self.assertIn('lower.contains("no recent network activity")', ENGINE)
 
+    def test_dead_socket_burst_from_field_log_4(self):
+        # 3.4.29 (msn-guard-log__4_): `connection download closed: … endpoint
+        # not connected` — a gVisor close on an already-dead socket. Noise in
+        # ones and twos; a BURST (5 in 60s, deliberately above the other
+        # triggers because apps closing their own connections produce it too)
+        # is the front path dying mid-download: every open app stalls at once.
+        self.assertIn('lower.contains("endpoint not connected")', ENGINE)
+        self.assertIn("DEAD_SOCKET_TRIGGERS = 5", ENGINE)
+        self.assertIn("DEAD_SOCKET_SPAN_MS = 60_000L", ENGINE)
+        # and the recovery side names it:
+        self.assertIn('"dead-socket-burst"', ENGINE)
+        self.assertIn('"dead-socket-burst"', MAIN)
+
     def test_debounce_and_session_gate(self):
         self.assertIn("FRONT_PATH_TRIGGERS = 3", ENGINE)
         self.assertIn("FRONT_PATH_SPAN_MS = 60_000L", ENGINE)

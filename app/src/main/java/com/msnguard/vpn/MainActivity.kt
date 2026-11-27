@@ -1607,10 +1607,13 @@ class MainActivity : Activity() {
             return
         }
         engineRecoveryInFlight = true
-        val cause = if (reason == "keepalive")
-            "the engine's connection went silent (no recent network activity)"
-        else
-            "no Lantern server could be reached (front path dead)"
+        val cause = when (reason) {
+            "keepalive" -> "the engine's connection went silent (no recent network activity)"
+            // 3.4.29, field log 4: a burst of `endpoint not connected` closes —
+            // the front path dropped mid-download and every open app stalled.
+            "dead-socket-burst" -> "open connections died in a burst (endpoint not connected x5 in 60s)"
+            else -> "no Lantern server could be reached (front path dead)"
+        }
         ConnectionLog.record("Lantern: session died mid-connection — $cause. Recovering…")
         consecutiveEngineDeaths++
         if (consecutiveEngineDeaths >= 3) {

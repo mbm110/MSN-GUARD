@@ -130,6 +130,16 @@ object LanternEngine {
     private const val FRONT_PATH_SPAN_MS = 60_000L
     private const val KEEPALIVE_TRIGGERS = 2
     private const val KEEPALIVE_SPAN_MS = 60_000L
+    // 3.4.29 (field log msn-guard-log__4_): `connection download closed: …
+    // endpoint not connected` is a gVisor close on an already-dead socket —
+    // NOISE in ones and twos during normal teardown, but a burst of them
+    // (three at the exact same millisecond, durations 4-5s, right after the
+    // dial i/o-timeouts) is the front path dying mid-download: Telegram and
+    // every open site stall at once. Five hits in 60s is deliberately higher
+    // than the other triggers — this signature also fires on an APP closing
+    // its own connections, so the threshold must stay above normal churn.
+    private const val DEAD_SOCKET_TRIGGERS = 5
+    private const val DEAD_SOCKET_SPAN_MS = 60_000L
     private const val VERDICT_COOLDOWN_MS = 90_000L
 
     /** Set by MainActivity; called on the sidecar log thread. */
@@ -138,6 +148,7 @@ object LanternEngine {
     private data class SensorState(
         val frontPathHits: ArrayDeque<Long> = ArrayDeque(),
         val keepaliveHits: ArrayDeque<Long> = ArrayDeque(),
+        val deadSocketHits: ArrayDeque<Long> = ArrayDeque(),
         var verdictAt: Long = 0L,
         var verdictInFlight: Boolean = false,
     )
@@ -173,6 +184,7 @@ object LanternEngine {
                     s.verdictInFlight = true
                     s.frontPathHits.clear()
                     s.keepaliveHits.clear()
+                    s.deadSocketHits.clear()
                     cb("front-path")
                     return
                 }
@@ -189,7 +201,29 @@ object LanternEngine {
                     s.verdictInFlight = true
                     s.frontPathHits.clear()
                     s.keepaliveHits.clear()
+                    s.deadSocketHits.clear()
                     cb("keepalive")
+                    return
+                }
+            }
+            // 3.4.29: the dead-socket burst — `endpoint not connected` is a
+            // close on a socket that already died, so it only counts as a
+            // session-death signature when MANY of them land inside one
+            // minute; see DEAD_SOCKET_TRIGGERS for why the bar is higher.
+            if (lower.contains("endpoint not connected")) {
+                s.deadSocketHits.addLast(now)
+                while (s.deadSocketHits.size > DEAD_SOCKET_TRIGGERS ||
+                    (s.deadSocketHits.isNotEmpty() && now - s.deadSocketHits.first() > DEAD_SOCKET_SPAN_MS)) {
+                    s.deadSocketHits.removeFirst()
+                    if (s.deadSocketHits.isEmpty()) break
+                }
+                if (s.deadSocketHits.size >= DEAD_SOCKET_TRIGGERS) {
+                    s.verdictAt = now
+                    s.verdictInFlight = true
+                    s.frontPathHits.clear()
+                    s.keepaliveHits.clear()
+                    s.deadSocketHits.clear()
+                    cb("dead-socket-burst")
                     return
                 }
             }
