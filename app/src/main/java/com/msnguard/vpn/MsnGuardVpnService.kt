@@ -3560,11 +3560,17 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         lanternStatsSkipped = 0
         torTrafficTask = ladderScheduler.scheduleAtFixedRate({
             try {
-                if (!LanternEngine.isRunning) {
+                // 3.4.30 BATTERY (audit): the screen check is FIRST. The old
+                // order called LanternEngine.isRunning — a 350ms /status
+                // control round-trip — on every tick even with the screen
+                // off, waking the sidecar 720 times an hour to decide to do
+                // nothing. shouldSampleTraffic() is two boolean reads; with
+                // the screen dark 14 of 15 ticks now never touch the engine.
+                if (!shouldSampleTraffic()) {
                     lanternStatsSkipped++
                     return@scheduleAtFixedRate
                 }
-                if (!shouldSampleTraffic()) {
+                if (!LanternEngine.isRunning) {
                     lanternStatsSkipped++
                     return@scheduleAtFixedRate
                 }
@@ -4080,6 +4086,23 @@ ConnectionLog.record("MTU: $foxyMtu for FOXY")
         if (needsRouting && !TunEngineManager.isRunningAny) return "device routing stopped"
 
         if (currentProtocol.contains("LANTERN")) {
+            // 3.4.30 BATTERY (audit): a screen-off Lantern session is the
+            // NORM, not a failure mode — the engine keeps its own keepalive
+            // and the 3.4.21 liveness sensor owns mid-session deaths from
+            // the engine's own log. Probing /status (a 350ms control
+            // round-trip that wakes the sidecar) and the SOCKS listener every
+            // 30s overnight bought ~960 radio/CPU wakeups that could only
+            // ever confirm a healthy session. So with the screen off, only
+            // the CHEAP fact decides: isSessionActive is exactly
+            // running-flag AND live-process — no round-trip at all. If that
+            // says the session is gone, the real probes below run once and
+            // report it; a healthy screen-off session probes nothing.
+            if (!isScreenInteractive()) {
+                if (!LanternEngine.isSessionActive && !LanternEngine.isRunning) {
+                    return "the Lantern/Radiance tunnel stopped"
+                }
+                return null
+            }
             if (!LanternEngine.isRunning) return "the Lantern/Radiance tunnel stopped"
             if (!LanternEngine.isSocksReady()) return "the Lantern SOCKS listener stopped"
             return null
