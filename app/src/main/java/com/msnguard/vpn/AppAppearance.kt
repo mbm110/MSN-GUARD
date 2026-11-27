@@ -50,6 +50,9 @@ object AppAppearance {
         /** Localized at call time so a language switch refreshes the label. */
         val label: String get() = Strings.t(enLabel)
 
+        /** 3.4.27: same as the label — the description rows were raw English. */
+        val localizedDescription: String get() = Strings.t(description)
+
         companion object {
             fun from(key: String?): Mode = entries.firstOrNull { it.key == key } ?: DARK
         }

@@ -167,6 +167,14 @@ object TorManager {
         /** Localized at call time, not class-load, so a language switch refreshes it. */
         val label: String get() = Strings.t(enLabel)
 
+        /**
+         * 3.4.27: the description rows showed RAW ENGLISH in fa/zh/ru — the
+         * [label] above goes through Strings.t but this field never did, so
+         * the Tor connection-mode sheet was half-translated. Same fix as
+         * [label]: resolve at call time.
+         */
+        val localizedDescription: String get() = Strings.t(description)
+
         companion object {
             fun from(key: String?): TorMode =
                 entries.firstOrNull { it.key == key } ?: AUTO

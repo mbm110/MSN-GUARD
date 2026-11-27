@@ -1682,7 +1682,14 @@ class MainActivity : Activity() {
         })
         addView(label(appVersion(), 11f, MUTED).apply {
             setSingleLine(true)
-            setPadding(dp(5), 0, 0, 0)
+            // 3.4.27: a PHYSICAL 5dp left pad does not flip in RTL, so in
+            // Persian the version sat flush against the name (no gap) while
+            // the pad landed on the far side. marginStart flips with the
+            // layout direction — the gap sits between name and version in
+            // every locale.
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { marginStart = dp(5) }
         })
         addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
         addView(ImageView(this@MainActivity).apply {
@@ -5506,7 +5513,7 @@ class MainActivity : Activity() {
                 } else if (mode == TorManager.TorMode.MANUAL) {
                     TorManualBridges.summary(this)
                 } else {
-                    mode.description
+                    mode.localizedDescription
                 }
             },
             scrollable = false,
@@ -5795,7 +5802,7 @@ class MainActivity : Activity() {
             options = AppAppearance.Mode.entries.toList(),
             selected = AppAppearance.mode(this),
             label = { mode -> mode.label },
-            description = { mode -> mode.description },
+            description = { mode -> mode.localizedDescription },
         ) { chosen ->
             if (chosen == AppAppearance.mode(this)) return@showChoiceSheet
             AppAppearance.setMode(this, chosen)
@@ -8991,7 +8998,7 @@ class MainActivity : Activity() {
         selected: SplitTunnelSettings.Mode,
         onSelect: (SplitTunnelSettings.Mode) -> Unit,
     ): SelectionOption {
-        val title = label(mode.label, 16f, INK, TypefaceStyle.MEDIUM)
+        val title = label(mode.localizedLabel, 16f, INK, TypefaceStyle.MEDIUM)
         val indicator = label(Strings.t("SELECTED"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply { letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.08f) }
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL

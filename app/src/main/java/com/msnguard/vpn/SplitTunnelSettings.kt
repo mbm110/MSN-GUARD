@@ -5,10 +5,19 @@ import android.content.Context
 class SplitTunnelSettings(context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
 
+    /**
+     * 3.4.27: the label resolves through Strings.t at call time — the enum's
+     * raw English ("All apps" / "Only selected apps" / "Exclude selected
+     * apps") used to reach the split-tunnel MODE screen untranslated, and a
+     * language switch while the app is open never refreshed it.
+     */
     enum class Mode(val label: String) {
         ALL("All apps"),
         INCLUDE("Only selected apps"),
         EXCLUDE("Exclude selected apps"),
+        ;
+
+        val localizedLabel: String get() = Strings.t(label)
     }
 
     fun mode(): Mode = preferences.getString(MODE, Mode.ALL.name)
