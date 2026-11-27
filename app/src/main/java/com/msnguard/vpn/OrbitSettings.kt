@@ -198,10 +198,14 @@ class OrbitSettingsRow(
         }
         // The value gets at most half the row: past that the title starts
         // truncating, and the title is what the user is scanning for.
-        // WRAP_CONTENT + END gravity: the box hugs the text, so END pins the
-        // text to the row's END edge — the chevron keeps its gap after it.
+        // QOBEAR PATTERN (3.4.26): WRAP_CONTENT + END gravity — the box hugs
+        // the text and the title's weight pins it to the row's END edge
+        // (RIGHT in English, LEFT in Persian via supportsRtl). One line, the
+        // original fixed row height — the half-width/2-line variant made
+        // long Persian values wrap and grow the row.
         addView(valueView, LayoutParams(
-            0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.5f,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { marginStart = dp(10) })
 
         addView(ChevronGlyph(context, Sculpt.withAlpha(palette.muted, 0.8f)), LayoutParams(dp(18), dp(18)).apply {

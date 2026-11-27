@@ -50,6 +50,7 @@
 
     <application
         android:allowBackup="false"
+        android:supportsRtl="true"
         android:icon="@mipmap/ic_launcher"
         android:label="MSN-GUARD"
         android:roundIcon="@mipmap/ic_launcher"

@@ -9255,41 +9255,32 @@ class MainActivity : Activity() {
             minimumHeight = dp(52)
             background = Sculpt.sculptedBackground(resources.displayMetrics.density, foxyC(SURFACE.toLong(), 0xFFFFFFFF), 16, stroke = accent)
         }
-        val localized = AppLanguage.current() != "en"
+        // QOBEAR PATTERN (3.4.26): title takes all the slack (weight 1) and
+        // pins to the row's START edge; value is WRAP_CONTENT so the title's
+        // weight pushes it hard against the END edge. START/END flip with the
+        // locale (needs android:supportsRtl, added in the Manifest) — title on
+        // the RIGHT in Persian, value on the LEFT, exactly like the reference
+        // app's Arrangement.SpaceBetween rows. One line each; the row keeps
+        // its fixed 52dp height — my earlier half-width/maxLines=2 value made
+        // long Persian wrap and grow the row.
         row.addView(label(title, 13f, MUTED).apply {
-            maxLines = 2
-            // RTL ROW RULE (3.4.25): the TITLE pins to the START edge — right
-            // edge in Persian, left in English. Without this the Persian title
-            // floats in the middle of its wide box (the screenshot bug).
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
             gravity = Gravity.START
             textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_START
         }, LinearLayout.LayoutParams(
             0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
         ))
         val valueLabel = label(value, 13.5f, valueColor).apply {
-            if (localized) {
-                maxLines = 2
-            } else {
-                maxLines = 1
-                ellipsize = TextUtils.TruncateAt.END
-                isSingleLine = true
-            }
-            // RTL ROW RULE (3.4.25): the VALUE pins to the END edge — the left
-            // edge in Persian, the right in English. English keeps its exact
-            // previous look (END == RIGHT there).
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
             gravity = Gravity.END
             textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_END
         }
         row.tag = valueLabel  // fetchFoxyQuota updates this in place
         row.addView(valueLabel, LinearLayout.LayoutParams(
-            0, ViewGroup.LayoutParams.WRAP_CONTENT,
-            if (localized) 0.55f else 0.5f,
-        ).apply {
-            // The physical gap that was missing in RTL: marginStart flips with
-            // the layout direction, so the 12dp sits between title and value
-            // in English AND in Persian.
-            marginStart = dp(12)
-        })
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { marginStart = dp(12) })
         return row
     }
 

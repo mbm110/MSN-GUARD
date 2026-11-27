@@ -39,8 +39,15 @@ class RtlRowLayoutContract(unittest.TestCase):
         self.assertIn("textAlignment = TEXT_ALIGNMENT_VIEW_END", ORBIT)
 
     def test_settings_row_value_caps_at_half_and_keeps_gap(self):
-        # weight 0.5 + marginStart gap: the value can never shove the title
-        self.assertIn("0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.5f", ORBIT)
+        # QOBEAR PATTERN (3.4.26): the value is WRAP_CONTENT pinned to the END
+        # edge — the title's weight pushes it there. A half-width weight made
+        # long Persian values wrap to 2 lines and GROW the row height (the
+        # field report: "why did you make the buttons taller").
+        self.assertIn(
+            "addView(valueView, LayoutParams(\n"
+            "            ViewGroup.LayoutParams.WRAP_CONTENT,\n"
+            "            ViewGroup.LayoutParams.WRAP_CONTENT,\n"
+            "        ).apply { marginStart = dp(10) })", ORBIT)
         self.assertIn("marginStart = dp(10)", ORBIT)
 
     # ── OrbitToggleRow: the switch must mirror too ──
@@ -134,3 +141,48 @@ class RtlRowLayoutContract(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QobearRtlPatternContract(unittest.TestCase):
+    """3.4.26: the two REAL roots behind 'nothing changed in Persian'.
+
+    Learned from the reference project (QobearVPN, github.com/Qorvhex/
+    QobearVPN) — mined, not cloned:
+
+    1. android:supportsRtl="true" in the Manifest (theirs: line 25 of
+       AndroidManifest.xml). WITHOUT it the framework resolves START/END
+       and start/end margins as LEFT/RIGHT no matter what the views say,
+       so every gravity change is a no-op in Persian — the reason the
+       previous sweep 'did nothing' on the device.
+    2. Rows are SpaceBetween-shaped: title weight(1f) at the START edge,
+       value WRAP_CONTENT pushed to the END edge, ONE line each — the
+       row height never grows. Their typography: Vazirmatn
+       regular/medium/bold, row titles 13sp/15sp regular-to-medium,
+       values 11-13sp, lineHeight MULT ~1.2-1.45 — and MSN already ships
+       Vazirmatn via Typefaces with the SAME compression idea
+       (lineHeightMult 0.80 fa / 0.85 zh).
+    3. The layout direction is chosen by the APP's language picker (theirs:
+       LocalLayoutDirection provides Rtl iff language == FA), exactly the
+       pattern MSN's pageHost/mainRoot already follow."""
+
+    MANIFEST = (ROOT / "app/src/main/AndroidManifest.xml").read_text()
+    THEME = (ROOT / "app/src/main/java/com/msnguard/vpn/Typefaces.kt").read_text()
+
+    def test_supports_rtl_is_enabled(self):
+        self.assertIn('android:supportsRtl="true"', self.MANIFEST,
+                      "without supportsRtl every START/END pin is resolved "
+                      "as LEFT/RIGHT — the whole RTL sweep was a no-op")
+
+    def test_foxy_rows_keep_single_line_fixed_height(self):
+        # both texts one-line: the row cannot grow (the 'taller buttons' bug)
+        block = MAIN[MAIN.find("private fun foxyInfoRow"):
+                     MAIN.find("private fun foxyFlag")]
+        self.assertNotIn("maxLines = 2", block)
+        self.assertIn("minimumHeight = dp(52)", block)
+
+    def test_vazirmatn_line_height_compression_stays(self):
+        # the reference app pairs Vazirmatn with ~1.37x headroom; MSN's
+        # Typefaces already compress fa to 0.80 — pin it so nobody 'fixes'
+        # the tight Persian rows by growing them again
+        self.assertIn('"fa" -> 0.80f', self.THEME)
+        self.assertIn('"zh" -> 0.85f', self.THEME)
