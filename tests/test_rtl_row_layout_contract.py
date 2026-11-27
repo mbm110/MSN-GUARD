@@ -92,6 +92,35 @@ class RtlRowLayoutContract(unittest.TestCase):
             self.assertIn('if (AppLanguage.current() == "fa") 0f else spacing(0.1f)', src,
                           f"{name} title still tracks Persian")
 
+    # ── 3.4.25 second sweep: the components the first pass missed ──
+    def test_exit_node_card_texts_pin_start(self):
+        block = CARDS[CARDS.find("class ExitNodeCard"):CARDS.find("fun render(")]
+        # all three texts (key/ip/loc) START-pinned
+        self.assertGreaterEqual(block.count("gravity = Gravity.START"), 3)
+
+    def test_mode_option_pins_title_start_and_badge_end(self):
+        block = MAIN[MAIN.find("private fun createModeOption"):]  # last fun of the group
+        self.assertIn("gravity = Gravity.START", block)
+        self.assertIn("TEXT_ALIGNMENT_VIEW_START", block)
+        self.assertGreaterEqual(block.count("gravity = Gravity.END"), 2,
+                                "CURRENT/DESKTOP ONLY badges must pin END")
+
+    def test_section_headers_use_directional_gaps(self):
+        raw = (V / "ExpandableSection.kt").read_text()
+        # comments may NAME the banned API while explaining why we don't use it
+        code = "\n".join(l.split("//")[0] for l in raw.splitlines())
+        self.assertIn("marginEnd = dp(9)", code)   # tick gap
+        self.assertIn("marginEnd = dp(7)", code)   # brand mark gap
+        self.assertIn("marginStart = dp(8)", code) # chevron gap
+        self.assertNotIn("leftMargin", code)
+        self.assertNotIn("rightMargin", code)
+
+    def test_metric_tile_unit_gap_is_start_side(self):
+        VIEWS = (V / "OrbitViews.kt").read_text()
+        self.assertIn("marginStart = context.px(3)", VIEWS)
+        self.assertIn("?.marginStart ?: 0", VIEWS)
+        self.assertNotIn("leftMargin", VIEWS)
+
     # ── no physical row margins survive in the shared components ──
     def test_no_physical_margins_left_in_shared_rows(self):
         # MainActivity: only the dial's symmetric negative bleed remains

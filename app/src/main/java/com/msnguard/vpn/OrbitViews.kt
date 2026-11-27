@@ -105,7 +105,7 @@ class MetricTile(
         row.addView(unitView, LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { leftMargin = context.px(3); bottomMargin = context.px(3) })
+        ).apply { marginStart = context.px(3); bottomMargin = context.px(3) })
         addView(row, LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -151,7 +151,7 @@ class MetricTile(
         row.post {
             val rowWidth = row.width
             if (rowWidth <= 0) return@post
-            val gap = (unitView.layoutParams as? LinearLayout.LayoutParams)?.leftMargin ?: 0
+            val gap = (unitView.layoutParams as? LinearLayout.LayoutParams)?.marginStart ?: 0
             val unitWidth = if (unitView.width > 0) unitView.width
                 else unitView.paint.measureText(unitView.text.toString()).toInt()
             val available = rowWidth - unitWidth - gap -

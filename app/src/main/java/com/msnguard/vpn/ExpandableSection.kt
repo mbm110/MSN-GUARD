@@ -174,7 +174,9 @@ class ExpandableSection(
             setPadding(dp(16), dp(10), dp(14), dp(10))
 
             addView(TickView(context, palette.neonBlue), LayoutParams(dp(3), dp(13)).apply {
-                rightMargin = dp(9)
+                // RTL ROW RULE (3.4.25): the gap after the tick is start-side —
+                // physical rightMargin does not flip in RTL.
+                marginEnd = dp(9)
             })
             // The optional brand mark: sized to sit IN the caption's line —
             // 15dp against the English 11.5sp caption, 17dp against fa/zh's
@@ -192,7 +194,7 @@ class ExpandableSection(
                     setImageResource(iconRes)
                     // VectorDrawable scaling is crisp; no software layer needed.
                     importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                }, LayoutParams(size, size).apply { rightMargin = dp(7) })
+                }, LayoutParams(size, size).apply { marginEnd = dp(7) })
             }
             addView(TextView(context).apply {
                 this.text = text
@@ -216,7 +218,7 @@ class ExpandableSection(
                 if (!english) setLineSpacing(0f, Typefaces.lineHeightMult())
                 isSingleLine = true
             }, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(chevron, LayoutParams(dp(18), dp(18)).apply { leftMargin = dp(8) })
+            addView(chevron, LayoutParams(dp(18), dp(18)).apply { marginStart = dp(8) })
         }
 
         fun chevronView(): ChevronView = chevron

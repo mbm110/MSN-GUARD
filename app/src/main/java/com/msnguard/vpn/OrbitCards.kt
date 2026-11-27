@@ -98,12 +98,21 @@ class ExitNodeCard(
         addView(flagView, LayoutParams(px(42), px(42)))
 
         val column = LinearLayout(context).apply { orientation = VERTICAL }
-        keyView = text(Strings.t("EXIT NODE"), 8.5f, Sculpt.withAlpha(palette.faint, 0.95f), medium = true, spacing = 0.14f)
+        keyView = text(Strings.t("EXIT NODE"), 8.5f, Sculpt.withAlpha(palette.faint, 0.95f), medium = true, spacing = 0.14f).apply {
+            // RTL ROW RULE (3.4.25): the card's texts follow the locale's
+            // start edge — without an explicit pin they stay physically left
+            // in Persian and read detached from the flag on the right.
+            gravity = Gravity.START
+        }
         ipView = text(Strings.t("not tunnelled"), 15f, palette.ink, medium = true, mono = true).apply {
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
+            gravity = Gravity.START
+            textAlignment = TEXT_ALIGNMENT_VIEW_START
         }
-        locView = text(Strings.t("tap to refresh"), 10.5f, Sculpt.withAlpha(palette.faint, 0.9f))
+        locView = text(Strings.t("tap to refresh"), 10.5f, Sculpt.withAlpha(palette.faint, 0.9f)).apply {
+            gravity = Gravity.START
+        }
         column.addView(keyView)
         column.addView(ipView, LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,

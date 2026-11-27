@@ -3460,17 +3460,29 @@ class MainActivity : Activity() {
             }
 
             val texts = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
-            texts.addView(label(protocol.label, 16f, INK, TypefaceStyle.MEDIUM))
-            texts.addView(label(protocol.description, 13f, MUTED), LinearLayout.LayoutParams(
+            texts.addView(label(protocol.label, 16f, INK, TypefaceStyle.MEDIUM).apply {
+                // RTL ROW RULE (3.4.25): the mode title pins to the row's START
+                // edge — right in Persian, left in English; unpinned TextViews
+                // stay physically left and read reversed in RTL.
+                gravity = Gravity.START
+                textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_START
+            })
+            texts.addView(label(protocol.description, 13f, MUTED).apply {
+                gravity = Gravity.START
+            }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(2) })
 
             addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             if (selected) addView(label(Strings.t("CURRENT"), 11f, PRIMARY_TEXT, TypefaceStyle.MEDIUM).apply {
-                letterSpacing = spacing(0.08f)
+                letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.08f)
+                // The badge pins to the END edge, opposite the title, in every
+                // locale (RTL ROW RULE 3.4.25).
+                gravity = Gravity.END
             }) else if (!protocol.androidAvailable) addView(label(Strings.t("DESKTOP ONLY"), 11f, MUTED, TypefaceStyle.MEDIUM).apply {
-                letterSpacing = spacing(0.05f)
+                letterSpacing = if (AppLanguage.current() == "fa") 0f else spacing(0.05f)
+                gravity = Gravity.END
             })
         }
     }
